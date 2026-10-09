@@ -1,24 +1,12 @@
 //! Consensus validation surfaces for bitcoin-rs.
-//!
-//! Script verification has two backends. The native Rust interpreter in
-//! `bitcoin-rs-script` executes every consensus spend class: legacy, P2SH,
-//! `SegWit` v0, and Taproot key-path and script-path. The `kernel` feature is
-//! a capability ("bitcoinkernel support is compiled in"), not a selection:
-//! which backend runs is the runtime `validation.engine` setting
-//! (`bitcoin_rs_consensus::ValidationEngine`, default `Native`). Enabling
-//! `kernel` compiles the bitcoinkernel backend (Bitcoin Core's C++ engine)
-//! in alongside the native one; selecting `Kernel` without the feature fails
-//! closed with the unsupported-build error. Every crate is kernel-free by
-//! default, so a plain `cargo build` links no C++ engine; see
-//! `docs/contracts/validation-default.md`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
 pub const MAX_SCRIPT_SIZE: usize = 10_000;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
-/// block's timestamp at a difficulty-adjustment boundary
-/// (`MAX_TIMEWARP`, Core `src/consensus/consensus.h:30-37`).
+/// block's timestamp at a difficulty-adjustment boundary (`MAX_TIMEWARP`, Core
+/// `src/consensus/consensus.h:30-37`).
 pub const MAX_TIMEWARP: u32 = 600;
 
 /// BIP113 median-time-past checks.
@@ -69,22 +57,14 @@ pub use verify_tx::{
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use thiserror::Error;
 
-/// Minimal UTXO lookup contract used by the portable validator.
-///
-/// PRE: `outpoint` identifies the requested previous output.
-/// POST: `lookup` returns that output, or `None` if this view has no output.
-/// INVARIANT: A reference view returns the same result as its referent.
+/// Lookup returns the referenced coin or None when absent; borrowed views agree.
 pub trait UtxoView {
     /// Looks up a previous output by outpoint.
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
 }
 
 /// The engine that rejected a script.
-///
-/// The two backends disagree about what a rejection means, and the difference
-/// is not in the message text: `bitcoinkernel` can reject a valid block
-/// depending on process state (issue #618), so its verdicts are retryable
-/// after a restart, while the native interpreter's are consensus-final.
+/// Kernel rejections are retryable; native rejections are consensus-final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptEngine {
     /// Bitcoin Core's `bitcoinkernel` C++ engine (the `kernel` feature).
@@ -102,7 +82,8 @@ pub enum ConsensusError {
     /// A transaction has no outputs.
     #[error("transaction has no outputs")]
     EmptyOutputs,
-    /// Coinbase scriptSig length is outside the consensus-allowed 2..=100 byte range.
+    /// Coinbase scriptSig length is outside the consensus-allowed 2..=100 byte
+    /// range.
     #[error("coinbase scriptSig length {len} outside allowed range 2..=100 bytes")]
     CoinbaseScriptSigSize {
         /// Observed coinbase scriptSig length in bytes.
@@ -144,8 +125,7 @@ pub enum ConsensusError {
         input_index: usize,
         /// Script failure reason.
         reason: String,
-        /// The engine that rejected the script. Classification reads this,
-        /// never the reason text.
+        /// The engine that rejected the script.
         engine: ScriptEngine,
     },
     /// Sigop cost exceeds consensus maximum.
@@ -175,9 +155,6 @@ pub enum ConsensusError {
     #[error("block merkle root mismatch")]
     MerkleRoot,
     /// The coinbase claims more than the subsidy plus the fees the block earned.
-    ///
-    /// Bitcoin Core's `bad-cb-amount`. Nothing else bounds what a coinbase may
-    /// pay itself, so this is the rule that keeps a miner from creating money.
     #[error("coinbase pays {paid} sats but only {allowed} sats are available")]
     CoinbaseAmount {
         /// Total value the coinbase outputs claim.
@@ -189,18 +166,12 @@ pub enum ConsensusError {
     #[error("block value total overflows the satoshi range")]
     BlockValueOverflow,
     /// Coinbase witness reserved nonce is missing or the wrong size.
-    ///
-    /// Bitcoin Core's `bad-witness-nonce-size`.
     #[error("coinbase witness reserved nonce is missing or the wrong size")]
     WitnessNonceSize,
     /// Witness data is present without a BIP141 commitment, or before `SegWit`.
-    ///
-    /// Bitcoin Core's `unexpected-witness`.
     #[error("unexpected witness data")]
     UnexpectedWitness,
     /// Block witness commitment does not match.
-    ///
-    /// Bitcoin Core's `bad-witness-merkle-match`.
     #[error("block witness commitment mismatch")]
     WitnessCommitment,
     /// Block weight exceeds consensus maximum.
@@ -228,11 +199,6 @@ pub enum ConsensusError {
         actual: usize,
     },
     /// A transaction's script checks received the wrong number of prevout rows.
-    ///
-    /// A caller wiring bug, not a verdict about the transaction: a short row
-    /// set would leave trailing inputs silently unverified and a long one
-    /// would index past the input set. Backend-neutral — no script backend
-    /// ran — so consumers classify it on its own, never as a script failure.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     PrevoutCount {
         /// Number of transaction inputs.
@@ -248,12 +214,6 @@ pub enum ConsensusError {
         input_index: usize,
     },
     /// The requested [`ValidationEngine`] is not compiled into this build.
-    ///
-    /// A build/wiring error, not a verdict about the transaction: this build
-    /// lacks the capability (`kernel` feature) the selection requires. The
-    /// node refuses such a selection at configuration validation before any
-    /// state or worker exists; seams reachable without that gate fail closed
-    /// with this error instead of substituting another backend.
     #[error("unsupported validation engine: {engine}")]
     UnsupportedEngine {
         /// The refused engine.
@@ -268,12 +228,6 @@ pub enum ConsensusError {
 }
 
 /// Coinbase subsidy at `height`, in satoshis.
-///
-/// Bitcoin Core's `GetBlockSubsidy`. `halving_interval` comes from the network
-/// (`Network::subsidy_halving_interval`) rather than being fixed at 210 000,
-/// because regtest halves every 150 blocks — hard-coding the mainnet interval
-/// would compute the wrong subsidy on the one network where a halving is
-/// reachable in a test.
 #[must_use]
 pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
     const INITIAL_SUBSIDY_SATS: u64 = 50 * 100_000_000;
@@ -291,19 +245,6 @@ pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
 }
 
 /// Verifies that a block's coinbase claims no more than it earned.
-///
-/// `fees` is the sum over the block's non-coinbase transactions of input value
-/// minus output value; `coinbase_out` is what the coinbase pays itself. Core
-/// applies this in `ConnectBlock` and rejects with `bad-cb-amount`.
-///
-/// Paying *less* than the maximum is allowed, as it is in Core — the
-/// difference is simply destroyed.
-///
-/// # Errors
-///
-/// Returns [`ConsensusError::CoinbaseAmount`] when the coinbase claims more
-/// than the subsidy plus `fees`, or [`ConsensusError::BlockValueOverflow`] if
-/// that sum leaves the satoshi range.
 pub const fn verify_coinbase_amount(
     coinbase_out: u64,
     fees: u64,

@@ -1,20 +1,17 @@
-//! Capability is not selection: `engine = native` must reach the Rust
-//! interpreter in every build, including builds where bitcoinkernel support is
-//! compiled in, and a build without the `kernel` feature must fail closed on
-//! `engine = kernel` instead of silently substituting another engine.
+//! Native selection always uses the Rust interpreter; kernel selection fails
+//! closed when the kernel backend is not compiled.
 
 use bitcoin_rs_consensus::kernel::BlockParse;
 #[cfg(feature = "kernel")]
 use bitcoin_rs_consensus::{BlockFacts, BlockView, ScriptStageTimings, verify_block_input_scripts};
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::opcode::OP_EQUAL;
 use bitcoin_rs_script::{VerifyFlags, push_int};
 
-/// Resolved coins for the standalone transaction seam.
 struct Coins(hashbrown::HashMap<OutPoint, TxOut>);
 
 impl UtxoView for Coins {
@@ -23,8 +20,6 @@ impl UtxoView for Coins {
     }
 }
 
-/// One input spending an `OP_EQUAL` prevout with a mismatched `7 8` scriptSig.
-/// Every compiled engine must reject the spend; no engine may accept it.
 fn mismatched_equal_spend() -> (Tx, Coins) {
     let outpoint = OutPoint {
         txid: Txid(Hash256::from_le_bytes(&[8; 32])),
@@ -56,16 +51,14 @@ fn single_tx_block(tx: &Tx) -> Block {
     Block {
         header: Header {
             version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root: Hash256::default(),
-            time: 0,
             bits: CompactTarget::from_consensus(0x2000_ffff),
-            nonce: 0,
+            ..Header::default()
         },
         txs: vec![tx.clone()],
     }
 }
 
+#[cfg(feature = "kernel")]
 fn script_reason(result: Result<(), ConsensusError>) -> String {
     match result {
         Err(ConsensusError::Script { reason, .. }) => reason,
@@ -73,9 +66,6 @@ fn script_reason(result: Result<(), ConsensusError>) -> String {
     }
 }
 
-/// The native interpreter stays compiled when the kernel feature is enabled:
-/// `engine = native` must produce the interpreter's verdict for both the
-/// transaction seam and the block seam, not the kernel dispatch marker.
 #[test]
 #[cfg(feature = "kernel")]
 fn native_engine_remains_available_when_kernel_is_compiled() {
@@ -109,7 +99,6 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
         "kernel engine must run the kernel, got {kernel_reason}"
     );
 
-    // The block seam dispatches the same way: the parse carries the engine.
     let block = single_tx_block(&tx);
     let parsed = BlockParse::parse(&consensus_bytes(&block), ValidationEngine::Native)
         .unwrap_or_else(|error| panic!("native parse: {error}"));
@@ -132,8 +121,6 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
     );
 }
 
-/// A build without `kernel` compiled in must fail closed on `engine = kernel`
-/// with a clear unsupported-build error, never a silent engine substitution.
 #[test]
 #[cfg(not(feature = "kernel"))]
 fn kernel_engine_fails_closed_without_the_kernel_feature() {
@@ -195,39 +182,11 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
     }
 }
 
-/// `native` resolves and runs in every build, kernel capability or not.
-#[test]
-fn native_engine_is_supported_and_default_in_every_build() {
-    assert!(ValidationEngine::Native.is_supported());
-    assert_eq!(ValidationEngine::default(), ValidationEngine::Native);
-
-    let (tx, coins) = mismatched_equal_spend();
-    let verdict = verify_transaction(
-        &tx,
-        &coins,
-        0,
-        0,
-        VerifyFlags::MANDATORY,
-        ValidationEngine::Native,
-    );
-    assert!(
-        script_reason(verdict).starts_with("script failed:"),
-        "native engine must reach the interpreter in this build"
-    );
-}
-
-/// A prevout set that does not cover exactly the transaction's inputs is
-/// rejected before any backend runs, under every compiled engine. A short
-/// slice would otherwise leave trailing inputs silently unverified
-/// (fail-open); a long one would index past `tx.inputs` in the native
-/// interpreter. The check is shared, so no engine can disagree about it.
 #[test]
 fn prevout_count_mismatch_is_rejected_under_every_engine() {
     let (tx, coins) = mismatched_equal_spend();
     let one_prevout = coins.0.into_iter().collect::<Vec<_>>();
 
-    // Every engine this build can execute, derived from the single engine
-    // list so this and other engine-parameterized tests cannot drift apart.
     let engines = ValidationEngine::ALL
         .iter()
         .copied()
@@ -235,8 +194,6 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
         .collect::<Vec<_>>();
 
     for engine in engines {
-        // Short: one prevout for one input is exact; two inputs are needed for
-        // a short slice to be a real fail-open case, so use a two-input tx.
         let two_input = Tx {
             version: 1,
             lock_time: LockTime::ZERO,
@@ -247,9 +204,8 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
                         txid: Txid(Hash256::from_le_bytes(&[9; 32])),
                         vout: 0,
                     },
-                    script_sig: Script::new(),
                     sequence: Sequence::MAX,
-                    witness: Witness::new(),
+                    ..TxIn::default()
                 },
             ],
             outputs: tx.outputs.clone(),

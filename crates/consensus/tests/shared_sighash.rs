@@ -53,9 +53,8 @@ fn fixture(inputs: u8, outputs: usize) -> (Tx, Vec<TxOut>) {
         inputs: (0..inputs)
             .map(|index| TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[index + 1; 32])), 0),
-                script_sig: Script::new(),
                 sequence: Sequence::from_consensus(0xffff_ff00 + u32::from(index)),
-                witness: Witness::new(),
+                ..TxIn::default()
             })
             .collect(),
         outputs: prevouts.iter().take(outputs).cloned().collect(),

@@ -6,20 +6,18 @@ use bitcoin::hex::FromHex;
 use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
 use serde_json::Value;
 
+/// Every Core `tx_valid` vector must decode; a vector that fails to
+/// deserialize is a decoder defect, not a consensus verdict.
 #[test]
 fn tx_valid_vectors_deserialize() {
-    let (total, parsed) = parse_tx_vectors("tx_valid.json", true);
-    println!("tx_valid.json: parsed {parsed}/{total} transaction vectors");
+    let (total, parsed) = parse_tx_vectors("tx_valid.json");
     assert!(total > 0);
     assert_eq!(parsed, total);
 }
 
 #[test]
 fn tx_invalid_vectors_load() {
-    let (total, parsed) = parse_tx_vectors("tx_invalid.json", false);
-    println!(
-        "tx_invalid.json: parsed {parsed}/{total} transaction vectors before expected rejection"
-    );
+    let (total, parsed) = parse_tx_vectors("tx_invalid.json");
     assert!(total > 0);
     assert!(parsed > 0);
 }
@@ -100,7 +98,7 @@ fn sighash_vectors_match_bitcoin_cache() {
     assert!(matched > 0);
 }
 
-fn parse_tx_vectors(name: &str, must_deserialize_all: bool) -> (usize, usize) {
+fn parse_tx_vectors(name: &str) -> (usize, usize) {
     let root = read_json(name);
     let rows = root
         .as_array()
@@ -121,8 +119,6 @@ fn parse_tx_vectors(name: &str, must_deserialize_all: bool) -> (usize, usize) {
         let bytes = decode_hex(tx_hex);
         if deserialize::<Tx>(&bytes).is_ok() {
             parsed = parsed.saturating_add(1);
-        } else if must_deserialize_all {
-            panic!("valid tx vector failed to deserialize");
         }
     }
     (total, parsed)

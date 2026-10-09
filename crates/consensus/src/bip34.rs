@@ -2,7 +2,8 @@ use bitcoin_rs_script::push_int;
 
 use crate::ConsensusError;
 
-/// Checks that the coinbase script starts with the minimally encoded block height.
+/// Checks that the coinbase script starts with the minimally encoded block
+/// height.
 pub fn check_bip34(height: u32, coinbase_script_sig: &[u8]) -> Result<(), ConsensusError> {
     let expected = push_int(i64::from(height));
     if coinbase_script_sig.starts_with(&expected) {

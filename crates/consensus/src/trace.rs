@@ -1,22 +1,9 @@
-//! Optional Bitcoin Core-compatible USDT tracepoints.
+//! Bitcoin Core-compatible USDT probes declared in `probes.d`.
 //!
-//! Every function in this module is a no-op unless the consuming binary is
-//! built with the `usdt` feature enabled. When it is, the probes carry
-//! Bitcoin Core's provider names (`validation`, `mempool`, `net`), probe
-//! names, and argument layout — the crate-root `probes.d` is the generator
-//! input and the compatibility table; see `docs/tracing.md`.
-//!
-//! Hot-path semantics mirror Bitcoin Core's `src/util/trace.h`: each emission
-//! site passes a `prepare` closure that *materialises* the probe arguments,
-//! and the closure is only invoked when a consumer (bpftrace, BCC, `DTrace`,
-//! …) has raised the probe's semaphore. With the feature on and nothing
-//! attached the cost is one volatile semaphore load per probe site; with the
-//! feature off every call is an empty function body and the closure is
-//! dropped without running.
+//! Feature-off calls are empty; feature-on calls prepare arguments only when
+//! an attached consumer raises the semaphore. See `docs/tracing.md`.
 
-// The usdt generator's probe macros cast their arguments to usize and
-// define an inline type-check item inside their expansion; that output is
-// not ours to reshape, so allow its lint set for the whole module.
+// Allow the lint set emitted by the usdt generator's casts and type-check items.
 #![allow(
     clippy::items_after_statements,
     clippy::as_conversions,
@@ -25,41 +12,24 @@
 )]
 
 mod generated {
-    // Raw generated probe macros, one generated module per provider. The
-    // generator names a module after each provider, so this private module
-    // keeps the generated `validation`/`mempool`/`net` modules out of the
-    // crate root where the public wrappers live. The provider definition
-    // lives at the package root next to `Cargo.toml`, where the `usdt`
-    // macro resolves it.
+    // Keep generated providers private; the macro loads the package-root definitions.
     #[cfg(feature = "usdt")]
     usdt::dtrace_provider!("probes.d");
 }
 
-/// Buffer address for the emitter's by-value pointer arguments.
-///
-/// Core passes hash and message buffers as pointers by value (`8@%reg`); the
-/// `usdt` crate's `uint8_t*` declaration would instead emit a dereferencing
-/// operand (`8@(%reg)`), so `probes.d` declares byte-buffer arguments
-/// `uint64_t` and the call sites below feed it the address.
+/// Buffer addresses are passed by value (`8@%reg`), using `uint64_t` in
+/// `probes.d` rather than a dereferencing `uint8_t*` (`8@(%reg)`).
 #[cfg(feature = "usdt")]
 fn address_of(buffer: *const u8) -> u64 {
     u64::try_from(buffer.addr()).unwrap_or(0)
 }
 
-/// Prepared arguments of `net:inbound_message` / `net:outbound_message`.
-///
-/// `(node_id, addr, conn_type, msg_type, payload_size, payload)`. `payload`
-/// must address `payload_size` bytes that outlive the probe call; callers
-/// pass the encoded frame's own byte slice.
+/// `(node_id, addr, conn_type, msg_type, payload_size, payload)`.
+/// The payload pointer must address `payload_size` bytes for the probe call.
 pub type MessageArgs = (i64, String, String, String, u64, *const u8);
 
-/// Fires `validation:block_connected` if probes are compiled in.
-///
-/// Arguments follow Bitcoin Core's `validation:block_connected` ABI (see
-/// `probes.d` and `docs/tracing.md`): `(block_hash, height, transactions,
-/// inputs, sigops_cost, elapsed_ns)`, where `block_hash` must address 32
-/// bytes that outlive the probe call; callers pass the hash's own byte
-/// array. `prepare` runs only while a consumer is attached.
+/// Emits `(block_hash, height, transactions, inputs, sigops_cost, elapsed_ns)`.
+/// The hash pointer must address 32 bytes for the probe call.
 pub fn block_connected(prepare: impl FnOnce() -> (*const u8, i32, u64, i32, i64, i64)) {
     #[cfg(feature = "usdt")]
     generated::validation::block_connected!(|| {
@@ -70,11 +40,7 @@ pub fn block_connected(prepare: impl FnOnce() -> (*const u8, i32, u64, i32, i64,
     drop(prepare);
 }
 
-/// Fires `mempool:added` if probes are compiled in.
-///
-/// Arguments follow Bitcoin Core's `mempool:added` ABI: `(txid, vsize,
-/// fee)`, where `txid` must address 32 bytes that outlive the probe call.
-/// `prepare` runs only while a consumer is attached.
+/// Emits `(txid, vsize, fee)`; the txid pointer must address 32 bytes.
 pub fn added(prepare: impl FnOnce() -> (*const u8, i32, i64)) {
     #[cfg(feature = "usdt")]
     generated::mempool::added!(|| {
@@ -85,12 +51,7 @@ pub fn added(prepare: impl FnOnce() -> (*const u8, i32, i64)) {
     drop(prepare);
 }
 
-/// Fires `mempool:removed` if probes are compiled in.
-///
-/// Arguments follow Bitcoin Core's `mempool:removed` ABI: `(txid, reason,
-/// vsize, fee, entry_time)`, where `txid` must address 32 bytes that
-/// outlive the probe call. `prepare` runs only while a consumer is
-/// attached.
+/// Emits `(txid, reason, vsize, fee, entry_time)`; txid must address 32 bytes.
 pub fn removed(prepare: impl FnOnce() -> (*const u8, &'static str, i32, i64, u64)) {
     #[cfg(feature = "usdt")]
     generated::mempool::removed!(|| {
@@ -101,9 +62,7 @@ pub fn removed(prepare: impl FnOnce() -> (*const u8, &'static str, i32, i64, u64
     drop(prepare);
 }
 
-/// Fires `net:inbound_message` if probes are compiled in.
-///
-/// `prepare` runs only while a consumer is attached.
+/// Emits `net:inbound_message` while a consumer is attached.
 pub fn inbound_message(prepare: impl FnOnce() -> MessageArgs) {
     #[cfg(feature = "usdt")]
     generated::net::inbound_message!(|| {
@@ -121,9 +80,7 @@ pub fn inbound_message(prepare: impl FnOnce() -> MessageArgs) {
     drop(prepare);
 }
 
-/// Fires `net:outbound_message` if probes are compiled in.
-///
-/// `prepare` runs only while a consumer is attached.
+/// Emits `net:outbound_message` while a consumer is attached.
 pub fn outbound_message(prepare: impl FnOnce() -> MessageArgs) {
     #[cfg(feature = "usdt")]
     generated::net::outbound_message!(|| {

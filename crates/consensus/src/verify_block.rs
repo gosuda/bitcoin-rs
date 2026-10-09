@@ -8,11 +8,12 @@ use crate::block_view::BlockFacts;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 use crate::verify_tx::is_coinbase;
 
-/// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
+/// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36`
+/// `commitment_header`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
-/// the batch kernel can issue work. Smaller trees stay on the spine.
+/// the batch kernel can issue work.
 const AVX2_MERKLE_MIN_LEAVES: usize = sha256d64::LANES * 2;
 
 /// BIP141 maximum block weight in weight units.
@@ -78,10 +79,6 @@ pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
 }
 
 /// Verifies block rules from facts derived once for the supplied block.
-///
-/// The caller supplies transaction identities, witness presence, Merkle facts,
-/// and block weight through [`BlockFacts`], so this entry does not re-serialize
-/// transactions or rebuild the Merkle tree on the validation hot path.
 pub fn verify_block_rules_precomputed(
     block: &Block,
     context: BlockRuleContext,
@@ -113,11 +110,6 @@ pub fn verify_block_rules_precomputed(
         return Err(ConsensusError::MerkleMutation);
     }
 
-    // BIP141/Core witness malleation check. When `SegWit` is active and a
-    // coinbase BIP141 commitment is present, the coinbase must prove the
-    // 32-byte reserved nonce and the commitment must match the computed
-    // witness Merkle root. Witness data without an active commitment is
-    // `unexpected-witness` (before `SegWit`, or with no commitment).
     if let Some(wtxids) = facts.wtxids() {
         check_witness_malleation(block, context.segwit_active, wtxids)?;
     } else if context.segwit_active && witness_commitment(block).is_some() {
@@ -137,18 +129,7 @@ pub fn verify_block_rules_precomputed(
 }
 
 /// Verifies the header Merkle root and rejects mutated Merkle trees.
-///
-/// `txids` must contain one transaction ID per block transaction in block
-/// order. The slice is borrowed. Small trees and hosts without AVX2 reduce
-/// through an O(log n) right-spine frontier; AVX2-capable hosts copy once
-/// when the tree can fill an 8-lane SHA-256d batch.
-///
-/// # Errors
-///
-/// Returns [`ConsensusError::MerkleRoot`] for an empty or mismatched tree and
-/// [`ConsensusError::MerkleMutation`] when duplicate branches make the tree
-/// ambiguous. The root verdict always takes precedence over the mutation
-/// verdict.
+/// `txids` must cover the block in transaction order; root errors precede mutation errors.
 pub fn verify_merkle_root_with_txids(block: &Block, txids: &[Txid]) -> Result<(), ConsensusError> {
     let Some((root, mutated)) = merkle_root_and_mutation_borrowed(txids) else {
         return Err(ConsensusError::MerkleRoot);
@@ -163,12 +144,7 @@ pub fn verify_merkle_root_with_txids(block: &Block, txids: &[Txid]) -> Result<()
 }
 
 /// Root-only precheck for the hot windowed apply path.
-///
-/// Computes the merkle root from caller-supplied transaction IDs and compares
-/// it to the block header. Mutation is intentionally ignored here; the later
-/// consensus path owns the mutation check and its error precedence. The slice
-/// is borrowed and reduced through the same production walker as
-/// [`verify_merkle_root_with_txids`].
+/// Mutation is ignored here and checked by full consensus validation.
 #[doc(hidden)]
 pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
     match merkle_root_and_mutation_borrowed(txids) {
@@ -190,13 +166,6 @@ fn hash_merkle_bytes(left: &[u8; 32], right: &[u8; 32]) -> Hash256 {
 }
 
 /// Merkle reduction over borrowed leaves.
-///
-/// Trees that cannot fill one AVX2 batch, and hosts without AVX2, stream
-/// leaves through [`merkle_root_spine`]. Trees with at least
-/// [`AVX2_MERKLE_MIN_LEAVES`] on an AVX2 host copy once into the
-/// level-synchronous 8-way reducer. Comparing two equal *real* adjacent nodes
-/// at any level flags the tree as mutated; the odd leftover paired with its
-/// duplicate-last copy never does.
 pub(crate) fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.len() >= AVX2_MERKLE_MIN_LEAVES && detect_avx2().is_some() {
         let mut hashes = txids.to_vec();
@@ -227,9 +196,7 @@ fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
         }
         spine[height] = Some(current);
     }
-    // Fold the right spine bottom-up: the carry rises to each pending height
-    // through duplicate-last self-pairs (never a mutation), then joins that
-    // pending node as its right sibling.
+    // Duplicate-last self-pairs pad the spine without flagging mutation.
     let mut carry: Option<(Txid, usize)> = None;
     for (height, slot) in spine.iter().enumerate() {
         let Some(node) = *slot else { continue };
@@ -249,11 +216,7 @@ fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
             }
         });
     }
-    let Some((root, _)) = carry else {
-        // Unreachable: the first leaf of non-empty input parks a node in the
-        // spine, so the fold above ran at least once.
-        return None;
-    };
+    let (root, _) = carry?;
     Some((root, mutated))
 }
 
@@ -332,16 +295,7 @@ fn hash_avx2_parent_batches<T: Copy>(
     idx
 }
 
-/// BIP141 witness commitment verification over cached witness IDs.
-///
-/// Finds the last coinbase output matching the commitment prefix, extracts the
-/// reserved value from the coinbase witness (must be exactly one 32-byte
-/// element), builds the witness merkle tree (coinbase leaf = all-zeros), and
-/// checks `SHA256d(witness_merkle_root || reserved) == commitment`.
-///
-/// `wtxids` must contain one witness ID per block transaction in block order;
-/// computing them here would re-serialize and re-hash every transaction on a
-/// path the node can already serve from its parse-once view.
+/// The last coinbase output carrying the BIP141 commitment prefix.
 fn witness_commitment(block: &Block) -> Option<&[u8]> {
     block
         .txs
@@ -357,14 +311,6 @@ fn witness_commitment(block: &Block) -> Option<&[u8]> {
 }
 
 /// Core `CheckWitnessMalleation`.
-///
-/// When `SegWit` is active and the coinbase has a BIP141 commitment, the
-/// coinbase witness must be a single 32-byte reserved nonce and the
-/// commitment must match. Witness data without a commitment, or before
-/// `SegWit`, is `unexpected-witness`.
-///
-/// `wtxids` must contain one witness ID per block transaction in block order
-/// when a commitment is present and the reserved nonce is well-formed.
 fn check_witness_malleation(
     block: &Block,
     expect_commitment: bool,
@@ -391,41 +337,11 @@ fn check_witness_malleation(
 }
 
 /// Returns whether the block's BIP141 commitment matches `wtxids`.
-///
-/// Callers that already require a commitment (window precheck under active
-/// `SegWit` with witness data) use this as a boolean. Full consensus uses
-/// `check_witness_malleation`.
 #[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     check_witness_malleation(block, true, wtxids).is_ok()
 }
 /// Checks that a block body is bound to its header before staging.
-///
-/// A peer can alter either transaction data or witness data without changing
-/// the block hash, which is computed from the header only. This gate verifies
-/// the transaction-ID Merkle root, Merkle mutation, and witness commitment
-/// rules before a body occupies the stager's single-body slot (issue #1070).
-///
-/// `segwit_active` must match the apply path's contextual derivation
-/// (`BlockRuleContext.segwit_active`) so the gate reproduces exact consensus
-/// semantics: pre-activation blocks with a commitment-like output are not
-/// required to carry a witness nonce, but witness data without an active
-/// commitment is `unexpected-witness` at either activation state.
-///
-/// Merkle verification runs before witness verification in this binding gate;
-/// this is not the full block-rule error precedence. The witness verdict is
-/// delegated to [`check_witness_malleation`] to avoid duplicating consensus logic. Two
-/// cost-only fast paths are hoisted ahead of wtxid hashing without changing
-/// the delegated verdict:
-///
-/// 1. When neither a commitment nor any witness is present the block is
-///    trivially well-formed (the delegated check returns `Ok`).
-/// 2. When segwit is active and a commitment is present but the coinbase
-///    witness nonce shape is wrong (missing input or not exactly 1×32B), the
-///    delegated check's first branch returns [`ConsensusError::WitnessNonceSize`]
-///    without consulting `wtxids`, so the same error is returned before the
-///    expensive hashing. This is **not** done when segwit is inactive: the
-///    delegated check may return `Ok` for a commitment-like output pre-activation.
 pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     verify_merkle_root_with_txids(block, &txids)?;
@@ -434,10 +350,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
-    // Early shape check: hoisted first branch of check_witness_malleation.
-    // When segwit is active and a commitment exists, a malformed coinbase
-    // witness nonce shape fails before wtxid hashing. The delegated check
-    // never consults wtxids in this branch, so the semantics are identical.
+    // Reject malformed nonces before deriving witness IDs.
     if segwit_active && commitment.is_some() {
         let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
             return Err(ConsensusError::WitnessNonceSize);
@@ -482,10 +395,6 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
 }
 
 /// Bitcoin merkle root over raw 32-byte leaves.
-///
-/// Duplicates the last leaf on odd levels. Empty input returns `None`.
-/// The vector is reduced in place through the same AVX2/spine walker the
-/// block-rule path uses; mining does not keep a second fold.
 #[must_use]
 pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
     if leaves.is_empty() {
@@ -503,677 +412,24 @@ pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
 }
 
 #[cfg(test)]
-fn merkle_root_and_mutation_scalar(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
-    if hashes.is_empty() {
-        return None;
-    }
-    let mut mutated = false;
-    while hashes.len() > 1 {
-        mutated |= hashes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .any(|pair| pair[0] == pair[1]);
-        next_merkle_level_scalar(hashes);
-    }
-    Some((hashes[0], mutated))
-}
-
-#[cfg(test)]
-fn next_merkle_level_scalar(level: &mut Vec<Txid>) {
-    let original_len = level.len();
-    for idx in 0..original_len.div_ceil(2) {
-        let left = level[2 * idx];
-        let right = level[(2 * idx + 1).min(original_len - 1)];
-        let mut pair = [0u8; 64];
-        pair[..32].copy_from_slice(left.as_bytes());
-        pair[32..].copy_from_slice(right.as_bytes());
-        level[idx] = Txid(double_sha256(&pair));
-    }
-    level.truncate(original_len.div_ceil(2));
-}
-
-#[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
-        Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence,
+        Tx, TxIn, TxOut, Txid, Witness,
     };
 
     use super::{
         BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_merkle_root_matches_txids,
         compute_merkle_root, is_coinbase, merkle_root_and_mutation,
-        merkle_root_and_mutation_borrowed, merkle_root_and_mutation_scalar, merkle_root_spine,
-        sha256d, verify_block_rules, verify_block_rules_precomputed, verify_flags,
-        verify_merkle_root_with_txids,
+        merkle_root_and_mutation_borrowed, merkle_root_spine, sha256d, verify_block_rules,
+        verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
     };
     use crate::ConsensusError;
     use crate::bip9::SoftforkState;
     use crate::block_view::BlockFacts;
     use bitcoin_rs_script::VerifyFlags;
 
-    #[test]
-    fn verify_flags_activate_contextual_rules() {
-        let flags = verify_flags(
-            Network::Mainnet,
-            481_824,
-            Hash256::from_le_bytes(&[0x11; 32]),
-            SoftforkState {
-                csv_active: true,
-                segwit_active: true,
-            },
-        );
-        assert!(flags.contains(VerifyFlags::P2SH));
-        assert!(flags.contains(VerifyFlags::DERSIG));
-        assert!(flags.contains(VerifyFlags::CHECKLOCKTIMEVERIFY));
-        assert!(flags.contains(VerifyFlags::CHECKSEQUENCEVERIFY));
-        assert!(flags.contains(VerifyFlags::WITNESS));
-        assert!(flags.contains(VerifyFlags::NULLDUMMY));
-    }
-
-    #[test]
-    fn verify_flags_drop_p2sh_for_bip16_exception() {
-        let exception = match "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"
-            .parse::<BlockHash>()
-        {
-            Ok(hash) => Hash256::from(hash),
-            Err(error) => panic!("invalid BIP16 exception hash: {error}"),
-        };
-        let flags = verify_flags(
-            Network::Mainnet,
-            170_060,
-            exception,
-            SoftforkState {
-                csv_active: false,
-                segwit_active: false,
-            },
-        );
-        assert!(!flags.contains(VerifyFlags::P2SH));
-    }
-
-    #[test]
-    fn valid_single_coinbase_block_passes() {
-        let block = Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 0,
-                bits: CompactTarget::from_consensus(0),
-                nonce: 0,
-            },
-            txs: vec![coinbase_tx()],
-        };
-        let mut fixed = block;
-        let mut hashes: Vec<Txid> = fixed.txs.iter().map(Tx::txid).collect();
-        let (root, _) = merkle_root_and_mutation_scalar(&mut hashes)
-            .unwrap_or_else(|| panic!("single coinbase block should have merkle root"));
-        fixed.header.merkle_root = root.into();
-        assert_eq!(verify_block_rules(&fixed), Ok(()));
-    }
-
-    #[test]
-    fn missing_coinbase_is_rejected() {
-        let tx = Tx {
-            version: 1,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: Script::new(),
-            }],
-            lock_time: LockTime::ZERO,
-        };
-        let block = Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 0,
-                bits: CompactTarget::from_consensus(0),
-                nonce: 0,
-            },
-            txs: vec![tx],
-        };
-        assert_eq!(
-            verify_block_rules(&block),
-            Err(ConsensusError::MissingCoinbase)
-        );
-    }
-
-    #[test]
-    fn contextual_rules_reject_witness_before_segwit_activation() {
-        let block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
-
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: false,
-                },
-            ),
-            Err(ConsensusError::UnexpectedWitness)
-        );
-    }
-
-    #[test]
-    fn contextual_rules_enforce_bip141_commitment_after_segwit_activation() {
-        let block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
-
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true,
-                },
-            ),
-            Err(ConsensusError::UnexpectedWitness)
-        );
-    }
-
-    #[test]
-    fn contextual_rules_always_enforce_block_weight_limit() {
-        let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].script_sig = Script::from_bytes(vec![1; 1_000_001]);
-        let block = block_with_transactions(vec![coinbase]);
-
-        assert!(matches!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: false,
-                },
-            ),
-            Err(ConsensusError::BlockWeight { .. })
-        ));
-        assert!(matches!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true,
-                },
-            ),
-            Err(ConsensusError::BlockWeight { .. })
-        ));
-    }
-
-    #[test]
-    fn duplicate_transaction_ids_are_rejected_even_with_matching_merkle_root() {
-        let tx = spend_tx(0x03);
-        let block = block_with_transactions(vec![coinbase_tx(), spend_tx(0x02), tx.clone(), tx]);
-
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: false,
-                },
-            ),
-            Err(ConsensusError::MerkleMutation)
-        );
-    }
-
-    #[test]
-    fn duplicate_transaction_ids_without_merkle_mutation_reach_later_validation() {
-        let tx = spend_tx(0x04);
-        let distinct = spend_tx(0x05);
-        let block = block_with_transactions(vec![coinbase_tx(), tx.clone(), distinct, tx]);
-
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: false,
-                },
-            ),
-            Ok(())
-        );
-    }
-
-    // --- BIP141 witness commitment tests ---
-
-    #[test]
-    fn bip141_witness_commitment_last_output_wins() {
-        // Coinbase has two commitment outputs: first valid, last bogus.
-        // The last matching output is checked, so the bogus commitment rejects the block.
-        let reserved = vec![0u8; 32];
-        let spend = witness_spend_tx();
-        let valid = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
-
-        let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = Witness::from_stack(vec![reserved]);
-        coinbase.outputs.push(TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: Script::from_bytes(commitment_script(&valid)),
-        });
-        coinbase.outputs.push(TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: Script::from_bytes(commitment_script(&[0xff; 32])),
-        });
-
-        let block = block_with_transactions(vec![coinbase, spend]);
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Err(ConsensusError::WitnessCommitment)
-        );
-    }
-
-    #[test]
-    fn bip141_witness_commitment_last_output_wins_valid() {
-        // Coinbase has two commitment outputs: first bogus, last valid.
-        // The last matching output is checked, so the valid commitment accepts the block.
-        let reserved = vec![0u8; 32];
-        let spend = witness_spend_tx();
-        let valid = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
-
-        let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = Witness::from_stack(vec![reserved]);
-        coinbase.outputs.push(TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: Script::from_bytes(commitment_script(&[0xff; 32])),
-        });
-        coinbase.outputs.push(TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: Script::from_bytes(commitment_script(&valid)),
-        });
-
-        let block = block_with_transactions(vec![coinbase, spend]);
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn bip141_coinbase_witness_must_have_exactly_one_32_byte_element() {
-        let spend = witness_spend_tx();
-        let commitment = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &[0u8; 32]);
-
-        let make_block = |witness: Vec<Vec<u8>>| -> Block {
-            let mut coinbase = coinbase_tx();
-            coinbase.inputs[0].witness = Witness::from_stack(witness);
-            coinbase.outputs.push(TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: Script::from_bytes(commitment_script(&commitment)),
-            });
-            block_with_transactions(vec![coinbase, spend.clone()])
-        };
-
-        // No witness elements → rejected.
-        let block = make_block(Vec::new());
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Err(ConsensusError::WitnessNonceSize)
-        );
-
-        // 31-byte element → rejected.
-        let block = make_block(vec![vec![0u8; 31]]);
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Err(ConsensusError::WitnessNonceSize)
-        );
-
-        // Two elements (both 32 bytes) → rejected.
-        let block = make_block(vec![vec![0u8; 32], vec![0u8; 32]]);
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Err(ConsensusError::WitnessNonceSize)
-        );
-    }
-
-    #[test]
-    fn bip141_valid_commitment_with_proper_reserved_value_passes() {
-        let reserved = vec![0u8; 32];
-        let spend = witness_spend_tx();
-        let commitment = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
-
-        let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = Witness::from_stack(vec![reserved]);
-        coinbase.outputs.push(TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: Script::from_bytes(commitment_script(&commitment)),
-        });
-
-        let block = block_with_transactions(vec![coinbase, spend]);
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: true
-                }
-            ),
-            Ok(())
-        );
-    }
-
-    // --- Merkle reducer tests ---
-
-    #[test]
-    fn avx2_matches_scalar_for_all_leaf_counts_0_to_129() {
-        for leaf_count in 0..=129 {
-            let txids = txids(leaf_count);
-            let mut avx = txids.clone();
-            let mut scalar = txids;
-            let avx_result = candidate_merkle(&mut avx);
-            let scalar_result = scalar_merkle(&mut scalar);
-            assert_eq!(avx_result, scalar_result, "leaf count {leaf_count}");
-        }
-    }
-
-    #[test]
-    fn witness_byte_fold_matches_txid_fold_across_sizes() {
-        for leaf_count in 1..=33 {
-            let leaves = txids(leaf_count);
-            let mut bytes: Vec<[u8; 32]> = leaves.iter().map(|txid| *txid.as_bytes()).collect();
-            let bytes_root = compute_merkle_root(&mut bytes);
-            let mut hashes = leaves;
-            let txid_root = merkle_root_and_mutation(&mut hashes).map(|(root, _)| *root.as_bytes());
-            assert_eq!(bytes_root, txid_root, "leaf count {leaf_count}");
-        }
-    }
-
-    #[test]
-    fn lane_boundary_pairs_seven_and_eight() {
-        for leaf_count in [14, 15, 16, 17, 31, 32, 33] {
-            let txids = txids(leaf_count);
-            let mut avx = txids.clone();
-            let mut scalar = txids;
-            assert_eq!(
-                candidate_merkle(&mut avx),
-                scalar_merkle(&mut scalar),
-                "leaf count {leaf_count}"
-            );
-        }
-    }
-
-    #[test]
-    fn borrowed_merkle_matches_in_place_across_sizes_and_mutation() {
-        // Distinct leaves past the u8 seed space of `txids()`, so large
-        // counts stay non-mutated by construction.
-        let distinct = |count: usize| -> Vec<Txid> {
-            (0..count)
-                .map(|index| {
-                    let mut bytes = [0u8; 32];
-                    bytes[..8].copy_from_slice(&index.to_le_bytes());
-                    Txid(Hash256::from_le_bytes(&bytes))
-                })
-                .collect()
-        };
-        let sizes = (0..=130usize).chain([255, 256, 257, 264, 1000]);
-        for leaf_count in sizes {
-            // tail 0: clean; 1: a duplicate-tail padding self-pair must stay
-            // unmutated; 2: a real adjacent duplicate pair must flag it.
-            for tail in 0..=2usize {
-                let mut leaves = distinct(leaf_count);
-                if leaf_count >= 2 {
-                    for _ in 0..tail {
-                        leaves.push(leaves[1]);
-                    }
-                }
-                let mut expected = leaves.clone();
-                let spine = merkle_root_spine(&leaves);
-                let in_place = merkle_root_and_mutation(&mut expected);
-                assert_eq!(spine, in_place, "leaf count {leaf_count} tail {tail}");
-                assert_eq!(
-                    merkle_root_and_mutation_borrowed(&leaves),
-                    spine,
-                    "leaf count {leaf_count} tail {tail} production dispatch"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn borrowed_final_spine_fold_flags_equal_real_siblings() {
-        // All-equal leaves at an odd width: the trailing lone leaf is raised
-        // through duplicate-last self-pairs (never a mutation by itself), and
-        // the final fold then joins it against real spine nodes whose value
-        // the raised branch equals. The fold must flag those equal real
-        // siblings exactly where the in-place reducer's final-level pair
-        // check does, with the same root.
-        for leaf_count in [3usize, 7] {
-            let leaves = vec![txid(0x2b); leaf_count];
-            let mut in_place = leaves.clone();
-            assert_eq!(
-                merkle_root_spine(&leaves),
-                merkle_root_and_mutation(&mut in_place),
-                "leaf count {leaf_count}"
-            );
-            assert_eq!(
-                merkle_root_and_mutation_borrowed(&leaves),
-                merkle_root_spine(&leaves),
-                "leaf count {leaf_count} production dispatch"
-            );
-            let Some((_, mutated)) = merkle_root_and_mutation_borrowed(&leaves) else {
-                panic!("borrowed merkle root over a non-empty leaf set");
-            };
-            assert!(mutated, "leaf count {leaf_count}");
-        }
-    }
-
-    #[test]
-    fn borrowed_verification_covers_empty_even_odd_and_mutation() {
-        let header_with = |merkle_root: Hash256| Header {
-            version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root,
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
-        };
-        // Empty input is a MerkleRoot error regardless of the header.
-        let empty = Block {
-            header: header_with(Hash256::default()),
-            txs: Vec::new(),
-        };
-        assert_eq!(
-            verify_merkle_root_with_txids(&empty, &[]),
-            Err(ConsensusError::MerkleRoot)
-        );
-        for leaf_count in [1usize, 2, 3, 4, 5, 6, 7, 8, 9] {
-            let leaves = txids(leaf_count);
-            let mut expected = leaves.clone();
-            let Some((root, mutated)) = candidate_merkle(&mut expected) else {
-                panic!("merkle root over a non-empty leaf set");
-            };
-            // Matching root: Ok, unless the tree is genuinely mutated.
-            let matching = Block {
-                header: header_with(root.into()),
-                txs: Vec::new(),
-            };
-            assert_eq!(
-                verify_merkle_root_with_txids(&matching, &leaves),
-                if mutated {
-                    Err(ConsensusError::MerkleMutation)
-                } else {
-                    Ok(())
-                },
-                "leaf count {leaf_count}"
-            );
-            // A wrong root outranks the mutation verdict.
-            let wrong = Block {
-                header: header_with(Hash256::from_le_bytes(&[0xff; 32])),
-                txs: Vec::new(),
-            };
-            assert_eq!(
-                verify_merkle_root_with_txids(&wrong, &leaves),
-                Err(ConsensusError::MerkleRoot),
-                "leaf count {leaf_count}"
-            );
-        }
-        // A genuinely mutated tree with a matching root reports MerkleMutation.
-        let duplicated = vec![txid(1), txid(1)];
-        let mut expected = duplicated.clone();
-        let Some((root, mutated)) = candidate_merkle(&mut expected) else {
-            panic!("merkle root over duplicated leaves");
-        };
-        assert!(mutated);
-        let mutated_block = Block {
-            header: header_with(root.into()),
-            txs: Vec::new(),
-        };
-        assert_eq!(
-            verify_merkle_root_with_txids(&mutated_block, &duplicated),
-            Err(ConsensusError::MerkleMutation)
-        );
-    }
-
-    #[test]
-    fn nonadjacent_duplicates_are_not_mutated() {
-        let a = txid(1);
-        let b = txid(2);
-
-        // [A, B, A]
-        for input in [vec![a, b, a], vec![a, b, b, a]] {
-            let mut avx = input.clone();
-            let mut scalar = input;
-            let (root, mutated) = candidate_merkle_nonempty(&mut avx);
-            let (scalar_root, scalar_mutated) = scalar_merkle_nonempty(&mut scalar);
-            assert!(!mutated, "non-adjacent duplicate must not mutate");
-            assert_eq!(root, scalar_root);
-            assert_eq!(mutated, scalar_mutated);
-        }
-    }
-
-    #[test]
-    fn synthetic_odd_duplicate_distinguishes_padding_from_mutation() {
-        let a = txid(1);
-        let b = txid(2);
-
-        // [A, B, B] (3 leaves) -- the trailing B is an odd duplicate and is padding.
-        let mut avx = vec![a, b, b];
-        let mut scalar = avx.clone();
-        let (root, mutated) = candidate_merkle_nonempty(&mut avx);
-        let (scalar_root, scalar_mutated) = scalar_merkle_nonempty(&mut scalar);
-        assert!(!mutated, "odd self-pair is not a mutation");
-        assert_eq!(root, scalar_root);
-        assert_eq!(mutated, scalar_mutated);
-
-        // [A, B, B, B] (4 leaves) -- positions 2 and 3 are a real duplicate pair.
-        let mut avx = vec![a, b, b, b];
-        let mut scalar = avx.clone();
-        let (root, mutated) = candidate_merkle_nonempty(&mut avx);
-        let (scalar_root, scalar_mutated) = scalar_merkle_nonempty(&mut scalar);
-        assert!(mutated, "real adjacent duplicate must mutate");
-        assert_eq!(root, scalar_root);
-        assert_eq!(mutated, scalar_mutated);
-    }
-
-    #[test]
-    fn core_ambiguous_six_leaf_tree_vs_duplicated_tail() {
-        // Core test vector: [1..6] and [1..6, 5, 6] share a root but only the
-        // duplicated version is mutated.
-        let one_to_six: Vec<Txid> = (1u8..=6).map(txid).collect();
-        let one_to_six_duplicated: Vec<Txid> = (1u8..=6).chain([5, 6]).map(txid).collect();
-
-        let mut avx_six = one_to_six.clone();
-        let mut scalar_six = one_to_six;
-        let (root_six, mutated_six) = candidate_merkle_nonempty(&mut avx_six);
-        let (scalar_root_six, scalar_mutated_six) = scalar_merkle_nonempty(&mut scalar_six);
-        assert!(!mutated_six);
-        assert_eq!(root_six, scalar_root_six);
-        assert_eq!(mutated_six, scalar_mutated_six);
-
-        let mut avx_dup = one_to_six_duplicated.clone();
-        let mut scalar_dup = one_to_six_duplicated;
-        let (root_dup, mutated_dup) = candidate_merkle_nonempty(&mut avx_dup);
-        let (scalar_root_dup, scalar_mutated_dup) = scalar_merkle_nonempty(&mut scalar_dup);
-        assert!(mutated_dup, "duplicated tail must be mutated");
-        assert_eq!(root_dup, scalar_root_dup);
-        assert_eq!(mutated_dup, scalar_mutated_dup);
-
-        // Roots match despite the mutation flag.
-        assert_eq!(root_six, root_dup);
-    }
-
-    #[test]
-    fn merkle_root_error_precedes_mutation_error() {
-        // Two duplicate transactions give a valid merkle root but the block
-        // header is wrong. The wrong root must be reported before the mutation.
-        let a = txid(1);
-        let txids = [a, a];
-        let wrong_root = Hash256::from_le_bytes(&[0xff; 32]);
-        let block = Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: wrong_root,
-                time: 0,
-                bits: CompactTarget::from_consensus(0),
-                nonce: 0,
-            },
-            txs: Vec::new(),
-        };
-        assert_eq!(
-            verify_merkle_root_with_txids(&block, &txids),
-            Err(ConsensusError::MerkleRoot),
-            "wrong root must be reported before the duplicate mutation"
-        );
-    }
-
-    #[test]
-    fn missing_coinbase_precedes_merkle_mutation() {
-        // A block with a duplicate transaction but no coinbase must fail on the
-        // missing coinbase structural check before the merkle mutation path.
-        let tx = spend_tx(1);
-        let block = block_with_transactions(vec![tx.clone(), tx]);
-        assert_eq!(
-            verify_block_rules(&block),
-            Err(ConsensusError::MissingCoinbase)
-        );
-    }
-
-    #[test]
-    fn block_merkle_root_matches_txids_ignores_mutation() {
-        // The window precheck helper must return true for a matching root
-        // even when the tree is mutated.
-        let a = txid(1);
-        let mut expected_hashes = vec![a, a];
-        let (expected_root, _) = scalar_merkle_nonempty(&mut expected_hashes);
-        let expected: Hash256 = expected_root.into();
-        let mut block = block_with_transactions(vec![coinbase_tx()]);
-        block.header.merkle_root = expected;
-        let check = vec![a, a];
-        assert!(block_merkle_root_matches_txids(&block, &check));
-    }
-
-    #[test]
-    fn is_coinbase_detects_null_prevout() {
-        assert!(is_coinbase(&coinbase_tx()));
-        assert!(!is_coinbase(&witness_spend_tx()));
-        assert!(!is_coinbase(&spend_tx(1)));
-    }
-
-    // --- Test helpers ---
+    type BindingCase = (Vec<[u8; 32]>, Vec<Vec<u8>>, Result<(), ConsensusError>);
 
     fn coinbase_tx() -> Tx {
         Tx {
@@ -1192,57 +448,36 @@ mod tests {
         }
     }
 
-    fn witness_spend_tx() -> Tx {
-        Tx {
-            version: 1,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::from_stack(vec![vec![1; 32]]),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: Script::new(),
-            }],
-            lock_time: LockTime::ZERO,
-        }
+    fn spend_tx(seed: u8, witness: Vec<Vec<u8>>) -> Tx {
+        let mut tx = coinbase_tx();
+        tx.inputs[0].previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0);
+        tx.inputs[0].script_sig = Script::new();
+        tx.inputs[0].witness = Witness::from_stack(witness);
+        tx.outputs[0].value = Amount::from_sat(1);
+        tx
     }
 
-    fn spend_tx(seed: u8) -> Tx {
-        Tx {
-            version: 1,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: Script::new(),
-            }],
-            lock_time: LockTime::ZERO,
-        }
+    fn witness_spend_tx() -> Tx {
+        spend_tx(2, vec![vec![1; 32]])
     }
 
     fn block_with_transactions(txs: Vec<Tx>) -> Block {
-        let mut block = Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 0,
-                bits: CompactTarget::from_consensus(0),
-                nonce: 0,
-            },
-            txs,
-        };
-        let Some(root) = compute_merkle_root_from_txs(&block.txs) else {
+        let mut hashes: Vec<Txid> = txs.iter().map(Tx::txid).collect();
+        let Some((root, _)) = merkle_root_and_mutation(&mut hashes) else {
             panic!("block should have merkle root");
         };
-        block.header.merkle_root = root;
-        block
+        Block {
+            header: header_with(root.into()),
+            txs,
+        }
+    }
+
+    fn header_with(merkle_root: Hash256) -> Header {
+        Header {
+            version: 1,
+            merkle_root,
+            ..Header::default()
+        }
     }
 
     fn check_block_rules(block: &Block, context: BlockRuleContext) -> Result<(), ConsensusError> {
@@ -1254,25 +489,21 @@ mod tests {
         verify_block_rules_precomputed(block, context, &facts)
     }
 
-    fn compute_merkle_root_from_txs(txs: &[Tx]) -> Option<Hash256> {
-        let mut hashes: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-        merkle_root_and_mutation(&mut hashes).map(|(root, _)| root.into())
-    }
-
-    /// Builds a BIP141 witness commitment scriptPubKey from a 32-byte commitment.
-    fn commitment_script(commitment: &[u8; 32]) -> Vec<u8> {
+    fn commitment_output(commitment: [u8; 32]) -> TxOut {
         let mut script = WITNESS_COMMITMENT_PREFIX.to_vec();
-        script.extend_from_slice(commitment);
-        script
+        script.extend_from_slice(&commitment);
+        TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: Script::from_bytes(script),
+        }
     }
 
-    /// Computes the BIP141 witness commitment for a block's transaction set.
     fn compute_witness_commitment(txs: &[Tx], reserved: &[u8]) -> [u8; 32] {
         let mut leaves: Vec<[u8; 32]> = txs
             .iter()
             .enumerate()
-            .map(|(i, tx)| {
-                if i == 0 {
+            .map(|(index, tx)| {
+                if index == 0 {
                     [0u8; 32]
                 } else {
                     *tx.wtxid().as_bytes()
@@ -1299,25 +530,365 @@ mod tests {
             .collect()
     }
 
-    fn candidate_merkle(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
-        merkle_root_and_mutation(hashes)
+    fn distinct_txids(count: usize) -> Vec<Txid> {
+        (0..count)
+            .map(|index| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&index.to_le_bytes());
+                Txid(Hash256::from_le_bytes(&bytes))
+            })
+            .collect()
     }
 
-    fn scalar_merkle(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
-        merkle_root_and_mutation_scalar(hashes)
+    fn oracle_root(leaves: &[Txid]) -> Option<[u8; 32]> {
+        use bitcoin::hashes::Hash as _;
+        bitcoin::merkle_tree::calculate_root(
+            leaves
+                .iter()
+                .map(|leaf| bitcoin::Txid::from_byte_array(*leaf.as_bytes())),
+        )
+        .map(bitcoin::hashes::Hash::to_byte_array)
     }
 
-    fn candidate_merkle_nonempty(hashes: &mut Vec<Txid>) -> (Txid, bool) {
-        match candidate_merkle(hashes) {
-            Some(result) => result,
-            None => panic!("test Merkle tree must be nonempty"),
+    #[test]
+    fn verify_flags_follow_activation_and_the_bip16_exception() {
+        let flags = verify_flags(
+            Network::Mainnet,
+            481_824,
+            Hash256::from_le_bytes(&[0x11; 32]),
+            SoftforkState {
+                csv_active: true,
+                segwit_active: true,
+            },
+        );
+        for expected in [
+            VerifyFlags::P2SH,
+            VerifyFlags::DERSIG,
+            VerifyFlags::CHECKLOCKTIMEVERIFY,
+            VerifyFlags::CHECKSEQUENCEVERIFY,
+            VerifyFlags::WITNESS,
+            VerifyFlags::NULLDUMMY,
+        ] {
+            assert!(flags.contains(expected), "missing {expected:?}");
+        }
+
+        let exception = match "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"
+            .parse::<BlockHash>()
+        {
+            Ok(hash) => Hash256::from(hash),
+            Err(error) => panic!("invalid BIP16 exception hash: {error}"),
+        };
+        let exempt = verify_flags(
+            Network::Mainnet,
+            170_060,
+            exception,
+            SoftforkState {
+                csv_active: false,
+                segwit_active: false,
+            },
+        );
+        assert!(!exempt.contains(VerifyFlags::P2SH));
+    }
+
+    #[test]
+    fn structural_block_rules_hold_under_both_activation_states() {
+        let duplicated = spend_tx(3, Vec::new());
+        let cases: [(Vec<Tx>, Result<(), ConsensusError>); 6] = [
+            (vec![coinbase_tx()], Ok(())),
+            (
+                vec![coinbase_tx(), coinbase_tx()],
+                Err(ConsensusError::ExtraCoinbase { tx_index: 1 }),
+            ),
+            // A block whose only transaction spends a real prevout.
+            (
+                vec![spend_tx(1, Vec::new())],
+                Err(ConsensusError::MissingCoinbase),
+            ),
+            // No coinbase AND an adjacent duplicate: the structural check wins.
+            (
+                vec![duplicated.clone(), duplicated.clone()],
+                Err(ConsensusError::MissingCoinbase),
+            ),
+            // Adjacent duplicate txids make the Merkle tree ambiguous.
+            (
+                vec![
+                    coinbase_tx(),
+                    spend_tx(2, Vec::new()),
+                    duplicated.clone(),
+                    duplicated.clone(),
+                ],
+                Err(ConsensusError::MerkleMutation),
+            ),
+            // Non-adjacent duplicates are not a Merkle mutation; BIP30 owns
+            // that rejection at a later stage.
+            (
+                vec![
+                    coinbase_tx(),
+                    duplicated.clone(),
+                    spend_tx(5, Vec::new()),
+                    duplicated,
+                ],
+                Ok(()),
+            ),
+        ];
+
+        for (txs, expected) in cases {
+            let block = block_with_transactions(txs);
+            for segwit_active in [false, true] {
+                assert_eq!(
+                    check_block_rules(&block, BlockRuleContext { segwit_active }),
+                    expected,
+                    "segwit_active {segwit_active}"
+                );
+            }
+            assert_eq!(
+                verify_block_rules(&block),
+                expected,
+                "the public entry derives the same facts"
+            );
+        }
+        let mut wrong = block_with_transactions(vec![coinbase_tx()]);
+        wrong.header.merkle_root = Hash256::default();
+        assert_eq!(
+            check_block_rules(
+                &wrong,
+                BlockRuleContext {
+                    segwit_active: true
+                }
+            ),
+            Err(ConsensusError::MerkleRoot)
+        );
+    }
+
+    #[test]
+    fn witness_without_commitment_and_oversized_blocks_are_rejected() {
+        let witness_block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
+        let mut heavy = coinbase_tx();
+        heavy.inputs[0].script_sig = Script::from_bytes(vec![1; 1_000_001]);
+        let heavy_block = block_with_transactions(vec![heavy]);
+
+        for segwit_active in [false, true] {
+            let context = BlockRuleContext { segwit_active };
+            assert_eq!(
+                check_block_rules(&witness_block, context),
+                Err(ConsensusError::UnexpectedWitness),
+                "segwit_active {segwit_active}"
+            );
+            assert!(
+                matches!(
+                    check_block_rules(&heavy_block, context),
+                    Err(ConsensusError::BlockWeight { .. })
+                ),
+                "segwit_active {segwit_active}"
+            );
         }
     }
 
-    fn scalar_merkle_nonempty(hashes: &mut Vec<Txid>) -> (Txid, bool) {
-        match scalar_merkle(hashes) {
-            Some(result) => result,
-            None => panic!("test Merkle tree must be nonempty"),
+    #[test]
+    fn bip141_commitment_selection_and_reserved_nonce_shape() {
+        let reserved = vec![0u8; 32];
+        let spend = witness_spend_tx();
+        let valid = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
+        let bogus = [0xff; 32];
+        let nonce = vec![reserved];
+
+        let cases: [BindingCase; 7] = [
+            (vec![valid], nonce.clone(), Ok(())),
+            // Last matching output wins in both directions.
+            (vec![bogus, valid], nonce.clone(), Ok(())),
+            (
+                vec![valid, bogus],
+                nonce,
+                Err(ConsensusError::WitnessCommitment),
+            ),
+            (
+                vec![valid],
+                Vec::new(),
+                Err(ConsensusError::WitnessNonceSize),
+            ),
+            (
+                vec![valid],
+                vec![vec![0u8; 31]],
+                Err(ConsensusError::WitnessNonceSize),
+            ),
+            (
+                vec![valid],
+                vec![vec![0u8; 33]],
+                Err(ConsensusError::WitnessNonceSize),
+            ),
+            (
+                vec![valid],
+                vec![vec![0u8; 32], vec![0u8; 32]],
+                Err(ConsensusError::WitnessNonceSize),
+            ),
+        ];
+
+        for (commitments, witness, expected) in cases {
+            let mut coinbase = coinbase_tx();
+            coinbase.inputs[0].witness = Witness::from_stack(witness);
+            coinbase
+                .outputs
+                .extend(commitments.iter().copied().map(commitment_output));
+            let block = block_with_transactions(vec![coinbase, spend.clone()]);
+            assert_eq!(
+                check_block_rules(
+                    &block,
+                    BlockRuleContext {
+                        segwit_active: true
+                    }
+                ),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn every_merkle_reducer_agrees_with_the_oracle_and_on_mutation() {
+        let sizes = (0..=130usize).chain([255, 256, 257, 264, 1000]);
+        for leaf_count in sizes {
+            for tail in 0..=2usize {
+                let mut leaves = distinct_txids(leaf_count);
+                if leaf_count >= 2 {
+                    // tail 0: clean; 1: a duplicate-tail padding self-pair
+                    // must stay unmutated; 2: a real adjacent duplicate pair
+                    // must flag it.
+                    for _ in 0..tail {
+                        leaves.push(leaves[1]);
+                    }
+                }
+                let label = format!("leaf count {leaf_count} tail {tail}");
+                let mut in_place = leaves.clone();
+                let spine = merkle_root_spine(&leaves);
+                assert_eq!(merkle_root_and_mutation(&mut in_place), spine, "{label}");
+                assert_eq!(
+                    merkle_root_and_mutation_borrowed(&leaves),
+                    spine,
+                    "{label} production dispatch"
+                );
+                assert_eq!(
+                    spine.map(|(root, _)| *root.as_bytes()),
+                    oracle_root(&leaves),
+                    "{label} against rust-bitcoin"
+                );
+                let mut bytes: Vec<[u8; 32]> = leaves.iter().map(|leaf| *leaf.as_bytes()).collect();
+                assert_eq!(
+                    compute_merkle_root(&mut bytes),
+                    oracle_root(&leaves),
+                    "{label} byte fold"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_flags_distinguish_padding_from_real_duplicate_pairs() {
+        let (a, b) = (txid(1), txid(2));
+        let one_to_six: Vec<Txid> = (1u8..=6).map(txid).collect();
+        let cases: [(Vec<Txid>, bool); 8] = [
+            // Non-adjacent duplicates are honest trees.
+            (vec![a, b, a], false),
+            (vec![a, b, b, a], false),
+            // An odd trailing leaf is padded against itself: not a mutation.
+            (vec![a, b, b], false),
+            (vec![a, b, b, b], true),
+            (one_to_six.clone(), false),
+            // Core's ambiguous pair: same root, only the tail copy mutated.
+            ((1u8..=6).chain([5, 6]).map(txid).collect(), true),
+            // All-equal odd widths: the raised branch meets equal real spine
+            // siblings in the final fold.
+            (vec![txid(0x2b); 3], true),
+            (vec![txid(0x2b); 7], true),
+        ];
+
+        for (leaves, expected_mutated) in cases {
+            let mut in_place = leaves.clone();
+            let Some((root, mutated)) = merkle_root_and_mutation(&mut in_place) else {
+                panic!("test Merkle tree must be nonempty");
+            };
+            assert_eq!(mutated, expected_mutated, "{leaves:?}");
+            assert_eq!(merkle_root_spine(&leaves), Some((root, mutated)));
+            assert_eq!(
+                merkle_root_and_mutation_borrowed(&leaves),
+                Some((root, mutated))
+            );
+            assert_eq!(Some(*root.as_bytes()), oracle_root(&leaves));
+        }
+        // The mutated tail shares its root with the honest six-leaf tree.
+        assert_eq!(
+            oracle_root(&one_to_six),
+            oracle_root(&(1u8..=6).chain([5, 6]).map(txid).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn header_merkle_verification_orders_root_before_mutation() {
+        let empty = Block {
+            header: header_with(Hash256::default()),
+            txs: Vec::new(),
+        };
+        assert_eq!(
+            verify_merkle_root_with_txids(&empty, &[]),
+            Err(ConsensusError::MerkleRoot)
+        );
+
+        let wrong = Block {
+            header: header_with(Hash256::from_le_bytes(&[0xff; 32])),
+            txs: Vec::new(),
+        };
+        for leaf_count in 1..=9usize {
+            let leaves = txids(leaf_count);
+            let Some((root, mutated)) = merkle_root_and_mutation_borrowed(&leaves) else {
+                panic!("merkle root over a non-empty leaf set");
+            };
+            let matching = Block {
+                header: header_with(root.into()),
+                txs: Vec::new(),
+            };
+            assert_eq!(
+                verify_merkle_root_with_txids(&matching, &leaves),
+                if mutated {
+                    Err(ConsensusError::MerkleMutation)
+                } else {
+                    Ok(())
+                },
+                "leaf count {leaf_count}"
+            );
+            assert_eq!(
+                verify_merkle_root_with_txids(&wrong, &leaves),
+                Err(ConsensusError::MerkleRoot),
+                "leaf count {leaf_count}"
+            );
+        }
+
+        // A mutated tree: matching root reports the mutation, a wrong root
+        // still outranks it, and the window precheck ignores mutation.
+        let duplicated = vec![txid(1), txid(1)];
+        let Some((root, mutated)) = merkle_root_and_mutation_borrowed(&duplicated) else {
+            panic!("merkle root over duplicated leaves");
+        };
+        assert!(mutated);
+        let mutated_block = Block {
+            header: header_with(root.into()),
+            txs: Vec::new(),
+        };
+        assert_eq!(
+            verify_merkle_root_with_txids(&mutated_block, &duplicated),
+            Err(ConsensusError::MerkleMutation)
+        );
+        assert_eq!(
+            verify_merkle_root_with_txids(&wrong, &duplicated),
+            Err(ConsensusError::MerkleRoot),
+            "wrong root must be reported before the duplicate mutation"
+        );
+        assert!(block_merkle_root_matches_txids(&mutated_block, &duplicated));
+        assert!(!block_merkle_root_matches_txids(&wrong, &duplicated));
+        assert!(!block_merkle_root_matches_txids(&empty, &[]));
+    }
+
+    #[test]
+    fn is_coinbase_detects_null_prevout() {
+        assert!(is_coinbase(&coinbase_tx()));
+        assert!(!is_coinbase(&witness_spend_tx()));
+        assert!(!is_coinbase(&spend_tx(1, Vec::new())));
     }
 }
