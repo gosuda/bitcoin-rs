@@ -48,7 +48,7 @@ jobs:
       # explicit kernel check, so both compile the C++ kernel engine; install
       # the native prerequisites.
       - uses: ./.github/actions/native-deps
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@fb523f40495206854c36b250850817ae0f83e3d1 # 1.99.0
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         if: matrix.range == 'minimal'
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -99,19 +99,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: toolchain
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - name: Workspace default targets on Rust 1.95
+      - name: Workspace default targets on Rust 1.99
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           cargo check --locked --workspace \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-      - name: Native consensus on Rust 1.95
+      - name: Native consensus on Rust 1.99
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           cargo check --locked -p bitcoin-rs-consensus \
             --no-default-features
-      - name: Native node on Rust 1.95
+      - name: Native node on Rust 1.99
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           cargo check --locked -p bitcoin-rs-node \
