@@ -96,7 +96,7 @@ windows-sys = { version = "=0.61.2", features = [
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
-corepc-types = { version = "0.15.0", default-features = false, features = [
+corepc-types = { version = "0.16.0", default-features = false, features = [
     "std", "serde-deny-unknown-fields",
 ] }
 
