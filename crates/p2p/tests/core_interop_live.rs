@@ -20,7 +20,7 @@ use bitcoin_rs_primitives::USER_AGENT;
 use serde_json::Value;
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
-const SCHEMA: &str = "bitcoin-rs-core-differential-v2";
+const SCHEMA: &str = "bitcoin-rs-core-differential-v3";
 
 type LiveError = Box<dyn std::error::Error>;
 
@@ -188,6 +188,7 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), LiveError> {
     assert_inbound_handshake(&evidence)?;
     assert_chain_identity(&evidence)?;
     assert_bip152_relay(&evidence)?;
+    assert_block_announcements(&evidence)?;
     Ok(())
 }
 
@@ -289,6 +290,56 @@ fn assert_bip152_relay(evidence: &Value) -> Result<(), LiveError> {
     ] {
         evidence_u64(performance, key)?;
     }
+    Ok(())
+}
+
+/// Compare the actual P2P frames emitted by pinned Core and bitcoin-rs for
+/// equivalent peers, then repeat the comparison across a live reorg.
+fn assert_block_announcements(evidence: &Value) -> Result<(), LiveError> {
+    let announcements = evidence
+        .get("block_announcements")
+        .ok_or_else(|| main_error("evidence missing `block_announcements`"))?;
+    for round in ["first", "reorg"] {
+        let observed = announcements
+            .get(round)
+            .ok_or_else(|| main_error(format!("block announcements missing `{round}`")))?;
+        for implementation in ["core", "bitcoin_rs"] {
+            let node = observed.get(implementation).ok_or_else(|| {
+                main_error(format!("{round} announcements missing `{implementation}`"))
+            })?;
+            for (mode, expected) in [
+                ("inv", "inv"),
+                ("headers", "headers"),
+                ("compact", "cmpctblock"),
+            ] {
+                assert_eq!(
+                    evidence_str(node, mode)?,
+                    expected,
+                    "{implementation} must use {expected} for the {mode} peer in the {round} round"
+                );
+            }
+        }
+    }
+
+    let stale = announcements
+        .get("abandoned_reannounced")
+        .ok_or_else(|| main_error("block announcements missing `abandoned_reannounced`"))?;
+    for implementation in ["core", "bitcoin_rs"] {
+        assert!(
+            !evidence_bool(stale, implementation)?,
+            "{implementation} must not announce the abandoned tip after the reorg begins"
+        );
+    }
+
+    for key in ["parent_tip", "first_tip", "reorg_tip"] {
+        let hash = evidence_str(announcements, key)?;
+        assert_eq!(hash.len(), 64, "{key} must be a display-form block hash");
+    }
+    assert_ne!(
+        evidence_str(announcements, "first_tip")?,
+        evidence_str(announcements, "reorg_tip")?,
+        "the reorg must replace the first announced tip"
+    );
     Ok(())
 }
 

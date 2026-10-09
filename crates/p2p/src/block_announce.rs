@@ -370,20 +370,7 @@ impl BlockAnnouncer {
     }
 
     fn planned_announcements(&self, tip: CommittedTip) -> Vec<PlannedAnnouncement> {
-        if self.in_ibd() {
-            return Vec::new();
-        }
-
-        let mut state = self.state.lock();
         let tip_hash = Hash256::from(tip.hash);
-        // This is only an observation cursor. The authoritative current tip
-        // was read from chainstate immediately before this call.
-        if state.last_processed_tip == Some(tip_hash) {
-            return Vec::new();
-        }
-        state.last_processed_tip = Some(tip_hash);
-        drop(state);
-
         let live_sessions = self.ready_sessions();
 
         let mut planned = Vec::new();
@@ -474,23 +461,26 @@ impl BlockAnnouncer {
         planned
     }
 
-    /// Plans announcements for the current committed tip without sending.
-    pub fn plan_announcements(&self) -> Vec<(SocketAddr, Message)> {
-        let Some(tip) = self.chain_query.committed_tip() else {
-            return Vec::new();
-        };
-        self.planned_announcements(tip)
-            .into_iter()
-            .map(|planned| (planned.source.addr, planned.message))
-            .collect()
-    }
-
     /// Rereads and processes the current committed tip.
     pub fn process_tip(&self) -> Vec<(SocketAddr, Message)> {
         self.reconcile_high_bandwidth_peers();
+        if self.in_ibd() {
+            return Vec::new();
+        }
         let Some(tip) = self.chain_query.committed_tip() else {
             return Vec::new();
         };
+        let tip_hash = Hash256::from(tip.hash);
+        {
+            let mut state = self.state.lock();
+            // Claim the observation only on the processing path. Planning is
+            // side-effect free, while this claim prevents concurrent workers
+            // from sending the same committed tip twice.
+            if state.last_processed_tip == Some(tip_hash) {
+                return Vec::new();
+            }
+            state.last_processed_tip = Some(tip_hash);
+        }
         let planned = self.planned_announcements(tip);
         let mut sent = Vec::with_capacity(planned.len());
         for announcement in planned {
@@ -503,7 +493,7 @@ impl BlockAnnouncer {
             }
             if announcement.confirms_tip {
                 self.peers
-                    .note_announced_block(announcement.source, Hash256::from(tip.hash));
+                    .note_announced_block(announcement.source, tip_hash);
             }
             sent.push((announcement.source.addr, announcement.message));
         }
@@ -938,6 +928,29 @@ mod tests {
     }
 
     #[test]
+    fn planning_does_not_consume_the_committed_tip() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        let addr = test_addr(1007);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+
+        let tip = chain.committed_tip().expect("committed tip");
+        assert_eq!(announcer.planned_announcements(tip).len(), 1);
+        assert_eq!(announcer.planned_announcements(tip).len(), 1);
+
+        let sent = announcer.process_tip();
+        assert_eq!(sent.len(), 1);
+        assert!(rx.try_recv().is_ok(), "planning must not suppress the send");
+    }
+
+    #[test]
     fn coalesced_wake_processes_the_latest_committed_tip() {
         let chain = Arc::new(MockAnnounceChain::new(4));
         let table = Arc::new(PeerTable::new());
@@ -955,7 +968,7 @@ mod tests {
         assert_eq!(queue.enqueued(), 1);
         assert_eq!(queue.coalesced(), 2);
 
-        let addr = test_addr(1007);
+        let addr = test_addr(1008);
         let (_lease, peer_rx) = setup_peer(&table, &announcer, addr, true);
         mark_known(&table, &announcer, addr, chain.hash_at(0));
 

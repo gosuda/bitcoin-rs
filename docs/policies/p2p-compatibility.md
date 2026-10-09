@@ -215,7 +215,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
   covers unavailable blocks, empty index lists, and out-of-range indexes
   for the same profiles.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
-- **Live lane (cut)**: owned by [`CORE-01` / `CORE-02`](../contracts/core-differential.md). This policy does not restate the Core version, RPC set, or CI job.
+- **Live lane (cut)**: owned by [`CORE-01` / `CORE-02` / `CORE-03` / `CORE-05`](../contracts/core-differential.md). `CORE-05` compares outbound `inv`, `headers`, and high-bandwidth `cmpctblock` frames from equivalent peers on pinned Core and bitcoin-rs, including a live reorg. This policy does not restate the Core version, RPC set, or CI job.
 - Node-level reorg effects are coordinated in `crates/node/src/reorg_effects.rs` (`switch_to_branch`, `invalidate_block`), which moves the applied tip off a losing branch; the node's P2P-chain adapter calls `switch_to_branch` when a higher-work header branch wins. The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
 
 See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the contracts index and precedence rule.

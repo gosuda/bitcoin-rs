@@ -122,7 +122,7 @@ RS_RPC_PASSWORD="interop"
 # Sole producer-side owner of the evidence schema identifier; the verifier
 # (crates/p2p/tests/core_interop_live.rs SCHEMA) consumes the value recorded
 # in the evidence. Do not add a second definition in this script.
-EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v2"
+EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v3"
 
 BITCOIN_RS_PID=""
 CORE_COOKIE_FILE="${CORE_DATADIR}/regtest/.cookie"
@@ -527,6 +527,19 @@ if missing:
 print(json.dumps(RESULT))
 PROBE
 )
+
+echo "==> comparing proactive block announcements and reorg behavior on the wire"
+ANNOUNCEMENT_JSON=$(
+  CORE_P2P_PORT="${CORE_P2P_PORT}" \
+  CORE_RPC_PORT="${CORE_RPC_PORT}" \
+  CORE_COOKIE="$(cat "${CORE_COOKIE_FILE}")" \
+  RS_P2P_PORT="${RS_P2P_PORT}" \
+  RS_RPC_PORT="${RS_RPC_PORT}" \
+  RS_RPC_AUTH="${RS_RPC_USER}:${RS_RPC_PASSWORD}" \
+  MINING_ADDRESS="$(printf '%s' "${MINING_ADDRESS}" | json_string)" \
+  ANNOUNCEMENT_TIMEOUT_SECONDS="${TIMEOUT_SECONDS}" \
+    python3 scripts/p2p_block_announcement_probe.py
+)
 echo "==> collecting Core's view of the bitcoin-rs peer"
 PEER_JSON=$(core_result getpeerinfo | python3 -c '
 import json, sys
@@ -564,7 +577,7 @@ python3 - "${EVIDENCE}" "${EVIDENCE_SCHEMA}" "${CORE_SUBVERSION}" \
   "${PEER_JSON}" "${CORE_TIP}" "${RS_TIP}" "${CORE_CHAIN}" "${CORE_BLOCKS}" "${RS_BLOCKS}" \
   "${PEER_IBD_JSON}" "${IBD_SECONDS}" "${NEAR_TIP_SECONDS}" \
   "${COMPACT_BATCHES}" "${RECONSTRUCTIONS}" "${GETBLOCKTXN_RECOVERIES}" "${FULL_BLOCK_FALLBACKS}" \
-  "${RAW_PEER_JSON}" "${CATCHUP_BLOCKS}" <<'PY'
+  "${RAW_PEER_JSON}" "${CATCHUP_BLOCKS}" "${ANNOUNCEMENT_JSON}" <<'PY'
 import json
 import sys
 
@@ -573,8 +586,8 @@ import sys
     peer, core_tip, rs_tip, chain, core_blocks, rs_blocks,
     peer_ibd, ibd_seconds, near_tip_seconds,
     compact_batches, reconstructions, getblocktxn, fallbacks, raw_probe,
-    phase_a_blocks,
-) = sys.argv[1:23]
+    phase_a_blocks, announcements,
+) = sys.argv[1:24]
 ibd = json.loads(peer_ibd)
 final = json.loads(peer)
 evidence = {
@@ -607,6 +620,7 @@ evidence = {
         "full_block_fallbacks": int(fallbacks),
     },
     "bip152_probe": json.loads(raw_probe),
+    "block_announcements": json.loads(announcements),
     "core_bip152": {
         "hb_to": final["bip152_hb_to"],
         "hb_from": final["bip152_hb_from"],

@@ -45,7 +45,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 ## 1. Live Bitcoin Core P2P and chain-identity differential
 
 - **Tier**: Real external-consumer evidence.
-- **Contract & clauses**: [`docs/contracts/core-differential.md`](contracts/core-differential.md) (`CORE-01`, `CORE-02`, `CORE-03`).
+- **Contract & clauses**: [`docs/contracts/core-differential.md`](contracts/core-differential.md) (`CORE-01`, `CORE-02`, `CORE-03`, `CORE-05`).
 - **Owner scripts & suites**:
   - Pinned installer: `scripts/install-bitcoind.sh` (POSIX) / `scripts/install-bitcoind.ps1` (Windows).
   - Test runner: `scripts/run-p2p-core-interop.sh`.
@@ -54,8 +54,9 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
   - Pinned Bitcoin Core 31.1 binary downloaded from bitcoincore.org and checked
     against the SHA-256 archive digest pinned in `crates/rpc/core-compat.toml`.
   - Live regtest P2P handshake, IBD sync, compact block relay (BIP152 phases A–C),
-    disconnect handling, and tip agreement (`getblockcount`, `getbestblockhash`,
-    `getblockchaininfo.{chain,blocks}`).
+    disconnect handling, tip agreement (`getblockcount`, `getbestblockhash`,
+    `getblockchaininfo.{chain,blocks}`), and direct wire comparison of proactive
+    `inv`, `headers`, and high-bandwidth `cmpctblock` announcements across a reorg.
   - Compact-block relay counts are diagnostic log-derived counters per `ECO-09`.
 - **Reproduce**:
   ```sh
