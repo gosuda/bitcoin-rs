@@ -570,11 +570,14 @@ pub(crate) fn start_node(
     let gateway = state.mempool_gateway();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
-    let block_announcer = Arc::new(bitcoin_rs_p2p::BlockAnnouncer::new(
-        state.peer_table(),
-        Arc::clone(&p2p_chain_query),
-        bitcoin_rs_p2p::BlockAnnounceConfig::default(),
-    ));
+    let block_announcer = Arc::new(
+        bitcoin_rs_p2p::BlockAnnouncer::new(
+            state.peer_table(),
+            Arc::clone(&p2p_chain_query),
+            bitcoin_rs_p2p::BlockAnnounceConfig::default(),
+        )
+        .with_ibd(state.ibd(), state.config().network),
+    );
     if let Some(announce_rx) = state.take_block_announce_receiver() {
         guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
             Arc::clone(&block_announcer),

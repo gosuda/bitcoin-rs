@@ -58,9 +58,9 @@ pub(crate) mod wtxid;
 mod test_support;
 
 pub use block_announce::{
-    BlockAnnounceConfig, BlockAnnounceEvent, BlockAnnounceQueue, BlockAnnouncer,
-    DEFAULT_BLOCK_ANNOUNCE_QUEUE_CAPACITY, MAX_BLOCKS_TO_ANNOUNCE, MAX_HIGH_BANDWIDTH_PEERS,
-    PeerAnnounceTracker, spawn_block_announce_worker,
+    BlockAnnounceConfig, BlockAnnounceEvent, BlockAnnounceQueue, BlockAnnounceReceiver,
+    BlockAnnouncer, DEFAULT_BLOCK_ANNOUNCE_QUEUE_CAPACITY, MAX_BLOCKS_TO_ANNOUNCE,
+    MAX_HIGH_BANDWIDTH_PEERS, PeerAnnounceTracker, spawn_block_announce_worker,
 };
 pub(crate) use block_stager::BlockStager;
 pub use chain_query::ActiveChainQuery;

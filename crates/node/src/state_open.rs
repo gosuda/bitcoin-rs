@@ -402,6 +402,7 @@ impl NodeState {
         // the transaction-relay gate, and block-peer eligibility can never
         // disagree.
         let ibd = chainstate.ibd_latch();
+        let followers = followers.with_ibd(Some((Arc::clone(&ibd), config.network)));
         let assumeutxo = Arc::new(
             bitcoin_rs_chainstate::AssumeUtxoManager::open(
                 config.network,

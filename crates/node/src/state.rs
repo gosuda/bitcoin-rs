@@ -126,7 +126,7 @@ pub struct NodeState {
     assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
     /// Bounded block announcement queue for outbound propagation.
     block_announce_queue: bitcoin_rs_p2p::BlockAnnounceQueue,
-    block_announce_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::BlockAnnounceEvent>>>,
+    block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
 }
 
 impl Drop for NodeState {
@@ -306,9 +306,7 @@ impl NodeState {
 
     /// Takes the block announcement receiver for worker execution.
     #[must_use]
-    pub fn take_block_announce_receiver(
-        &self,
-    ) -> Option<Receiver<bitcoin_rs_p2p::BlockAnnounceEvent>> {
+    pub fn take_block_announce_receiver(&self) -> Option<bitcoin_rs_p2p::BlockAnnounceReceiver> {
         self.block_announce_rx.lock().take()
     }
 

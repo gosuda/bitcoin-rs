@@ -1387,17 +1387,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                                 .note_compact_relay(lease.source(peer_addr));
                         }
                         if let Some(announcer) = &shared.block_announcer {
-                            announcer.note_compact_relay(
+                            announcer.note_peer_compact_preference(
                                 peer_addr,
                                 send_cmpct.send_compact,
                                 send_cmpct.version,
                             );
-                            let msgs = announcer.maybe_promote_peer(peer_addr, lease);
-                            for (target, msg) in msgs {
-                                if let Some(target_lease) = shared.peer_table.lease(target) {
-                                    let _ = target_lease.send(msg);
-                                }
-                            }
                         }
                     }
                     crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {

@@ -83,28 +83,42 @@ pub struct BlockAnnounceConfig {
     pub blocksonly: bool,
 }
 
-/// Bounded producer side of the block announcement queue.
+/// Thread-safe non-blocking block announcement queue with pending tip preservation under saturation.
 #[derive(Clone)]
 pub struct BlockAnnounceQueue {
     sender: Sender<BlockAnnounceEvent>,
+    pending_tip: Arc<Mutex<Option<BlockAnnounceEvent>>>,
     enqueued: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+}
+
+/// Receiving end of the block announcement queue that coalesces and preserves pending tips.
+pub struct BlockAnnounceReceiver {
+    receiver: Receiver<BlockAnnounceEvent>,
+    pending_tip: Arc<Mutex<Option<BlockAnnounceEvent>>>,
 }
 
 impl BlockAnnounceQueue {
     /// Creates a bounded announcement queue with `capacity`.
     #[must_use]
-    pub fn new(capacity: usize) -> (Self, Receiver<BlockAnnounceEvent>) {
+    pub fn new(capacity: usize) -> (Self, BlockAnnounceReceiver) {
         let (sender, receiver) = crossbeam_channel::bounded(capacity.max(1));
+        let pending_tip = Arc::new(Mutex::new(None));
         let queue = Self {
             sender,
+            pending_tip: Arc::clone(&pending_tip),
             enqueued: Arc::new(AtomicU64::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
         };
-        (queue, receiver)
+        let rx = BlockAnnounceReceiver {
+            receiver,
+            pending_tip,
+        };
+        (queue, rx)
     }
 
     /// Announces a newly committed active block. Never blocks chainstate.
+    /// Under saturation, the newest committed tip is preserved in the pending slot.
     pub fn announce(&self, event: BlockAnnounceEvent) -> bool {
         match self.sender.try_send(event) {
             Ok(()) => {
@@ -112,6 +126,8 @@ impl BlockAnnounceQueue {
                 true
             }
             Err(TrySendError::Full(_)) => {
+                // Saturated: replace pending slot with this newest committed tip.
+                *self.pending_tip.lock() = Some(event);
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
@@ -132,6 +148,57 @@ impl BlockAnnounceQueue {
     }
 }
 
+impl BlockAnnounceReceiver {
+    /// Receives the next announcement event, or waits up to `timeout`.
+    /// Coalesces intermediate queue entries and incorporates any overflow pending tip.
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<BlockAnnounceEvent, crossbeam_channel::RecvTimeoutError> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(mut latest) => {
+                while let Ok(next) = self.receiver.try_recv() {
+                    latest = next;
+                }
+                let pending = self.pending_tip.lock().take();
+                if let Some(pending) = pending {
+                    latest = pending;
+                }
+                Ok(latest)
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                let pending = self.pending_tip.lock().take();
+                if let Some(pending) = pending {
+                    Ok(pending)
+                } else {
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout)
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                let pending = self.pending_tip.lock().take();
+                if let Some(pending) = pending {
+                    Ok(pending)
+                } else {
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                }
+            }
+        }
+    }
+
+    /// Drains all available queued events and pending overflow, returning the latest tip if any.
+    pub fn try_recv_latest(&self) -> Option<BlockAnnounceEvent> {
+        let mut latest = None;
+        while let Ok(event) = self.receiver.try_recv() {
+            latest = Some(event);
+        }
+        let pending = self.pending_tip.lock().take();
+        if let Some(pending) = pending {
+            latest = Some(pending);
+        }
+        latest
+    }
+}
+
 /// Per-peer announcement tracker.
 #[derive(Clone, Debug, Default)]
 pub struct PeerAnnounceTracker {
@@ -139,16 +206,19 @@ pub struct PeerAnnounceTracker {
     pub best_known_block: Option<Hash256>,
     /// Whether the peer negotiated BIP130 `sendheaders`.
     pub send_headers: bool,
-    /// Whether this peer is currently in high-bandwidth compact mode.
-    pub high_bandwidth: bool,
+    /// Inbound compact block announcement preference: whether the peer sent
+    /// `sendcmpct(high_bandwidth=true, ...)`, requesting that WE announce new blocks via `cmpctblock`.
+    pub peer_wants_high_bandwidth: bool,
     /// Compact-block protocol version requested by the peer (e.g. 1 or 2).
-    pub compact_version: Option<u64>,
+    pub peer_compact_version: Option<u64>,
 }
 
 #[derive(Default)]
 struct AnnounceState {
     peer_trackers: HashMap<SocketAddr, PeerAnnounceTracker>,
-    high_bandwidth_peers: Vec<SocketAddr>,
+    /// Up to 3 peers we have requested high-bandwidth compact blocks from via `sendcmpct(true, 2)`.
+    /// BIP152: "Nodes MUST NOT send `sendcmpct(high_bandwidth=true)` to more than 3 peers."
+    high_bandwidth_requested_peers: Vec<SocketAddr>,
     last_announced_tip: Option<Hash256>,
 }
 
@@ -157,6 +227,10 @@ pub struct BlockAnnouncer {
     peers: Arc<PeerTable>,
     chain_query: Arc<dyn ChainQuery>,
     config: BlockAnnounceConfig,
+    ibd: Option<(
+        Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        bitcoin_rs_primitives::Network,
+    )>,
     state: Mutex<AnnounceState>,
 }
 
@@ -172,8 +246,28 @@ impl BlockAnnouncer {
             peers,
             chain_query,
             config,
+            ibd: None,
             state: Mutex::new(AnnounceState::default()),
         }
+    }
+
+    /// Configures the IBD gate to suppress proactive block announcements during initial block download.
+    #[must_use]
+    pub fn with_ibd(
+        mut self,
+        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        network: bitcoin_rs_primitives::Network,
+    ) -> Self {
+        self.ibd = Some((ibd, network));
+        self
+    }
+
+    /// Whether the node is currently in initial block download.
+    #[must_use]
+    pub fn in_ibd(&self) -> bool {
+        self.ibd.as_ref().is_some_and(|(latch, network)| {
+            latch.is_active(bitcoin_rs_primitives::unix_time_secs(), *network)
+        })
     }
 
     /// Marks whether a peer negotiated BIP130 `sendheaders`.
@@ -182,15 +276,17 @@ impl BlockAnnouncer {
         state.peer_trackers.entry(addr).or_default().send_headers = send_headers;
     }
 
-    /// Records BIP152 compact-block negotiation from a peer.
-    pub fn note_compact_relay(&self, addr: SocketAddr, send_compact: bool, version: u64) {
+    /// Records inbound compact block preferences received in `sendcmpct` from `addr`.
+    pub fn note_peer_compact_preference(
+        &self,
+        addr: SocketAddr,
+        high_bandwidth: bool,
+        version: u64,
+    ) {
         let mut state = self.state.lock();
         let tracker = state.peer_trackers.entry(addr).or_default();
-        tracker.compact_version = Some(version);
-        if !send_compact {
-            tracker.high_bandwidth = false;
-            state.high_bandwidth_peers.retain(|a| *a != addr);
-        }
+        tracker.peer_wants_high_bandwidth = high_bandwidth;
+        tracker.peer_compact_version = Some(version);
     }
 
     /// Records that `addr` is known to hold `hash`.
@@ -203,18 +299,18 @@ impl BlockAnnouncer {
             .best_known_block = Some(hash);
     }
 
-    /// Reports whether `addr` is currently selected for high-bandwidth compact relay.
+    /// Reports whether we have requested high-bandwidth compact blocks from `addr`.
     #[must_use]
-    pub fn is_high_bandwidth(&self, addr: &SocketAddr) -> bool {
+    pub fn is_high_bandwidth_requested(&self, addr: &SocketAddr) -> bool {
         let state = self.state.lock();
-        state.high_bandwidth_peers.contains(addr)
+        state.high_bandwidth_requested_peers.contains(addr)
     }
 
-    /// Returns the current list of peers in high-bandwidth compact mode.
+    /// Returns the current list of peers we requested high-bandwidth compact blocks from.
     #[must_use]
-    pub fn high_bandwidth_peers(&self) -> Vec<SocketAddr> {
+    pub fn high_bandwidth_requested_peers(&self) -> Vec<SocketAddr> {
         let state = self.state.lock();
-        state.high_bandwidth_peers.clone()
+        state.high_bandwidth_requested_peers.clone()
     }
 
     /// Returns the best block known for `addr`.
@@ -227,13 +323,22 @@ impl BlockAnnouncer {
             .and_then(|t| t.best_known_block)
     }
 
+    /// Returns whether the peer requested high-bandwidth compact block announcements.
+    #[must_use]
+    pub fn peer_wants_high_bandwidth(&self, addr: SocketAddr) -> bool {
+        let state = self.state.lock();
+        state
+            .peer_trackers
+            .get(&addr)
+            .is_some_and(|t| t.peer_wants_high_bandwidth)
+    }
+
     /// Called when a peer handshake completes.
     pub fn on_peer_ready(&self, addr: SocketAddr, lease: &PeerLease, info: &PeerInfo) {
         if info.send_headers {
             self.set_send_headers(addr, true);
         }
         if info.compact_block_relay {
-            self.note_compact_relay(addr, false, 2);
             let msgs = self.maybe_promote_peer(addr, lease);
             for (target, msg) in msgs {
                 if let Some(target_lease) = self.peers.lease(target) {
@@ -247,12 +352,11 @@ impl BlockAnnouncer {
     pub fn on_peer_disconnected(&self, addr: SocketAddr) {
         let mut state = self.state.lock();
         state.peer_trackers.remove(&addr);
-        state.high_bandwidth_peers.retain(|a| *a != addr);
+        state.high_bandwidth_requested_peers.retain(|a| *a != addr);
     }
 
-    /// Considers promoting `addr` to high-bandwidth compact relay.
-    ///
-    /// Returns the messages that should be sent (demotions and promotion).
+    /// Evaluates whether to request high-bandwidth compact relay from `addr` (sending `sendcmpct(true, 2)`).
+    /// If we already have 3 peers in high-bandwidth mode, demotes the oldest peer (`sendcmpct(false, 2)`).
     pub fn maybe_promote_peer(
         &self,
         addr: SocketAddr,
@@ -262,26 +366,19 @@ impl BlockAnnouncer {
             return Vec::new();
         }
         let mut state = self.state.lock();
-        if let Some(tracker) = state.peer_trackers.get(&addr) {
-            if tracker.high_bandwidth {
-                return Vec::new();
-            }
+        if state.high_bandwidth_requested_peers.contains(&addr) {
+            return Vec::new();
         }
         let mut messages = Vec::new();
-        if state.high_bandwidth_peers.len() >= MAX_HIGH_BANDWIDTH_PEERS {
-            let demoted_addr = state.high_bandwidth_peers.remove(0);
-            if let Some(demoted_tracker) = state.peer_trackers.get_mut(&demoted_addr) {
-                demoted_tracker.high_bandwidth = false;
-            }
+        if state.high_bandwidth_requested_peers.len() >= MAX_HIGH_BANDWIDTH_PEERS {
+            let demoted_addr = state.high_bandwidth_requested_peers.remove(0);
             let demote_msg = Message::SendCmpct(SendCmpct {
                 send_compact: false,
                 version: 2,
             });
             messages.push((demoted_addr, demote_msg));
         }
-        let tracker = state.peer_trackers.entry(addr).or_default();
-        tracker.high_bandwidth = true;
-        state.high_bandwidth_peers.push(addr);
+        state.high_bandwidth_requested_peers.push(addr);
         let promote_msg = Message::SendCmpct(SendCmpct {
             send_compact: true,
             version: 2,
@@ -292,6 +389,10 @@ impl BlockAnnouncer {
 
     /// Plans announcements for `event` without sending them directly.
     pub fn plan_announcements(&self, event: &BlockAnnounceEvent) -> Vec<(SocketAddr, Message)> {
+        if self.in_ibd() {
+            return Vec::new();
+        }
+
         let mut state = self.state.lock();
         // 1. Idempotence: duplicate notifications for the same committed tip are no-op.
         if state.last_announced_tip == Some(event.hash) {
@@ -314,7 +415,7 @@ impl BlockAnnouncer {
             .peer_trackers
             .retain(|addr, _| live_addrs.contains(addr));
         state
-            .high_bandwidth_peers
+            .high_bandwidth_requested_peers
             .retain(|addr| live_addrs.contains(addr));
 
         let mut planned = Vec::new();
@@ -336,18 +437,19 @@ impl BlockAnnouncer {
             }
 
             // Option A: High-Bandwidth BIP152 Compact Block
-            if tracker.high_bandwidth
+            // Peer must have explicitly requested high-bandwidth compact blocks from us.
+            if tracker.peer_wants_high_bandwidth
+                && tracker.peer_compact_version == Some(2)
                 && !self.config.blocksonly
                 && session.lease.role().relays_transactions()
             {
                 let knows_prev = tracker.best_known_block == Some(event.prev_hash)
                     || session.demonstrated_tips.contains(&event.prev_hash);
                 if knows_prev {
-                    let version = tracker.compact_version.or(Some(2));
                     if let Some(msg) = self.chain_query.compact_block_for(
                         event.height,
                         BlockHash::from(event.hash),
-                        version,
+                        Some(2),
                     ) {
                         planned.push((addr, msg));
                         tracker.best_known_block = Some(event.hash);
@@ -413,24 +515,20 @@ impl BlockAnnouncer {
     }
 
     /// Synchronously drains the queue, coalesces to the latest tip, and processes it.
-    pub fn drain_queue_and_process(&self, rx: &Receiver<BlockAnnounceEvent>) -> usize {
-        let mut count = 0;
-        let mut latest = None;
-        while let Ok(event) = rx.try_recv() {
-            count += 1;
-            latest = Some(event);
-        }
-        if let Some(event) = latest {
+    pub fn drain_queue_and_process(&self, rx: &BlockAnnounceReceiver) -> usize {
+        if let Some(event) = rx.try_recv_latest() {
             self.process_tip(&event);
+            1
+        } else {
+            0
         }
-        count
     }
 }
 
 /// Dedicated background worker thread that drains `BlockAnnounceQueue` and announces new blocks.
 pub fn spawn_block_announce_worker(
     announcer: Arc<BlockAnnouncer>,
-    rx: Receiver<BlockAnnounceEvent>,
+    rx: BlockAnnounceReceiver,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
     let shutdown = shutdown.into();
@@ -440,12 +538,7 @@ pub fn spawn_block_announce_worker(
             while !shutdown.load() {
                 match rx.recv_timeout(ANNOUNCE_POLL) {
                     Ok(event) => {
-                        let mut latest = event;
-                        // Coalesce: drain all currently pending events to the latest active tip.
-                        while let Ok(next) = rx.try_recv() {
-                            latest = next;
-                        }
-                        announcer.process_tip(&latest);
+                        announcer.process_tip(&event);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -469,7 +562,7 @@ mod tests {
     use bitcoin::bip152::HeaderAndShortIds;
     use bitcoin::hashes::Hash;
     use bitcoin::p2p::message_compact_blocks::CmpctBlock;
-    use bitcoin_rs_primitives::{CompactTarget, Header};
+    use bitcoin_rs_primitives::{CompactTarget, Header, Network};
 
     struct MockAnnounceChain {
         headers: Vec<Header>,
@@ -743,10 +836,10 @@ mod tests {
         let addr = test_addr(1004);
         let (lease, _rx) = setup_peer(&table, &announcer, addr, true);
         let _ = announcer.maybe_promote_peer(addr, &lease);
-        assert_eq!(announcer.high_bandwidth_peers(), vec![addr]);
+        assert_eq!(announcer.high_bandwidth_requested_peers(), vec![addr]);
 
         announcer.on_peer_disconnected(addr);
-        assert!(announcer.high_bandwidth_peers().is_empty());
+        assert!(announcer.high_bandwidth_requested_peers().is_empty());
         assert_eq!(announcer.peer_known_block(addr), None);
     }
 
@@ -810,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_capacity_and_coalescing() {
+    fn test_queue_capacity_and_pending_tip_preservation() {
         let chain = Arc::new(MockAnnounceChain::new(5));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -826,7 +919,10 @@ mod tests {
 
         assert!(queue.announce(e1));
         assert!(queue.announce(e2));
-        assert!(!queue.announce(e3), "queue must drop when full");
+        assert!(
+            !queue.announce(e3),
+            "queue must report saturation when full"
+        );
         assert_eq!(queue.enqueued(), 2);
         assert_eq!(queue.dropped(), 1);
 
@@ -834,16 +930,17 @@ mod tests {
         let (_lease, peer_rx) = setup_peer(&table, &announcer, addr, true);
         announcer.mark_known_block(addr, chain.hash_at(0));
 
+        // When draining the saturated queue, e3 was preserved in the pending slot!
         let drained = announcer.drain_queue_and_process(&rx);
-        assert_eq!(drained, 2);
+        assert_eq!(drained, 1);
 
-        // Should have coalesced to e2 (height 2)
-        assert_eq!(announcer.peer_known_block(addr), Some(chain.hash_at(2)));
-        let msg = peer_rx.try_recv().expect("peer received coalesced tip");
+        // Crucial invariant: latest committed tip e3 (height 3) is NOT lost!
+        assert_eq!(announcer.peer_known_block(addr), Some(chain.hash_at(3)));
+        let msg = peer_rx.try_recv().expect("peer received preserved tip");
         match msg {
             Message::Headers(h) => {
-                assert_eq!(h.len(), 2);
-                assert_eq!(h.last().unwrap().compute_hash(), chain.block_hash_at(2));
+                assert_eq!(h.len(), 3);
+                assert_eq!(h.last().unwrap().compute_hash(), chain.block_hash_at(3));
             }
             other => panic!("expected Headers, got {other:?}"),
         }
@@ -862,7 +959,6 @@ mod tests {
         let addr = test_addr(1008);
         let (lease, _rx) = setup_peer(&table, &announcer, addr, true);
 
-        announcer.note_compact_relay(addr, true, 2);
         let msgs = announcer.maybe_promote_peer(addr, &lease);
 
         assert_eq!(msgs.len(), 1);
@@ -874,7 +970,7 @@ mod tests {
                 version: 2,
             })
         );
-        assert_eq!(announcer.high_bandwidth_peers(), vec![addr]);
+        assert_eq!(announcer.high_bandwidth_requested_peers(), vec![addr]);
     }
 
     #[test]
@@ -890,12 +986,11 @@ mod tests {
         for i in 1..=3 {
             let addr = test_addr(1010 + i);
             let (lease, _) = setup_peer(&table, &announcer, addr, true);
-            announcer.note_compact_relay(addr, true, 2);
             let msgs = announcer.maybe_promote_peer(addr, &lease);
             assert_eq!(msgs.len(), 1);
         }
 
-        assert_eq!(announcer.high_bandwidth_peers().len(), 3);
+        assert_eq!(announcer.high_bandwidth_requested_peers().len(), 3);
     }
 
     #[test]
@@ -915,12 +1010,10 @@ mod tests {
 
         for a in [a1, a2, a3] {
             let (lease, _) = setup_peer(&table, &announcer, a, true);
-            announcer.note_compact_relay(a, true, 2);
             announcer.maybe_promote_peer(a, &lease);
         }
 
         let (lease4, _) = setup_peer(&table, &announcer, a4, true);
-        announcer.note_compact_relay(a4, true, 2);
         let msgs = announcer.maybe_promote_peer(a4, &lease4);
 
         assert_eq!(msgs.len(), 2);
@@ -945,11 +1038,11 @@ mod tests {
             )
         );
 
-        assert_eq!(announcer.high_bandwidth_peers(), vec![a2, a3, a4]);
+        assert_eq!(announcer.high_bandwidth_requested_peers(), vec![a2, a3, a4]);
     }
 
     #[test]
-    fn test_compact_announcement_requires_prev_hash() {
+    fn test_compact_announcement_requires_peer_high_bandwidth_and_prev_hash() {
         let chain = Arc::new(MockAnnounceChain::new(5));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -958,34 +1051,44 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
+        // addr1: peer wants high-bandwidth compact blocks AND knows prev_hash
         let addr1 = test_addr(1031);
-        let (lease1, _rx1) = setup_peer(&table, &announcer, addr1, true);
-        announcer.note_compact_relay(addr1, true, 2);
-        announcer.maybe_promote_peer(addr1, &lease1);
-        // addr1 knows block 1 (which is prev_hash for block 2)
+        let (_lease1, _rx1) = setup_peer(&table, &announcer, addr1, true);
+        announcer.note_peer_compact_preference(addr1, true, 2);
         announcer.mark_known_block(addr1, chain.hash_at(1));
 
+        // addr2: peer wants high-bandwidth compact blocks, but does NOT know prev_hash
         let addr2 = test_addr(1032);
-        let (lease2, _rx2) = setup_peer(&table, &announcer, addr2, true);
-        announcer.note_compact_relay(addr2, true, 2);
-        announcer.maybe_promote_peer(addr2, &lease2);
-        // addr2 knows block 0 (NOT prev_hash for block 2)
+        let (_lease2, _rx2) = setup_peer(&table, &announcer, addr2, true);
+        announcer.note_peer_compact_preference(addr2, true, 2);
         announcer.mark_known_block(addr2, chain.hash_at(0));
+
+        // addr3: peer sent sendcmpct(false), knows prev_hash -> must NOT receive CmpctBlock
+        let addr3 = test_addr(1033);
+        let (_lease3, _rx3) = setup_peer(&table, &announcer, addr3, true);
+        announcer.note_peer_compact_preference(addr3, false, 2);
+        announcer.mark_known_block(addr3, chain.hash_at(1));
 
         let event = BlockAnnounceEvent::new(2, chain.hash_at(2), chain.hash_at(1));
         let sent = announcer.process_tip(&event);
 
-        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.len(), 3);
         let sent1 = sent.iter().find(|(a, _)| *a == addr1).unwrap();
         assert!(
             matches!(sent1.1, Message::CmpctBlock(_)),
-            "peer with prev_hash should receive CmpctBlock"
+            "peer with high-bandwidth request and prev_hash should receive CmpctBlock"
         );
 
         let sent2 = sent.iter().find(|(a, _)| *a == addr2).unwrap();
         assert!(
             matches!(sent2.1, Message::Headers(_)),
             "peer without prev_hash should fall back to Headers"
+        );
+
+        let sent3 = sent.iter().find(|(a, _)| *a == addr3).unwrap();
+        assert!(
+            matches!(sent3.1, Message::Headers(_)),
+            "peer that sent sendcmpct(false) must fall back to Headers"
         );
     }
 
@@ -1001,13 +1104,13 @@ mod tests {
 
         let addr = test_addr(1041);
         let (lease, _rx) = setup_peer(&table, &announcer, addr, true);
-        announcer.note_compact_relay(addr, true, 2);
+        announcer.note_peer_compact_preference(addr, true, 2);
         let promote_msgs = announcer.maybe_promote_peer(addr, &lease);
         assert!(
             promote_msgs.is_empty(),
             "blocksonly must suppress promotion to compact relay"
         );
-        assert!(announcer.high_bandwidth_peers().is_empty());
+        assert!(announcer.high_bandwidth_requested_peers().is_empty());
 
         announcer.mark_known_block(addr, chain.hash_at(1));
         let event = BlockAnnounceEvent::new(2, chain.hash_at(2), chain.hash_at(1));
@@ -1017,6 +1120,35 @@ mod tests {
         assert!(
             matches!(sent[0].1, Message::Headers(_)),
             "blocksonly must announce via Headers, not CmpctBlock"
+        );
+    }
+
+    #[test]
+    fn test_ibd_suppresses_proactive_announcements() {
+        let chain = Arc::new(MockAnnounceChain::new(5));
+        let table = Arc::new(PeerTable::new());
+        let ibd_latch = crate::sync::syncing_ibd_latch();
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        )
+        .with_ibd(ibd_latch, Network::Regtest);
+
+        let addr = test_addr(1042);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        announcer.mark_known_block(addr, chain.hash_at(0));
+
+        let event = BlockAnnounceEvent::new(1, chain.hash_at(1), chain.hash_at(0));
+        let sent = announcer.process_tip(&event);
+
+        assert!(
+            sent.is_empty(),
+            "announcements must be suppressed during IBD"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "peer must receive nothing during IBD"
         );
     }
 
