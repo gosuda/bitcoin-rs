@@ -221,7 +221,7 @@ impl ConnectionShared {
             && self.peer_table.is_current(source)
         {
             if let Some(announcer) = &self.block_announcer {
-                announcer.on_peer_ready(source);
+                announcer.on_peer_ready();
             }
             self.notify_peer_ready(source);
             true
@@ -1348,23 +1348,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 )?;
                 match message {
                     crate::Message::Headers(headers) => {
-                        if let Some(announcer) = &shared.block_announcer {
-                            if let Some(last) = headers.last() {
-                                announcer.mark_known_block(
-                                    lease.source(peer_addr),
-                                    last.compute_hash().into(),
-                                );
-                            }
-                        }
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
                     crate::Message::Block(block) => {
-                        if let Some(announcer) = &shared.block_announcer {
-                            announcer.mark_known_block(
-                                lease.source(peer_addr),
-                                block.block_hash().into(),
-                            );
-                        }
                         shared.send_block(lease, peer_addr, block, raw);
                     }
                     crate::Message::Tx(tx) => forward_tx_if_relay_open(
@@ -1395,6 +1381,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             send_cmpct.send_compact,
                             send_cmpct.version,
                         );
+                        if let Some(announcer) = &shared.block_announcer {
+                            announcer.reconcile_high_bandwidth_peers();
+                        }
                     }
                     crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
                         process_compact_wire_message(

@@ -127,7 +127,12 @@ impl BlockSync {
 
     pub(super) fn retire_applied_reorg_body(&self, hash: Hash256) {
         let mut scheduler = self.scheduler.lock();
+        let source = scheduler.stager.staged_source(&hash);
         scheduler.stager.retire_applied(&hash);
+        drop(scheduler);
+        if let Some(source) = source {
+            self.peer_table.note_useful_block(source);
+        }
     }
 
     /// Frees every bounded download slot held by an invalidated hash under

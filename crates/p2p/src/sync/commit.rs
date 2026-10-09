@@ -202,6 +202,9 @@ impl BlockSync {
                     }
                     for drained in chunk.iter().take(stopped) {
                         applied_hashes.push(drained.hash);
+                        if let Some(source) = drained.source() {
+                            self.peer_table.note_useful_block(source);
+                        }
                     }
                     applied = applied.saturating_add(stopped);
                     // Everything after the block that failed, in the order it
@@ -236,6 +239,9 @@ impl BlockSync {
             };
             for drained in chunk.iter().take(committed) {
                 applied_hashes.push(drained.hash);
+                if let Some(source) = drained.source() {
+                    self.peer_table.note_useful_block(source);
+                }
             }
             applied = applied.saturating_add(committed);
             chunk_start = chunk_end;

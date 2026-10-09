@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
@@ -43,9 +44,11 @@ pub struct PeerSession {
 /// Announcement-relevant state owned by the live peer connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PeerAnnouncementState {
-    pub(crate) best_known_block: Option<Hash256>,
+    pub(crate) last_announced_block: Option<Hash256>,
     pub(crate) compact_high_bandwidth: Option<bool>,
     pub(crate) compact_version: Option<u64>,
+    pub(crate) supports_compact_v2: bool,
+    pub(crate) useful_block_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -120,6 +123,7 @@ fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
 #[derive(Debug, Default)]
 pub struct PeerTable {
     entries: RwLock<TableView>,
+    next_useful_block_sequence: AtomicU64,
 }
 
 impl PeerTable {
@@ -381,11 +385,13 @@ impl PeerTable {
         };
         entry.announcement.compact_high_bandwidth = Some(high_bandwidth);
         entry.announcement.compact_version = Some(version);
+        entry.announcement.supports_compact_v2 |= version == 2;
         true
     }
 
-    /// Records one block known to be held by the current connection.
-    pub(crate) fn note_known_block(&self, source: PeerSource, hash: Hash256) -> bool {
+    /// Records the last block whose possession was confirmed by an outbound
+    /// headers or compact-block announcement to the current connection.
+    pub(crate) fn note_announced_block(&self, source: PeerSource, hash: Hash256) -> bool {
         let mut entries = self.entries.write();
         let Some(entry) = entries
             .get_mut(&source.addr)
@@ -393,7 +399,25 @@ impl PeerTable {
         else {
             return false;
         };
-        entry.announcement.best_known_block = Some(hash);
+        entry.announcement.last_announced_block = Some(hash);
+        true
+    }
+
+    /// Records that a block delivered by the current connection passed
+    /// validation and was committed. The global sequence provides a stable
+    /// recency ordering for high-bandwidth compact-relay selection.
+    pub(crate) fn note_useful_block(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.useful_block_sequence = self
+            .next_useful_block_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
         true
     }
 
