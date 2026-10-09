@@ -72,12 +72,12 @@ The kernel oracle is a development tree identity, not a released product,
 carried by the scalar keys of `[reference]` itself:
 
 - `core_version = "31.99.0"`
-- `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.3.0"`
+- `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.3.2"`
 - `kernel_sys_crate = "libbitcoinkernel-sys"` at
-  `kernel_sys_crate_version = "0.4.0"`
-- `kernel_vendor_commit = "2a4a46487903f27883321d7342ae053c5112374a"`
+  `kernel_sys_crate_version = "0.4.1"`
+- `kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"`
 - `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`
-- `kernel_sys_crate_sha256 = "ccee819dc48af6ce3fb213e6f93bae7a7231cd0689b0435afd86ab167cad5321"`
+- `kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"`
 - `differential_harness = false`
 
 The published crate's `.cargo_vcs_info.json` identifies the vendor revision.

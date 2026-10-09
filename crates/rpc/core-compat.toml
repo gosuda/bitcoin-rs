@@ -32,16 +32,17 @@ core_version = "31.99.0"
 # vendors the Core source under `bitcoin/`, and its `CMakeLists.txt` carries the
 # CLIENT_VERSION above.
 kernel_crate = "bitcoinkernel"
-kernel_crate_version = "0.3.0"
+kernel_crate_version = "0.3.2"
 kernel_sys_crate = "libbitcoinkernel-sys"
-kernel_sys_crate_version = "0.4.0"
+kernel_sys_crate_version = "0.4.1"
 # Published crate custody: `.cargo_vcs_info.json` identifies the wrapper tree.
 # Its subtree squash 84c89f1baa0bb14dca891323c6f5538b7241db44 records this
-# bitcoin/bitcoin source commit in `git-subtree-split`.
+# bitcoin/bitcoin source commit in `git-subtree-split`; 0.4.1 changes only
+# build flags, so the vendored tree stays byte-identical at that squash.
 # https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44
-kernel_vendor_commit = "2a4a46487903f27883321d7342ae053c5112374a"
+kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"
 kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"
-kernel_sys_crate_sha256 = "ccee819dc48af6ce3fb213e6f93bae7a7231cd0689b0435afd86ab167cad5321"
+kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"
 # Set when a differential harness compares *values* against a running reference
 # (#78 scope item 2). Still false, and deliberately so: no harness currently
 # compares result values or shapes against Core's own declarations. A method

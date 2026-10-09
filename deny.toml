@@ -32,7 +32,7 @@ exceptions = [
     { crate = "hex_lit@0.1.1", allow = ["MITNFA"] },
     # The supported fjall backend pulls xxhash-rust through lsm-tree/sfa. Keep
     # BSL-1.0 scoped to the audited resolved version instead of dropping G7.
-    { crate = "xxhash-rust@0.8.18", allow = ["BSL-1.0"] },
+    { crate = "xxhash-rust@0.8.19", allow = ["BSL-1.0"] },
 ]
 
 [bans]
