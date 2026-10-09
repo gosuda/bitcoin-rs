@@ -2385,6 +2385,7 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         version: 70_016,
         wtxid_relay: false,
         compact_block_relay: false,
+        send_headers: false,
         services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
             | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
         user_agent: String::from("/test/"),

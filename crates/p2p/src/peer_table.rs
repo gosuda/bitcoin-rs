@@ -366,6 +366,31 @@ impl PeerTable {
         })
     }
 
+    /// Records that the live connection at `source` negotiated BIP130 `sendheaders`.
+    pub(crate) fn note_send_headers(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
+                let Some(info) = entry.info.as_mut() else {
+                    return false;
+                };
+                info.send_headers = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports whether the live published connection at `addr` requested
+    /// BIP130 `sendheaders`.
+    #[must_use]
+    pub fn send_headers_of(&self, addr: SocketAddr) -> bool {
+        let entries = self.entries.read();
+        entries
+            .get(&addr)
+            .is_some_and(|entry| entry.info.as_ref().is_some_and(|info| info.send_headers))
+    }
+
     /// Removes and cancels the connection `lease` refers to. Returns `false`
     /// when a different connection is live at `addr`, leaving it untouched.
     pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
@@ -780,6 +805,7 @@ mod tests {
             version: 70016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 0,
             user_agent: String::new(),
             start_height,

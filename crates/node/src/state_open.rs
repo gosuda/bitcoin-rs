@@ -349,6 +349,9 @@ impl NodeState {
             gateway
         };
         // Construct followers before Chainstate so capture policy has one owner.
+        let (block_announce_queue, block_announce_rx) = bitcoin_rs_p2p::BlockAnnounceQueue::new(
+            bitcoin_rs_p2p::DEFAULT_BLOCK_ANNOUNCE_QUEUE_CAPACITY,
+        );
         let followers = crate::chain_effects::ChainFollowers::new(
             Arc::clone(&blocks),
             Arc::clone(&zmq_publisher),
@@ -357,7 +360,8 @@ impl NodeState {
                 .map(|(runtime, _, _, _)| Arc::clone(runtime)),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
-        );
+        )
+        .with_block_announcer(Some(block_announce_queue.clone()));
         chainstate.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo
@@ -456,6 +460,8 @@ impl NodeState {
             sync,
             recovery_reporter,
             assumeutxo,
+            block_announce_queue,
+            block_announce_rx: Mutex::new(Some(block_announce_rx)),
         })
     }
 }

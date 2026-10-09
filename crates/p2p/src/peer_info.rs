@@ -37,6 +37,7 @@ impl PeerRole {
 
 /// Information collected during a successful Bitcoin v1 handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
     /// Remote socket address.
     pub addr: SocketAddr,
@@ -52,6 +53,8 @@ pub struct PeerInfo {
     /// The high-bandwidth push preference is a separate per-peer decision and
     /// does not gate eligibility.
     pub compact_block_relay: bool,
+    /// Whether this connection requested BIP130 header announcements (`sendheaders`).
+    pub send_headers: bool,
     /// Service flags advertised by the remote (`ServiceFlags::to_u64`).
     pub services: u64,
     /// User-agent string advertised by the remote.
@@ -118,6 +121,7 @@ impl PeerInfo {
             version: version.version,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,

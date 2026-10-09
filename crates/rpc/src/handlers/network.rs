@@ -744,6 +744,7 @@ mod addnode_validation_tests {
         let info = PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr,
             version: 70_016,
             services: 9,
@@ -1086,6 +1087,7 @@ mod peer_counter_tests {
         PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr: parse(addr),
             version: 70_016,
             services: 0,
@@ -1461,6 +1463,7 @@ mod getnodeaddresses_tests {
         PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr: parsed,
             version: 70_016,
             services,

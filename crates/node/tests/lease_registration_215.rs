@@ -52,6 +52,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
         wtxid_relay: false,
         compact_block_relay: false,
         addr,
+        send_headers: false,
         version: 70_016,
         services: 1,
         user_agent: String::from("/test/"),

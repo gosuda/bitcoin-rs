@@ -92,6 +92,28 @@ pub trait ChainQuery: Send + Sync {
     fn best_block_time(&self) -> Option<u32> {
         None
     }
+
+    /// Returns the active-chain height of `hash` if it is currently an ancestor
+    /// of the active tip.
+    fn active_height(&self, _hash: BlockHash) -> Option<u32> {
+        None
+    }
+
+    /// Builds one `cmpctblock` message for the block at `height` and `hash`
+    /// at the given BIP152 version.
+    fn compact_block_for(
+        &self,
+        _height: u32,
+        _hash: BlockHash,
+        _compact_version: Option<u64>,
+    ) -> Option<Message> {
+        None
+    }
+
+    /// The current active tip height and hash, or `None` if uninitialized.
+    fn active_tip(&self) -> Option<(u32, BlockHash)> {
+        None
+    }
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the

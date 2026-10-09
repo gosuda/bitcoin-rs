@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Outbound block announcements: headers-first, high-bandwidth compact, inv fallback.
+pub mod block_announce;
 /// Out-of-order inbound block staging bounded by the download window budget.
 pub(crate) mod block_stager;
 /// Active-chain `getheaders` / `getdata` serving.
@@ -55,6 +57,11 @@ pub(crate) mod wtxid;
 #[cfg(test)]
 mod test_support;
 
+pub use block_announce::{
+    BlockAnnounceConfig, BlockAnnounceEvent, BlockAnnounceQueue, BlockAnnouncer,
+    DEFAULT_BLOCK_ANNOUNCE_QUEUE_CAPACITY, MAX_BLOCKS_TO_ANNOUNCE, MAX_HIGH_BANDWIDTH_PEERS,
+    PeerAnnounceTracker, spawn_block_announce_worker,
+};
 pub(crate) use block_stager::BlockStager;
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};

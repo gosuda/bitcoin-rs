@@ -74,6 +74,8 @@ pub struct ListenerExtras {
     /// When `None`, announcements are ignored and inbound bodies are treated
     /// as unsolicited.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Block announcer for outbound block announcements and peer capability tracking.
+    pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
 }
 
 /// Share the wiring for one P2P start epoch.
@@ -122,6 +124,8 @@ pub struct ConnectionShared {
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
     /// Block-download orchestrator for this start epoch.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Block announcer for outbound block announcements and peer capability tracking.
+    pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
     /// the outbound slot counts. The listener refuses inbound admission at
     /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
@@ -173,6 +177,7 @@ impl ConnectionShared {
             inbound_tx: extras.inbound_tx,
             ibd: extras.ibd,
             block_sync: extras.block_sync,
+            block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
@@ -212,6 +217,9 @@ impl ConnectionShared {
         info: crate::PeerInfo,
     ) -> bool {
         let source = lease.source(peer_addr);
+        if let Some(announcer) = &self.block_announcer {
+            announcer.on_peer_ready(peer_addr, lease, &info);
+        }
         if self.peer_table.publish_info(peer_addr, lease, info)
             && self.peer_table.is_current(source)
         {
@@ -929,6 +937,7 @@ fn run_connected_session(
     // independently of our own advertisement. Publish it atomically with the
     // completed handshake so relay never chooses a type during negotiation.
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
+    info.send_headers = peer.capabilities.send_headers;
     let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
         #[cfg(test)]
         if WRITER_SETUP_FAIL.swap(false, Ordering::Relaxed) {
@@ -973,6 +982,9 @@ fn run_connected_session(
     let loop_result = run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref());
 
     shared.peer_table.remove_current(peer_addr, &lease);
+    if let Some(announcer) = &shared.block_announcer {
+        announcer.on_peer_disconnected(peer_addr);
+    }
     lease.cancel();
     let _ = peer.stream.shutdown(std::net::Shutdown::Both);
     drop(lease);
@@ -1335,9 +1347,17 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 )?;
                 match message {
                     crate::Message::Headers(headers) => {
+                        if let Some(announcer) = &shared.block_announcer {
+                            if let Some(last) = headers.last() {
+                                announcer.mark_known_block(peer_addr, last.compute_hash().into());
+                            }
+                        }
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
                     crate::Message::Block(block) => {
+                        if let Some(announcer) = &shared.block_announcer {
+                            announcer.mark_known_block(peer_addr, block.block_hash().into());
+                        }
                         shared.send_block(lease, peer_addr, block, raw);
                     }
                     crate::Message::Tx(tx) => forward_tx_if_relay_open(
@@ -1347,6 +1367,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         peer_addr,
                         tx_relay_open(),
                     ),
+                    crate::Message::SendHeaders => {
+                        shared.peer_table.note_send_headers(lease.source(peer_addr));
+                        if let Some(announcer) = &shared.block_announcer {
+                            announcer.set_send_headers(peer_addr, true);
+                        }
+                    }
                     crate::Message::SendCmpct(send_cmpct) => {
                         // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
                         // the peer may serve `MSG_CMPCT_BLOCK` getdata at our
@@ -1359,6 +1385,19 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             shared
                                 .peer_table
                                 .note_compact_relay(lease.source(peer_addr));
+                        }
+                        if let Some(announcer) = &shared.block_announcer {
+                            announcer.note_compact_relay(
+                                peer_addr,
+                                send_cmpct.send_compact,
+                                send_cmpct.version,
+                            );
+                            let msgs = announcer.maybe_promote_peer(peer_addr, lease);
+                            for (target, msg) in msgs {
+                                if let Some(target_lease) = shared.peer_table.lease(target) {
+                                    let _ = target_lease.send(msg);
+                                }
+                            }
                         }
                     }
                     crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
@@ -2057,6 +2096,7 @@ mod writer_setup_cleanup_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
@@ -2194,6 +2234,7 @@ mod writer_shutdown_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,
@@ -2392,6 +2433,7 @@ mod writer_shutdown_tests {
                 version: 70_016,
                 wtxid_relay: false,
                 compact_block_relay: false,
+                send_headers: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
@@ -2830,6 +2872,7 @@ mod writer_shutdown_tests {
                 version: 70_016,
                 wtxid_relay: false,
                 compact_block_relay: false,
+                send_headers: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
@@ -2961,6 +3004,7 @@ mod ready_notify_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,

@@ -207,6 +207,27 @@ impl ChainQuery for ActiveChainQuery {
         tree.node(tip.tip_id).ok().map(|node| node.header.time)
     }
 
+    fn active_height(&self, hash: BlockHash) -> Option<u32> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        tree.active_height_of(tip.tip_id, hash.into())
+    }
+
+    fn compact_block_for(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        compact_version: Option<u64>,
+    ) -> Option<Message> {
+        self.compact_block_for(height, hash, compact_version)
+    }
+
+    fn active_tip(&self) -> Option<(u32, BlockHash)> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        Some((tip.height, BlockHash::from(tip.hash)))
+    }
+
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
