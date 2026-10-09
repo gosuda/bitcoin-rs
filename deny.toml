@@ -109,6 +109,10 @@ skip = [
     { crate = "hashbrown@0.16.1", reason = "metrics-util 0.20 and quick_cache 0.6" },
     # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
+    # metrics-util 0.20 (via metrics-exporter-prometheus 0.18) pins quanta 0.12
+    # for internal recency timing; the workspace moved to 0.13. quanta is not
+    # exposed in metrics-util's public API, so the copies never cross.
+    { crate = "quanta@0.12.6", reason = "metrics-util 0.20 via metrics-exporter-prometheus 0.18" },
     # cap-std 4 stack: fs-set-times 0.20 pins io-lifetimes 2, cap-std uses 3.
     { crate = "io-lifetimes@2.0.4", reason = "fs-set-times 0.20" },
     # system-deps 6 (zmq/rocksdb build chain) pins the toml 0.8 stack.
