@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(announcer.high_bandwidth_requested_peers(), vec![addr]);
 
         announcer.on_peer_disconnected(lease.source(addr));
-        assert!(announcer.high_bandwidth_requested_peers().is_empty());
+        assert_eq!(announcer.high_bandwidth_requested_peers(), Vec::new());
         assert_eq!(announcer.peer_known_block(addr), None);
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
         mark_known(&table, &announcer, addr, chain.hash_at(0));
 
         let stale = BlockAnnounceEvent::new(1, chain.hash_at(1), chain.hash_at(0));
-        assert!(announcer.process_tip(&stale).is_empty());
+        assert_eq!(announcer.process_tip(&stale), Vec::new());
         assert!(rx.try_recv().is_err());
     }
 
@@ -1105,7 +1105,7 @@ mod tests {
         drop(rx);
 
         let event = BlockAnnounceEvent::new(1, chain.hash_at(1), chain.hash_at(0));
-        assert!(announcer.process_tip(&event).is_empty());
+        assert_eq!(announcer.process_tip(&event), Vec::new());
         assert_eq!(
             announcer
                 .state
@@ -1331,7 +1331,7 @@ mod tests {
             promote_msgs.is_empty(),
             "blocksonly must suppress promotion to compact relay"
         );
-        assert!(announcer.high_bandwidth_requested_peers().is_empty());
+        assert_eq!(announcer.high_bandwidth_requested_peers(), Vec::new());
 
         mark_known(&table, &announcer, addr, chain.hash_at(1));
         let event = BlockAnnounceEvent::new(2, chain.hash_at(2), chain.hash_at(1));
