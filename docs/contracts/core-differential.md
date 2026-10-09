@@ -63,6 +63,12 @@ a running pinned binary, not a replay of captured JSON.
   Both nodes must announce the replacement tip using the same negotiated
   mechanisms, and neither may re-announce the abandoned hash after the reorg
   begins.
+- The probe keeps each peer open for a bounded observation window after the
+  replacement tip arrives so a later stale announcement still fails the run.
+- This is a main-only qualification lane. Its presence and PR-CI compilation
+  do not by themselves constitute recorded external evidence; the ecosystem
+  matrix may upgrade CORE-05 only after the main workflow retains a successful
+  evidence artifact for the merged implementation.
 
 ### `CORE-04`: Curated live block and transaction acceptance
 

@@ -15,6 +15,7 @@ import urllib.request
 
 MAGIC = b"\xfa\xbf\xb5\xda"
 TIMEOUT = float(os.environ.get("ANNOUNCEMENT_TIMEOUT_SECONDS", "60"))
+OBSERVATION_WINDOW = float(os.environ.get("ANNOUNCEMENT_OBSERVATION_SECONDS", "1"))
 
 
 def sha256d(data: bytes) -> bytes:
@@ -75,26 +76,32 @@ class Peer:
         self.name = name
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT)
         self.sock.settimeout(TIMEOUT)
+        self.receive_buffer = bytearray()
         self._handshake(start_height)
 
-    def _read_exact(self, count: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < count:
-            chunk = self.sock.recv(count - len(chunks))
+    def _fill_receive_buffer(self, count: int) -> None:
+        while len(self.receive_buffer) < count:
+            chunk = self.sock.recv(count - len(self.receive_buffer))
             if not chunk:
                 raise ConnectionError(f"{self.name}: unexpected EOF")
-            chunks.extend(chunk)
-        return bytes(chunks)
+            self.receive_buffer.extend(chunk)
 
     def read_message(self) -> tuple[str, bytes]:
-        header = self._read_exact(24)
+        # Keep partial headers and payloads across socket timeouts. `drain()`
+        # deliberately uses a short timeout, so discarding a partial read there
+        # would desynchronize every later frame on this connection.
+        self._fill_receive_buffer(24)
+        header = self.receive_buffer[:24]
         if header[:4] != MAGIC:
             raise ConnectionError(f"{self.name}: bad network magic")
         command = header[4:16].rstrip(b"\x00").decode()
         length = struct.unpack("<I", header[16:20])[0]
-        payload = self._read_exact(length) if length else b""
+        frame_length = 24 + length
+        self._fill_receive_buffer(frame_length)
+        payload = bytes(self.receive_buffer[24:frame_length])
         if sha256d(payload)[:4] != header[20:24]:
             raise ConnectionError(f"{self.name}: bad payload checksum")
+        del self.receive_buffer[:frame_length]
         return command, payload
 
     def send(self, command: str, payload: bytes = b"") -> None:
@@ -150,19 +157,30 @@ class Peer:
 
     def wait_for_tip(self, target: str, abandoned: str | None = None) -> tuple[str, bool]:
         deadline = time.monotonic() + TIMEOUT
+        observation_deadline = None
+        target_command = None
         saw_abandoned = False
-        while time.monotonic() < deadline:
-            self.sock.settimeout(max(0.1, deadline - time.monotonic()))
-            command, payload = self.read_message()
+        while True:
+            now = time.monotonic()
+            active_deadline = observation_deadline or deadline
+            if now >= active_deadline:
+                if target_command is not None:
+                    return target_command, saw_abandoned
+                raise TimeoutError(f"{self.name}: did not receive announcement for {target}")
+            self.sock.settimeout(max(0.01, active_deadline - now))
+            try:
+                command, payload = self.read_message()
+            except socket.timeout:
+                continue
             if command == "ping":
                 self.send("pong", payload)
                 continue
             hashes = announcement_hashes(command, payload)
             if abandoned in hashes:
                 saw_abandoned = True
-            if target in hashes:
-                return command, saw_abandoned
-        raise TimeoutError(f"{self.name}: did not receive announcement for {target}")
+            if target_command is None and target in hashes:
+                target_command = command
+                observation_deadline = time.monotonic() + OBSERVATION_WINDOW
 
 
 def announcement_hashes(command: str, payload: bytes) -> list[str]:
