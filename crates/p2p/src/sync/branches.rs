@@ -4,7 +4,6 @@ use super::BlockSync;
 use super::chain::ReorgError;
 use super::chain::WindowApplyDisposition;
 use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
 
@@ -158,8 +157,8 @@ impl BlockSync {
     ///
     /// SYNC-FRONTIER-01: ancestry is identified by node identity, not height
     /// alone. An applied ancestor needs no switch; request selection starts at
-    /// the first connect node of the parent-walk plan. The trusted active-height
-    /// index may answer linear-sync queries without constructing that plan.
+    /// the common ancestor's child. The trusted active-height index may answer
+    /// linear-sync queries directly.
     /// Forks, disconnected roots, and invalidated indices retain parent-walk
     /// semantics. This does not change admission, request budgets, or apply.
     ///
@@ -178,7 +177,7 @@ impl BlockSync {
         if Self::is_ancestor_at_height(&tree, applied_id, applied_height, chain_tip.tip_id) {
             return None;
         }
-        let plan = plan_reorg(&tree, applied_id, chain_tip.tip_id).ok()?;
-        (!plan.disconnect.is_empty()).then_some(chain_tip.tip_id)
+        let ancestor = tree.find_common_ancestor(applied_id, chain_tip.tip_id)?;
+        (ancestor != applied_id).then_some(chain_tip.tip_id)
     }
 }

@@ -116,8 +116,8 @@ fn fallback_request_peer(
 }
 
 /// Height of the deepest active-chain node that is an ancestor of `hash` —
-/// `hash`'s own height when it is on the active chain, `None` only when
-/// `hash` is unknown to the tree. A demonstrated tip implies capability for
+/// `hash`'s own height when it is on the active chain, `None` when the hash
+/// or shared height cannot be verified. A demonstrated tip implies capability for
 /// every ancestor it shares with the active chain: a fork tip whose branch
 /// later wins already proved the peer can serve the shared prefix, and one
 /// whose branch lost still proved the same.
@@ -126,14 +126,9 @@ pub(super) fn shared_active_height(
     active_tip: NodeId,
     hash: Hash256,
 ) -> Option<u32> {
-    let mut node_id = tree.lookup(hash)?;
-    loop {
-        let node = tree.node(node_id).ok()?;
-        if tree.node_at_height_from(active_tip, node.height) == Some(node_id) {
-            return Some(node.height);
-        }
-        node_id = node.parent?;
-    }
+    let ancestor = tree.find_common_ancestor(active_tip, tree.lookup(hash)?)?;
+    let height = tree.node(ancestor).ok()?.height;
+    (tree.node_at_height_from(active_tip, height) == Some(ancestor)).then_some(height)
 }
 
 pub(super) fn active_demonstrated_height(
