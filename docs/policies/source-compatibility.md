@@ -15,14 +15,14 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
 | Setting | Value | Configuration Source |
 | :--- | :--- | :--- |
 | Development Rust toolchain | `stable` | `rust-toolchain.toml` |
-| Minimum Supported Rust Version (MSRV) | `1.95.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
+| Minimum Supported Rust Version (MSRV) | `1.99.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
 | Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
 | Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
 
 ### 2.1 MSRV Rules
-- All crates in the workspace must compile on Rust `1.95.0`.
+- All crates in the workspace must compile on Rust `1.99.0`.
 - MSRV increases only under these conditions:
-  1. A required upstream dependency bumps its MSRV floor beyond `1.95.0`.
+  1. A required upstream dependency bumps its MSRV floor beyond `1.99.0`.
   2. A new standard library feature or compiler capability is strictly necessary for consensus correctness or performance.
 - An MSRV bump requires updating root `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`), and workspace documentation simultaneously. The repository development toolchain remains `stable`.
 

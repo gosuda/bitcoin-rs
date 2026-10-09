@@ -2,7 +2,7 @@
 # The hooks mirror the kernel-free pull-request gate by invoking
 # scripts/ci-pr.sh, the single owner of those commands; no local hook enables
 # the kernel feature or needs CMake/Boost. Rust follows the rolling stable
-# channel via rust-toolchain.toml; Cargo.toml/clippy.toml retain the 1.95.0
+# channel via rust-toolchain.toml; Cargo.toml/clippy.toml retain the 1.99.0
 # MSRV compatibility floor.
 # pre-commit stable: 4.6.2 (2026-08-10), with no LTS or fixed EoS channel:
 # https://pypi.org/pypi/pre-commit/json
