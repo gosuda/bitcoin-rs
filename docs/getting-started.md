@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-The repository development toolchain is `stable`; the workspace MSRV is Rust `1.95.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
+The repository development toolchain is `stable`; the workspace MSRV is Rust `1.99.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
 
 The default binary is kernel-free. Building the optional `kernel` lane also needs CMake and Boost on Debian/Ubuntu:
 
