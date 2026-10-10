@@ -147,10 +147,6 @@
             "size_on_disk": 293,
             "pruned": false,
             "warnings": [],
-            "automatic_pruning": null,
-            "prune_target_size": null,
-            "pruneheight": null,
-            "signet_challenge": null,
             "is_closed_for_recovery": false
           },
           "id": "a"
@@ -243,10 +239,6 @@
               "size_on_disk"
             ],
             "gap_keys": [
-              "automatic_pruning",
-              "prune_target_size",
-              "pruneheight",
-              "signet_challenge",
               "is_closed_for_recovery"
             ]
           }
@@ -306,10 +298,6 @@
     "body[1].result.relayfee",
     "body[1].result.subversion",
     "body[1].result.version",
-    "body[0].result.automatic_pruning",
-    "body[0].result.prune_target_size",
-    "body[0].result.pruneheight",
-    "body[0].result.signet_challenge",
     "body[0].result.is_closed_for_recovery",
     "headers.content-type"
   ]

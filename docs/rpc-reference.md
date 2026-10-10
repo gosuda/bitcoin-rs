@@ -24,7 +24,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 
 | surface | since | notes |
 |---|---|---|
-| `getblockchaininfo` | 0.4.0 | Optional prune and signet fields serialize as null rather than omitted (automatic_pruning, prune_target_size, pruneheight, signet_challenge). Tracked in #160. |
+| `getblockchaininfo` | 0.4.0 | Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs). |
 | `getblock` | 0.4.0 | Response is the pinned corepc v31 verbose contract; verbosity 3 serves the verbosity-2 shape because no prevout source exists — Core returns prevouts at verbosity 3 (crates/rpc/src/handlers/chain.rs). |
 | `verifychain` | 0.4.0 | Levels 3 and 4 omit Core's block disconnect and reconnect checks; level 3 behaves as level 2 and level 4 does not replay the UTXO set (crates/rpc/src/handlers/chain.rs). |
 | `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
@@ -104,6 +104,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
+| `getblockfilter` | n/a | BIP157/158 compact block filters and the filter index are not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
 | `getchainstates` | n/a | Not implemented. |
 | `getdeploymentinfo` | n/a | Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists). |
@@ -238,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 19, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 92 - total 174.
+Row counts: Supported 0, Deviation 19, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 93 - total 175.
