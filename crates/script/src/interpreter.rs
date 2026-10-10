@@ -10,15 +10,14 @@ use std::borrow::Cow;
 use std::fmt;
 
 use bitcoin_rs_primitives::{
-    Amount, OutPoint, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
+    OutPoint, Script, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
 };
-use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::checker::{SigVersion, TxSignatureChecker};
 use crate::eval::{self, MAX_SCRIPT_ELEMENT_SIZE};
-use crate::script::{is_p2tr, is_push_only, witness_program};
+use crate::script::{is_push_only, witness_program};
 use crate::stack::{ScriptItem, Stack};
 use crate::taproot;
 
@@ -488,26 +487,20 @@ fn execute_spend(
     prevouts: &[TxOut],
     cache: &SighashCache<'_>,
 ) -> Result<bool, ScriptError> {
-    if is_p2tr(script_pubkey) && flags.contains(VerifyFlags::TAPROOT) {
-        verify_taproot(
-            spending,
-            input_idx,
-            script_pubkey,
-            witness,
-            prevouts,
-            flags,
-            cache,
-        )?;
-        return Ok(true);
-    }
-    let checker = TxSignatureChecker::new(
+    let mut checker = TxSignatureChecker::new(
         spending,
         input_idx,
         prevouts[input_idx].value,
         prevouts,
         cache,
     );
-    verify_script(script_sig, script_pubkey, witness, flags.filled(), &checker)?;
+    verify_script(
+        script_sig,
+        script_pubkey,
+        witness,
+        flags.filled(),
+        &mut checker,
+    )?;
     Ok(true)
 }
 
@@ -522,7 +515,7 @@ fn verify_script(
     script_pubkey: &[u8],
     witness: &[Vec<u8>],
     flags: VerifyFlags,
-    checker: &TxSignatureChecker<'_>,
+    checker: &mut TxSignatureChecker<'_>,
 ) -> Result<(), ScriptError> {
     if flags.contains(VerifyFlags::SIGPUSHONLY) && !is_push_only(script_sig) {
         return Err(invalid(ScriptErrCode::SigPushonly));
@@ -561,7 +554,18 @@ fn verify_script(
             if !script_sig.is_empty() {
                 return Err(invalid(ScriptErrCode::WitnessMalleated));
             }
-            verify_witness_program(witness, version, program, flags, checker, &mut stack)?;
+            if version == 1 && program.len() == 32 && flags.contains(VerifyFlags::TAPROOT) {
+                // Bare Taproot follows the same scriptSig evaluation and
+                // witness-malleation checks as every native witness program.
+                // Wrapped v1 programs below retain their upgradeable meaning.
+                verify_taproot(program, witness, flags, checker)?;
+                stack.clear();
+                stack
+                    .push(ScriptItem::Num(1))
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            } else {
+                verify_witness_program(witness, version, program, flags, checker, &mut stack)?;
+            }
             witness_used = true;
         }
     }
@@ -629,9 +633,9 @@ fn verify_witness_program(
     stack: &mut Stack,
 ) -> Result<(), ScriptError> {
     if version != 0 {
-        // Taproot arrives here only without the TAPROOT flag, and unknown
+        // Bare Taproot arrives here without TAPROOT; wrapped v1 and unknown
         // versions stay spendable by consensus so future soft forks can define
-        // them; policy discourages relaying them.
+        // them. Policy discourages relaying these upgradeable programs.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableWitnessProgram));
         }
@@ -729,19 +733,11 @@ fn require_true_top(stack: &Stack) -> Result<(), ScriptError> {
 /// (control block + leaf script), and executes tapscript through the native
 /// evaluator with `SigVersion::Tapscript`.
 fn verify_taproot(
-    spending: &Tx,
-    input_idx: usize,
-    script_pubkey: &[u8],
+    program: &[u8],
     witness: &[Vec<u8>],
-    prevouts: &[TxOut],
     flags: VerifyFlags,
-    cache: &SighashCache<'_>,
+    checker: &mut TxSignatureChecker<'_>,
 ) -> Result<(), ScriptError> {
-    // scriptPubKey). `is_p2tr` already confirmed the shape.
-    let program = script_pubkey
-        .get(2..34)
-        .ok_or_else(|| ScriptError::Verification("taproot program is not 32 bytes".to_owned()))?;
-
     if witness.is_empty() {
         return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
     }
@@ -754,25 +750,20 @@ fn verify_taproot(
     let annex_bytes = strip_annex(&mut stack);
 
     if stack.len() == 1 {
-        verify_taproot_keypath(
-            input_idx,
-            program,
-            &stack,
-            annex_bytes.as_deref(),
-            prevouts,
-            cache,
-        )
+        let signature = &stack[0];
+        // Tapscript uses an empty signature as false; a key-path witness
+        // must instead contain a 64/65-byte signature (BIP341).
+        if signature.is_empty() {
+            return Err(invalid(ScriptErrCode::SchnorrSigSize));
+        }
+        checker.set_annex(annex_bytes);
+        if checker.check_schnorr_signature(signature, program, None, u32::MAX)? {
+            Ok(())
+        } else {
+            Err(invalid(ScriptErrCode::SchnorrSig))
+        }
     } else {
-        let mut checker =
-            TxSignatureChecker::new(spending, input_idx, Amount::ZERO, prevouts, cache);
-        verify_taproot_scriptpath(
-            &mut checker,
-            program,
-            witness,
-            &mut stack,
-            annex_bytes,
-            flags,
-        )
+        verify_taproot_scriptpath(checker, program, witness, &mut stack, annex_bytes, flags)
     }
 }
 
@@ -788,43 +779,6 @@ fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
         .last()
         .is_some_and(|last| !last.is_empty() && last[0] == taproot::ANNEX_TAG);
     if is_annex { stack.pop() } else { None }
-}
-
-/// Verifies a taproot key-path spend (BIP341).
-fn verify_taproot_keypath(
-    input_idx: usize,
-    program: &[u8],
-    stack: &[Vec<u8>],
-    annex_bytes: Option<&[u8]>,
-    prevouts: &[TxOut],
-    cache: &SighashCache<'_>,
-) -> Result<(), ScriptError> {
-    let signature_bytes = &stack[0];
-    let sighash_type = match signature_bytes.len() {
-        64 => Sighash::Default,
-        65 => Sighash::from_consensus_u8(signature_bytes[64])
-            .map_err(|error| ScriptError::Verification(error.to_string()))?,
-        len => {
-            return Err(ScriptError::Verification(format!(
-                "taproot key-path signature length {len} is not 64 or 65 bytes"
-            )));
-        }
-    };
-    let signature = Signature::from_slice(signature_bytes)
-        .map_err(|error| ScriptError::Verification(error.to_string()))?;
-    let public_key = XOnlyPublicKey::from_slice(program)
-        .map_err(|error| ScriptError::Verification(error.to_string()))?;
-    let sighash = cache
-        .taproot_signature_hash(input_idx, prevouts, annex_bytes, None, sighash_type)
-        .map_err(|error| ScriptError::Verification(error.to_string()))?;
-    let message = Message::from_digest(*sighash.as_byte_array());
-    if taproot::verify_taproot_keypath(&signature, &message, &public_key) {
-        Ok(())
-    } else {
-        Err(ScriptError::Verification(
-            "taproot key-path Schnorr verification failed".to_owned(),
-        ))
-    }
 }
 
 /// Verifies a taproot script-path spend (BIP341/BIP342).

@@ -83,9 +83,9 @@ proptest! {
                 Err(ScriptError::Invalid {
                     code: ScriptErrCode::TaprootWrongControlSize
                         | ScriptErrCode::WitnessProgramMismatch
-                        | ScriptErrCode::WitnessProgramWitnessEmpty,
-                }
-                | ScriptError::Verification(_))
+                        | ScriptErrCode::WitnessProgramWitnessEmpty
+                        | ScriptErrCode::SchnorrSig,
+                })
             ),
             "expected rejection, got {ok:?}"
         );

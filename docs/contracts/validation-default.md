@@ -22,6 +22,32 @@
   `CheckTransaction` before script verification). `tx_valid` accepts no
   skips.
 
+### Native Taproot witness rules
+
+- Bare P2TR is dispatched from the existing witness-program path only when
+  witness and Taproot verification are active. ScriptSig push-only and script
+  evaluation errors precede the native-witness empty-scriptSig check. A
+  push-only nonempty scriptSig fails `WITNESS_MALLEATED` for both key-path and
+  script-path spends. P2SH-wrapped v1 programs retain their upgradeable meaning.
+- Key-path and tapscript signatures use the same native Schnorr checker.
+  A 64-byte key-path signature selects `SIGHASH_DEFAULT`; a 65-byte signature
+  must append one of `01`, `02`, `03`, `81`, `82`, or `83`. An appended `00`
+  is forbidden, and malformed suffixes/sizes fail before signature verification.
+  Annex handling remains per input and enters the existing BIP341 sighash.
+- This corrects the previous native P2TR fast path, which bypassed scriptSig
+  validation and passed all 65 bytes to a 64-byte Schnorr parser. Previously
+  accepted nonempty-scriptSig spends are rejected; correctly signed nondefault
+  hash modes are accepted. Network activation heights, flag definitions and
+  the selected default validation engine are unchanged.
+- `crates/script/tests/taproot_spend_rules.rs` uses rust-bitcoin-produced
+  signatures and control blocks against both native complete-prevout entry
+  points, including flag activation, wrapped-v1 and error-order cases.
+  `overhaul_process_harness::taproot_spend_cases` compares 40 transaction
+  cases through actual native/Core 31.1 block validation over identical
+  funded regtest histories. Block proposals isolate consensus from annex
+  relay policy. Fixture keys exist only in test targets; no performance claim
+  or production signing capability follows from these checks.
+
 ### `VAL-03`: Default binary stays kernel-free
 
 - `bin/bitcoin-rs` default features are `fjall`, `redb`, and `zmq`. They
