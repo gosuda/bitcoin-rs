@@ -47,3 +47,33 @@ writer; their schema numbers were not relabelled. Compiled with Rust1.99.0;
 source addrman blob IDs are respectively `570d5d44af8089891f0a6fdceb9ac26f2e2f3b65`,
 `676273fd73a7c5daf0fef09328f44e7e7f6e89d8`, and
 `883694c2c3db06273602558959efdac83e6c5d43`.
+
+Service observation migration adds these original-writer files:
+
+| File | Original writer commit | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| addrman-historical-v1-services.dat | 2ae5b5d39eb3c4dceed8c9fd871ff0d6c8d2d3c6 | 863 | 77403eee0c4014c84a43fbb33542c87a235b961153a8f31d83ce13384fe5b1d9 |
+| addrman-historical-v7-services.dat | d657ab17883e850452eac803ea6a9bf266f40439 | 1548 | 2bd0955ad87bf1e0b4b82455bfcce629e9b71ce815b194328f52183c2774c90f |
+| addrman-historical-v7-services-asmap.dat | d657ab17883e850452eac803ea6a9bf266f40439 | 1658 | ef15044ef11854da5521015d9b7aade5f86209ab613ae3ea28d76abfd6f90102 |
+
+The v7 writer uses the actual d657 AddrMan module (blob
+`d944f8c6f1ceef59afa9258566973618cba7f354`), secret `[7;32]`, RNG seed17 and time
+1700000000. It saves and reopens seven records: never-observed DNS zero
+`8.8.8.8:8333`, an actual `set_services(0)` DNS row without Good
+`8.8.4.4:8333`, IP zero `9.9.9.9:8333`, IP Good zero `9.9.9.10:8333`, DNS Good
+zero `1.1.1.1:8333`, known DNS9 `1.0.0.1:8333`, and an eight-reference New
+record `11.12.13.14:8333` with one failure. Both Good-zero records are anchors
+confirmed at 1700000010. Prefix and ASMap variants use the same calls; the latter
+uses the retained linked-IPv4 map. The v1 writer is original blob
+`5363b03540d83783f6a1c9bb24de8f9b6bcfa301` and emits four DNS/IP zero records,
+with and without Good. Neither fixture was made by relabelling a current schema.
+
+Original writer modules were compiled unchanged with a module-local fixture
+entry point appended, using Rust1.99.0. For v7 linkage only, its exact original
+pure desirable-service predicate and constant were copied from listener.rs;
+no writer or service-observation algorithm was stubbed. Producer executable
+SHA-256 values are `b91d1cfd3add210e4cf2e20307894088e99206916d1bda9f1e525c65bb36860e`
+(v7) and `075352b85065fa70bbe89bb50c7509631c6e1d8afe9e6d025be8ff3e8a99a8a7` (v1).
+The two ambiguous old DNS rows deliberately migrate to unknown: their bytes
+cannot recover whether zero was observed. Schema8 tests then observe known zero
+without Good and verify that future DNS refresh and restart retain it.

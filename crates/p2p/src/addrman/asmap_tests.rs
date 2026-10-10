@@ -115,7 +115,7 @@ fn incoming_source_asn_controls_corroboration_without_rewriting_primary_source()
     for _ in 0..512 {
         assert!(!manager.learn(
             addr,
-            9,
+            Some(9),
             Source::Ip("9.9.0.1".parse().expect("same ASN")),
             EPOCH,
             EPOCH,
@@ -274,13 +274,27 @@ fn asmap_change_is_backed_up_and_current_map_restart_keeps_all_refs() {
         let mut manager = book.state.lock();
         manager.stored.secret = [7; 32];
         manager.rng = StdRng::seed_from_u64(17);
-        assert!(manager.learn(target(), 9, Source::Internal([1; 10]), EPOCH - 1, EPOCH, 0));
+        assert!(manager.learn(
+            target(),
+            Some(9),
+            Source::Internal([1; 10]),
+            EPOCH - 1,
+            EPOCH,
+            0
+        ));
         for n in 2..=32 {
             if refs(&manager, target()) == 8 {
                 break;
             }
             for _ in 0..4096 {
-                if manager.learn(target(), 9, Source::Internal([n; 10]), EPOCH, EPOCH, 0) {
+                if manager.learn(
+                    target(),
+                    Some(9),
+                    Source::Internal([n; 10]),
+                    EPOCH,
+                    EPOCH,
+                    0,
+                ) {
                     break;
                 }
             }

@@ -7,9 +7,9 @@ fn collision_book() -> Arc<AddressBook> {
     let book = oracle_book();
     {
         let mut manager = book.state.lock();
-        assert!(manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0));
+        assert!(manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0));
         assert!(manager.good(target(), true, EPOCH - 20_000));
-        assert!(manager.learn(challenger(), 9, source(1), EPOCH - 1000, EPOCH, 0));
+        assert!(manager.learn(challenger(), Some(9), source(1), EPOCH - 1000, EPOCH, 0));
         assert!(!manager.good(challenger(), true, EPOCH - 2401));
         assert_eq!(manager.tried_slot(target()), 82 * 64 + 29);
         assert_eq!(
@@ -67,7 +67,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
                 add_ref(&mut manager, challenger(), &source(n), EPOCH);
             }
             assert_eq!(refs(&manager, challenger()), 8);
-            assert!(manager.learn(victim, 9, source(1), EPOCH - 1000, EPOCH, 0));
+            assert!(manager.learn(victim, Some(9), source(1), EPOCH - 1000, EPOCH, 0));
             if victim_refs == 2 {
                 add_ref(&mut manager, victim, &source(2), EPOCH);
             }
@@ -98,7 +98,7 @@ fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
     let victim: SocketAddr = "8.8.9.89:8333".parse().expect("collider");
     {
         let mut manager = book.state.lock();
-        manager.learn(victim, 9, source(1), EPOCH - 1000, EPOCH, 0);
+        manager.learn(victim, Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     }
     book.queued(victim);
     book.attempted(target(), false, EPOCH - 61);
@@ -325,7 +325,7 @@ fn manager_from_collision_snapshot(row: &serde_json::Value) -> Manager {
                 .expect("endpoint")
                 .parse()
                 .expect("address"),
-            services: 9,
+            services: Some(9),
             source: Source::Ip(
                 entry["primary_source"]
                     .as_str()
@@ -483,7 +483,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
     let rows = oracle["rows"].as_array().expect("rows");
     let book = oracle_book();
     let mut manager = book.state.lock();
-    manager.learn(target(), 9, source(1), EPOCH - 100_000, EPOCH, 0);
+    manager.learn(target(), Some(9), source(1), EPOCH - 100_000, EPOCH, 0);
     manager.good(target(), false, EPOCH - 20_000);
     for (index, endpoint) in rows[0]["colliders"]
         .as_array()
@@ -499,7 +499,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
             .expect("address");
         assert!(manager.learn(
             addr,
-            9,
+            Some(9),
             source(u8::try_from(index + 2).expect("source")),
             EPOCH - 100_000,
             EPOCH,
@@ -674,10 +674,10 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     let book = oracle_book();
     let second: SocketAddr = "8.8.8.8:1343".parse().expect("second actual Core collider");
     let mut manager = book.state.lock();
-    manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
+    manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     manager.good(target(), true, EPOCH - 20_000);
-    manager.learn(challenger(), 9, source(2), EPOCH - 1000, EPOCH, 0);
-    manager.learn(second, 9, source(3), EPOCH - 1000, EPOCH, 0);
+    manager.learn(challenger(), Some(9), source(2), EPOCH - 1000, EPOCH, 0);
+    manager.learn(second, Some(9), source(3), EPOCH - 1000, EPOCH, 0);
     manager.good(second, true, EPOCH - 30);
     manager.good(challenger(), true, EPOCH - 30);
     assert_eq!(manager.collisions, [challenger(), second]);
@@ -712,9 +712,9 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
     );
     book.learn_peer(addr(2).ip(), &[(target(), 1, EPOCH)], EPOCH);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
-    book.state.lock().stored.records[0].services = 1024;
+    book.state.lock().stored.records[0].services = Some(1024);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
-    book.state.lock().stored.records[0].services = 8;
+    book.state.lock().stored.records[0].services = Some(8);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), None);
 }
 

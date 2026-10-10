@@ -27,7 +27,7 @@ const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 const MAX_COLLISIONS: usize = 10;
 const REPLACEMENT_WINDOW: u64 = 4 * 60 * 60;
 const COLLISION_TEST_WINDOW: u64 = 40 * 60;
@@ -78,7 +78,8 @@ struct Candidate {
     #[serde(skip)]
     creation_id: u64,
     addr: SocketAddr,
-    services: u64,
+    #[serde(deserialize_with = "required_services")]
+    services: Option<u64>,
     source: Source,
     last_seen: u64,
     last_success: u64,
@@ -92,16 +93,27 @@ struct Candidate {
     last_count_attempt: u64,
 }
 impl Candidate {
+    fn allows_unknown_services(&self) -> bool {
+        self.last_success == 0 && matches!(self.source, Source::Internal(_) | Source::LegacyDns(_))
+    }
     fn ordinary_services_eligible(&self, best_block_depth: u64) -> bool {
-        // Native DNS discovery carries no service advertisement. Preserve that
-        // bootstrap path without inventing filtered-DNS flags or another field.
-        (self.services == 0
-            && self.last_success == 0
-            && matches!(self.source, Source::Internal(_) | Source::LegacyDns(_)))
-            || crate::listener::has_all_desirable_service_flags(
-                bitcoin::p2p::ServiceFlags::from(self.services),
-                best_block_depth,
-            )
+        self.services.map_or_else(
+            || self.allows_unknown_services(),
+            |services| {
+                crate::listener::has_all_desirable_service_flags(
+                    bitcoin::p2p::ServiceFlags::from(services),
+                    best_block_depth,
+                )
+            },
+        )
+    }
+    fn infer_historical_services(mut self) -> Self {
+        // Old schemas cannot distinguish an unobserved DNS record from a
+        // rejected VERSION0 before Good. Preserve their exact source backup.
+        if self.services == Some(0) && self.allows_unknown_services() {
+            self.services = None;
+        }
+        self
     }
     fn terrible(&self, now: u64) -> bool {
         if now.saturating_sub(self.last_attempt) <= 60 {
@@ -438,9 +450,9 @@ impl Manager {
     }
     fn set_services(&mut self, addr: SocketAddr, services: u64) {
         if let Some(index) = self.by_addr.get(&addr).copied()
-            && self.stored.records[index].services != services
+            && self.stored.records[index].services != Some(services)
         {
-            self.stored.records[index].services = services;
+            self.stored.records[index].services = Some(services);
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -529,14 +541,15 @@ impl Manager {
     fn learn(
         &mut self,
         addr: SocketAddr,
-        services: u64,
+        services: Option<u64>,
         source: Source,
         seen: u64,
         now: u64,
         time_penalty: u64,
     ) -> bool {
         let addr = canonical(addr);
-        if !routable(addr, self.allow_local)
+        if services.is_none() && matches!(source, Source::Ip(_))
+            || !routable(addr, self.allow_local)
             || seen > now.saturating_add(FUTURE_SKEW_SECS)
             || now.saturating_sub(seen) > STALE_SECS
         {
@@ -561,7 +574,9 @@ impl Manager {
             if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
                 entry.last_seen = seen.saturating_sub(time_penalty);
             }
-            entry.services |= services;
+            if let Some(services) = services {
+                entry.services = Some(entry.services.unwrap_or(0) | services);
+            }
             if before != (entry.last_seen, entry.services) {
                 self.revision = self.revision.wrapping_add(1);
             }
@@ -596,13 +611,11 @@ impl Manager {
         {
             return false;
         }
-        let next_creation_id = if existing.is_none() {
-            let Some(next) = self.next_creation_id.checked_add(1) else {
-                return false;
-            };
-            next
-        } else {
-            self.next_creation_id
+        let Some(next_creation_id) = self
+            .next_creation_id
+            .checked_add(u64::from(existing.is_none()))
+        else {
+            return false;
         };
         self.clear_new(slot);
         let index = if let Some(index) = self.by_addr.get(&addr).copied() {
@@ -864,7 +877,7 @@ impl AddressBook {
         let source = Source::dns(seed);
         let mut manager = self.state.lock();
         for &addr in addresses.iter().take(MAX_DNS_RESULTS) {
-            manager.learn(addr, 0, source.clone(), now, now, 0);
+            manager.learn(addr, None, source.clone(), now, now, 0);
         }
     }
     pub(crate) fn learn_peer(
@@ -875,7 +888,14 @@ impl AddressBook {
     ) {
         let mut manager = self.state.lock();
         for &(addr, services, seen) in addresses.iter().take(MAX_GOSSIP) {
-            manager.learn(addr, services, Source::Ip(source), seen, now, 2 * 60 * 60);
+            manager.learn(
+                addr,
+                Some(services),
+                Source::Ip(source),
+                seen,
+                now,
+                2 * 60 * 60,
+            );
         }
     }
     /// Exact endpoint exclusion includes inbound; diversity excludes only outbound
@@ -1177,6 +1197,7 @@ impl AddressBook {
                     manager.good(addr, true, now);
                 } else if manager.stored.records[usize::try_from(incumbent).unwrap_or_default()]
                     .services
+                    .unwrap_or(0)
                     & useful_services
                     != 0
                     && allowed.contains(&addr)
@@ -1193,7 +1214,7 @@ impl AddressBook {
             .iter()
             .map(|entry| {
                 !entry.tried
-                    && entry.services & useful_services != 0
+                    && entry.services.unwrap_or(0) & useful_services != 0
                     && allowed.contains(&entry.addr)
                     && !active.contains(&entry.addr)
                     && !manager.pending.contains_key(&entry.addr)
@@ -1369,7 +1390,7 @@ impl AddressBook {
                 u32::try_from(entry.last_seen).unwrap_or(u32::MAX),
                 bitcoin::p2p::address::Address::new(
                     &entry.addr,
-                    bitcoin::p2p::ServiceFlags::from(entry.services),
+                    bitcoin::p2p::ServiceFlags::from(entry.services.unwrap_or(0)),
                 ),
             ));
             if gossip.len() == MAX_GOSSIP {
@@ -1436,6 +1457,12 @@ struct Loaded {
     bytes: Vec<u8>,
 }
 
+fn required_services<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)
+}
+
 fn read_new_buckets<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<u16>, D::Error> {
@@ -1461,12 +1488,14 @@ fn read_new_buckets<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_seq(Buckets)
 }
-fn read_records<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<Candidate>, D::Error> {
-    struct Records;
-    impl<'de> serde::de::Visitor<'de> for Records {
-        type Value = Vec<Candidate>;
+fn read_records<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Records<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Records<T> {
+        type Value = Vec<T>;
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("bounded address records")
         }
@@ -1484,7 +1513,7 @@ fn read_records<'de, D: serde::Deserializer<'de>>(
             Ok(result)
         }
     }
-    deserializer.deserialize_seq(Records)
+    deserializer.deserialize_seq(Records(std::marker::PhantomData))
 }
 
 fn read_anchors<'de, D: serde::Deserializer<'de>>(
@@ -1513,7 +1542,7 @@ fn read_anchors<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_seq(Anchors)
 }
 
-// The current public v1 format is read only for validated, backed-up migration.
+// Historical v1–v4 shapes are read only for validated, backed-up migration.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyCandidate {
@@ -1548,12 +1577,44 @@ struct GroupedLegacyStored {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReferencedCandidate {
+    addr: SocketAddr,
+    services: u64,
+    source: Source,
+    last_seen: u64,
+    last_success: u64,
+    failures: u32,
+    tried: bool,
+    #[serde(deserialize_with = "read_new_buckets")]
+    new_buckets: Vec<u16>,
+}
+impl From<ReferencedCandidate> for Candidate {
+    fn from(old: ReferencedCandidate) -> Self {
+        Self {
+            creation_id: 0,
+            addr: old.addr,
+            services: Some(old.services),
+            source: old.source,
+            last_seen: old.last_seen,
+            last_success: old.last_success,
+            failures: old.failures,
+            tried: old.tried,
+            new_buckets: old.new_buckets,
+            last_attempt: 0,
+            last_count_attempt: 0,
+        }
+        .infer_historical_services()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrefixStored {
     version: u32,
     magic: [u8; 4],
     secret: [u8; 32],
     #[serde(deserialize_with = "read_records")]
-    records: Vec<Candidate>,
+    records: Vec<ReferencedCandidate>,
 }
 
 // These separate structs admit only fields present in the published schemas.
@@ -1575,8 +1636,20 @@ struct GroupedStored {
     magic: [u8; 4],
     secret: [u8; 32],
     #[serde(deserialize_with = "read_records")]
-    records: Vec<Candidate>,
+    records: Vec<ReferencedCandidate>,
     asmap_id: Option<[u8; 32]>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnchoredReferencedStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    #[serde(deserialize_with = "read_records")]
+    records: Vec<ReferencedCandidate>,
+    asmap_id: Option<[u8; 32]>,
+    #[serde(deserialize_with = "read_anchors")]
+    anchors: Vec<Anchor>,
 }
 fn validate_anchors(stored: &Stored) -> io::Result<()> {
     let mut anchors = HashSet::new();
@@ -1612,6 +1685,7 @@ fn validate_current(
         if !routable(entry.addr, allow_local)
             || canonical(entry.addr) != entry.addr
             || !endpoints.insert(entry.addr)
+            || entry.services.is_none() && !entry.allows_unknown_services()
             || entry.new_buckets.len() > MAX_NEW_REFS
             || entry.tried && (entry.last_success == 0 || !entry.new_buckets.is_empty())
             || !entry.tried && entry.new_buckets.is_empty()
@@ -1703,7 +1777,7 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
             Candidate {
                 creation_id: 0,
                 addr: entry.addr,
-                services: entry.services,
+                services: Some(entry.services),
                 source: entry
                     .source_ip
                     .map_or(Source::LegacyDns(entry.source_group), Source::Ip),
@@ -1715,6 +1789,7 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
                 last_attempt: 0,
                 last_count_attempt: 0,
             }
+            .infer_historical_services()
         })
         .collect();
     Ok(Stored {
@@ -1810,16 +1885,14 @@ fn read_book(
             if old.version != 5 {
                 return Err(invalid("prefix address book version"));
             }
-            let stored = Stored {
+            Stored {
                 version: VERSION,
                 magic: old.magic,
                 secret: old.secret,
-                records: old.records,
+                records: old.records.into_iter().map(Candidate::from).collect(),
                 asmap_id: None,
                 anchors: Vec::new(),
-            };
-            validate_current(&stored, allow_local, Some(&NetGroups::default()))?;
-            stored
+            }
         }
         6 => {
             let old: GroupedStored =
@@ -1827,41 +1900,44 @@ fn read_book(
             if old.version != 6 {
                 return Err(invalid("grouped address book version"));
             }
-            let stored = Stored {
+            Stored {
                 version: VERSION,
                 magic: old.magic,
                 secret: old.secret,
-                records: old.records,
+                records: old.records.into_iter().map(Candidate::from).collect(),
                 asmap_id: old.asmap_id,
                 anchors: Vec::new(),
-            };
-            let prefix = NetGroups::default();
-            let classifier = if stored.asmap_id.is_none() {
-                Some(&prefix)
-            } else if stored.asmap_id == groups.identity() {
-                Some(groups)
-            } else {
-                None
-            };
-            validate_current(&stored, allow_local, classifier)?;
-            stored
+            }
         }
-        VERSION => {
-            let stored: Stored =
+        7 => {
+            let old: AnchoredReferencedStored =
                 serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-            let prefix = NetGroups::default();
-            let classifier = if stored.asmap_id.is_none() {
-                Some(&prefix)
-            } else if stored.asmap_id == groups.identity() {
-                Some(groups)
-            } else {
-                None
-            };
-            validate_current(&stored, allow_local, classifier)?;
-            stored
+            if old.version != 7 {
+                return Err(invalid("anchored address book version"));
+            }
+            Stored {
+                version: VERSION,
+                magic: old.magic,
+                secret: old.secret,
+                records: old.records.into_iter().map(Candidate::from).collect(),
+                asmap_id: old.asmap_id,
+                anchors: old.anchors,
+            }
         }
+        VERSION => serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?,
         _ => return Err(invalid("unsupported address book schema")),
     };
+    if header.version >= 5 {
+        let prefix = NetGroups::default();
+        let classifier = if stored.asmap_id.is_none() {
+            Some(&prefix)
+        } else if stored.asmap_id == groups.identity() {
+            Some(groups)
+        } else {
+            None
+        };
+        validate_current(&stored, allow_local, classifier)?;
+    }
     validate_anchors(&stored)?;
     if magic.is_some_and(|magic| magic != stored.magic) {
         return Err(invalid("address book network"));

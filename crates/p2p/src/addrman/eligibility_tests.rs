@@ -79,7 +79,7 @@ fn accepted_version_service_update_is_metadata_only_canonical_and_idempotent() {
     {
         let manager = book.state.lock();
         let after = &manager.stored.records[0];
-        assert_eq!(after.services, 1);
+        assert_eq!(after.services, Some(1));
         assert_eq!(
             (
                 after.last_seen,
@@ -114,7 +114,7 @@ fn accepted_version_service_update_is_metadata_only_canonical_and_idempotent() {
 }
 
 #[test]
-fn only_unproven_dns_zero_flags_keep_native_bootstrap_exception() {
+fn only_unknown_dns_services_keep_native_bootstrap_exception() {
     for source in [
         Source::dns("seed"),
         Source::LegacyDns(77),
@@ -123,16 +123,16 @@ fn only_unproven_dns_zero_flags_keep_native_bootstrap_exception() {
         let directory = tempfile::tempdir().expect("directory");
         let path = directory.path().join("peers.dat");
         let book = AddressBook::open(Some(path.clone()), [1; 4], false, None);
+        let dns = matches!(source, Source::Internal(_) | Source::LegacyDns(_));
+        let services = if dns { None } else { Some(0) };
         book.state
             .lock()
-            .learn(target(), 0, source.clone(), EPOCH, EPOCH, 0);
-        let dns = matches!(source, Source::Internal(_) | Source::LegacyDns(_));
+            .learn(target(), services, source.clone(), EPOCH, EPOCH, 0);
         assert_eq!(book.ordinary_services_eligible(target(), u64::MAX), dns);
         book.set_services(target(), 0);
-        assert_eq!(
-            book.ordinary_services_eligible(target(), u64::MAX),
-            dns,
-            "the existing fields cannot distinguish an ordinary-rejected DNS VERSION0 without Good"
+        assert!(
+            !book.ordinary_services_eligible(target(), u64::MAX),
+            "an accepted VERSION0 is known even without Good"
         );
         book.succeeded(target(), 0, EPOCH + 1);
         assert!(

@@ -673,7 +673,8 @@ impl P2pService {
         }
         self.session_cancel.lock().store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
-        apply_network_active(&self.network_active, &self.peer_table, false);
+        self.peer_table
+            .set_network_active(&self.network_active, false);
         self.address_book
             .return_restart_anchors(crate::addrman::now());
         self.address_book.save();
@@ -808,7 +809,8 @@ impl P2pService {
     /// Enables or disables network activity. Disabling cancels current peers;
     /// their owners remove the leases during teardown.
     pub fn set_network_active(&self, active: bool) {
-        apply_network_active(&self.network_active, &self.peer_table, active);
+        self.peer_table
+            .set_network_active(&self.network_active, active);
     }
 
     /// Adds or replaces one manual ban entry.
@@ -902,17 +904,6 @@ impl P2pService {
     #[must_use]
     pub fn inbound_blocks_sender(&self) -> Sender<crate::InboundBlock> {
         self.inbound_blocks_tx.clone()
-    }
-}
-
-/// Applies the service-owned network-activity transition.
-///
-/// Disabling cancels current leases; connection owners remove their own
-/// sessions during teardown.
-fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
-    flag.store(active, Ordering::Release);
-    if !active {
-        table.cancel_all();
     }
 }
 
@@ -1897,18 +1888,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_network_active_cancels_leases_only_when_disabled() {
+    fn network_activity_transition_cancels_leases_only_when_disabled() {
         let table = crate::PeerTable::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
         table.register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)), lease.clone());
         let flag = AtomicBool::new(true);
 
-        apply_network_active(&flag, &table, true);
+        table.set_network_active(&flag, true);
         assert!(flag.load(Ordering::Acquire));
         assert!(!lease.is_cancelled());
 
-        apply_network_active(&flag, &table, false);
+        table.set_network_active(&flag, false);
         assert!(!flag.load(Ordering::Acquire));
         assert!(lease.is_cancelled());
     }
@@ -3485,7 +3476,10 @@ mod tests {
         assert_eq!(saved_book(&path)["anchors"][0]["confirmed_at"], now);
         assert_eq!(book.take_restart_anchors(now), vec![address]);
     }
-    struct ServiceTip(std::sync::atomic::AtomicU32);
+    struct ServiceTip {
+        time: std::sync::atomic::AtomicU32,
+        pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    }
     impl crate::ChainQuery for ServiceTip {
         fn headers_after(
             &self,
@@ -3513,7 +3507,14 @@ mod tests {
             Ok(None)
         }
         fn best_block_time(&self) -> Option<u32> {
-            Some(self.0.load(Ordering::Acquire))
+            let pause = self.pause.lock().take();
+            if let Some((entered, release)) = pause {
+                entered.send(()).expect("query entered");
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release query");
+            }
+            Some(self.time.load(Ordering::Acquire))
         }
     }
 
@@ -3524,9 +3525,12 @@ mod tests {
             server.set_nonblocking(true).expect("nonblocking");
             let address = server.local_addr().expect("address");
             let now = crate::addrman::now();
-            let tip = Arc::new(ServiceTip(std::sync::atomic::AtomicU32::new(
-                u32::try_from(now - 143 * 600).expect("tip time"),
-            )));
+            let tip = Arc::new(ServiceTip {
+                time: std::sync::atomic::AtomicU32::new(
+                    u32::try_from(now - 143 * 600).expect("tip time"),
+                ),
+                pause: Mutex::new(None),
+            });
             let query: Arc<dyn crate::ChainQuery> = tip.clone();
             let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
             book.learn_dns("seed", &[address], now);
@@ -3544,7 +3548,7 @@ mod tests {
                 &HashMap::new()
             ));
             if tip_changes {
-                tip.0.store(
+                tip.time.store(
                     u32::try_from(now - 144 * 600).expect("older tip"),
                     Ordering::Release,
                 );
@@ -3653,5 +3657,88 @@ mod tests {
             queue.try_recv().expect("healthy ordinary candidate").addr,
             healthy
         );
+    }
+    #[test]
+    fn disable_during_outbound_tip_query_refuses_registration_before_handshake() {
+        let directory = tempfile::tempdir().expect("directory");
+        let service = Arc::new(P2pService::new(
+            P2pServiceConfig {
+                address_book_path: Some(directory.path().join("peers.dat")),
+                allow_local_addresses: true,
+                dns_seeds_enabled: false,
+                magic: Magic::REGTEST,
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let server = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = server.local_addr().expect("address");
+        let now = crate::addrman::now();
+        service.address_book.learn_dns("loopback", &[address], now);
+        service.address_book.set_services(address, 9);
+        let (entered, entered_rx) = crossbeam_channel::bounded(1);
+        let (release, release_rx) = crossbeam_channel::bounded(1);
+        let query: Arc<dyn crate::ChainQuery> = Arc::new(ServiceTip {
+            time: std::sync::atomic::AtomicU32::new(u32::try_from(now).expect("tip time")),
+            pause: Mutex::new(Some((entered, release_rx))),
+        });
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ready_count = Arc::clone(&ready);
+        let mut shared = crate::listener::ConnectionShared::new(
+            Arc::clone(&service.peer_table),
+            service.banned_reader(),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
+                &service.network_active,
+            ))),
+            Arc::clone(&service.session_cancel.lock()),
+            Some(Arc::new(move |_| {
+                ready_count.fetch_add(1, Ordering::Relaxed);
+            })),
+            Magic::REGTEST,
+            crossbeam_channel::bounded(1).0,
+            crossbeam_channel::bounded(1).0,
+            Some(query),
+            None,
+            crate::listener::ListenerExtras::default(),
+        );
+        shared.address_book = Some(Arc::clone(&service.address_book));
+        let worker =
+            crate::listener::spawn_outbound_connection(address, shared, crate::PeerRole::FullRelay);
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("passed early activity check, paused before TCP");
+        let disabling_service = Arc::clone(&service);
+        let (disabled_tx, disabled_rx) = crossbeam_channel::bounded(1);
+        let disable = thread::spawn(move || {
+            disabling_service.set_network_active(false);
+            disabled_tx.send(()).expect("disabled");
+        });
+        let disabled = disabled_rx.recv_timeout(Duration::from_secs(5));
+        release.send(()).expect("release metadata query");
+        disable.join().expect("disable worker");
+        let (mut remote, _) = server.accept().expect("TCP can complete after disable");
+        remote
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut byte = [0];
+        let received = std::io::Read::read(&mut remote, &mut byte);
+        // Close before joining: the old unconditional registration would send a
+        // VERSION and wait for a response. Its failure must be the leaked byte,
+        // not a second fixture pause or the production handshake deadline.
+        let _ = remote.shutdown(std::net::Shutdown::Both);
+        drop(remote);
+        let result = worker.join().expect("outbound worker");
+        disabled.expect("disable does not wait for socket I/O or metadata query");
+        assert_eq!(received.expect("closed without handshake"), 0);
+        assert!(matches!(
+            result,
+            Err(crate::PeerError::Protocol("network inactive"))
+        ));
+        assert_eq!(service.peer_table.sessions().len(), 0);
+        assert_eq!(ready.load(Ordering::Relaxed), 0);
+        service.address_book.save();
+        let record = &saved_book(&directory.path().join("peers-fabfb5da.dat"))["records"][0];
+        assert_eq!(record["last_success"], 0);
+        assert_eq!(record["tried"], false);
     }
 }

@@ -224,15 +224,15 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    Accepted VERSION metadata overwrites the one stored service field before
    ordinary service rejection, without marking Good, changing health times or
-   promoting membership. Later gossip may still OR service claims into that
-   same field; no second last-VERSION authority is introduced. The native DNS
-   bootstrap exemption is exactly zero services, zero last-success time and an
-   Internal or legacy-DNS original source. A successful NONE feeler therefore
-   remains Good/Tried but is excluded from ordinary dialing, including after
-   restart and DNS refresh. Without Good, the existing fields cannot distinguish
-   a rejected ordinary DNS VERSION reporting NONE from previously unknown DNS
-   services. This explicit limitation preserves bootstrap without a new fitness
-   flag and does not claim Core's service-filtered x9 DNS discovery.
+   promoting membership. This field is an optional u64: unknown DNS metadata
+   is `None`; an observed zero-bit claim is `Some(0)`. Known gossip ORs into the
+   same field, including turning unknown metadata into known zero. DNS without
+   an advertisement preserves every known value. No second last-VERSION or
+   fitness flag is introduced. Only genuine unknown DNS metadata can bootstrap
+   ordinary selection; an accepted NONE VERSION is excluded immediately even
+   without Good, through DNS refresh and restart. A successful NONE feeler
+   still remains Good/Tried and is excluded from ordinary dialing. Native DNS
+   does not claim Core's service-filtered x9 discovery.
    Feelers finish on a valid VERSION through the existing native parser/FSM,
    without readiness or sync work. This does not claim Core's inherited minimum
    protocol floor or connman-wide inbound self-nonce validation; ordinary
@@ -295,7 +295,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    The fixed indexes occupy 327,680 bytes; endpoint count is bounded at 81,920,
    with at most eight New bucket IDs each and at most 65,536 occupied New slots.
-   On the tested 64-bit target Candidate is 136 bytes and Source is 24 bytes,
+   On the tested 64-bit target Candidate is 144 bytes and Source is 24 bytes,
    excluding allocator/index/vector overhead. Fixed-width serialized fields
    have a conservative 512-byte/record bound (315-byte max-width fixture), so
    record separators plus bounded header/checksum remain below the 64 MiB file
@@ -315,11 +315,20 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    and migration backup creation; restoring the map recovers the untouched
    book. Intentionally omitting the map permits backed-up prefix migration.
 
-   Schema v7 persists the secret, original source, health, map identity,
-   New membership and at most two anchors in one checksummed snapshot. Same-map
-   restart restores every reference; same-classifier v5/v6-to-v7 upgrades also
-   preserve all references exactly. Known v1/v2/v3/v4 formats, including genuine
-   v3 files carrying anchors, and strict v5/v6 formats are migration sources.
+   Schema v8 persists the secret, original source, health, map identity,
+   New membership and at most two anchors in one checksummed snapshot. Services
+   is a required field: JSON null means unknown DNS metadata, while numeric zero
+   means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
+   original source with no prior Good. Missing or invalid fields fail closed.
+   Same-map restart restores every reference; same-classifier v5/v6/v7-to-v8
+   upgrades preserve all references and anchors exactly. Known v1–v7 formats,
+   including genuine v3 files carrying anchors, are strict migration sources.
+   Their service fields must be numeric u64; old null or missing fields remain
+   invalid. Historical DNS zero/no-Good records cannot reveal whether zero was
+   actually observed. After exact-byte backup, only that ambiguous case is
+   inferred unknown and may retry; its next accepted VERSION records the
+   observation precisely. IP zero and every prior-Good zero stay known. No
+   source, success or failure value is rewritten to manufacture evidence.
    The v1 reader retains its original 4,096-record/64-source/slot checks;
    historical ASMap layouts validate source/record shape before re-bucketing.
    The actual source bytes are copied to an exclusive content-named
@@ -337,7 +346,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    Actual Core group/placement evidence includes 224 ASMap rows and official
    Tried236/New795 anchors. Migration fixtures were emitted by the original
-   v2/v3/v4/v5/v6 writers; the v5/v6 fixtures pin all eight retained references. These
+   v1/v2/v3/v4/v5/v6/v7 writers; v5/v6/v7 fixtures pin all eight retained references. These
    are specific algorithm/persistence checks, not full peer-lifecycle parity.
 
    Filenames remain scoped to actual P2P magic: `peers.dat` becomes
