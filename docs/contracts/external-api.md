@@ -56,6 +56,33 @@
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
 
+#### Native deployment reporting
+
+- `getdeploymentinfo` and `/rest/deploymentinfo` share one typed projection
+  of `chain::deployment_statuses` and consensus `verify_flags`. The default
+  hash is captured from one applied publication; explicit hashes select any
+  known header ancestry, including a side branch or header without a body.
+- `active` describes enforcement for the next block. BIP9 `status`, `since`,
+  and signalling describe the queried block; `status_next` describes its
+  successor. Script flags describe the queried block itself. Unavailable
+  optional fields are omitted, never rendered as null.
+- Header-chain lookups reuse the existing height index. An off-header-chain
+  BIP9 query captures at most 2,000,000 ancestor IDs once (at most 8 MB), then
+  uses direct height lookup with the existing BIP9 state machine/cache.
+  Larger side histories return RPC -1 / REST 503 instead of unbounded
+  repeated parent walks. This is a work bound, not a performance claim.
+- This is a declared Core deviation, not a consensus change: native CSV and
+  Segwit use historical BIP9 on mainnet/testnet3; native Taproot uses a fixed
+  height; testdummy is not configured. Fixed activation heights on regtest
+  and Segwit on testnet4/signet differ from Core 31.1. Historical script flags
+  report the native validation flags, including its BIP16 exceptions, rather
+  than Core 31.1's retroactive WITNESS/TAPROOT flags. No RPC-local activation
+  table substitutes for those owners. Full deployment parity remains open.
+- Unknown RPC hashes return -5; malformed hashes return -8. REST keeps its
+  JSON-only format and 400 malformed/unknown-hash responses. Excess argument
+  counts retain the local JSON-RPC parameter-shape error instead of Core's
+  method-help message.
+
 ### `API-03`: REST dialect
 
 

@@ -213,59 +213,84 @@ impl Network {
     /// - Regtest activates at height 1,351
     #[must_use]
     pub const fn is_bip65_active(self, height: u32) -> bool {
-        let activation = match self {
+        height >= self.bip65_activation_height()
+    }
+
+    /// Native fixed activation height for BIP65.
+    #[must_use]
+    pub const fn bip65_activation_height(self) -> u32 {
+        match self {
             Self::Mainnet => 388_381,
             Self::Testnet3 => 581_885,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 1_351,
-        };
-        height >= activation
+        }
     }
 
     /// Returns `true` when BIP66 (strict DER signatures) is enforced at `height`.
     #[must_use]
     pub const fn is_bip66_active(self, height: u32) -> bool {
-        let activation = match self {
+        height >= self.bip66_activation_height()
+    }
+
+    /// Native fixed activation height for BIP66.
+    #[must_use]
+    pub const fn bip66_activation_height(self) -> u32 {
+        match self {
             Self::Mainnet => 363_725,
             Self::Testnet3 => 330_776,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 1_251,
-        };
-        height >= activation
+        }
     }
 
     /// Returns `true` when CSV (BIP68/112/113 relative locktime + MTP) is enforced at `height`.
     #[must_use]
     pub const fn is_csv_active(self, height: u32) -> bool {
-        let activation = match self {
+        height >= self.csv_activation_height()
+    }
+
+    /// Native fixed activation height for CSV.
+    #[must_use]
+    pub const fn csv_activation_height(self) -> u32 {
+        match self {
             Self::Mainnet => 419_328,
             Self::Testnet3 => 770_112,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 432,
-        };
-        height >= activation
+        }
     }
 
     /// Returns `true` when Segwit (BIP141/143/147) is enforced at `height`.
     #[must_use]
     pub const fn is_segwit_active(self, height: u32) -> bool {
-        let activation = match self {
+        height >= self.segwit_activation_height()
+    }
+
+    /// Native fixed activation height for SEGWIT.
+    #[must_use]
+    pub const fn segwit_activation_height(self) -> u32 {
+        match self {
             Self::Mainnet => 481_824,
             Self::Testnet3 => 834_624,
             Self::Testnet4 | Self::Signet | Self::Regtest => 0,
-        };
-        height >= activation
+        }
     }
 
     /// Returns `true` when Taproot (BIP341/342) is enforced at `height`.
     #[must_use]
     pub const fn is_taproot_active(self, height: u32) -> bool {
-        let activation = match self {
+        height >= self.taproot_activation_height()
+    }
+
+    /// Native fixed activation height for TAPROOT.
+    #[must_use]
+    pub const fn taproot_activation_height(self) -> u32 {
+        match self {
             Self::Mainnet => 709_632,
             Self::Testnet3 => 2_017_256,
             Self::Testnet4 | Self::Signet | Self::Regtest => 0,
-        };
-        height >= activation
+        }
     }
 
     /// Returns `true` when `block_hash` is a block Bitcoin Core grandfathers from P2SH

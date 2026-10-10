@@ -25,7 +25,7 @@ The gateway registers these Core REST prefixes:
 | `/rest/mempool/{info,contents}` | JSON | Mempool summary or contents |
 | `/rest/headers/{hash}` | JSON, hex, binary | Active-chain header walk |
 | `/rest/getutxos[/checkmempool]/{txid}-{vout}...` | JSON, hex, binary | URI-form UTXO lookup; at most 15 outpoints |
-| `/rest/deploymentinfo[/{hash}]` | JSON | Deployment state |
+| `/rest/deploymentinfo[/{hash}]` | JSON | Native deployment state and script flags; declared Core activation deviations (external API contract) |
 | `/rest/blockhashbyheight/{height}` | JSON, hex, binary | Block hash by height |
 | `/rest/spenttxouts/{hash}` | JSON, hex, binary | Explicitly unavailable: no undo data |
 
