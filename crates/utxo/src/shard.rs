@@ -210,19 +210,12 @@ impl Shard {
         table.table_bytes()
     }
 
-    pub(crate) fn insert_owned_record(
-        &self,
-        key: UtxoKey,
-        txid: Hash256,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<(), UtxoError> {
-        let record = UtxoRecord::from_owned_outputs(txid, outputs)?;
+    pub(crate) fn insert_record(&self, record: UtxoRecord) {
         if record.is_empty() {
-            return Ok(());
+            return;
         }
         let mut table = self.inner.write();
-        replace_record(&mut table, key, txid, record);
-        Ok(())
+        replace_record(&mut table, record.key(), record.txid(), record);
     }
 }
 
@@ -838,7 +831,7 @@ mod tests {
     #[test]
     fn empty_owned_record_is_not_inserted() -> Result<(), UtxoError> {
         let shard = Shard::new();
-        shard.insert_owned_record(UtxoKey::from_prefix([0; 8]), Hash256::default(), &[])?;
+        shard.insert_record(UtxoRecord::from_owned_outputs(Hash256::default(), &[])?);
         assert_eq!(shard.record_count(), 0);
         Ok(())
     }

@@ -1,0 +1,26 @@
+{
+  "reference": "Bitcoin Core v31.1",
+  "binary_sha256": "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08",
+  "source": "https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/test/util/mining.cpp#L33-L64",
+  "snapshot_sha256": "bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c",
+  "size_bytes": 14439,
+  "dumptxoutset": {
+    "coins_written": 200,
+    "base_hash": "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9",
+    "base_height": 200,
+    "path": "core200.dat",
+    "txoutset_hash": "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a",
+    "nchaintx": 201
+  },
+  "gettxoutsetinfo": {
+    "height": 200,
+    "bestblock": "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9",
+    "txouts": 200,
+    "bogosize": 16800,
+    "hash_serialized_3": "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a",
+    "total_amount": 8725.0,
+    "transactions": 200,
+    "disk_size": 0
+  },
+  "blocks_sha256": "598427285aa9adfaf2e3269dea1628d3777cb46a63afed311556a19f1315c403"
+}

@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::contract::{BlockChanges, UndoBatch, UtxoAdd};
 use crate::listener::UtxoChangeEvents;
 use crate::stats::CoinStatsListener;
-use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
+use crate::{UtxoKey, record::UtxoRecord, shard::Shard};
 
 /// Below this many combined add+remove operations, a multi-shard no-listener
 /// commit runs serially: a `rayon` scope plus per-shard task dispatch costs
@@ -106,6 +106,13 @@ pub enum UtxoError {
         /// Offending value in satoshis.
         value: u64,
     },
+}
+
+// Counts the actual insertion boundary, on the decoding thread only, so
+// malformed portable-input tests can prove no hash-table insertion occurred.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static SNAPSHOT_INSERTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// One live UTXO coin as contract consumers observe it.
@@ -403,13 +410,10 @@ impl UtxoSet {
         self.with_stable_view(|view| view.record_count())
     }
 
-    pub(crate) fn insert_snapshot_record(
-        &self,
-        key: UtxoKey,
-        txid: Hash256,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<(), UtxoError> {
-        self.shards[usize::from(key.shard())].insert_owned_record(key, txid, outputs)
+    pub(crate) fn insert_snapshot_record(&self, record: UtxoRecord) {
+        #[cfg(test)]
+        SNAPSHOT_INSERTIONS.with(|count| count.set(count.get() + 1));
+        self.shards[usize::from(record.key().shard())].insert_record(record);
     }
 
     fn commit_adds_and_removes<T: Borrow<TxOut>>(

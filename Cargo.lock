@@ -574,6 +574,7 @@ dependencies = [
  "proptest",
  "rayon",
  "ruint",
+ "secp256k1",
  "sha2",
  "smallvec",
  "tempfile",

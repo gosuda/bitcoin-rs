@@ -44,10 +44,20 @@ as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
 | script_eval | bitcoin-core | src/test/data/script_tests.json, tx_valid.json, tx_invalid.json, bip341_wallet_vectors.json | row ASM assembled with the Core opcode table; flags encoded via the harness EXPLICIT_FLAGS framing from the row's own flag names — tx_valid names the flags Core turns OFF, so its seeds carry `FULL & ~listed`; rows that declare a prevout amount (witness rows, tx prevouts) append it as a trailing u64 of satoshis; `#SCRIPT#`/`#CONTROLBLOCK#`/`#TAPROOTOUTPUT#` markers resolve the BIP341 tweaked key and control block the upstream harness generates (internal key = key0); tx rows emit one frame per input (scriptSig + prevout scriptPubKey + witness) and, when every declared prevout resolves, one TX_CONTEXT frame per input carrying the spending tx and all prevouts so signatures verify under their original context; bip341_wallet_vectors.json rows use a separate transform — each row's expected scriptPubKey is wrapped verbatim as a TAPROOT key-path seed rather than assembled from row ASM |
 | script_eval | btcd | txscript/data/script_tests.json, tx_valid.json, tx_invalid.json, taproot-ref/*.json | same framing; taproot-ref rows take the spent output's scriptPubKey and amount from `prevouts[index]` and the witness/scriptSig from `success`/`failure` |
 | utxo_snapshot | btcd | blockchain/testdata/277647.utxostore.bz2 | foreign-format serialized UTXO store truncated to the seed bound; negative seed for the strict v4 snapshot decoder |
+| utxo_snapshot | bitcoin-core v31.1 | crates/utxo/tests/fixtures/core-v2/core200.dat (embedded reference, not a companion-corpus seed) | preserve the 51-byte Core header; apply at most 256 input triples as little-endian body offset modulo body length plus XOR byte; empty/no-op input retains the complete positive artifact |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the matching import script after major
 decoder changes to refresh.
+
+The embedded Core snapshot was produced by the unmodified pinned v31.1 binary
+from the deterministic regtest-200 chain. Its SHA-256 is
+`bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c`.
+[Fixture provenance and reproduction](../crates/utxo/tests/fixtures/core-v2/README.md)
+record the binary digest and immutable upstream source at
+`9be056a8a72b624dae9623b2f7bded92c2a21c91` (Bitcoin Core, MIT).
+This harness arm is authored here and does not imply a corpus import,
+minimization run, or executed fuzz campaign.
 
 See also docs/contracts/qa-corpus.md for the contracts index and precedence rule.
 

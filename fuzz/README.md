@@ -34,7 +34,15 @@ Replace `p2p_message` with any of:
 | `block_validate` | rust-bitcoin block parse, then `verify_block_rules`                     |
 | `tx_validate`    | rust-bitcoin tx/witness parse, then consensus + mempool `is_standard_tx` |
 | `script_eval`    | Production interpreter entry point (`Interpreter::execute_with_prevouts` with fuzz-selected `VerifyFlags`) |
-| `utxo_snapshot`  | UTXO snapshot deserializer (`read_snapshot_strict_v4`)                  |
+| `utxo_snapshot`  | Strict native v4 loading; Core v2 metadata, compiled-anchor verification, and fixture-body mutations |
+
+The snapshot target passes raw input to both formats. It also embeds the
+[independent Core regtest-200 fixture](../crates/utxo/tests/fixtures/core-v2/README.md),
+preserves its 51-byte pinned header, and applies at most 256 input triples as
+little-endian body-offset/XOR-byte mutations. Empty or no-op inputs exercise the
+complete positive fixture. This arm reaches coin decoding without requiring a
+foreign-format corpus seed to discover the compiled base hash. The fixture is
+compiled into the harness; no companion-corpus import is required for that arm.
 
 To limit the run to 60 seconds:
 

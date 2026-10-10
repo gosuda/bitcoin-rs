@@ -89,10 +89,11 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 
 When a feature, algorithm, interface, or data layout changes, maintainers must remove the old code path completely in the same change-set.
 
-The UTXO snapshot reader is a clean-cutover boundary: `read_snapshot_strict_v4`
+The native UTXO checkpoint reader is a clean-cutover boundary: `read_snapshot_strict_v4`
 accepts only complete version-4 snapshots and rejects versions 2 and 3. The
 node can rebuild or resynchronize chainstate, so no legacy reader is retained
-for this format. A future recovery exception would require an explicit
+for this format. The distinct Bitcoin Core portable v2 input codec is not a
+legacy native-checkpoint reader. A future recovery exception would require an explicit
 maintainer decision and matching migration policy before adding a reader.
 
 ### 5.2 RPC Deprecation Policy
