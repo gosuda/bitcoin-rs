@@ -525,6 +525,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-snapshot"
+version = "0.12.0"
+dependencies = [
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-utxo",
+ "clap",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "bitcoin-rs-storage"
 version = "0.13.0"
 dependencies = [

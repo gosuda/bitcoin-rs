@@ -18,6 +18,7 @@ members = [
     "bin/bitcoin-rs",
     "e2e",
     "tools/storage-footprint",
+    "tools/snapshot",
 ]
 
 [workspace.package]
