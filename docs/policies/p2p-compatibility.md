@@ -438,8 +438,9 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    at most 1,024 retained identities against known state and at most 1,024 ready
    request identities before sending. The ordered request owner supplies the
    resumable cursors for both sweeps and ready batches, so reannounced lower
-   keys cannot starve older tail requests; no second identity index is maintained. Every selected
-   identity is checked even if its periodic sweep turn has not arrived. Gateway
+   keys cannot starve older tail requests. These traversals still use that map;
+   a separate derived set of candidate references serves only bounded admission.
+   Every selected identity is checked even if its periodic sweep turn has not arrived. Gateway
    reads happen without policy/table locks; eligible candidates are rechecked
    before reserving and enqueueing under one owner lock. Only transaction inv
    wakes periodic policy work from the wire: ping, headers and unrelated traffic
@@ -450,12 +451,27 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    `txrequest.cpp` `ByPeer`/`ByTxHash`). Known/reject checks retain their inventory
    type. Different raw hashes remain independent until a body proves their
    txid/wtxid relationship; no persistent alias map or second body cache is added. Additional
-   resource policy: at most 100,000 total announcements and eight sources
-   per identity; excess valid announcements are ignored, never punished.
+   native resource policy: at most 100,000 total announcements and eight sources
+   per raw 32-byte hash shared by TX/WTX. At either limit a preferred arrival may
+   replace one non-preferred, non-owner candidate with the largest existing
+   numeric priority. A full hash must replace within that hash; that one removal
+   also frees a global slot when both caps are full. Current owners and preferred
+   candidates are protected. Ordinary arrivals or fully protected limits are
+   refused, as are duplicates and sources already at their 5,000-entry cap,
+   without eviction or punishment. Core does not have these global/hash caps;
+   this replacement rule is native resource policy, not Core contributor fairness.
+   One derived ordered set holds at most 100,000 fixed-size references
+   (priority, typed identity, connection ID), never announcement/owner copies.
+   Admission uses a constant number of lookups and scans of candidate groups,
+   each bounded by eight entries. Global victim selection uses the ordered index
+   with logarithmic updates; there is no per-announcement full-table scan or lazy
+   stale entry.
    Orphan-parent requests share the owner and limits but preserve their
    existing immediate source retry rather than Core's parent delay. A parent
    already announced by that source is expedited without another announcement
    or a second in-flight owner; ordinary duplicate inv cannot bypass its delay.
+   A newly retained parent reports success even when replacing a weak candidate
+   leaves the total announcement count unchanged.
    These hard caps are resource-policy bounds, not measured throughput claims.
 16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
    queued transaction as an immediate single-item `inv`; Core batches and

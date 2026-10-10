@@ -6,7 +6,7 @@
 //! a body supplies the mapping. Identical bytes share request ownership only;
 //! gateway knowledge and rejection remain scoped by inventory kind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::Hash as _;
@@ -18,7 +18,7 @@ use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
 
 pub(crate) const MAX_PEER_ANNOUNCEMENTS: usize = 5_000;
 pub(crate) const MAX_PEER_IN_FLIGHT: usize = 100;
-/// Extra global and per-identity bounds, independent of connection count.
+/// Extra global and per-raw-hash bounds, independent of connection count.
 const MAX_ANNOUNCEMENTS: usize = 100_000;
 const MAX_ALTERNATES: usize = 8;
 const REQUEST_LIFETIME: Duration = Duration::from_secs(60);
@@ -76,6 +76,16 @@ struct Announcement {
     priority: u64,
 }
 
+type EvictionKey = (u64, Identity, u64);
+
+fn eviction_key(key: Identity, candidate: &Announcement) -> EvictionKey {
+    (
+        candidate.priority,
+        key,
+        candidate.source.connection_id().get(),
+    )
+}
+
 #[derive(Debug, Default)]
 struct Request {
     candidates: Vec<Announcement>,
@@ -91,44 +101,102 @@ pub(crate) struct TxPolicy {
     /// Derived accounting, updated only by this owner.
     counts: HashMap<PeerSource, usize>,
     announcements: usize,
+    /// References to exactly the non-preferred candidates that are not owners.
+    /// Requests and candidate vectors remain the sole announcement authority.
+    evictable: BTreeSet<EvictionKey>,
 }
 
 impl TxPolicy {
-    fn announce(&mut self, announcement: Announcement) {
+    fn announce(&mut self, announcement: Announcement) -> bool {
         let Some(key) = Identity::from_inventory(announcement.item) else {
-            return;
+            return false;
         };
-        if self.announcements >= MAX_ANNOUNCEMENTS
-            || self.counts.get(&announcement.source).copied().unwrap_or(0) >= MAX_PEER_ANNOUNCEMENTS
-        {
-            return;
+        let kinds = [key, key.same_hash_other_kind()];
+        let mut raw_count = 0;
+        for kind in kinds {
+            if let Some(request) = self.requests.get(&kind) {
+                if request
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.source == announcement.source)
+                {
+                    return false;
+                }
+                raw_count += request.candidates.len();
+            }
         }
-        let counterpart = self.requests.get(&key.same_hash_other_kind());
-        if counterpart.is_some_and(|request| {
-            request
-                .candidates
-                .iter()
-                .any(|candidate| candidate.source == announcement.source)
-        }) || self
-            .requests
-            .get(&key)
-            .map_or(0, |request| request.candidates.len())
-            + counterpart.map_or(0, |request| request.candidates.len())
-            >= MAX_ALTERNATES
-        {
-            return;
+        if self.counts.get(&announcement.source).copied().unwrap_or(0) >= MAX_PEER_ANNOUNCEMENTS {
+            return false;
         }
-        let request = self.requests.entry(key).or_default();
-        if request
+        if raw_count >= MAX_ALTERNATES || self.announcements >= MAX_ANNOUNCEMENTS {
+            if !announcement.preferred {
+                return false;
+            }
+            // A full hash must free its own slot. The same removal also frees
+            // the global slot when both limits are reached; never evict twice.
+            let victim = if raw_count >= MAX_ALTERNATES {
+                kinds
+                    .into_iter()
+                    .filter_map(|kind| self.requests.get(&kind).map(|request| (kind, request)))
+                    .flat_map(|(kind, request)| {
+                        request
+                            .candidates
+                            .iter()
+                            .filter(move |candidate| {
+                                !candidate.preferred
+                                    && request
+                                        .owner
+                                        .is_none_or(|(owner, _)| owner != candidate.source)
+                            })
+                            .map(move |candidate| eviction_key(kind, candidate))
+                    })
+                    .max()
+            } else {
+                self.evictable.last().copied()
+            };
+            let Some(victim) = victim else {
+                return false;
+            };
+            let Some(source) = self.eviction_source(victim) else {
+                return false;
+            };
+            // All cap, identity, ownership and accounting checks precede removal.
+            if !self.remove_candidate(victim.1, source) {
+                return false;
+            }
+        }
+        if !announcement.preferred {
+            self.evictable.insert(eviction_key(key, &announcement));
+        }
+        self.requests
+            .entry(key)
+            .or_default()
             .candidates
-            .iter()
-            .any(|candidate| candidate.source == announcement.source)
-        {
-            return;
-        }
-        request.candidates.push(announcement);
+            .push(announcement);
         *self.counts.entry(announcement.source).or_default() += 1;
         self.announcements += 1;
+        true
+    }
+
+    /// Recheck one derived reference against at most eight authoritative rows.
+    /// An inconsistent projection refuses admission; it never scans or repairs
+    /// other entries opportunistically and cannot authorize owner eviction.
+    fn eviction_source(&self, reference: EvictionKey) -> Option<PeerSource> {
+        if !self.evictable.contains(&reference) || self.announcements == 0 {
+            return None;
+        }
+        let request = self.requests.get(&reference.1)?;
+        let candidate = request.candidates.iter().find(|candidate| {
+            !candidate.preferred
+                && eviction_key(reference.1, candidate) == reference
+                && request
+                    .owner
+                    .is_none_or(|(owner, _)| owner != candidate.source)
+        })?;
+        self.counts
+            .get(&candidate.source)
+            .is_some_and(|count| *count > 0)
+            .then_some(candidate.source)
     }
 
     /// Orphan admission may expedite an existing source without allocating
@@ -145,6 +213,7 @@ impl TxPolicy {
                     .iter_mut()
                     .find(|candidate| candidate.source == announcement.source)
             }) {
+                self.evictable.remove(&eviction_key(kind, candidate));
                 candidate.ready = candidate.ready.min(announcement.ready);
                 candidate.preferred = true;
                 candidate.priority = candidate.priority.min(announcement.priority);
@@ -156,25 +225,48 @@ impl TxPolicy {
                 return true;
             }
         }
-        let before = self.announcements;
-        self.announce(announcement);
-        self.announcements > before
+        self.announce(announcement)
     }
 
     fn forget(&mut self, key: Identity) {
         if let Some(request) = self.requests.remove(&key) {
             for candidate in request.candidates {
-                self.decrement(candidate.source);
+                self.untrack_candidate(key, candidate);
             }
         }
     }
 
-    fn decrement(&mut self, source: PeerSource) {
+    /// Remove an unowned candidate without failure/expedition side effects.
+    fn remove_candidate(&mut self, key: Identity, source: PeerSource) -> bool {
+        let Some(request) = self.requests.get_mut(&key) else {
+            return false;
+        };
+        if request.owner.is_some_and(|(owner, _)| owner == source) {
+            return false;
+        }
+        let Some(index) = request
+            .candidates
+            .iter()
+            .position(|candidate| candidate.source == source)
+        else {
+            return false;
+        };
+        let candidate = request.candidates.remove(index);
+        let empty = request.candidates.is_empty();
+        self.untrack_candidate(key, candidate);
+        if empty {
+            self.requests.remove(&key);
+        }
+        true
+    }
+
+    fn untrack_candidate(&mut self, key: Identity, candidate: Announcement) {
+        self.evictable.remove(&eviction_key(key, &candidate));
         self.announcements = self.announcements.saturating_sub(1);
-        if let Some(count) = self.counts.get_mut(&source) {
+        if let Some(count) = self.counts.get_mut(&candidate.source) {
             *count -= 1;
             if *count == 0 {
-                self.counts.remove(&source);
+                self.counts.remove(&candidate.source);
             }
         }
     }
@@ -192,26 +284,16 @@ impl TxPolicy {
         // together. Retire only this failed source and expedite other sources,
         // preserving typed known/reject state and unrelated raw hashes.
         for kind in [key, key.same_hash_other_kind()] {
-            let Some(request) = self.requests.get_mut(&kind) else {
-                continue;
-            };
-            if request.owner.is_some_and(|(owner, _)| owner == source) {
+            if let Some(request) = self.requests.get_mut(&kind)
+                && request.owner.is_some_and(|(owner, _)| owner == source)
+            {
                 request.owner = None;
             }
-            let before = request.candidates.len();
-            request
-                .candidates
-                .retain(|candidate| candidate.source != source);
-            for candidate in &mut request.candidates {
-                candidate.ready = now;
-            }
-            let removed = before - request.candidates.len();
-            let empty = request.candidates.is_empty();
-            for _ in 0..removed {
-                self.decrement(source);
-            }
-            if empty {
-                self.requests.remove(&kind);
+            self.remove_candidate(kind, source);
+            if let Some(request) = self.requests.get_mut(&kind) {
+                for candidate in &mut request.candidates {
+                    candidate.ready = now;
+                }
             }
         }
         true
@@ -236,18 +318,7 @@ impl TxPolicy {
             if request.owner.is_some_and(|(owner, _)| owner == source) {
                 self.failed(key, source, now);
             } else {
-                let before = request.candidates.len();
-                request
-                    .candidates
-                    .retain(|candidate| candidate.source != source);
-                let removed = before - request.candidates.len();
-                let empty = request.candidates.is_empty();
-                for _ in 0..removed {
-                    self.decrement(source);
-                }
-                if empty {
-                    self.requests.remove(&key);
-                }
+                self.remove_candidate(key, source);
             }
         }
         keys
@@ -362,6 +433,7 @@ impl TxPolicy {
                 let Some(request) = self.requests.get_mut(&key) else {
                     continue;
                 };
+                self.evictable.remove(&eviction_key(key, &candidate));
                 request.owner = Some((candidate.source, now + REQUEST_LIFETIME));
                 *in_flight.entry(candidate.source).or_default() += 1;
                 owned_hashes.insert(key.hash_bytes());
@@ -371,8 +443,8 @@ impl TxPolicy {
         selected
     }
 
-    /// Ordered owner keys provide a resumable bounded sweep without a second
-    /// identity index. Deletions between ticks do not invalidate the cursor.
+    /// Ordered owner keys provide a resumable bounded sweep. The derived
+    /// admission index is not used here; deletions never invalidate the cursor.
     fn known_batch(&mut self) -> Vec<Identity> {
         use std::ops::Bound::{Excluded, Unbounded};
         let mut keys: Vec<_> = if let Some(cursor) = self.known_cursor {
@@ -656,15 +728,15 @@ mod tests {
         });
     }
 
-    fn select(policy: &mut TxPolicy, now: Instant) -> Vec<(Identity, Announcement)> {
+    pub(super) fn select(policy: &mut TxPolicy, now: Instant) -> Vec<(Identity, Announcement)> {
         let planned = policy.plan(now, None);
         policy.claim(now, &planned)
     }
 
-    fn source(port: u16) -> PeerSource {
+    pub(super) fn source(port: u16) -> PeerSource {
         PeerSource::for_test(([127, 0, 0, 1], port).into())
     }
-    fn item(n: u32) -> Inventory {
+    pub(super) fn item(n: u32) -> Inventory {
         let mut hash = [0; 32];
         hash[..4].copy_from_slice(&n.to_le_bytes());
         Inventory::WTx(bitcoin::Wtxid::from_byte_array(hash))
@@ -677,6 +749,84 @@ mod tests {
             preferred,
             priority: u64::from(n),
         });
+    }
+
+    #[test]
+    fn preferred_source_replaces_one_weak_entry_at_the_real_global_cap() {
+        let now = Instant::now();
+        let mut policy = TxPolicy::default();
+        let mut last_source = source(1);
+        for port in 1..=20 {
+            let peer = source(port);
+            last_source = peer;
+            for n in 0..5_000 {
+                announce(&mut policy, peer, u32::from(port) * 5_000 + n, now, false);
+            }
+        }
+        assert_eq!(policy.announcements, MAX_ANNOUNCEMENTS);
+        let preferred = source(21);
+        announce(&mut policy, preferred, 200_000, now, true);
+        let key = Identity::from_inventory(item(200_000)).unwrap();
+        assert!(
+            policy.requests.contains_key(&key),
+            "preferred arrival must displace one removable weaker candidate"
+        );
+        assert_eq!(policy.announcements, MAX_ANNOUNCEMENTS);
+        assert_eq!(policy.counts[&preferred], 1);
+        assert_eq!(policy.counts[&last_source], MAX_PEER_ANNOUNCEMENTS - 1);
+        assert!(
+            !policy
+                .requests
+                .contains_key(&Identity::from_inventory(item(104_999)).unwrap())
+        );
+        let planned = policy.plan(now, Some(&[key]));
+        assert_eq!(policy.claim(now, &planned)[0].1.source, preferred);
+    }
+
+    #[test]
+    fn preferred_source_enters_a_full_shared_hash_without_preempting_its_owner() {
+        let now = Instant::now();
+        let hash = [42; 32];
+        let tx = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(hash));
+        let wtx = Inventory::WTx(bitcoin::Wtxid::from_byte_array(hash));
+        let mut policy = TxPolicy::default();
+        let mut sources = Vec::new();
+        for n in 0..8 {
+            let peer = source(n + 1);
+            sources.push(peer);
+            policy.announce(Announcement {
+                source: peer,
+                item: if n % 2 == 0 { tx } else { wtx },
+                ready: now,
+                preferred: false,
+                priority: u64::from(n),
+            });
+        }
+        let owned = select(&mut policy, now)[0];
+        let owner_before = policy.requests[&owned.0].owner;
+        let preferred = source(9);
+        policy.announce(Announcement {
+            source: preferred,
+            item: wtx,
+            ready: now + SOURCE_DELAY,
+            preferred: true,
+            priority: 99,
+        });
+        assert!(
+            policy.requests.values().any(|request| request
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source == preferred)),
+            "preferred arrival must replace a same-hash weak alternate"
+        );
+        assert_eq!(policy.announcements, MAX_ALTERNATES);
+        assert_eq!(policy.requests[&owned.0].owner, owner_before);
+        assert!(!policy.counts.contains_key(&sources[7]));
+        assert_eq!(select(&mut policy, now), []);
+        assert!(policy.failed(owned.0, owned.1.source, now));
+        let selected = select(&mut policy, now);
+        assert_eq!(selected[0].1.source, preferred);
+        assert_eq!(selected[0].1.item, wtx);
     }
 
     #[test]
@@ -893,7 +1043,7 @@ mod tests {
             matches!(new_receiver.try_recv(), Ok(Message::GetData(items)) if items == vec![item(2)])
         );
     }
-    fn registered_source(
+    pub(super) fn registered_source(
         table: &PeerTable,
         port: u16,
     ) -> (PeerSource, crossbeam_channel::Receiver<Message>) {
@@ -923,7 +1073,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct CountingInventory {
+    pub(super) struct CountingInventory {
         checked: std::sync::Mutex<Vec<Identity>>,
         known: std::sync::Mutex<HashSet<Identity>>,
     }
@@ -1388,3 +1538,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tx_policy/preferred_tests.rs"]
+#[expect(clippy::expect_used, reason = "bounded admission contract assertions")]
+mod preferred_tests;
