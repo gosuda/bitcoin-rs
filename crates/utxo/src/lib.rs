@@ -18,6 +18,8 @@ extern crate alloc;
 mod compress;
 /// The chainstate-facing apply/commit/disconnect contract.
 pub mod contract;
+/// Bitcoin Core portable v2 snapshot inspection and pinned-state verification.
+pub mod core_snapshot;
 /// UTXO hash-table key.
 mod key;
 

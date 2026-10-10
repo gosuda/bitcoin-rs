@@ -267,6 +267,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "ruint",
+ "secp256k1",
  "sha2",
  "smallvec",
  "thiserror",

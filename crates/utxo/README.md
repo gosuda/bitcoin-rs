@@ -31,7 +31,43 @@ zero-copy block application. Both commit through `commit_block_changes`; there i
 borrowed mutation API. Removal-only batches specify `BlockChanges` explicitly
 because they carry no output from which to infer `T`.
 
-Snapshot loading is a clean-cutover contract: `read_snapshot_strict_v4` accepts only complete version-4 snapshots, including the declared record count, the 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 are rejected; an incompatible checkpoint requires an explicit datadir resync.
+Native checkpoint loading is a clean-cutover contract: `read_snapshot_strict_v4` accepts only complete version-4 snapshots, including the declared record count, the 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 are rejected; an incompatible checkpoint requires an explicit datadir resync.
+
+## Bitcoin Core portable snapshots
+
+`core_snapshot::read_metadata` parses only the fixed Core v2 header. Its network
+magic, base hash and output count remain untrusted. `read_and_verify` selects a
+compiled `AssumeUtxoData` by network and base hash, loads the entire file into the
+existing `UtxoSet`, and recomputes `hash_serialized_3` against that anchor. Height
+and cumulative transaction count come from the compiled pin, never the file.
+A successful result establishes pinned-state consistency; historical validation
+from genesis remains the chainstate manager's responsibility.
+
+The portable reader does not alter the source or a datadir. It handles Core's
+txid groups, CompactSize counts/indices, subtract-one Core VARINT fields, amount
+compression and all six special script encodings. Core's uncompressed P2PK forms
+(4/5) require a valid curve point; compressed forms (2/3) preserve the original
+bytes even when they are not a curve point, matching Core's codec. Malformed
+uncompressed keys and scripts longer than 10,000 bytes are rejected directly;
+the reader does not imitate Core's malformed-input script substitutions.
+
+`SnapshotLimits` bounds encoded bytes (including the header), live output count,
+aggregate decompressed script bytes, and outputs per txid before growing the
+corresponding state. Defaults are 32 GiB encoded bytes, 250 million coins,
+32 GiB aggregate scripts and one million outputs per group. The EOF check reads
+at most one additional byte. These limits bound work and retained input-derived
+state, not process RSS. The UTXO set and per-shard commitment sorting remain
+memory-resident and have additional allocation overhead; large-file runs require
+operator-selected budgets and measured RSS. Header inspection does not scan or
+validate the body.
+
+The reference format is
+[Bitcoin Core v31.1 SnapshotMetadata](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/node/utxo_snapshot.h),
+[the snapshot writer](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/rpc/blockchain.cpp#L3252),
+and [Coin compression](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/compressor.h).
+The [Core-produced regtest fixture](tests/fixtures/core-v2/README.md) includes
+provenance and a reproduction command. This library support does not implement
+node RPC activation, process lifecycle interoperability, or snapshot export.
 
 ## Statistics
 
