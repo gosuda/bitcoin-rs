@@ -1,0 +1,34 @@
+name: template-provider-lockfile
+
+# tools/stratum-sv2/template-provider is a standalone Cargo workspace with its
+# own Cargo.lock. Its deps are all registry crates — unlike fuzz/ it has no
+# `path` deps on crates/* — so only edits to its own Cargo.toml can invalidate
+# its lockfile, and this cheap metadata check owns drift detection for just
+# that manifest. No other workflow builds the bridge: ci.yml covers only the
+# root workspace, so this is the sole guard.
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'tools/stratum-sv2/template-provider/Cargo.toml'
+      - '.github/workflows/template-provider-lockfile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: template-provider-lockfile-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: never
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - run: cargo metadata --locked --format-version 1 --manifest-path tools/stratum-sv2/template-provider/Cargo.toml > /dev/null
