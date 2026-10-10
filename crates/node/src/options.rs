@@ -501,6 +501,12 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
                         toml native("dns_seeds_enabled")
                     }
+                    /// Optional Bitcoin Core `ASMap` file for network diversity.
+                    asmap as asmap: Option<PathBuf> {
+                        cli[#[arg(long = "asmap")]]
+                        env["BITCOIN_RS_ASMAP", parse_path]
+                        toml native("asmap")
+                    }
                     /// Fixed outbound peer endpoints.
                     connect as connect: Option<Vec<String>> {
                         cli[#[arg(long = "connect", value_delimiter = ',', value_parser = parse_connect_endpoint)]]

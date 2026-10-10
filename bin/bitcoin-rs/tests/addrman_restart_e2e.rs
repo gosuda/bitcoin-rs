@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
@@ -18,8 +19,33 @@ fn dns_disabled_restart_reconnects_to_a_gossiped_peer() -> Result<(), Error> {
         binary: Some(Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))),
         ..SpawnOptions::default()
     };
-    let destination = ProcessNode::spawn_with(Kind::BitcoinRs, &options)?;
-    let mut learner = ProcessNode::spawn_with(Kind::BitcoinRs, &options)?;
+    restart_reconnects(&options, None)
+}
+
+#[test]
+fn configured_asmap_survives_dns_disabled_restart() -> Result<(), Error> {
+    let directory = tempfile::tempdir()?;
+    let map = directory.path().join("asmap.raw");
+    let bytes = include_bytes!("../../../crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.raw");
+    std::fs::write(&map, bytes)?;
+    let args = ["--asmap", map.to_str().expect("temporary path")];
+    let options = SpawnOptions {
+        binary: Some(Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))),
+        extra_args: &args,
+        ..SpawnOptions::default()
+    };
+    restart_reconnects(
+        &options,
+        Some(bitcoin::hashes::sha256::Hash::hash(bytes).to_byte_array()),
+    )
+}
+
+fn restart_reconnects(
+    options: &SpawnOptions<'_>,
+    expected_map: Option<[u8; 32]>,
+) -> Result<(), Error> {
+    let destination = ProcessNode::spawn_with(Kind::BitcoinRs, options)?;
+    let mut learner = ProcessNode::spawn_with(Kind::BitcoinRs, options)?;
     let mut gossip = LivePeer::connect_with_height(&learner, "addr-source", 0)?;
     let timestamp = u32::try_from(
         SystemTime::now()
@@ -69,8 +95,15 @@ fn dns_disabled_restart_reconnects_to_a_gossiped_peer() -> Result<(), Error> {
     )?;
     drop(gossip);
     let datadir = learner.stop_keep_datadir()?;
-    assert!(datadir.path().join("node/peers-fabfb5da.dat").is_file());
-    let mut restarted = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options, datadir)?;
+    let bytes = std::fs::read(datadir.path().join("node/peers-fabfb5da.dat"))?;
+    let book: serde_json::Value = serde_json::from_slice(&bytes[..bytes.len() - 32])?;
+    assert_eq!(book["version"], 6);
+    assert_eq!(
+        book["asmap_id"],
+        json!(expected_map),
+        "CLI configuration reaches the one persisted classifier owner"
+    );
+    let mut restarted = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, options, datadir)?;
     restarted.wait_for(
         "persisted outbound connection",
         Duration::from_secs(20),

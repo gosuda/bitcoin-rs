@@ -56,6 +56,8 @@ pub struct P2pServiceConfig {
     /// the filename and imports a valid matching legacy file without deleting
     /// it. None keeps discovery in memory.
     pub address_book_path: Option<std::path::PathBuf>,
+    /// Optional Core `ASMap` file; invalid configured files preserve peer books read-only.
+    pub asmap_path: Option<std::path::PathBuf>,
     /// Permit private/local peer addresses only on isolated regtest networks.
     pub allow_local_addresses: bool,
     /// Whether DNS seed maintenance is enabled.
@@ -91,6 +93,7 @@ impl Default for P2pServiceConfig {
             listen_addrs: Vec::new(),
             magic: Magic::from_bytes([0; 4]),
             address_book_path: None,
+            asmap_path: None,
             allow_local_addresses: false,
             dns_seeds_enabled: false,
             dns_seeds: Vec::new(),
@@ -318,6 +321,7 @@ impl P2pService {
             config.address_book_path.clone(),
             config.magic.to_bytes(),
             config.allow_local_addresses,
+            config.asmap_path.as_deref(),
         );
         Self {
             config,
@@ -965,14 +969,18 @@ fn dial_outbound_role(
 // PeerTable registers outbound leases only after TCP establishment. Like Core's
 // CNode census, handshake-in-progress and manual persistent sessions count;
 // queued/inflight dial work and inbound/cancelled sessions do not.
-fn count_address_failure(peer_table: &crate::PeerTable, maximum: usize) -> bool {
-    let groups: std::collections::HashSet<_> = peer_table
+fn count_address_failure(
+    peer_table: &crate::PeerTable,
+    maximum: usize,
+    book: &crate::addrman::AddressBook,
+) -> bool {
+    let outbound: Vec<_> = peer_table
         .sessions()
         .into_iter()
         .filter(|session| !session.lease.is_inbound() && !session.lease.is_cancelled())
-        .map(|session| crate::netgroup::group(session.addr.ip()))
+        .map(|session| session.addr)
         .collect();
-    groups.len() >= maximum.saturating_sub(1).min(2)
+    book.count_failure(&outbound, maximum)
 }
 
 /// Starts one accepted dial: skips addresses already running or connected,
@@ -1011,7 +1019,11 @@ fn spawn_outbound_dial(
         block_relay_slots,
         extra_dial,
     );
-    let count_failure = !dial.manual && count_address_failure(peer_table, max_peer_connections);
+    let count_failure = !dial.manual
+        && shared
+            .address_book
+            .as_ref()
+            .is_some_and(|book| count_address_failure(peer_table, max_peer_connections, book));
     if !dial.manual {
         if let Some(book) = &shared.address_book {
             book.queued(dial.addr);
@@ -1870,7 +1882,7 @@ mod tests {
     #[test]
     fn parked_overflow_releases_the_address_for_another_selection() {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
-        let book = crate::addrman::AddressBook::open(None, [1; 4], true);
+        let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         book.learn_dns("seed", &[address], 10_000);
         book.queued(address);
         assert_eq!(book.select(&[], &[], 10_000, |_| true), None);
@@ -1884,7 +1896,7 @@ mod tests {
     }
     fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
         let (tx, rx) = crossbeam_channel::bounded(16);
-        let book = crate::addrman::AddressBook::open(None, [1; 4], false);
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         for n in 1..100 {
             book.learn_dns("seed", &[SocketAddr::from(([8, n, 1, 1], 8333))], 10_000);
         }
@@ -1943,7 +1955,7 @@ mod tests {
 
     #[test]
     fn block_relay_readiness_counts_for_dns_without_refreshing_gossip_time() {
-        let book = crate::addrman::AddressBook::open(None, [1; 4], false);
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         let full = SocketAddr::from(([8, 1, 1, 1], 8333));
         book.learn_dns("seed", &[full], 5000);
         let block = (2..=255)
@@ -1998,16 +2010,17 @@ mod tests {
     #[test]
     fn failure_accounting_uses_persistent_tcp_groups_including_manual_before_ready() {
         let table = crate::PeerTable::new();
-        assert!(!count_address_failure(&table, 125));
-        assert!(count_address_failure(&table, 1));
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
+        assert!(!count_address_failure(&table, 125, &book));
+        assert!(count_address_failure(&table, 1, &book));
         let (tx, _) = crossbeam_channel::bounded(1);
         let automatic = crate::PeerLease::new(tx.clone());
         table.register(SocketAddr::from(([8, 1, 1, 1], 8333)), automatic);
-        assert!(!count_address_failure(&table, 125));
-        assert!(count_address_failure(&table, 2));
+        assert!(!count_address_failure(&table, 125, &book));
+        assert!(count_address_failure(&table, 2, &book));
         let same_group = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
         table.register(SocketAddr::from(([8, 1, 2, 2], 8333)), same_group);
-        assert!(!count_address_failure(&table, 125));
+        assert!(!count_address_failure(&table, 125, &book));
         let manual = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
         table.register(SocketAddr::from(([8, 2, 1, 1], 8333)), manual.clone());
         assert!(
@@ -2017,7 +2030,7 @@ mod tests {
                 .all(|session| session.info.is_none())
         );
         assert!(
-            count_address_failure(&table, 125),
+            count_address_failure(&table, 125, &book),
             "Core counts established TCP sessions before handshake publication"
         );
         manual.cancel();
@@ -2026,39 +2039,91 @@ mod tests {
             crate::PeerLease::new_inbound(tx),
         );
         assert!(
-            !count_address_failure(&table, 125),
+            !count_address_failure(&table, 125, &book),
             "inbound and cancelled sessions do not certify connectivity"
         );
+    }
+
+    #[test]
+    fn failure_census_uses_the_same_configured_asmap_for_persistent_tcp_sessions() {
+        let directory = tempfile::tempdir().expect("directory");
+        let map = directory.path().join("asmap.raw");
+        std::fs::write(
+            &map,
+            include_bytes!("../tests/data/asmap-source-quota-core-v31.1.raw"),
+        )
+        .expect("Core map");
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false, Some(&map));
+        let table = crate::PeerTable::new();
+        let (tx, _) = crossbeam_channel::bounded(1);
+        table.register(
+            "8.8.0.1:8333".parse().expect("peer"),
+            crate::PeerLease::new(tx.clone()),
+        );
+        table.register(
+            "9.9.0.1:8333".parse().expect("same ASN"),
+            crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay),
+        );
+        assert!(
+            !count_address_failure(&table, 125, &book),
+            "different prefixes in one ASN count once"
+        );
+        assert!(count_address_failure(&table, 2, &book));
+        let independent = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
+        table.register(
+            "8.8.1.1:8333".parse().expect("independent ASN"),
+            independent.clone(),
+        );
+        assert!(
+            table
+                .sessions()
+                .iter()
+                .all(|session| session.info.is_none())
+        );
+        assert!(
+            count_address_failure(&table, 125, &book),
+            "independent ASN in same /16 establishes second group"
+        );
+        std::fs::remove_file(&map).expect("loaded map stays immutable");
+        assert!(count_address_failure(&table, 125, &book));
+        independent.cancel();
+        table.register(
+            "8.8.1.2:8333".parse().expect("inbound"),
+            crate::PeerLease::new_inbound(tx),
+        );
+        assert!(!count_address_failure(&table, 125, &book));
     }
 
     #[test]
     fn auxiliary_save_interval_retains_immediate_explicit_save() {
         let dir = tempfile::tempdir().expect("dir");
         let base = dir.path().join("peers.dat");
-        let book = crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true);
+        let book = crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None);
         let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
         book.learn_dns("seed", &[addr], 10_000);
         let tick = Instant::now();
         let mut next = tick + Duration::from_mins(15);
         save_address_book_if_due(&book, tick, &mut next);
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None).len(),
             0
         );
         save_address_book_if_due(&book, tick + Duration::from_mins(15), &mut next);
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None).len(),
             1
         );
         book.connected(addr, 20_000);
         save_address_book_if_due(&book, tick + Duration::from_secs(901), &mut next);
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).gossip(20_000)[0].0,
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None)
+                .gossip(20_000)[0]
+                .0,
             10_000
         );
         book.save();
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base), [1; 4], true).gossip(20_000)[0].0,
+            crate::addrman::AddressBook::open(Some(base), [1; 4], true, None).gossip(20_000)[0].0,
             20_000,
             "shutdown and anchor-consumption barriers bypass the periodic throttle"
         );
@@ -2227,7 +2292,7 @@ mod tests {
             None,
             crate::listener::ListenerExtras::default(),
         );
-        let book = crate::addrman::AddressBook::open(None, [1; 4], true);
+        let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         shared.address_book = Some(book.clone());
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
         book.queued(address);

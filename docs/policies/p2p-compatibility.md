@@ -258,18 +258,41 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    ceiling. Reads bound both bytes and record/reference sequences. These are
    representation/work bounds, not RSS or performance measurements.
 
-   Schema v5 persists the secret, source, health and New membership in one
-   checksummed snapshot. Same-schema restart restores every reference. The
-   known v1 format is validated using its original 4,096-record/64-source/slot
-   rules before migration. The actual source bytes are copied to an exclusive,
-   content-named `.v1-<sha256>.bak` and file/directory-synced before v5 can replace
-   the book. Re-bucketing is deterministic, prioritizes proven/recent successes,
-   logs retained/demoted/dropped counts, and preserves the original backup.
-   Legacy DNS retained only a u64 hash: its labelled deterministic source
-   namespace does not claim to recover the original seed name or Core hash.
-   A backup failure allows in-memory recovery but disables writes for the run.
-   Unknown child v2/v3/v4 or other schemas remain preserved/read-only here;
-   their actual ASMap/anchor owners provide later migrations.
+   `--asmap <file>` (TOML `asmap`, environment `BITCOIN_RS_ASMAP`) loads one
+   immutable classifier through the P2P netgroup owner. Its validated Core
+   bytecode is bounded at 4 MiB. Placement, incoming source corroboration,
+   outbound diversity and persistent-TCP failure counting use that same map.
+   Core ASN groups serialize as NET_IPV6 followed by little-endian ASN bytes,
+   grouping IPv4/IPv6 together. ASN0 uses the corrected prefix/HE fallback;
+   public linked-IPv4 forms use their embedded IPv4 without rewriting the dial
+   endpoint. Internal and legacy DNS sources retain their source namespaces.
+   Startup logs the raw-file SHA256 identity. Invalid or unavailable configured
+   maps permit memory-only prefix fallback but disable all book publication
+   and migration backup creation; restoring the map recovers the untouched
+   book. Intentionally omitting the map permits backed-up prefix migration.
+
+   Schema v6 persists the secret, original source, health, map identity and
+   New membership in one checksummed snapshot. Same-map restart restores every
+   reference; v5-to-v6 with no map also preserves all references exactly.
+   Known v1/v2/v3 formats and the strict v5 prefix format are migration sources.
+   The v1 reader retains its original 4,096-record/64-source/slot checks;
+   historical ASMap layouts validate source/record shape before re-bucketing.
+   The actual source bytes are copied to an exclusive content-named
+   `.v<schema>-<sha256>.bak` and file/directory-synced before replacement.
+   Schema-only upgrades do not discard corroboration. Changed classifiers or
+   old custom placement use deterministic original-source re-bucketing,
+   prioritizing proven/recent successes and logging retained/demoted/dropped
+   counts. Historic DNS u64 hashes retain a labelled legacy namespace; no
+   recovered seed name or Core hash is invented. Operational attempt/Good
+   times reset; advertised time, success and failures remain intact. A backup
+   failure allows memory discovery but disables writes. Unknown anchor v4,
+   historical v3 carrying anchors and other unknown shapes remain read-only
+   until their actual anchor owner provides a migration.
+
+   Actual Core group/placement evidence includes 224 ASMap rows and official
+   Tried236/New795 anchors. Migration fixtures were emitted by the original
+   v2/v3/v5 writers; the v5 fixture pins all eight retained references. These
+   are specific algorithm/persistence checks, not full peer-lifecycle parity.
 
    Filenames remain scoped to actual P2P magic: `peers.dat` becomes
    `peers-<8 hexadecimal magic digits>.dat`, including custom/drynet magics.
@@ -281,8 +304,8 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    First installation cannot overwrite a newly appeared destination. Saves
    retain the captured revision only after durable success, outside the state
    lock; concurrent later changes remain dirty. Periodic saves occur every
-   15 minutes and shutdown/explicit barriers remain immediate. ASMap grouping,
-   tried-collision probing and restart anchors remain stacked follow-ups under
+   15 minutes and shutdown/explicit barriers remain immediate. Tried-collision
+   probing and restart anchors remain stacked follow-ups under
    #1387; the final combined stack requires its own acceptance checks.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
