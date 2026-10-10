@@ -89,7 +89,8 @@
   negative amounts inside non-witness transactions are retained. Encoding
   strips witness bytes from a non-witness UTXO transaction and gates known
   nonfinal input metadata only when final scriptSig/witness is nonempty,
-  matching Core serialization. An encoding copy preserves parsed/caller
+  matching Core serialization. Empty redeem/witness scripts in both input and
+  output maps are omitted on encoding. An encoding copy preserves parsed/caller
   metadata for decode, analyze and join. Already
   decoded CompactSize types/subtypes and BIP373 fields receive Core checks.
 - PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
@@ -109,7 +110,12 @@
   The typed library canonically orders TapTree sibling branches rather than
   retaining their original byte/JSON order. The exact `core-valid-18` fixture
   and independent Core descriptor derivation verify the same commitment;
-  no raw-tree sidecar is kept. No wallet, signing authority, or parallel PSBT
+  no raw-tree sidecar is kept. An admission-only check of library-validated framing rejects an explicit
+  65-byte Taproot DEFAULT suffix, which the typed reader would otherwise drop.
+  Core retains those bytes; dropping them could change signature validity.
+  Unknown sighash values are also rejected instead of retained. Permanent
+  `probe-taproot-65-explicit-default` and `probe-taproot-65-unknown` vectors record
+  those exact differences. No wallet, signing authority, or parallel PSBT
   parser is introduced.
 
 ### `API-03`: REST dialect

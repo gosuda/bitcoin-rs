@@ -843,6 +843,172 @@
       "psbt": "cHNidP8BAD0CAAAAAQcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAQoAAAAAAAAAAVGQAQAATwEENYfPAAAAAAAAAAAAGAyZhhVjbNh1qnDHHPpre/VwGHpW2MbQVOYLZE0T6dMCPkdA0LpjniiWPzR2FXt88vt8b99CVPlwmc+GcLUF6lkE3q2+7wb8AmlkAXgUZ2xvYmFsLXByb3ByaWV0YXJ5LWEC+gEFZmlyc3QC+gIGb25seS1hACICAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYCTAGAgEBAgEBAQEDBAEAAAABBAFRAQUBUSIGAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYCN6tvu8HAAAAAQcAAQgCAQABE0ARERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERQRR5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiQDMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMG/AJpZAF4EWlucHV0LXByb3ByaWV0YXJ5AvACDWlucHV0LXVua25vd24ABvwCaWQBeBJvdXRwdXQtcHJvcHJpZXRhcnkC8QIOb3V0cHV0LXVua25vd24A",
       "core_valid": true,
       "reason": ""
+    },
+    {
+      "name": "probe-input-redeem-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQQAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-input-witness-script-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQUAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-input-final-script-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQcAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-input-final-witness-empty-stack",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQgBAAAC8QEIb3V0cHV0LWEA",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-input-final-witness-empty-value",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQgAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": false,
+      "reason": "TX decode failed Size of value was not the stated size: iostream error"
+    },
+    {
+      "name": "probe-output-redeem-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAALxAQhvdXRwdXQtYQEAAAA=",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-output-witness-script-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAALxAQhvdXRwdXQtYQEBAAA=",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-output-taptree-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAALxAQhvdXRwdXQtYQEGAAA=",
+      "core_valid": false,
+      "reason": "TX decode failed Output Taproot tree must not be empty: iostream error"
+    },
+    {
+      "name": "probe-all-empty-scripts-and-stack",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQQAAQUAAQcAAQgBAAAC8QEIb3V0cHV0LWEBAAABAQAA",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-nonempty-final-empty-others",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAQQAAQUAAQcBUQEIAQAAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "reason": "",
+      "exact_roundtrip": true
+    },
+    {
+      "name": "probe-ecdsa-control",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gJMAYCAQECAQEBAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": ""
+    },
+    {
+      "name": "probe-ecdsa-empty",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-ecdsa-garbage",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gEAQIDAQAC8QEIb3V0cHV0LWEA",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-ecdsa-der-nonminimal",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gKMAcCAgABAgEBAQAC8QEIb3V0cHV0LWEA",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-ecdsa-der-trailing",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gKMAYCAQECAQEAAQAC8QEIb3V0cHV0LWEA",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-ecdsa-sighash-zero",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gJMAYCAQECAQEAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-ecdsa-sighash-unknown",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIgICeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5gJMAYCAQECAQEEAALxAQhvdXRwdXQtYQA=",
+      "core_valid": false,
+      "reason": "TX decode failed Signature is not a valid encoding: iostream error"
+    },
+    {
+      "name": "probe-taproot-64-control",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hARNAEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQAC8QEIb3V0cHV0LWEA",
+      "core_valid": true,
+      "reason": ""
+    },
+    {
+      "name": "probe-taproot-65-explicit-default",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hARNBEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQAAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "reason": "",
+      "deviation": "explicit DEFAULT signature suffix rejected to prevent typed canonicalization",
+      "candidate_valid": false
+    },
+    {
+      "name": "probe-taproot-65-all",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hARNBEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQEAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "reason": ""
+    },
+    {
+      "name": "probe-taproot-65-unknown",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hARNBEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQQAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "reason": "",
+      "candidate_valid": false,
+      "deviation": "typed Taproot signature only accepts standard sighash types"
+    },
+    {
+      "name": "probe-tapscript-64-control",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hQRR5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiQBEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "reason": ""
+    },
+    {
+      "name": "probe-tapscript-65-explicit-default",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hQRR5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiQREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREAAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": "",
+      "candidate_valid": false,
+      "deviation": "typed signature restriction"
+    },
+    {
+      "name": "probe-tapscript-65-all",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hQRR5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiQREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREBAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": ""
+    },
+    {
+      "name": "probe-tapscript-65-unknown",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hQRR5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiQREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREEAALxAQhvdXRwdXQtYQA=",
+      "core_valid": true,
+      "reason": "",
+      "candidate_valid": false,
+      "deviation": "typed signature restriction"
     }
   ],
   "upstream_fixture_sha256": "1779e2a9a07476d72411d38a48986585e600915d8a3148b9becf8a985f781b87"

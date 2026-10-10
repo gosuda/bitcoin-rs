@@ -18,9 +18,26 @@ fn shared_psbt_codec_follows_core_and_retains_legacy_error_classes() {
         let expected = case["core_valid"].as_bool().expect("expectation");
         let reference = core.rpc("combinepsbt", &json!([[encoded]]));
         let candidate = node.rpc("combinepsbt", &json!([[encoded]]));
+        if expected && case["candidate_valid"] == false {
+            assert!(
+                reference.is_ok(),
+                "{name}: Core accepts opaque signature bytes"
+            );
+            assert!(
+                matches!(candidate, Err(Error::Rpc { code: -32602, .. })),
+                "{name}: declared typed-field rejection"
+            );
+            continue;
+        }
         if expected {
             match (reference, candidate) {
                 (Ok(reference), Ok(candidate)) => {
+                    if case["exact_roundtrip"] == true {
+                        assert_eq!(
+                            candidate, reference,
+                            "{name}: exact optional-field omission"
+                        );
+                    }
                     let reference = core
                         .rpc("decodepsbt", &json!([reference]))
                         .expect("Core encoded result");

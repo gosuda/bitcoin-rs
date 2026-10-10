@@ -91,8 +91,47 @@ pub(crate) fn decode(encoded: &str) -> Result<Psbt, DecodeError> {
     }
     normalize_missing_witness_utxos(&mut psbt);
     measure(&psbt)?;
+    reject_explicit_default_signatures(&bytes, psbt.inputs.len())?;
     validate(&psbt)?;
     Ok(psbt)
+}
+
+// The typed signature reader drops an explicit DEFAULT byte. Inspect only this
+// lossy field on the original, already library-validated framing, without
+// retaining a second representation or interpreting transactions/keys here.
+fn reject_explicit_default_signatures(bytes: &[u8], inputs: usize) -> Result<(), DecodeError> {
+    use bitcoin::consensus::Decodable as _;
+    fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
+        let length = bitcoin::VarInt::consensus_decode(bytes)
+            .map_err(|error| DecodeError::Format(error.into()))?
+            .0;
+        let length = usize::try_from(length).map_err(|_| DecodeError::Trailing)?;
+        let (value, rest) = bytes
+            .split_at_checked(length)
+            .ok_or(DecodeError::Trailing)?;
+        *bytes = rest;
+        Ok(value)
+    }
+    let mut remaining = bytes.get(5..).ok_or(DecodeError::Trailing)?;
+    for map in 0..=inputs {
+        loop {
+            let key = field(&mut remaining)?;
+            if key.is_empty() {
+                break;
+            }
+            let value = field(&mut remaining)?;
+            if map != 0
+                && matches!(key.first(), Some(0x13 | 0x14))
+                && value.len() == 65
+                && value[64] == 0
+            {
+                return Err(DecodeError::Field(
+                    "explicit DEFAULT Taproot signature suffix is not supported".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Admit the unsigned transaction's map counts before a creator allocates them.
@@ -136,6 +175,11 @@ pub(crate) fn encode(psbt: &Psbt) -> Result<String, RpcError> {
             "library PSBT serialization left unread bytes".to_owned(),
         ));
     }
+    reject_explicit_default_signatures(&bytes, psbt.inputs.len()).map_err(|_| {
+        RpcError::InvalidParameter(
+            "PSBT output contains an explicit DEFAULT Taproot signature suffix".to_owned(),
+        )
+    })?;
     Ok(crate::base64::encode(&bytes))
 }
 
@@ -180,10 +224,36 @@ fn needs_core_serialization(psbt: &Psbt) -> bool {
                     .as_ref()
                     .is_some_and(|tx| tx.input.iter().any(|input| !input.witness.is_empty()))
         })
+        || psbt.outputs.iter().any(|output| {
+            output
+                .redeem_script
+                .as_ref()
+                .is_some_and(|script| script.is_empty())
+                || output
+                    .witness_script
+                    .as_ref()
+                    .is_some_and(|script| script.is_empty())
+        })
 }
 
 fn normalize_for_core_serialization(psbt: &mut Psbt) {
     normalize_missing_witness_utxos(psbt);
+    for output in &mut psbt.outputs {
+        if output
+            .redeem_script
+            .as_ref()
+            .is_some_and(|script| script.is_empty())
+        {
+            output.redeem_script = None;
+        }
+        if output
+            .witness_script
+            .as_ref()
+            .is_some_and(|script| script.is_empty())
+        {
+            output.witness_script = None;
+        }
+    }
     for input in &mut psbt.inputs {
         if let Some(tx) = &mut input.non_witness_utxo {
             for previous_input in &mut tx.input {
@@ -540,7 +610,7 @@ fn core_compact_size(bytes: &mut &[u8]) -> Result<u64, DecodeError> {
             let message = if matches!(error, bitcoin::consensus::encode::Error::NonMinimalVarInt) {
                 "non-canonical ReadCompactSize()"
             } else {
-                "end of data"
+                "SpanReader::read(): end of data"
             };
             DecodeError::Field(message.to_owned())
         })?
@@ -582,7 +652,10 @@ mod tests {
         let mut differences = Vec::new();
         for case in fixtures()["cases"].as_array().expect("cases") {
             let result = decode(case["psbt"].as_str().expect("encoded"));
-            if result.is_ok() != case["core_valid"].as_bool().expect("expectation") {
+            let expected = case["candidate_valid"]
+                .as_bool()
+                .unwrap_or_else(|| case["core_valid"].as_bool().expect("expectation"));
+            if result.is_ok() != expected {
                 differences.push(format!("{}: {result:?}", case["name"]));
             }
         }
@@ -675,6 +748,55 @@ mod tests {
                 assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{method} {name}");
             }
         }
+    }
+
+    #[test]
+    fn raw_default_rejection_does_not_reject_canonical_or_opaque_bytes() {
+        for side in ["taproot", "tapscript"] {
+            let error = decode(&fixture(&format!("probe-{side}-65-explicit-default")))
+                .expect_err("must not change a supplied signature encoding");
+            assert!(
+                matches!(error, DecodeError::Field(message) if message.contains("explicit DEFAULT"))
+            );
+            let canonical = decode(&fixture(&format!("probe-{side}-64-control")))
+                .expect("canonical DEFAULT accepted");
+            decode(&encode(&canonical).expect("canonical output"))
+                .expect("programmatic DEFAULT remains readable");
+        }
+        let mut opaque = decode(&fixture("a")).expect("base");
+        let mut signature_like = vec![0x11; 65];
+        signature_like[64] = 0;
+        opaque.inputs[0].unknown.insert(
+            raw::Key {
+                type_value: 0x42,
+                key: vec![0x13],
+            },
+            signature_like.clone(),
+        );
+        opaque.outputs[0].unknown.insert(
+            raw::Key {
+                type_value: 0x13,
+                key: Vec::new(),
+            },
+            signature_like,
+        );
+        decode(&encode(&opaque).expect("opaque data"))
+            .expect("only input signature fields checked");
+        opaque.inputs[0].unknown.insert(
+            raw::Key {
+                type_value: 0x13,
+                key: Vec::new(),
+            },
+            {
+                let mut bytes = vec![0x11; 65];
+                bytes[64] = 0;
+                bytes
+            },
+        );
+        assert!(
+            encode(&opaque).is_err(),
+            "reserved unknown keys cannot bypass output admission"
+        );
     }
 
     #[test]
