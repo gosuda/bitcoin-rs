@@ -17,7 +17,7 @@ Owners:
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint` | Runtime assembly, lifecycle, and offline tooling |
+| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint`, `snapshot` | Runtime assembly, lifecycle, and offline tooling |
 | 3: Surface | `rpc` | External protocol boundaries |
 | 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
@@ -60,7 +60,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     outcomes for scheduling, retry and peer policy through `SyncChain`.
   - In Layer 4, the footprint package is an offline Linux
     filesystem utility with no node/runtime-workspace or storage-engine
-    dependencies.
+    dependencies. `bitcoin-rs-snapshot` is an offline Core-file inspector and
+    verifier consuming the shared primitives/UTXO codec; it does not compose
+    a node, P2P service, RPC server, mempool, or mining runtime.
     `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
     surfaces only; it declares no internal dependencies and no workspace
