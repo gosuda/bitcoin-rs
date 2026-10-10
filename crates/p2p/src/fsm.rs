@@ -166,6 +166,13 @@ mod tests {
 
         step(&mut peer, &Message::Verack)?;
         step(&mut peer, &sendcmpct_message(false, 1))?;
+        assert_eq!(
+            peer.compact_blocks.remote_preference(),
+            Some(SendCmpct {
+                send_compact: true,
+                version: 2,
+            })
+        );
         Ok(())
     }
 }

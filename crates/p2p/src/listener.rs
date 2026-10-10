@@ -1363,23 +1363,22 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::Message::SendHeaders => {
                         shared.peer_table.note_send_headers(lease.source(peer_addr));
                     }
-                    crate::Message::SendCmpct(send_cmpct) => {
-                        // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
-                        // the peer may serve `MSG_CMPCT_BLOCK` getdata at our
-                        // advertised version. The high-bandwidth push
-                        // preference is a separate per-peer choice and must
-                        // not gate compact-fetch eligibility — an inbound peer
-                        // (how the node sees its Core dial) is never selected
-                        // for push announcements.
-                        if matches!(send_cmpct.version, 1 | 2) {
-                            shared
-                                .peer_table
-                                .note_compact_relay(lease.source(peer_addr));
-                        }
+                    crate::Message::SendCmpct(send_cmpct)
+                        if peer
+                            .compact_blocks
+                            .remote_preference()
+                            .is_some_and(|preference| preference.version == send_cmpct.version) =>
+                    {
+                        // Only a version we advertise negotiates BIP152 relay.
+                        // The high-bandwidth push preference is a separate
+                        // per-peer choice and must not gate compact-fetch
+                        // eligibility.
+                        shared
+                            .peer_table
+                            .note_compact_relay(lease.source(peer_addr));
                         shared.peer_table.note_compact_announcement(
                             lease.source(peer_addr),
-                            send_cmpct.send_compact,
-                            send_cmpct.version,
+                            &peer.compact_blocks,
                         );
                         if let Some(announcer) = &shared.block_announcer {
                             announcer.reconcile_high_bandwidth_peers();
@@ -1389,7 +1388,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         process_compact_wire_message(
                             &message,
                             &mut compact_reconstruction,
-                            peer.compact_blocks.local_version,
+                            peer.compact_blocks.local_version(),
                             shared.compact_hints.as_deref(),
                             lease,
                             peer_addr,
@@ -2448,7 +2447,8 @@ mod writer_shutdown_tests {
         // for push, and fetch eligibility must not depend on it.
         assert!(sendcmpct_scenario(true, 2, 18_448));
         assert!(sendcmpct_scenario(false, 2, 18_449));
-        assert!(!sendcmpct_scenario(false, 7, 18_450));
+        assert!(!sendcmpct_scenario(false, 1, 18_450));
+        assert!(!sendcmpct_scenario(false, 7, 18_451));
     }
 
     /// Serves the scripted bytes, then ends the connection with a clean

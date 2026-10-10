@@ -49,8 +49,18 @@ pub struct CompactBlockNegotiation {
 }
 
 impl CompactBlockNegotiation {
-    /// Record the latest remote `sendcmpct` preference.
+    /// Whether `version` is one this node advertises and can negotiate.
+    #[must_use]
+    const fn supports_version(version: u64) -> bool {
+        version == COMPACT_BLOCK_VERSION
+    }
+
+    /// Record the latest supported remote `sendcmpct` preference. Messages
+    /// for versions we did not advertise have no effect, as BIP152 requires.
     pub(crate) const fn record_remote_preference(&mut self, preference: &SendCmpct) {
+        if !Self::supports_version(preference.version) {
+            return;
+        }
         self.remote_send_compact = Some(preference.send_compact);
         self.remote_version = Some(preference.version);
     }
@@ -60,30 +70,32 @@ impl CompactBlockNegotiation {
         self.local_version = Some(version);
     }
 
-    /// The transaction-identity profile valid for this peer's compact blocks.
-    ///
-    /// v1 identifies transactions by txid with witness-stripped prefills;
-    /// v2 identifies them by wtxid and carries witness data. A peer that
-    /// never sent `sendcmpct`, or announced an unknown version, falls back to
-    /// the base v1 profile: short IDs are hints, so a wrong guess only costs
-    /// round trips, never a wrong block.
+    /// The compact-block version this node advertised to the peer.
     #[must_use]
-    const fn negotiated_version(&self) -> u64 {
-        match self.remote_version {
-            Some(2) => 2,
-            _ => 1,
+    pub(crate) const fn local_version(&self) -> Option<u64> {
+        self.local_version
+    }
+
+    /// The mutually supported remote preference selected for this connection.
+    #[must_use]
+    pub(crate) const fn remote_preference(&self) -> Option<SendCmpct> {
+        match (self.remote_send_compact, self.remote_version) {
+            (Some(send_compact), Some(version)) => Some(SendCmpct {
+                send_compact,
+                version,
+            }),
+            _ => None,
         }
     }
 
     /// The version to serve this peer's `MSG_CMPCT_BLOCK` requests at, or
-    /// `None` while the peer never announced BIP152 support. The identity
-    /// profile is the peer's recorded `sendcmpct` version; short IDs are
-    /// hints, so an unknown recorded version degrades to the v1 profile.
+    /// `None` while the peer has not announced a mutually supported BIP152
+    /// version. Unsupported messages never change the negotiated profile.
     #[must_use]
     pub(crate) const fn servable_version(&self) -> Option<u64> {
-        match self.remote_send_compact {
-            Some(_) => Some(self.negotiated_version()),
-            None => None,
+        match self.remote_preference() {
+            Some(preference) => Some(preference.version),
+            _ => None,
         }
     }
 }
@@ -239,6 +251,44 @@ pub(crate) const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_negotiation_ignores_versions_we_do_not_advertise() {
+        let mut negotiation = CompactBlockNegotiation::default();
+
+        negotiation.record_remote_preference(&SendCmpct {
+            send_compact: true,
+            version: 1,
+        });
+        assert_eq!(negotiation.servable_version(), None);
+        assert_eq!(negotiation.remote_preference(), None);
+
+        negotiation.record_remote_preference(&SendCmpct {
+            send_compact: true,
+            version: COMPACT_BLOCK_VERSION,
+        });
+        assert_eq!(negotiation.servable_version(), Some(COMPACT_BLOCK_VERSION));
+        assert_eq!(
+            negotiation.remote_preference(),
+            Some(SendCmpct {
+                send_compact: true,
+                version: COMPACT_BLOCK_VERSION,
+            })
+        );
+
+        negotiation.record_remote_preference(&SendCmpct {
+            send_compact: false,
+            version: 1,
+        });
+        assert_eq!(negotiation.servable_version(), Some(COMPACT_BLOCK_VERSION));
+        assert_eq!(
+            negotiation.remote_preference(),
+            Some(SendCmpct {
+                send_compact: true,
+                version: COMPACT_BLOCK_VERSION,
+            })
+        );
+    }
 
     #[test]
     fn system_dns_resolver_uses_configured_port_for_literal_hosts() -> Result<(), PeerError> {

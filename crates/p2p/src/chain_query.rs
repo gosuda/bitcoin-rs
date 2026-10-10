@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_exchange_uses_peer_version_for_prefills_and_blocktxn()
+    fn compact_exchange_keeps_the_mutually_supported_version()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::dispatch::dispatch_inbound_full;
         use crate::peer::{Peer, PeerState};
@@ -1346,6 +1346,7 @@ mod tests {
         for versions in [[Some(1), Some(2)], [Some(2), Some(1)], [None, Some(99)]] {
             let mut peer = Peer::new(std::io::Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
             peer.state = PeerState::Ready;
+            let mut negotiated = None;
             for version in versions {
                 if let Some(version) = version {
                     dispatch_inbound_full(
@@ -1361,14 +1362,17 @@ mod tests {
                         &mut |_| panic!("sendcmpct does not emit a response"),
                         &mut |_| {},
                     )?;
+                    if version == crate::peer::COMPACT_BLOCK_VERSION {
+                        negotiated = Some(version);
+                    }
                 }
-                let strip_witness = matches!(version, Some(1 | 99));
+                assert_eq!(peer.compact_blocks.servable_version(), negotiated);
                 let compact = dispatched_wire_response(
                     &mut peer,
                     &query,
                     &Message::GetData(vec![compact_item]),
                 )?;
-                if version.is_none() {
+                if negotiated.is_none() {
                     assert_eq!(
                         compact.payload(),
                         &NetworkMessage::NotFound(vec![compact_item])
@@ -1378,13 +1382,14 @@ mod tests {
                         panic!("negotiated compact request must produce cmpctblock");
                     };
                     let prefill = &compact.compact_block.prefilled_txs[0].tx;
-                    assert_eq!(prefill.input[0].witness.is_empty(), strip_witness);
+                    assert!(!prefill.input[0].witness.is_empty());
                     assert_eq!(prefill.compute_txid(), original.txdata[0].compute_txid());
-                    if !strip_witness {
-                        assert_eq!(prefill.compute_wtxid(), original.txdata[0].compute_wtxid());
-                    }
+                    assert_eq!(prefill.compute_wtxid(), original.txdata[0].compute_wtxid());
                 }
 
+                if negotiated.is_none() {
+                    continue;
+                }
                 let indexes = vec![1, 2];
                 let decoded = dispatched_wire_response(
                     &mut peer,
@@ -1399,12 +1404,7 @@ mod tests {
                 let NetworkMessage::BlockTxn(response) = decoded.payload() else {
                     panic!("available request must produce blocktxn");
                 };
-                assert_blocktxn_profile(
-                    &response.transactions,
-                    &original,
-                    &indexes,
-                    strip_witness,
-                )?;
+                assert_blocktxn_profile(&response.transactions, &original, &indexes, false)?;
                 assert_eq!(
                     source.body, body,
                     "version selection leaves the stored body intact"

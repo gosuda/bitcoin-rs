@@ -35,6 +35,7 @@ use crate::PeerTable;
 use crate::connection::PeerLease;
 use crate::connection::PeerSource;
 use crate::dispatch::{ChainQuery, CommittedTip};
+use crate::peer::COMPACT_BLOCK_VERSION;
 #[cfg(test)]
 use crate::peer_info::PeerInfo;
 use crate::wire::Message;
@@ -234,7 +235,7 @@ impl BlockAnnouncer {
             }
             let message = Message::SendCmpct(SendCmpct {
                 send_compact: true,
-                version: 2,
+                version: COMPACT_BLOCK_VERSION,
             });
             if self.peers.send(source, message.clone()).is_ok() {
                 state.high_bandwidth_requested_peers.push(source);
@@ -258,8 +259,8 @@ impl BlockAnnouncer {
                 (!session.lease.is_cancelled()
                     && session.lease.role().relays_transactions()
                     && info.compact_block_relay
-                    && announcement.supports_compact_v2)
-                    .then_some((source, announcement.useful_block_sequence))
+                    && announcement.compact_version == Some(COMPACT_BLOCK_VERSION))
+                .then_some((source, announcement.useful_block_sequence))
             })
             .collect();
         let selection_open = !self.config.blocksonly && !self.in_ibd();
@@ -273,7 +274,7 @@ impl BlockAnnouncer {
             }
             let message = Message::SendCmpct(SendCmpct {
                 send_compact: false,
-                version: 2,
+                version: COMPACT_BLOCK_VERSION,
             });
             let send_succeeded = self.peers.send(source, message.clone()).is_ok();
             state
@@ -317,7 +318,7 @@ impl BlockAnnouncer {
                 self.peers.note_high_bandwidth_selected(demoted, false);
                 let demote = Message::SendCmpct(SendCmpct {
                     send_compact: false,
-                    version: 2,
+                    version: COMPACT_BLOCK_VERSION,
                 });
                 if self.peers.send(demoted, demote.clone()).is_ok() {
                     sent.push((demoted.addr, demote));
@@ -325,7 +326,7 @@ impl BlockAnnouncer {
 
                 let promote = Message::SendCmpct(SendCmpct {
                     send_compact: true,
-                    version: 2,
+                    version: COMPACT_BLOCK_VERSION,
                 });
                 if self.peers.send(candidate, promote.clone()).is_ok() {
                     state.high_bandwidth_requested_peers.push(candidate);
@@ -396,17 +397,18 @@ impl BlockAnnouncer {
             // Option A: High-Bandwidth BIP152 Compact Block
             // Peer must have explicitly requested high-bandwidth compact blocks from us.
             if peer_state.compact_high_bandwidth == Some(true)
-                && peer_state.compact_version == Some(2)
+                && peer_state.compact_version == Some(COMPACT_BLOCK_VERSION)
                 && !self.config.blocksonly
                 && session.lease.role().relays_transactions()
             {
                 let knows_prev = known_position
                     .is_some_and(|(_, height)| height >= tip.height.saturating_sub(1));
                 if knows_prev {
-                    if let Some(msg @ Message::CmpctBlock(_)) =
-                        self.chain_query
-                            .compact_block_for(tip.height, tip.hash, Some(2))
-                    {
+                    if let Some(msg @ Message::CmpctBlock(_)) = self.chain_query.compact_block_for(
+                        tip.height,
+                        tip.hash,
+                        Some(COMPACT_BLOCK_VERSION),
+                    ) {
                         planned.push(PlannedAnnouncement {
                             source,
                             message: msg,
@@ -785,10 +787,15 @@ mod tests {
         high_bandwidth: bool,
         version: u64,
     ) {
-        if matches!(version, 1 | 2) {
+        let mut negotiation = crate::CompactBlockNegotiation::default();
+        negotiation.record_remote_preference(&SendCmpct {
+            send_compact: high_bandwidth,
+            version,
+        });
+        if negotiation.remote_preference().is_some() {
             table.note_compact_relay(source(table, addr));
+            table.note_compact_announcement(source(table, addr), &negotiation);
         }
-        table.note_compact_announcement(source(table, addr), high_bandwidth, version);
     }
 
     #[test]

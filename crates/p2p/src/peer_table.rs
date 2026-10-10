@@ -18,6 +18,7 @@ use parking_lot::RwLock;
 
 use crate::connection::{ConnectionId, PeerLease, PeerSource};
 use crate::counters::PeerCounters;
+use crate::peer::CompactBlockNegotiation;
 use crate::peer_info::PeerInfo;
 #[cfg(test)]
 use crate::peer_info::PeerRole;
@@ -57,7 +58,6 @@ pub(crate) struct PeerAnnouncementState {
     pub(crate) last_announced_block: Option<Hash256>,
     pub(crate) compact_high_bandwidth: Option<bool>,
     pub(crate) compact_version: Option<u64>,
-    pub(crate) supports_compact_v2: bool,
     pub(crate) useful_block_sequence: u64,
     /// Whether the announcement worker currently selects this peer for
     /// high-bandwidth push (`bip152_hb_to`). Selection authority lives in
@@ -385,19 +385,16 @@ impl PeerTable {
         }
     }
 
-    /// Records the latest supported remote compact-announcement preference
-    /// for the current connection. Preferences for other versions do not
-    /// overwrite the negotiated v2 state, matching Core's `sendcmpct`
-    /// handling.
+    /// Copies the connection owner's negotiated compact-announcement
+    /// preference into the shared session snapshot.
     pub(crate) fn note_compact_announcement(
         &self,
         source: PeerSource,
-        high_bandwidth: bool,
-        version: u64,
+        negotiation: &CompactBlockNegotiation,
     ) -> bool {
-        if version != crate::peer::COMPACT_BLOCK_VERSION {
+        let Some(preference) = negotiation.remote_preference() else {
             return false;
-        }
+        };
         let mut entries = self.entries.write();
         let Some(entry) = entries
             .get_mut(&source.addr)
@@ -405,9 +402,8 @@ impl PeerTable {
         else {
             return false;
         };
-        entry.announcement.compact_high_bandwidth = Some(high_bandwidth);
-        entry.announcement.compact_version = Some(version);
-        entry.announcement.supports_compact_v2 |= version == 2;
+        entry.announcement.compact_high_bandwidth = Some(preference.send_compact);
+        entry.announcement.compact_version = Some(preference.version);
         true
     }
 
@@ -1301,30 +1297,42 @@ mod tests {
     }
 
     #[test]
-    fn compact_announcement_ignores_unsupported_versions() {
+    fn compact_announcement_snapshots_only_negotiated_versions() {
         let table = PeerTable::new();
         let current = lease();
         table.register(addr(1), current.clone());
         assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
         let source = current.source(addr(1));
+        let mut negotiation = CompactBlockNegotiation::default();
 
-        assert!(!table.note_compact_announcement(source, true, 7));
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: true,
+            version: 7,
+        });
+        assert!(!table.note_compact_announcement(source, &negotiation));
         assert!(!table.sessions()[0].bip152_hb_from);
         assert_eq!(
             table.announcement_state(source),
             Some(PeerAnnouncementState::default())
         );
 
-        assert!(table.note_compact_announcement(source, true, crate::peer::COMPACT_BLOCK_VERSION));
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: true,
+            version: crate::peer::COMPACT_BLOCK_VERSION,
+        });
+        assert!(table.note_compact_announcement(source, &negotiation));
         assert!(table.sessions()[0].bip152_hb_from);
 
-        assert!(!table.note_compact_announcement(source, false, 1));
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: false,
+            version: 1,
+        });
+        assert!(table.note_compact_announcement(source, &negotiation));
         assert_eq!(
             table.announcement_state(source),
             Some(PeerAnnouncementState {
                 compact_high_bandwidth: Some(true),
                 compact_version: Some(crate::peer::COMPACT_BLOCK_VERSION),
-                supports_compact_v2: true,
                 ..PeerAnnouncementState::default()
             })
         );
