@@ -42,7 +42,8 @@ pub use window::classify_apply_error;
 pub mod assumeutxo;
 pub use assumeutxo::{
     ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
-    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary, HistoricalCheckpointRef,
+    ChainstateRole, ChainstatesReport, ChainstatesSummary, HistoricalChainstateSummary,
+    HistoricalCheckpointRef,
 };
 
 mod checkpoint;
@@ -653,7 +654,7 @@ impl Chainstate {
     ) -> Result<(), AssumeUtxoError> {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
-        let mut tree = self.block_tree.write();
+        let tree = self.block_tree.read();
         let node_id = tree
             .lookup(pinned.block_hash)
             .ok_or(AssumeUtxoError::SnapshotHeaderMissing(pinned.block_hash))?;
@@ -681,6 +682,11 @@ impl Chainstate {
                 self.fail_closed_for_recovery();
             }
         })?;
+        // The transition reservation excludes authoritative tree changes,
+        // and the retained read guard kept the captured base stable through
+        // the durable callback. Only publication needs a write guard.
+        drop(tree);
+        let mut tree = self.block_tree.write();
         // This journal extends the old checkpoint, not the new snapshot root.
         // Snapshot recovery uses its immutable anchor and the certified suffix.
         *self.journal.write() = None;

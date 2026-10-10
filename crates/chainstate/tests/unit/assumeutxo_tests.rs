@@ -125,7 +125,10 @@ impl Fixture {
     }
 
     fn activate(&self, manager: &AssumeUtxoManager) -> TestResult {
-        manager.activate_pinned_snapshot(self.load()?, &self.pinned)?;
+        {
+            let loaded = self.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &self.pinned)
+        }?;
         Ok(())
     }
 }
@@ -197,7 +200,7 @@ fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult 
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     assert!(matches!(
-        manager.activate_pinned_snapshot(forged, &fixture.pinned),
+        manager.activate_pinned_snapshot(forged.set, forged.tip_hash, &fixture.pinned),
         Err(AssumeUtxoError::Utxo(
             bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
         ))
@@ -237,7 +240,10 @@ fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResu
         Err(ApplyError::PruneDuringHistoricalValidation { .. })
     ));
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::AlreadyActive)
     ));
     Ok(())
@@ -254,7 +260,10 @@ fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestR
         Some(dir.path().to_path_buf()),
     )?;
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::SnapshotHeaderMissing(_))
     ));
     assert!(active.durable_head.load()?.is_none());
@@ -262,7 +271,10 @@ fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestR
     let mut wrong_height = fixture.pinned;
     wrong_height.height += 1;
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &wrong_height),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &wrong_height)
+        },
         Err(AssumeUtxoError::SnapshotHeaderHeightMismatch { .. })
     ));
     assert!(fixture.active.applied_tip_snapshot().is_none());
@@ -277,7 +289,10 @@ fn activation_io_failure_does_not_publish_snapshot() -> TestResult {
     let manager = fixture.manager(dir.path())?;
     fixture.head.fail.store(true, Ordering::Release);
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::Storage(_))
     ));
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
@@ -370,7 +385,10 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
     let before = fixture.active.durable_head.load()?;
     // This is an ordinary user refusal, not an unresolved storage mutation.
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::ActivationBehindTip)
     ));
     assert_eq!(fixture.active.durable_head.load()?, before);
@@ -612,5 +630,59 @@ fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
             .connect(&child, None),
         Err(ApplyError::ConnectPastHistoricalTarget { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult {
+    let fixture = Fixture::new()?;
+    let genesis = Network::Regtest.genesis_block();
+    fixture
+        .active
+        .lock_transition()?
+        .into_transition()
+        .connect(&genesis, None)?;
+    let before = fixture
+        .active
+        .applied_tip_snapshot()
+        .ok_or("genesis missing")?;
+    let reader = fixture.active.chain_progress_reader();
+    let loaded = fixture.load()?;
+    let mut observed = None;
+    let result = std::thread::scope(|scope| {
+        fixture.active.install_snapshot(
+            loaded.set,
+            fixture.stats.clone(),
+            &fixture.pinned,
+            |_, _| {
+                let (sent, received) = std::sync::mpsc::sync_channel(1);
+                scope.spawn(move || {
+                    let progress =
+                        reader.progress(Network::Regtest, bitcoin_rs_primitives::unix_time_secs());
+                    let _ = sent.send(progress);
+                });
+                // A storage callback may wait on slow I/O while public readers
+                // continue to describe the previously committed chainstate.
+                observed = received
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .ok();
+                Err(AssumeUtxoError::Archive(anyhow::anyhow!(
+                    "simulated persistence refusal"
+                )))
+            },
+        )
+    });
+    assert!(result.is_err());
+    let progress = observed.ok_or("progress query blocked behind snapshot persistence")?;
+    assert_eq!(progress.blocks, before.height);
+    assert_eq!(progress.best_block_hash, before.hash);
+    assert_eq!(
+        fixture
+            .active
+            .applied_tip_snapshot()
+            .ok_or("prior tip lost")?
+            .hash,
+        before.hash
+    );
     Ok(())
 }

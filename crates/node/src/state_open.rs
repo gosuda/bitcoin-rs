@@ -438,6 +438,13 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
+        let snapshots = Arc::new(crate::snapshot::SnapshotControl::new(
+            assumeutxo,
+            Arc::clone(&chainstate),
+            followers.clone(),
+            config.data_dir.clone(),
+            config.network,
+        ));
         Ok(Self {
             config,
             #[cfg(test)]
@@ -457,7 +464,7 @@ impl NodeState {
             followers,
             sync,
             recovery_reporter,
-            assumeutxo,
+            snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
         })
     }

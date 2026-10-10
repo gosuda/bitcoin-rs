@@ -38,6 +38,8 @@ mod signal;
 #[cfg(windows)]
 #[path = "signal_windows.rs"]
 mod signal;
+/// Core snapshot import through the node-owned activation boundary.
+mod snapshot;
 /// Internal node composition root.
 #[cfg(not(feature = "test-seam"))]
 #[allow(

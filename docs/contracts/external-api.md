@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-33` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior;
 [Proven by](#proven-by) separates existing tests from planned comparisons.
 
@@ -781,3 +781,53 @@ owned by [wallet-facing.md](wallet-facing.md).
     optional transaction bytes, named forms, and parameter errors.
 
 ## Vocabulary
+
+
+### `API-33`: Core snapshot import and lifecycle reporting
+
+`loadtxoutset(path)` synchronously reads an unmodified Bitcoin Core v2
+`dumptxoutset` file. Positional `[path]` and named `{ "path": path }` parameters
+are accepted. Relative paths resolve below the configured node datadir.
+The input must be a regular file outside the node's `assumeutxo` recovery
+namespace. The shared UTXO codec applies its finite resource limits and resolves
+height, commitment, and cumulative transaction count only from the compiled
+network anchor matching the header's base block hash. The complete decoded
+state must reproduce `hash_serialized_3`; a parsed header is not authentication.
+Only one file import per node may materialize a UTXO set at a time. Unix input
+opens are nonblocking before the held-descriptor regular-file check. Recovery
+archives use exclusive temporary reservations and atomic publication, so a
+source hard-linked to a prior staging or destination filename is not truncated.
+
+The node enters the existing mempool generation fence, activates through
+`AssumeUtxoManager`, and reconciles the block log, index, mining, and mempool
+consumers. Successful return certifies the durable snapshot anchor and consumer
+settlement. Settlement failure closes admission for recovery and is an error,
+even if the anchor committed. Headers through the base must already be known;
+repeated activation, missing headers, an existing full-revalidation requirement,
+and a base behind the durable tip are rejected. Existing native v4 checkpoints
+remain internal recovery artifacts and are not accepted by this RPC.
+
+The result contains `coins_loaded` (unspent **outputs**, not txid records),
+`tip_hash`, `base_height`, and the absolute input `path`. File/path failures
+return -8, codec/trust failures -22, and lifecycle/storage/settlement failures
+-32603. These explicit error-code deviations are not a full Core RPC parity
+claim. Historical validation continues through the existing P2P scheduler.
+
+`getchainstates()` captures both roles under the existing lifecycle and active
+transition exclusion. `headers` is the best admitted header height; the
+historical role, when present, is first and the active role last. Each reports
+`blocks`, `bestblockhash`, `validated`, and `verificationprogress` when a known
+cumulative transaction count permits the existing transaction-based estimate.
+Unknown progress is omitted rather than replaced with a height fraction.
+The historical role contains coins validated from genesis and reports
+`validated: true`; the assumed active role reports false until finalization.
+`snapshot_blockhash` identifies the compiled base for a snapshot-derived active
+role, including after finalization. Core's difficulty and cache-allocation
+fields are omitted because this projection does not expose corresponding
+owner facts. Role state and progress survive restart through the durable head
+and the existing checkpoint/replay contract.
+
+`dumptxoutset` export remains unimplemented and is a separate producer feature.
+The process contract is exercised by `e2e/tests/assumeutxo.rs`, using an actual
+Core 31.1 dump of the deterministic, compiled regtest 200-height pin. Regtest
+evidence does not establish mainnet memory or throughput qualifications.

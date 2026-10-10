@@ -88,7 +88,8 @@ impl Node {
             .map_err(|error| NodeError::Unavailable(error.to_string()))
     }
 
-    /// Imports a pinned snapshot through the node's fenced activation boundary.
+    /// Imports a pinned native v4 snapshot through the node's fenced activation boundary.
+    /// Portable Bitcoin Core v2 files use the `loadtxoutset` RPC.
     /// Like startup, file reading and validation run synchronously when polled;
     /// the caller chooses their runtime placement. Headers through the pinned
     /// base must already have been admitted by ordinary header synchronization.

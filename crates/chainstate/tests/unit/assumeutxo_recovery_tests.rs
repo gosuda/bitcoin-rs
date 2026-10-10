@@ -67,7 +67,10 @@ fn activate(
     )?;
     let manager =
         AssumeUtxoManager::open(Network::Regtest, active.clone(), Some(dir.to_path_buf()))?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     Ok((active, manager))
 }
 
@@ -244,7 +247,10 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         Some(dir.path().to_path_buf()),
         1,
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     manager.step_historical(&fixture.blocks[0], None)?;
     manager.step_historical(&fixture.blocks[1], None)?;
     let status = manager.status()?;
@@ -475,7 +481,10 @@ fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
     let head = active.durable_head.load()?;
     let tip = active.applied_tip_snapshot();
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::FullRevalidationRequired)
     ));
     assert_eq!(active.durable_head.load()?, head);
@@ -730,7 +739,10 @@ fn crash_writer() -> TestResult {
             DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL
         },
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
         fixture.blocks[2].block_hash(),
         3,
@@ -977,7 +989,10 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
         active.clone(),
         Some(dir.path().to_path_buf()),
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     manager.step_historical(&fixture.blocks[0], None)?;
     let mut invalid = fixture.blocks[1].clone();
     invalid.txs.clear();
@@ -1031,7 +1046,10 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
             active.clone(),
             Some(dir.path().to_path_buf()),
         )?;
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        }?;
         if mismatch {
             let prior = active.durable_head.load()?.ok_or("missing head")?;
             let mut next = prior;

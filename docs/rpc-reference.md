@@ -40,6 +40,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/minimum_fee_filter/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
+| `getchainstates` | 0.12.0 | Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Historical role precedes active. See API-33. |
+| `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation. Malformed input returns -22. See API-33. dumptxoutset export remains unimplemented. |
 
 ### Implemented (unverified)
 
@@ -105,12 +107,10 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 |---|---|---|
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
-| `getchainstates` | n/a | Not implemented. |
 | `getdeploymentinfo` | n/a | Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists). |
 | `getdescriptoractivity` | n/a | No wallet/scan index to serve it. |
 | `getmempoolcluster` | n/a | Cluster mempool tracking not implemented. |
 | `importmempool` | n/a | Mempool import not implemented. |
-| `loadtxoutset` | n/a | UTXO snapshot load (assumeutxo) not implemented. |
 | `preciousblock` | n/a | No manual block-preference surface. |
 | `reconsiderblock` | n/a | No manual reorg-control surface. |
 | `savemempool` | n/a | Mempool dump/reload persistence not implemented. |
@@ -238,4 +238,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 19, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 92 - total 174.
+Row counts: Supported 0, Deviation 21, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 90 - total 174.

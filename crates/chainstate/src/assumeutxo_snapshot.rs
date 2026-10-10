@@ -1,13 +1,17 @@
 //! Immutable snapshot input selected only by the authoritative durable head.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use cap_fs_ext::DirExt as _;
+use cap_std::fs::Dir;
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::{AssumeUtxoData, Network, consensus_bytes, deserialize};
-use bitcoin_rs_storage::checkpoint::fs::{open_data_dir, sync_dir};
+use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet};
 
 use crate::AssumeUtxoDiskStatus;
@@ -15,43 +19,96 @@ use crate::recovery::{InitialChainstate, ResumeSource};
 
 const DIRECTORY: &str = "assumeutxo";
 
+// Temporary names are only reservation candidates: exclusive creation owns
+// the inode, and collisions never authorize truncating an existing artifact.
+static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
+
+fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> Result<Dir> {
+    fn child(parent: &Dir, name: &str) -> std::io::Result<Dir> {
+        if let Err(error) = parent.create_dir(name)
+            && error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(error);
+        }
+        let directory = parent.open_dir_nofollow(name)?;
+        // Retry also certifies an entry left by an earlier failed directory
+        // sync; existence alone is not evidence that its parent is durable.
+        sync_dir(parent)?;
+        Ok(directory)
+    }
+    let data = open_data_dir(data_dir)?;
+    let root = child(&data, DIRECTORY)?;
+    Ok(child(&root, &base.to_string())?)
+}
+
+fn write_archive(
+    directory: &Dir,
+    name: &str,
+    write: impl FnOnce(&mut BufWriter<cap_std::fs::File>) -> Result<()>,
+) -> Result<()> {
+    let mut reserved = None;
+    for _ in 0..32 {
+        let sequence = NEXT_ARCHIVE.fetch_add(1, Ordering::Relaxed);
+        let temporary = format!(".{name}.{}.{sequence}.tmp", std::process::id());
+        match create_file(directory, &temporary) {
+            Ok(file) => {
+                reserved = Some((temporary, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (temporary, file) = reserved.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "snapshot temporary reservation exhausted",
+        )
+    })?;
+    let result = (|| {
+        let mut writer = BufWriter::new(file);
+        write(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        directory.rename(&temporary, directory, name)?;
+        sync_dir(directory)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        // Only the exclusively reserved temporary can be removed. If rename
+        // succeeded, this is already absent and the published archive remains.
+        let _ = directory.remove_file(&temporary);
+    }
+    result
+}
+
 /// Stage durable coins before the root can name them. Uncommitted files never
 /// establish an anchor. One activation is admitted per datadir.
 pub(super) fn write_coins(data_dir: &Path, set: &UtxoSet, pinned: &AssumeUtxoData) -> Result<()> {
-    let path = data_dir.join(DIRECTORY).join(pinned.block_hash.to_string());
-    fs::create_dir_all(&path)?;
-    sync_dir(&open_data_dir(data_dir)?)?;
-    sync_dir(&open_data_dir(&data_dir.join(DIRECTORY))?)?;
-    let mut writer = BufWriter::new(File::create(path.join("coins.tmp"))?);
-    bitcoin_rs_utxo::snapshot::write_snapshot_observed(
-        set,
-        &pinned.block_hash,
-        pinned.height,
-        &mut writer,
-        bitcoin_rs_utxo::stats::CoinStatsAccumulator::with_parallel_muhash(pinned.height),
-    )?;
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    drop(writer);
-    fs::rename(path.join("coins.tmp"), path.join("coins.dat"))?;
-    sync_dir(&open_data_dir(&path)?)?;
-    Ok(())
+    let directory = archive_directory(data_dir, pinned.block_hash)?;
+    write_archive(&directory, "coins.dat", |writer| {
+        bitcoin_rs_utxo::snapshot::write_snapshot_observed(
+            set,
+            &pinned.block_hash,
+            pinned.height,
+            writer,
+            bitcoin_rs_utxo::stats::CoinStatsAccumulator::with_parallel_muhash(pinned.height),
+        )?;
+        Ok(())
+    })
 }
 
 pub(super) fn write_headers(data_dir: &Path, tree: &BlockTree, base: &TipSnapshot) -> Result<()> {
-    let path = data_dir.join(DIRECTORY).join(base.hash.to_string());
-    let mut writer = BufWriter::new(File::create(path.join("headers.tmp"))?);
-    let mut ancestry = tree.ancestor_chain(base.tip_id)?;
-    ancestry.reverse();
-    for id in ancestry {
-        writer.write_all(&consensus_bytes(&tree.node(id)?.header))?;
-    }
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    drop(writer);
-    fs::rename(path.join("headers.tmp"), path.join("headers.dat"))?;
-    sync_dir(&open_data_dir(&path)?)?;
-    Ok(())
+    let directory = archive_directory(data_dir, base.hash)?;
+    write_archive(&directory, "headers.dat", |writer| {
+        let mut ancestry = tree.ancestor_chain(base.tip_id)?;
+        ancestry.reverse();
+        for id in ancestry {
+            writer.write_all(&consensus_bytes(&tree.node(id)?.header))?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn trusted_anchor(
