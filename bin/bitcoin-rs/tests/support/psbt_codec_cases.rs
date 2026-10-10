@@ -75,7 +75,7 @@ fn shared_psbt_codec_follows_core_and_retains_legacy_error_classes() {
 // The typed library canonically orders these sibling nodes. Preserve one typed
 // tree owner; prove the exact observed reorder commits to the same output using
 // independent Core descriptor derivation before comparing every other field.
-fn assert_taptree_orientation_only(
+pub(super) fn assert_taptree_orientation_only(
     core: &mut bitcoin_rs_e2e::ProcessNode,
     reference: &Value,
     candidate: &mut Value,
