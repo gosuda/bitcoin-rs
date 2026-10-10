@@ -122,6 +122,30 @@ fn wait_parameters_and_timeouts_match_core_with_declared_short_help() -> Result<
     core.stop()
 }
 
+fn check_header_only_waits(
+    node: &mut ProcessNode,
+    raw: &str,
+    hash: &str,
+    applied: &Value,
+) -> Result<()> {
+    assert!(node.rpc("submitheader", &json!([&raw[..160]]))?.is_null());
+    // Each finite request completes after header admission. Its answer proves
+    // the header-only state still exposes the old applied tip, regardless of
+    // scheduling. The owner's private notification gate proves parked races.
+    for (method, params) in [
+        ("waitfornewblock", json!([1, applied["hash"]])),
+        ("waitforblock", json!([hash, 1])),
+        ("waitforblockheight", json!([2, 1])),
+    ] {
+        assert_eq!(
+            node.rpc(method, &params)?,
+            *applied,
+            "{method} after header"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
@@ -133,6 +157,9 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
     let next = core.rpc("generateblock", &json!(["raw(51)", [], false]))?;
     let next_hash = next["hash"].as_str().expect("new hash");
     let next_raw = next["hex"].as_str().expect("new block");
+    for node in [&mut core, &mut candidate] {
+        check_header_only_waits(node, next_raw, next_hash, &before)?;
+    }
     let mut tasks = Vec::new();
     for address in [core.rpc_addr, candidate.rpc_addr] {
         for (method, params) in [
@@ -143,17 +170,6 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
             tasks.push(waiting(address, method, params));
         }
     }
-    for node in [&mut core, &mut candidate] {
-        assert!(
-            node.rpc("submitheader", &json!([&next_raw[..160]]))?
-                .is_null()
-        );
-    }
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(
-        tasks.iter().all(|task| !task.is_finished()),
-        "header publication must not satisfy waits"
-    );
     for node in [&mut core, &mut candidate] {
         assert!(node.rpc("submitblock", &json!([next_raw]))?.is_null());
     }
@@ -203,8 +219,10 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
         let address = node.rpc_addr;
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let task = std::thread::spawn(move || {
-            // Establish a worker on this same keep-alive connection first:
-            // shutdown must exercise an admitted wait, not race TCP accept.
+            // Reuse an established HTTP connection to avoid racing TCP accept.
+            // This black-box scenario observes a shutdown response; it does
+            // not expose the point where the wait predicate parks. Deterministic
+            // admitted cancellation is proved by the owner/real-server tests.
             let mut connection = Connection::new(address);
             connection.rpc(
                 &envelope("getblockcount", json!([])),

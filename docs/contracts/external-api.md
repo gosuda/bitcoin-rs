@@ -591,11 +591,15 @@ owned by [wallet-facing.md](wallet-facing.md).
   no I/O. A satisfied predicate releases this gate before acquiring transition
   exclusion and rechecks the settled tip, so an intermediate reorg prefix
   cannot satisfy normal success as if it were the completed transition.
-  Timeout or cancellation returns the latest durable published prefix without
-  waiting for a busy transition to finish. This bounded return differs from
-  Core's final `GetTip` acquiring `cs_main`, and is an explicit deviation.
-  Transition acquisition uses bounded cancellation checks; unsatisfied predicates sleep on a
-  condition variable without periodically reading the chain.
+  Timeout, caller cancellation, normal shutdown, recovery closure and explicit
+  owner closure return the latest durable published prefix without waiting for
+  a busy transition to finish. Connect, grouped-connect and disconnect publish
+  only after their durable-head commit; a published prefix can be durable
+  without being the final tip of an in-flight reorg. This bounded return
+  differs from Core's final `GetTip` acquiring `cs_main`, and is an explicit
+  deviation. Transition acquisition uses bounded cancellation checks;
+  unsatisfied predicates sleep on a condition variable without periodically
+  reading the chain.
 - Normal shutdown, recovery closure, and explicit owner closure wake waiters.
   RPC-server-only shutdown sets the bound dispatcher's cancellation latch before
   waking the owner, and does not stop chainstate. The listener retains its
@@ -622,8 +626,11 @@ owned by [wallet-facing.md](wallet-facing.md).
   differences are declared `Deviation`; no full compatibility promotion is made.
 - Evidence: `chainstate::tip_wait::tests`,
   `rpc::server::tip_wait_tests`, and the live pinned-Core process comparisons
-  in `e2e/tests/rpc_tip_waits.rs` exercise publication races, reorgs, deadlines,
-  shutdown, HTTP availability, parameter errors and restored startup.
+  in `e2e/tests/rpc_tip_waits.rs` exercise reorgs, deadlines, shutdown responses,
+  parameter errors and restored startup. Header-only process checks complete
+  finite waits after admission and compare the applied tip; deterministic
+  waiter registration/publication and admitted cancellation are proved by the
+  owner and real-server tests, which also prove ordinary HTTP availability.
 
 ## Live gaps
 

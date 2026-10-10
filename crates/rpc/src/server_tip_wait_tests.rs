@@ -66,6 +66,31 @@ fn await_waiter(handler: &Handler) {
     }
 }
 
+// EOF can precede ConnectionPermit::drop. Retry only the observable 503
+// admission refusal; an RPC/JSON/transport error is never treated as busy.
+fn ordinary_rpc(address: SocketAddr) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let body = serde_json::to_vec(&serde_json::json!({
+        "id":2, "method":"getblockcount", "params":[],
+    }))
+    .expect("request JSON");
+    loop {
+        let response = bitcoin_rs_e2e::rpc::Connection::new(address)
+            .http("POST", "/", &body, Some(("parity", "parity")), deadline)
+            .expect("ordinary HTTP request");
+        if response.status != 503 {
+            assert_eq!(response.status, 200, "ordinary HTTP status");
+            return response.json().expect("ordinary JSON response");
+        }
+        assert_eq!(response.body, b"busy");
+        assert!(
+            Instant::now() < deadline,
+            "connection permit must be released"
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     let (ctx, chainstate) = context();
@@ -89,20 +114,14 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
         &json!({"id":1,"method":"waitforblockheight","params":[1]}),
     );
     await_waiter(&handler);
-    let ordinary = bitcoin_rs_e2e::rpc::Connection::new(address)
-        .rpc(
-            &serde_json::json!({"id":2,"method":"getblockcount","params":[]}),
-            ("parity", "parity"),
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("ordinary request retains a worker");
-    assert_eq!(ordinary["result"], serde_json::json!(0));
     let (head, denied) = read(send(
         address,
         &json!({"id":3,"method":"waitfornewblock","params":[]}),
     ));
     assert!(head.contains("Connection: close"));
     assert_eq!(denied["error"]["code"].as_i64(), Some(-1));
+    let ordinary = ordinary_rpc(address);
+    assert_eq!(ordinary["result"], serde_json::json!(0));
     shutdown.store(true, Ordering::Release);
     server_thread
         .join()
@@ -325,13 +344,7 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
     ));
     assert!(head.contains("Connection: close"));
     assert_eq!(answer["error"]["code"].as_i64(), Some(-1));
-    let ordinary = bitcoin_rs_e2e::rpc::Connection::new(address)
-        .rpc(
-            &serde_json::json!({"id":2,"method":"getblockcount","params":[]}),
-            ("parity", "parity"),
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("ordinary RPC with one worker");
+    let ordinary = ordinary_rpc(address);
     assert_eq!(ordinary["result"], serde_json::json!(0));
     shutdown.store(true, Ordering::Release);
     task.join().expect("server").expect("exit");

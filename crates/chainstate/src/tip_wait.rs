@@ -263,6 +263,13 @@ mod tests {
             TipWaitCondition::Changed(Some(genesis.hash)),
             Arc::new(AtomicBool::new(false)),
         );
+        // This is the private registration proof that the black-box header
+        // response comparison cannot observe through the public RPC surface.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while owner.tip_notification.changed.notify_all() == 0 {
+            assert!(Instant::now() < deadline, "waiter must park before headers");
+            std::thread::yield_now();
+        }
         let child = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("child");
         owner
@@ -322,6 +329,20 @@ mod tests {
         transition
             .disconnect(&first)
             .expect("durable rollback prefix");
+        let committed = owner
+            .durable_head
+            .load()
+            .expect("durable head")
+            .expect("head");
+        assert_eq!(committed.height, 0);
+        assert_eq!(
+            committed.tip,
+            owner
+                .applied_tip
+                .load_full()
+                .expect("published prefix")
+                .hash
+        );
         let start = Instant::now();
         let tip = owner
             .wait_for_tip(
@@ -342,6 +363,59 @@ mod tests {
         );
         drop(transition);
     }
+    #[test]
+    fn shutdown_and_recovery_wake_parked_waiters_at_the_committed_reorg_prefix() {
+        for recovery in [false, true] {
+            let owner = owner();
+            let first = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
+                .expect("first");
+            owner.apply_block(&first, None).expect("first commit");
+            let observer = owner.clone();
+            let (tx, rx) = mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                tx.send(observer.wait_for_tip(
+                    TipWaitCondition::Height(2),
+                    None,
+                    &LatchReader::fixture_never(),
+                ))
+                .expect("receiver");
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while owner.tip_notification.changed.notify_all() == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "waiter must park before rollback"
+                );
+                std::thread::yield_now();
+            }
+            let transition = owner.begin_transition().expect("transition");
+            transition.disconnect(&first).expect("durable rollback");
+            let committed = owner
+                .durable_head
+                .load()
+                .expect("durable head")
+                .expect("head");
+            assert_eq!(committed.height, 0);
+            assert_eq!(
+                committed.tip,
+                owner.applied_tip.load_full().expect("prefix").hash
+            );
+            if recovery {
+                owner.fail_closed_for_recovery();
+            } else {
+                owner.request_shutdown();
+            }
+            let answer = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shutdown must not wait for held transition")
+                .expect("tip");
+            assert_eq!(answer.hash, committed.tip);
+            assert_eq!(answer.height, committed.height);
+            drop(transition);
+            waiter.join().expect("waiter");
+        }
+    }
+
     #[test]
     fn omitted_current_tip_captures_after_an_in_flight_transition() {
         let owner = owner();
