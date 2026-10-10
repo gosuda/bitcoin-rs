@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
@@ -17,6 +18,7 @@ use parking_lot::RwLock;
 
 use crate::connection::{ConnectionId, PeerLease, PeerSource};
 use crate::counters::PeerCounters;
+use crate::peer::CompactBlockNegotiation;
 use crate::peer_info::PeerInfo;
 #[cfg(test)]
 use crate::peer_info::PeerRole;
@@ -38,6 +40,30 @@ pub struct PeerSession {
     /// [`PeerInfo::best_known_height`], the P2P-03 credit this does not
     /// disturb.
     pub(crate) headers_horizon: Option<u32>,
+    /// Whether we have currently selected this peer for high-bandwidth
+    /// compact-block push — Core's `getpeerinfo.bip152_hb_to`: we asked the
+    /// peer (via `sendcmpct(true)`) to announce new blocks to us as
+    /// unsolicited `cmpctblock` instead of `inv`.
+    pub bip152_hb_to: bool,
+    /// Whether this peer has selected us for high-bandwidth compact-block
+    /// push — Core's `getpeerinfo.bip152_hb_from`: the peer asked us (via
+    /// its `sendcmpct(true)`) to announce new blocks to it as unsolicited
+    /// `cmpctblock` instead of `inv`.
+    pub bip152_hb_from: bool,
+}
+
+/// Announcement-relevant state owned by the live peer connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PeerAnnouncementState {
+    pub(crate) last_announced_block: Option<Hash256>,
+    pub(crate) compact_high_bandwidth: Option<bool>,
+    pub(crate) compact_version: Option<u64>,
+    pub(crate) useful_block_sequence: u64,
+    /// Whether the announcement worker currently selects this peer for
+    /// high-bandwidth push (`bip152_hb_to`). Selection authority lives in
+    /// the worker; the table is the snapshot rpc reads, so promotions and
+    /// demotions are written through here.
+    pub(crate) selected_high_bandwidth: bool,
 }
 
 #[derive(Debug)]
@@ -46,6 +72,7 @@ struct Entry {
     info: Option<PeerInfo>,
     demonstrated_tips: Vec<Hash256>,
     headers_horizon: Option<u32>,
+    announcement: PeerAnnouncementState,
 }
 
 impl Entry {
@@ -55,6 +82,7 @@ impl Entry {
             info: None,
             demonstrated_tips: Vec::new(),
             headers_horizon: None,
+            announcement: PeerAnnouncementState::default(),
         }
     }
 
@@ -65,6 +93,8 @@ impl Entry {
             info: self.info.clone(),
             demonstrated_tips: self.demonstrated_tips.clone(),
             headers_horizon: self.headers_horizon,
+            bip152_hb_to: self.announcement.selected_high_bandwidth,
+            bip152_hb_from: self.announcement.compact_high_bandwidth == Some(true),
         }
     }
 }
@@ -110,6 +140,7 @@ fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
 #[derive(Debug, Default)]
 pub struct PeerTable {
     entries: RwLock<TableView>,
+    next_useful_block_sequence: AtomicU64,
 }
 
 impl PeerTable {
@@ -354,6 +385,82 @@ impl PeerTable {
         }
     }
 
+    /// Copies the connection owner's negotiated compact-announcement
+    /// preference into the shared session snapshot.
+    pub(crate) fn note_compact_announcement(
+        &self,
+        source: PeerSource,
+        negotiation: &CompactBlockNegotiation,
+    ) -> bool {
+        let Some(preference) = negotiation.remote_preference() else {
+            return false;
+        };
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.compact_high_bandwidth = Some(preference.send_compact);
+        entry.announcement.compact_version = Some(preference.version);
+        true
+    }
+
+    /// Records the last block whose possession was confirmed by an outbound
+    /// headers or compact-block announcement to the current connection.
+    pub(crate) fn note_announced_block(&self, source: PeerSource, hash: Hash256) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.last_announced_block = Some(hash);
+        true
+    }
+
+    /// Records that a block delivered by the current connection passed
+    /// validation and was committed. The global sequence provides a stable
+    /// recency ordering for high-bandwidth compact-relay selection.
+    pub(crate) fn note_useful_block(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.useful_block_sequence = self
+            .next_useful_block_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        true
+    }
+
+    /// Records whether the announcement worker currently selects the current
+    /// connection for high-bandwidth compact-block push (`bip152_hb_to`).
+    /// The worker keeps the authoritative set; this mirror exists so the
+    /// `sessions()` snapshot rpc reads reports the live selection.
+    pub(crate) fn note_high_bandwidth_selected(&self, source: PeerSource, selected: bool) {
+        let mut entries = self.entries.write();
+        if let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        {
+            entry.announcement.selected_high_bandwidth = selected;
+        }
+    }
+
+    /// Returns announcement state for the current published connection.
+    pub(crate) fn announcement_state(&self, source: PeerSource) -> Option<PeerAnnouncementState> {
+        let entries = self.entries.read();
+        entries.get(&source.addr).and_then(|entry| {
+            (entry.lease.is_current(source) && entry.info.is_some()).then_some(entry.announcement)
+        })
+    }
+
     /// Reports whether the live published connection at `addr` requested
     /// compact-block relay.
     pub(crate) fn compact_relay_of(&self, addr: SocketAddr) -> bool {
@@ -364,6 +471,21 @@ impl PeerTable {
                 .as_ref()
                 .is_some_and(|info| info.compact_block_relay)
         })
+    }
+
+    /// Records that the live connection at `source` negotiated BIP130 `sendheaders`.
+    pub(crate) fn note_send_headers(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
+                let Some(info) = entry.info.as_mut() else {
+                    return false;
+                };
+                info.send_headers = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Removes and cancels the connection `lease` refers to. Returns `false`
@@ -780,6 +902,7 @@ mod tests {
             version: 70016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 0,
             user_agent: String::new(),
             start_height,
@@ -1171,6 +1294,49 @@ mod tests {
         assert!(!table.compact_relay_of(addr(2)));
         table.register(addr(3), lease());
         assert!(!table.compact_relay_of(addr(3)));
+    }
+
+    #[test]
+    fn compact_announcement_snapshots_only_negotiated_versions() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+        let source = current.source(addr(1));
+        let mut negotiation = CompactBlockNegotiation::default();
+
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: true,
+            version: 7,
+        });
+        assert!(!table.note_compact_announcement(source, &negotiation));
+        assert!(!table.sessions()[0].bip152_hb_from);
+        assert_eq!(
+            table.announcement_state(source),
+            Some(PeerAnnouncementState::default())
+        );
+
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: true,
+            version: crate::peer::COMPACT_BLOCK_VERSION,
+        });
+        assert!(table.note_compact_announcement(source, &negotiation));
+        assert!(table.sessions()[0].bip152_hb_from);
+
+        negotiation.record_remote_preference(&bitcoin::p2p::message_compact_blocks::SendCmpct {
+            send_compact: false,
+            version: 1,
+        });
+        assert!(table.note_compact_announcement(source, &negotiation));
+        assert_eq!(
+            table.announcement_state(source),
+            Some(PeerAnnouncementState {
+                compact_high_bandwidth: Some(true),
+                compact_version: Some(crate::peer::COMPACT_BLOCK_VERSION),
+                ..PeerAnnouncementState::default()
+            })
+        );
+        assert!(table.sessions()[0].bip152_hb_from);
     }
 
     #[test]

@@ -40,7 +40,14 @@ surface = "P2P v1 wire protocol"
 core_reference = "Bitcoin Core 31.1 net protocol (docs/policies/p2p-compatibility.md pin)"
 status = "externally verified"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind (scripts/run-p2p-core-interop.sh)"
-evidence = "black-box interop: handshake, IBD sync, relay, disconnect behavior, externally visible chain identity (docs/contracts/core-differential.md CORE-02/CORE-03; evidence schema bitcoin-rs-core-differential-v2 verified by crates/p2p/tests/core_interop_live.rs). Bounded to those outcomes. Per CORE-03, compact-block relay counters are still derived from internal bitcoin-rs log markers (scripts/run-p2p-core-interop.sh count_marker); per ECO-09 that derivation is diagnostic only and must trend to observable protocol outcomes before it is relied on as a compatibility contract. The main workflow retains any generated evidence JSON and diagnostic logs for seven days in its core-differential-<run_attempt> artifact, including available partial logs on failure (docs/contracts/core-differential.md)."
+evidence = "recorded black-box interop covers handshake, IBD sync, relay, disconnect behavior, externally visible chain identity, and BIP152 request/response serving (docs/contracts/core-differential.md CORE-02/CORE-03). Bounded to those outcomes. Compact-block reconstruction counters are log-derived and diagnostic only per ECO-09. Proactive block announcements are tracked separately below and are not included in this externally verified claim until a retained main-workflow CORE-05 run exists."
+
+[[row]]
+surface = "Proactive block announcements (BIP130/BIP152)"
+core_reference = "Bitcoin Core 31.1 UpdatedBlockTip / high-bandwidth compact relay"
+status = "implemented"
+representative_consumer = "qualification target: pinned Bitcoin Core 31.1 plus equivalent scripted wire peers"
+evidence = "deterministic block-announcement tests cover headers, inv fallback, compact relay, duplicate suppression, backpressure, and reorg selection. CORE-05 adds a direct live wire comparison for inv/headers/cmpctblock and reorg behavior, but that lane is main-only; ordinary PR CI does not execute it. Upgrade this row to externally verified only after a retained main-workflow artifact records a successful CORE-05 run for the merged implementation."
 
 [[row]]
 surface = "BIP324 / P2P v2 transport"
@@ -68,7 +75,7 @@ surface = "Peer lifecycle and address management"
 core_reference = "Bitcoin Core 31.1 net behavior"
 status = "partially compatible"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind (one lane)"
-evidence = "externally observed: handshake, relay, serving, disconnect behavior and chain identity via the live Core lane (docs/contracts/core-differential.md CORE-02/CORE-03). Deliberately absent internals: no address store or gossip, no getaddr response, no proactive block announcements (docs/policies/p2p-compatibility.md section 7 deviation ledger). Peer-visible reorg/restart behavior is owned by internal tests (docs/contracts/p2p-wire.md)."
+evidence = "externally observed: handshake, relay, serving, disconnect behavior and chain identity via the live Core lane (docs/contracts/core-differential.md CORE-02/CORE-03). Deliberately absent address-management behavior: no address store or gossip and no getaddr response (docs/policies/p2p-compatibility.md section 7 deviation ledger). Proactive block announcements are implemented and tracked in their own row; their CORE-05 external qualification remains pending a retained main-workflow run. Peer-visible restart behavior is owned by internal tests (docs/contracts/p2p-wire.md)."
 
 [[row]]
 surface = "JSON-RPC"

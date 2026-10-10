@@ -17,7 +17,7 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network, deserialize};
 #[cfg(test)]
 use parking_lot::RwLock;
 
-use crate::dispatch::{ChainQuery, InventoryServing};
+use crate::dispatch::{ChainQuery, CommittedTip, InventoryServing};
 use crate::wire::{Message, PeerError};
 
 /// Depth from the active tip for which a `getdata` of a block is still worth
@@ -205,6 +205,35 @@ impl ChainQuery for ActiveChainQuery {
         let tip = self.applied_tip.load_full()?;
         let tree = self.block_tree.read();
         tree.node(tip.tip_id).ok().map(|node| node.header.time)
+    }
+
+    fn active_height(&self, hash: BlockHash) -> Option<u32> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        tree.active_height_of(tip.tip_id, hash.into())
+    }
+
+    fn compact_block_for(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        compact_version: Option<u64>,
+    ) -> Option<Message> {
+        self.compact_block_for(height, hash, compact_version)
+    }
+
+    fn committed_tip(&self) -> Option<CommittedTip> {
+        let tip = self.applied_tip.load_full()?;
+        let tree = self.block_tree.read();
+        let active_tip = tree.tip()?;
+        let node = tree.node(tip.tip_id).ok()?;
+        (node.hash == tip.hash
+            && tree.active_height_of(active_tip.tip_id, tip.hash) == Some(tip.height))
+        .then(|| CommittedTip {
+            height: tip.height,
+            hash: BlockHash::from(tip.hash),
+            prev_hash: node.header.prev_blockhash,
+        })
     }
 
     fn serve_inventory_blocks(
@@ -482,6 +511,54 @@ mod tests {
         let response = query.headers_after(&[], stop, 2);
 
         assert_eq!(header_hashes(&response), vec![stop]);
+        Ok(())
+    }
+
+    #[test]
+    fn committed_tip_reads_applied_tip_when_headers_are_ahead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(3);
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
+        let applied_id = tree.insert_node(Some(genesis), headers[1], NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("missing applied fixture tip")?;
+        tree.insert_node(Some(applied_id), headers[2], NodeStatus::Active)?;
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            query.committed_tip(),
+            Some(CommittedTip {
+                height: 1,
+                hash: headers[1].compute_hash(),
+                prev_hash: headers[0].compute_hash(),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn committed_tip_rejects_an_applied_tip_off_the_active_header_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
+        tree.insert_node(Some(genesis), headers[1], NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("missing applied fixture tip")?;
+
+        let fork = test_header(headers[0].compute_hash(), 100);
+        let fork_id = tree.insert_node(Some(genesis), fork, NodeStatus::Active)?;
+        let fork_tip = test_header(fork.compute_hash(), 101);
+        tree.insert_node(Some(fork_id), fork_tip, NodeStatus::Active)?;
+
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(query.committed_tip(), None);
         Ok(())
     }
 
@@ -1240,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_exchange_uses_peer_version_for_prefills_and_blocktxn()
+    fn compact_exchange_keeps_the_mutually_supported_version()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::dispatch::dispatch_inbound_full;
         use crate::peer::{Peer, PeerState};
@@ -1269,6 +1346,7 @@ mod tests {
         for versions in [[Some(1), Some(2)], [Some(2), Some(1)], [None, Some(99)]] {
             let mut peer = Peer::new(std::io::Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
             peer.state = PeerState::Ready;
+            let mut negotiated = None;
             for version in versions {
                 if let Some(version) = version {
                     dispatch_inbound_full(
@@ -1284,14 +1362,17 @@ mod tests {
                         &mut |_| panic!("sendcmpct does not emit a response"),
                         &mut |_| {},
                     )?;
+                    if version == crate::peer::COMPACT_BLOCK_VERSION {
+                        negotiated = Some(version);
+                    }
                 }
-                let strip_witness = matches!(version, Some(1 | 99));
+                assert_eq!(peer.compact_blocks.servable_version(), negotiated);
                 let compact = dispatched_wire_response(
                     &mut peer,
                     &query,
                     &Message::GetData(vec![compact_item]),
                 )?;
-                if version.is_none() {
+                if negotiated.is_none() {
                     assert_eq!(
                         compact.payload(),
                         &NetworkMessage::NotFound(vec![compact_item])
@@ -1301,13 +1382,14 @@ mod tests {
                         panic!("negotiated compact request must produce cmpctblock");
                     };
                     let prefill = &compact.compact_block.prefilled_txs[0].tx;
-                    assert_eq!(prefill.input[0].witness.is_empty(), strip_witness);
+                    assert!(!prefill.input[0].witness.is_empty());
                     assert_eq!(prefill.compute_txid(), original.txdata[0].compute_txid());
-                    if !strip_witness {
-                        assert_eq!(prefill.compute_wtxid(), original.txdata[0].compute_wtxid());
-                    }
+                    assert_eq!(prefill.compute_wtxid(), original.txdata[0].compute_wtxid());
                 }
 
+                if negotiated.is_none() {
+                    continue;
+                }
                 let indexes = vec![1, 2];
                 let decoded = dispatched_wire_response(
                     &mut peer,
@@ -1322,12 +1404,7 @@ mod tests {
                 let NetworkMessage::BlockTxn(response) = decoded.payload() else {
                     panic!("available request must produce blocktxn");
                 };
-                assert_blocktxn_profile(
-                    &response.transactions,
-                    &original,
-                    &indexes,
-                    strip_witness,
-                )?;
+                assert_blocktxn_profile(&response.transactions, &original, &indexes, false)?;
                 assert_eq!(
                     source.body, body,
                     "version selection leaves the stored body intact"

@@ -293,7 +293,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
 
-  # Main-only (issue #174 / CORE-02): a running Bitcoin Core 31.1 node vs
+  # Main-only (issues #174 / #1389; CORE-02/CORE-03/CORE-05): a running Bitcoin Core 31.1 node vs
   # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)
   # with observable P2P sync and chain-identity RPCs.
   core-differential:

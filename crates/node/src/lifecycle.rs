@@ -228,6 +228,7 @@ pub(crate) struct NodeServices {
     /// Publishes the capability readiness gauge until shutdown.
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
     tx_relay: Option<std::thread::JoinHandle<()>>,
+    block_announce: Option<std::thread::JoinHandle<()>>,
     signal_handler: Option<crate::signal::ShutdownHandler>,
     teardown_started: bool,
 }
@@ -342,6 +343,18 @@ impl NodeServices {
             } else {
                 tracing::error!("tx relay worker panicked");
                 set_first_error(first_error, anyhow::anyhow!("tx relay worker panicked"));
+            }
+        }
+        if let Some(handle) = self.block_announce.take() {
+            // Block announce worker panic.
+            if matches!(handle.join(), Ok(())) {
+                tracing::info!("block announce worker exited cleanly");
+            } else {
+                tracing::error!("block announce worker panicked");
+                set_first_error(
+                    first_error,
+                    anyhow::anyhow!("block announce worker panicked"),
+                );
             }
         }
     }
@@ -557,6 +570,21 @@ pub(crate) fn start_node(
     let gateway = state.mempool_gateway();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
+    let block_announcer = Arc::new(
+        bitcoin_rs_p2p::BlockAnnouncer::new(
+            state.peer_table(),
+            Arc::clone(&p2p_chain_query),
+            bitcoin_rs_p2p::BlockAnnounceConfig::default(),
+        )
+        .with_ibd(state.ibd(), state.config().network),
+    );
+    if let Some(announce_rx) = state.take_block_announce_receiver() {
+        guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
+            Arc::clone(&block_announcer),
+            announce_rx,
+            state.shutdown_reader(),
+        )?);
+    }
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
@@ -568,6 +596,7 @@ pub(crate) fn start_node(
         // One orchestrator: the listener announces block inventory to the
         // same sync loop the event loop drives.
         block_sync: Some(Arc::clone(&peer_ready_sync)),
+        block_announcer: Some(block_announcer),
     };
     let (relay_queue, relay_rx) =
         bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);

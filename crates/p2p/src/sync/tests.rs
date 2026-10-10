@@ -802,6 +802,12 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
         .map(|info| info.best_known_height)
         .ok_or_else(|| std::io::Error::other("missing peer info"))?;
     assert_eq!(best_known, 1);
+    assert!(
+        peers
+            .announcement_state(source)
+            .is_some_and(|state| state.useful_block_sequence > 0),
+        "a validated and committed delivery must become high-bandwidth selection evidence"
+    );
     assert_no_getdata(&rx)?;
     Ok(())
 }
@@ -2385,6 +2391,7 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         version: 70_016,
         wtxid_relay: false,
         compact_block_relay: false,
+        send_headers: false,
         services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
             | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
         user_agent: String::from("/test/"),

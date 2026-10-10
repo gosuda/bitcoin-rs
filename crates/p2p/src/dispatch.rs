@@ -13,6 +13,17 @@ use crate::inv::{
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
+/// Fully applied active-chain tip published by chainstate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedTip {
+    /// Applied height.
+    pub height: u32,
+    /// Applied block hash.
+    pub hash: BlockHash,
+    /// Previous block hash from the applied tip's header.
+    pub prev_hash: BlockHash,
+}
+
 /// Maximum headers returned by one `headers` response.
 pub const MAX_HEADERS_RESPONSE: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.
@@ -90,6 +101,32 @@ pub trait ChainQuery: Send + Sync {
     /// INVARIANT: the only local tip-age source for peer admission; no
     ///   caller walks the block tree per handshake for it.
     fn best_block_time(&self) -> Option<u32> {
+        None
+    }
+
+    /// Returns the active-chain height of `hash` if it is currently an ancestor
+    /// of the active tip.
+    fn active_height(&self, _hash: BlockHash) -> Option<u32> {
+        None
+    }
+
+    /// Builds one `cmpctblock` message for the block at `height` and `hash`
+    /// at the given BIP152 version.
+    fn compact_block_for(
+        &self,
+        _height: u32,
+        _hash: BlockHash,
+        _compact_version: Option<u64>,
+    ) -> Option<Message> {
+        None
+    }
+
+    /// The fully applied active-chain tip, or `None` if uninitialized.
+    ///
+    /// This is deliberately distinct from the header-tree tip: consumers of
+    /// committed block effects must never treat fresher, unapplied headers as
+    /// the publication frontier.
+    fn committed_tip(&self) -> Option<CommittedTip> {
         None
     }
 }

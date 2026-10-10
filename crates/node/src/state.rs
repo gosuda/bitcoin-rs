@@ -124,6 +124,7 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     /// `AssumeUTXO` coordinator managing chainstate roles.
     assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
+    block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
 }
 
 impl Drop for NodeState {
@@ -293,6 +294,12 @@ impl NodeState {
     #[must_use]
     pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
         self.inbound_tx_rx.lock().take()
+    }
+
+    /// Takes the block announcement receiver for worker execution.
+    #[must_use]
+    pub fn take_block_announce_receiver(&self) -> Option<bitcoin_rs_p2p::BlockAnnounceReceiver> {
+        self.block_announce_rx.lock().take()
     }
 
     /// Returns the shared block-download orchestrator.

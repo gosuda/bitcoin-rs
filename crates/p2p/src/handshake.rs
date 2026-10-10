@@ -368,7 +368,7 @@ mod tests {
         );
 
         assert_eq!(
-            peer.compact_blocks.local_version,
+            peer.compact_blocks.local_version(),
             Some(COMPACT_BLOCK_VERSION),
             "post-verack advertisement is recorded on the negotiation state",
         );

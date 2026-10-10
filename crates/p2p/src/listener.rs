@@ -74,6 +74,8 @@ pub struct ListenerExtras {
     /// When `None`, announcements are ignored and inbound bodies are treated
     /// as unsolicited.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Block announcer for outbound block announcements and peer capability tracking.
+    pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
 }
 
 /// Share the wiring for one P2P start epoch.
@@ -122,6 +124,8 @@ pub struct ConnectionShared {
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
     /// Block-download orchestrator for this start epoch.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Block announcer for outbound block announcements and peer capability tracking.
+    pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
     /// the outbound slot counts. The listener refuses inbound admission at
     /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
@@ -173,6 +177,7 @@ impl ConnectionShared {
             inbound_tx: extras.inbound_tx,
             ibd: extras.ibd,
             block_sync: extras.block_sync,
+            block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
@@ -209,12 +214,15 @@ impl ConnectionShared {
         &self,
         peer_addr: SocketAddr,
         lease: &crate::PeerLease,
-        info: crate::PeerInfo,
+        info: &crate::PeerInfo,
     ) -> bool {
         let source = lease.source(peer_addr);
-        if self.peer_table.publish_info(peer_addr, lease, info)
+        if self.peer_table.publish_info(peer_addr, lease, info.clone())
             && self.peer_table.is_current(source)
         {
+            if let Some(announcer) = &self.block_announcer {
+                announcer.on_peer_ready();
+            }
             self.notify_peer_ready(source);
             true
         } else {
@@ -929,6 +937,7 @@ fn run_connected_session(
     // independently of our own advertisement. Publish it atomically with the
     // completed handshake so relay never chooses a type during negotiation.
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
+    info.send_headers = peer.capabilities.send_headers;
     let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
         #[cfg(test)]
         if WRITER_SETUP_FAIL.swap(false, Ordering::Relaxed) {
@@ -961,7 +970,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    shared.publish_info_and_notify_ready(peer_addr, &lease, info);
+    shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -972,7 +981,11 @@ fn run_connected_session(
 
     let loop_result = run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref());
 
+    let source = lease.source(peer_addr);
     shared.peer_table.remove_current(peer_addr, &lease);
+    if let Some(announcer) = &shared.block_announcer {
+        announcer.on_peer_disconnected(source);
+    }
     lease.cancel();
     let _ = peer.stream.shutdown(std::net::Shutdown::Both);
     drop(lease);
@@ -1347,25 +1360,35 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         peer_addr,
                         tx_relay_open(),
                     ),
-                    crate::Message::SendCmpct(send_cmpct) => {
-                        // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
-                        // the peer may serve `MSG_CMPCT_BLOCK` getdata at our
-                        // advertised version. The high-bandwidth push
-                        // preference is a separate per-peer choice and must
-                        // not gate compact-fetch eligibility — an inbound peer
-                        // (how the node sees its Core dial) is never selected
-                        // for push announcements.
-                        if matches!(send_cmpct.version, 1 | 2) {
-                            shared
-                                .peer_table
-                                .note_compact_relay(lease.source(peer_addr));
+                    crate::Message::SendHeaders => {
+                        shared.peer_table.note_send_headers(lease.source(peer_addr));
+                    }
+                    crate::Message::SendCmpct(send_cmpct)
+                        if peer
+                            .compact_blocks
+                            .remote_preference()
+                            .is_some_and(|preference| preference.version == send_cmpct.version) =>
+                    {
+                        // Only a version we advertise negotiates BIP152 relay.
+                        // The high-bandwidth push preference is a separate
+                        // per-peer choice and must not gate compact-fetch
+                        // eligibility.
+                        shared
+                            .peer_table
+                            .note_compact_relay(lease.source(peer_addr));
+                        shared.peer_table.note_compact_announcement(
+                            lease.source(peer_addr),
+                            &peer.compact_blocks,
+                        );
+                        if let Some(announcer) = &shared.block_announcer {
+                            announcer.reconcile_high_bandwidth_peers();
                         }
                     }
                     crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
                         process_compact_wire_message(
                             &message,
                             &mut compact_reconstruction,
-                            peer.compact_blocks.local_version,
+                            peer.compact_blocks.local_version(),
                             shared.compact_hints.as_deref(),
                             lease,
                             peer_addr,
@@ -2057,6 +2080,7 @@ mod writer_setup_cleanup_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
@@ -2194,6 +2218,7 @@ mod writer_shutdown_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,
@@ -2392,6 +2417,7 @@ mod writer_shutdown_tests {
                 version: 70_016,
                 wtxid_relay: false,
                 compact_block_relay: false,
+                send_headers: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
@@ -2421,7 +2447,8 @@ mod writer_shutdown_tests {
         // for push, and fetch eligibility must not depend on it.
         assert!(sendcmpct_scenario(true, 2, 18_448));
         assert!(sendcmpct_scenario(false, 2, 18_449));
-        assert!(!sendcmpct_scenario(false, 7, 18_450));
+        assert!(!sendcmpct_scenario(false, 1, 18_450));
+        assert!(!sendcmpct_scenario(false, 7, 18_451));
     }
 
     /// Serves the scripted bytes, then ends the connection with a clean
@@ -2830,6 +2857,7 @@ mod writer_shutdown_tests {
                 version: 70_016,
                 wtxid_relay: false,
                 compact_block_relay: false,
+                send_headers: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
@@ -2961,6 +2989,7 @@ mod ready_notify_tests {
             version: 70_016,
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,
@@ -3000,13 +3029,13 @@ mod ready_notify_tests {
         shared.peer_table.register(addr, current.clone());
 
         assert!(
-            !shared.publish_info_and_notify_ready(addr, &stale, peer_info(addr, 1)),
+            !shared.publish_info_and_notify_ready(addr, &stale, &peer_info(addr, 1)),
             "replaced predecessor must not publish or notify"
         );
         assert_eq!(notified.load(Ordering::Relaxed), 0);
         assert_eq!(shared.peer_table.infos(), []);
 
-        assert!(shared.publish_info_and_notify_ready(addr, &current, peer_info(addr, 2)));
+        assert!(shared.publish_info_and_notify_ready(addr, &current, &peer_info(addr, 2)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos()[0].start_height, 2);
     }
@@ -3021,7 +3050,7 @@ mod ready_notify_tests {
         let lease = crate::PeerLease::new(tx);
         shared.peer_table.register(addr, lease.clone());
 
-        assert!(shared.publish_info_and_notify_ready(addr, &lease, peer_info(addr, 3)));
+        assert!(shared.publish_info_and_notify_ready(addr, &lease, &peer_info(addr, 3)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);
     }

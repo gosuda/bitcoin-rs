@@ -25,7 +25,7 @@ a running pinned binary, not a replay of captured JSON.
 - **Owner**: `scripts/run-p2p-core-interop.sh`.
 - After bitcoin-rs catches up to Core on regtest, `getblockcount`,
   `getbestblockhash`, and `getblockchaininfo.{chain,blocks}` agree.
-- Evidence schema `bitcoin-rs-core-differential-v2` is verified by
+- Evidence schema `bitcoin-rs-core-differential-v3` is verified by
   `crates/p2p/tests/core_interop_live.rs`.
 - This complements `kernel_block_parity` / `kernel_vector_parity`: those
   tests the C++ engine in-process; this tests a running Core node.
@@ -47,6 +47,28 @@ a running pinned binary, not a replay of captured JSON.
   is answered with a `cmpctblock` whose header hashes to the tip, a valid
   `getblocktxn` returns a `blocktxn`, and out-of-range indexes end the
   connection.
+
+### `CORE-05`: Proactive block announcements across a live reorg
+
+- **Owner**: `scripts/p2p_block_announcement_probe.py`, invoked by
+  `scripts/run-p2p-core-interop.sh`; verified by
+  `assert_block_announcements` in `crates/p2p/tests/core_interop_live.rs`.
+- Equivalent scripted peers connect to pinned Core 31.1 and bitcoin-rs. One
+  peer requests no announcement extension, one negotiates BIP130
+  `sendheaders`, and one negotiates BIP152 v2 high-bandwidth relay. Each peer
+  demonstrates the same current parent header before Core mines the block.
+- The probe requires both nodes to emit, respectively, `inv`, `headers`, and
+  unsolicited `cmpctblock` frames naming the newly accepted tip.
+- Core then invalidates that block and mines a two-block competing branch.
+  Both nodes must announce the replacement tip using the same negotiated
+  mechanisms, and neither may re-announce the abandoned hash after the reorg
+  begins.
+- The probe keeps each peer open for a bounded observation window after the
+  replacement tip arrives so a later stale announcement still fails the run.
+- This is a main-only qualification lane. Its presence and PR-CI compilation
+  do not by themselves constitute recorded external evidence; the ecosystem
+  matrix may upgrade CORE-05 only after the main workflow retains a successful
+  evidence artifact for the merged implementation.
 
 ### `CORE-04`: Curated live block and transaction acceptance
 

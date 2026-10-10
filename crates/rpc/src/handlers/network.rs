@@ -243,8 +243,14 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             version: peer.version,
             subversion: peer.user_agent.clone(),
             inbound: peer.inbound,
-            bip152_hb_to: false,
-            bip152_hb_from: false,
+            // Core's `bip152_hb_to`/`bip152_hb_from` (v25+): whether WE have
+            // selected this peer as a high-bandwidth compact-block relay
+            // (the announcement worker's current set), and whether the peer
+            // has selected US (its `sendcmpct(true)` preference recorded at
+            // handshake). High-bandwidth peers announce new blocks as
+            // unsolicited `cmpctblock` instead of `inv`.
+            bip152_hb_to: session.bip152_hb_to,
+            bip152_hb_from: session.bip152_hb_from,
             // Core 31 does not emit `startingheight` at all -- the name does
             // not appear anywhere in its source. corepc keeps the field
             // `Option` for older versions, so `None` is what v31 looks like.
@@ -744,6 +750,7 @@ mod addnode_validation_tests {
         let info = PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr,
             version: 70_016,
             services: 9,
@@ -1086,6 +1093,7 @@ mod peer_counter_tests {
         PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr: parse(addr),
             version: 70_016,
             services: 0,
@@ -1461,6 +1469,7 @@ mod getnodeaddresses_tests {
         PeerInfo {
             wtxid_relay: false,
             compact_block_relay: false,
+            send_headers: false,
             addr: parsed,
             version: 70_016,
             services,

@@ -56,6 +56,7 @@ pub struct ChainFollowers {
     derived_index: Option<Arc<DerivedIndexRuntime>>,
     mining: Arc<crate::mining::MiningGenerationSignal>,
     mempool: Option<Arc<MempoolGateway>>,
+    block_announcer: Option<bitcoin_rs_p2p::BlockAnnounceQueue>,
 }
 
 impl ChainFollowers {
@@ -83,6 +84,7 @@ impl ChainFollowers {
             derived_index,
             mining,
             mempool,
+            block_announcer: None,
         }
     }
 
@@ -112,6 +114,16 @@ impl ChainFollowers {
     #[must_use]
     pub fn with_tx_index(mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) -> Self {
         self.derived_index = derived_index;
+        self
+    }
+
+    /// Returns `self` with the block announcement queue swapped.
+    #[must_use]
+    pub fn with_block_announcer(
+        mut self,
+        block_announcer: Option<bitcoin_rs_p2p::BlockAnnounceQueue>,
+    ) -> Self {
+        self.block_announcer = block_announcer;
         self
     }
 
@@ -234,6 +246,9 @@ impl ChainFollowers {
         self.mining.publish_generation();
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.txids);
+        }
+        if let Some(announcer) = &self.block_announcer {
+            announcer.wake();
         }
     }
 
