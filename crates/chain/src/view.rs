@@ -107,6 +107,15 @@ impl BlockTreeReader {
         self.inner.read()
     }
 
+    /// Waits at most timeout for a shared tree guard so bounded reads can
+    /// observe cancellation while a writer owns the tree.
+    pub fn try_read_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<RwLockReadGuard<'_, BlockTree>> {
+        self.inner.try_read_for(timeout)
+    }
+
     /// Acquires a fixture-only write guard. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn write(&self) -> RwLockWriteGuard<'_, BlockTree> {

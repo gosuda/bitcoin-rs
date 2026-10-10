@@ -30,6 +30,8 @@ mod listener;
 mod overlay;
 /// Owned UTXO records.
 mod record;
+/// Bounded and cancellable script scans.
+pub mod scan;
 /// UTXO-set mutations and lookup.
 pub mod set;
 /// Shard internals.

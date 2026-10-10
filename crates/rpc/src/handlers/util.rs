@@ -8,6 +8,7 @@ use miniscript::ForEachKey as _;
 use miniscript::descriptor::{DescriptorPublicKey, DescriptorSecretKey, KeyMap};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
+use bitcoin_rs_primitives::Network;
 use corepc_types::v31;
 
 use bitcoin::hex::DisplayHex as _;
@@ -434,38 +435,45 @@ fn checksummed_payload(
 }
 
 /// Bitcoin Core's `ParseDescriptorRange`: an end, or an inclusive `[begin,end]`.
-fn parse_derivation_range(value: &Value) -> Result<(u32, u32), RpcError> {
-    const RANGE_TOO_LARGE: &str = "Range is too large";
-
-    if let Some(end) = value.as_u64() {
-        let end = u32::try_from(end)
-            .map_err(|_| RpcError::InvalidParameter(RANGE_TOO_LARGE.to_owned()))?;
-        bound_derivation_work(0, end)?;
-        return Ok((0, end));
-    }
-    let Some(pair) = value.as_array().filter(|pair| pair.len() == 2) else {
+pub(crate) fn parse_derivation_range(value: &Value) -> Result<(u32, u32), RpcError> {
+    let integer = |value: &Value| {
+        value
+            .as_i64()
+            .ok_or_else(|| RpcError::Misc("JSON integer out of range".into()))
+    };
+    let (begin, end) = if value.is_number() {
+        (0, integer(value)?)
+    } else if let Some(pair) = value
+        .as_array()
+        .filter(|pair| pair.len() == 2 && pair.iter().all(JsonValueTrait::is_number))
+    {
+        let begin = integer(&pair[0])?;
+        let end = integer(&pair[1])?;
+        if begin > end {
+            return Err(RpcError::InvalidParameter(
+                "Range specified as [begin,end] must not have begin after end".into(),
+            ));
+        }
+        (begin, end)
+    } else {
         return Err(RpcError::InvalidParameter(
-            "Range must be specified as end or as [begin,end]".to_owned(),
+            "Range must be specified as end or as [begin,end]".into(),
         ));
     };
-    let bound = |index: usize| -> Result<u32, RpcError> {
-        pair.get(index)
-            .and_then(JsonValueTrait::as_u64)
-            .ok_or_else(|| {
-                RpcError::InvalidParameter("Range should be greater or equal than 0".to_owned())
-            })
-            .and_then(|value| {
-                u32::try_from(value)
-                    .map_err(|_| RpcError::InvalidParameter(RANGE_TOO_LARGE.to_owned()))
-            })
-    };
-    let begin = bound(0)?;
-    let end = bound(1)?;
-    if end < begin {
+    if begin < 0 {
         return Err(RpcError::InvalidParameter(
-            "Range specified as [begin,end] must not have begin after end".to_owned(),
+            "Range should be greater or equal than 0".into(),
         ));
     }
+    if !(0..=i64::from(MAX_DERIVATION_INDEX)).contains(&end) {
+        return Err(RpcError::InvalidParameter(
+            "End of range is too high".into(),
+        ));
+    }
+    let begin = u32::try_from(begin)
+        .map_err(|_| RpcError::InvalidParameter("End of range is too high".into()))?;
+    let end = u32::try_from(end)
+        .map_err(|_| RpcError::InvalidParameter("End of range is too high".into()))?;
     bound_derivation_work(begin, end)?;
     Ok((begin, end))
 }
@@ -487,11 +495,6 @@ const MAX_DERIVATION_COUNT: u32 = 1_000_000;
 const MAX_DERIVATION_INDEX: u32 = (1 << 31) - 1;
 
 fn bound_derivation_work(begin: u32, end: u32) -> Result<(), RpcError> {
-    if end > MAX_DERIVATION_INDEX {
-        return Err(RpcError::InvalidParameter(
-            "End of range is too high".to_owned(),
-        ));
-    }
     // Core compares `high >= low + 1000000` on `int64_t`, so the sum cannot
     // wrap there; here both are `u32` and it can, which would turn the ceiling
     // into a floor. Widened rather than saturated for that reason.
@@ -501,11 +504,102 @@ fn bound_derivation_work(begin: u32, end: u32) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// Returns the payload inside an `addr(...)` descriptor, if `payload` is one.
-pub(crate) fn strip_addr_wrapper(payload: &str) -> Option<&str> {
-    let stripped = payload.strip_prefix("addr(")?;
-    let stripped = stripped.strip_suffix(')')?;
-    Some(stripped)
+/// One public, fixed scan descriptor and its Core-specialized attribution.
+pub(crate) struct ScanScript {
+    pub(crate) script_pubkey: Vec<u8>,
+    pub(crate) desc: String,
+}
+
+/// Evaluates the explicitly supported, non-ranged scan descriptor forms.
+/// Existing checksum/network/derivation rules stay in this descriptor owner.
+pub(crate) fn scan_descriptor(text: &str, network: Network) -> Result<ScanScript, RpcError> {
+    let (payload, _) = checked_checksum(text, ChecksumRequirement::Optional)?;
+    if payload.contains('*') || payload.contains('<') {
+        return Err(RpcError::InvalidParameter(
+            "Ranged and multipath scantxoutset descriptors are not supported".into(),
+        ));
+    }
+    let chain = convert::bitcoin_network(network);
+    if let Some(raw) = parse_unspendable(payload) {
+        let script = match raw.map_err(descriptor_error)? {
+            Unspendable::Address(address) => address
+                .require_network(chain)
+                .map_err(|_| RpcError::InvalidAddressOrKey("Address is not valid".into()))?
+                .script_pubkey(),
+            Unspendable::Raw(script) => script,
+        };
+        return Ok(ScanScript {
+            desc: crate::tx_render::script_descriptor(script.as_bytes(), network),
+            script_pubkey: script.into_bytes(),
+        });
+    }
+    // Parsing public keys directly rejects WIF/xprv without converting or
+    // deriving secrets. Other descriptor endpoints retain their own contract.
+    let descriptor = MiniscriptDescriptor::<DescriptorPublicKey>::from_str(payload)
+        .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
+    ensure_keys_match_network(&descriptor, chain).map_err(descriptor_error)?;
+    if descriptor_needs_private_keys(&descriptor) {
+        return Err(RpcError::InvalidAddressOrKey(
+            GENERATEBLOCK_NEEDS_PRIVATE_KEYS.into(),
+        ));
+    }
+    let kind =
+        match &descriptor {
+            MiniscriptDescriptor::Pkh(_) => "pkh",
+            MiniscriptDescriptor::Wpkh(_) => "wpkh",
+            MiniscriptDescriptor::Sh(sh)
+                if matches!(sh.as_inner(), miniscript::descriptor::ShInner::Wpkh(_)) =>
+            {
+                "sh(wpkh"
+            }
+            MiniscriptDescriptor::Tr(tr) if tr.tap_tree().is_none() => "tr",
+            _ => return Err(RpcError::InvalidParameter(
+                "Supported scan descriptors are addr, raw, pkh, wpkh, sh(wpkh), and key-only tr"
+                    .into(),
+            )),
+        };
+    let derived = descriptor
+        .at_derivation_index(0)
+        .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
+    let key = derived
+        .iter_pk()
+        .next()
+        .ok_or_else(|| RpcError::Internal("descriptor has no public key".into()))?;
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    let public = key.derive_public_key(&secp);
+    let path = key
+        .full_derivation_path()
+        .ok_or_else(|| RpcError::Internal("fixed descriptor has no derivation path".into()))?;
+    let path = path.to_string().replace('\'', "h");
+    let suffix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("/{path}")
+    };
+    // Core's constant key provider uses the full public key ID even when
+    // the descriptor wrote only an x coordinate. Miniscript's bare x-only
+    // fingerprint hashes the 32-byte coordinate instead, so derive this
+    // fallback from the normalized compressed public key.
+    let fingerprint = match key.as_descriptor_public_key() {
+        DescriptorPublicKey::Single(single) if single.origin.is_none() => public
+            .pubkey_hash()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>(),
+        _ => key.master_fingerprint().to_string(),
+    };
+    let origin = format!("[{fingerprint}{suffix}]");
+    let public = if kind == "tr" {
+        public.inner.x_only_public_key().0.to_string()
+    } else {
+        public.to_string()
+    };
+    let suffix = if kind == "sh(wpkh" { "))" } else { ")" };
+    Ok(ScanScript {
+        script_pubkey: derived.script_pubkey().into_bytes(),
+        desc: with_checksum(&format!("{kind}({origin}{public}{suffix}")),
+    })
 }
 
 // ---------------------------------------------------------------------------
