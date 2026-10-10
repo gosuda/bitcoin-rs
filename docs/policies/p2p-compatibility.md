@@ -170,12 +170,15 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: automatic outbound selection uses one persistent
    P2P-owned address book (`addrman.rs`, `service.rs`). DNS seeds are bootstrap
-   input; retained candidates are selected even with DNS disabled. A populated
-   book gets 60 seconds to connect before a remaining ready-outbound deficit
-   permits DNS recovery, with at most one seed pass per 60 seconds. DNS may
-   replace only same-source, unclaimed candidates not attempted in the past
-   minute: never-success entries need three failures; previously successful
-   entries need ten failures and over a week without success. These thresholds
+   input; retained candidates are selected even with DNS disabled. Books with
+   at least 64 records get 60 seconds to connect before a remaining
+   ready-outbound deficit permits DNS recovery. Smaller books query immediately
+   and retry every 60 seconds regardless of the ready-outbound count. Both paths
+   make at most one seed pass per 60 seconds. DNS may replace only same-source,
+   unclaimed candidates not attempted in the past minute. Records dated more
+   than ten minutes in the future are eligible after clock rollback; otherwise,
+   never-success entries need three failures, and previously successful entries
+   need ten failures and over a week without success. These thresholds
    adapt Core's `IsTerrible` health criteria, not its tried-bucket eviction
    algorithm. Retirement occurs only when a fresh admissible replacement can
    occupy a slot; DNS-disabled nodes retain failed candidates for recovery.

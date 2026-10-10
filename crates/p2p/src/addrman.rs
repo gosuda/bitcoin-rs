@@ -1,8 +1,9 @@
 //! Bounded, non-consensus peer knowledge. DNS and wire gossip feed this one owner.
 //!
-//! Bucket placement is keyed and source-limited; a learned address never replaces
-//! a proven address. The on-disk book is auxiliary: unreadable/corrupt data is
-//! preserved and disables writes for this run, while in-memory discovery works.
+//! Bucket placement is keyed and source-limited; gossip cannot replace retained
+//! peer knowledge. DNS recovery replaces only eligible same-source records.
+//! The on-disk book is auxiliary: unreadable/corrupt data is preserved and
+//! disables writes for this run, while in-memory discovery works.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -23,6 +24,7 @@ const NEW_SLOTS: u64 = 3072;
 const TRIED_SLOTS: u64 = 1024;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const STALE_SECS: u64 = 30 * 24 * 60 * 60;
+const FUTURE_SKEW_SECS: u64 = 10 * 60;
 const RETRY_SECS: u64 = 60;
 const MAX_GOSSIP: usize = 32;
 // A shared response survives reconnects, as Core's response cache does. The
@@ -185,7 +187,7 @@ impl Manager {
         self.expire(now);
         let addr = canonical(addr);
         if !routable(addr, self.allow_local)
-            || seen > now.saturating_add(600)
+            || seen > now.saturating_add(FUTURE_SKEW_SECS)
             || now.saturating_sub(seen) > STALE_SECS
         {
             return false;
@@ -220,15 +222,17 @@ impl Manager {
         };
         let slot = self.slot(&candidate, false);
         // Adapt Core's IsTerrible health thresholds for replacement admission:
+        // future timestamps beyond the admission skew are eligible; otherwise
         // never-success candidates need three failures, old successes need ten
-        // and a week without success. Retain failed knowledge until an actual
+        // and a week without success. Retain peer knowledge until an actual
         // admissible same-seed replacement exists (including with DNS disabled).
         // Pending and last-minute attempts are never replacement victims.
         let replaceable = |old: &Candidate| {
             source_ip.is_none()
                 && old.source_group == source_group
                 && now.saturating_sub(old.last_attempt) > RETRY_SECS
-                && ((old.last_success == 0 && old.failures >= 3)
+                && (old.last_seen > now.saturating_add(FUTURE_SKEW_SECS)
+                    || (old.last_success == 0 && old.failures >= 3)
                     || (old.last_success != 0
                         && now.saturating_sub(old.last_success) > 7 * 24 * 60 * 60
                         && old.failures >= 10))
@@ -1046,6 +1050,69 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn restarted_future_dated_seed_quota_allows_bounded_replacement_after_clock_rollback() {
+        // Core 31.1 AddrInfo::IsTerrible admits future-dated records as victims
+        // beyond ten minutes, but still protects attempts in the last minute.
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("peers.dat");
+        let book = AddressBook::open(Some(path.clone()), [1; 4], false);
+        for n in 1..=255 {
+            book.learn_dns("seed", &[addr(n)], 10_601);
+        }
+        assert_eq!(book.len(), MAX_SOURCE_GROUP);
+        let protected = {
+            let mut manager = book.state.lock();
+            let entries = &mut manager.stored.records;
+            entries[0].last_seen = 10_600;
+            entries[1].last_attempt = 9_940;
+            [entries[0].addr, entries[1].addr, entries[2].addr]
+        };
+        book.save();
+        drop(book);
+        let book = AddressBook::open(Some(path), [1; 4], false);
+        book.queued(protected[2]);
+        book.expire(10_000);
+        assert_eq!(
+            book.len(),
+            MAX_SOURCE_GROUP,
+            "clock rollback alone must retain peer data"
+        );
+        book.learn_dns("seed", &[SocketAddr::from(([0, 0, 0, 0], 0))], 10_000);
+        assert_eq!(
+            book.len(),
+            MAX_SOURCE_GROUP,
+            "invalid replacement must retain peer data"
+        );
+        let fresh = (1..=255)
+            .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
+            .find(|candidate| {
+                book.learn_dns("seed", &[*candidate], 10_000);
+                book.state
+                    .lock()
+                    .stored
+                    .records
+                    .iter()
+                    .any(|entry| entry.addr == *candidate)
+            })
+            .expect("future-dated source quota must admit a valid same-seed replacement");
+        assert_eq!(book.len(), MAX_SOURCE_GROUP);
+        assert_eq!(
+            book.select(&[], &[], 10_000, |candidate| candidate == fresh),
+            Some(fresh)
+        );
+        let manager = book.state.lock();
+        for protected in protected {
+            assert!(
+                manager
+                    .stored
+                    .records
+                    .iter()
+                    .any(|entry| entry.addr == protected)
+            );
+        }
+    }
+
     #[test]
     fn old_successes_need_local_failure_evidence_and_an_admissible_replacement() {
         let book = book();
