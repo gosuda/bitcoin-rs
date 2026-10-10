@@ -225,10 +225,11 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    Accepted VERSION metadata overwrites the one stored service field before
    ordinary service rejection, without marking Good, changing health times or
    promoting membership. This field is an optional u64: unknown DNS metadata
-   is `None`; an observed zero-bit claim is `Some(0)`. Known gossip ORs into the
-   same field, including turning unknown metadata into known zero. DNS without
-   an advertisement preserves every known value. No second last-VERSION or
-   fitness flag is introduced. Only genuine unknown DNS metadata can bootstrap
+   is `None`; an observed zero-bit claim is `Some(0)`. Gossip ORs service bits
+   into the same field; zero-bit gossip preserves an existing unknown value.
+   Direct VERSION zero and a fresh IP-sourced zero advertisement remain known
+   zero. DNS without an advertisement preserves every known value. No second
+   last-VERSION or fitness flag is introduced. Only genuine unknown DNS metadata can bootstrap
    ordinary selection; an accepted NONE VERSION is excluded immediately even
    without Good, through DNS refresh and restart. A successful NONE feeler
    still remains Good/Tried and is excluded from ordinary dialing. Native DNS

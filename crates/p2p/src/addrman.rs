@@ -574,7 +574,8 @@ impl Manager {
             if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
                 entry.last_seen = seen.saturating_sub(time_penalty);
             }
-            if let Some(services) = services {
+            // Zero-bit gossip adds no service knowledge to an unknown DNS record.
+            if let Some(services) = services.filter(|bits| *bits != 0 || entry.services.is_some()) {
                 entry.services = Some(entry.services.unwrap_or(0) | services);
             }
             if before != (entry.last_seen, entry.services) {
