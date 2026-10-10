@@ -689,6 +689,7 @@ fn publish_book_with_nonce(
             }
         }
     };
+    let mut temp_present = true;
     let result = (|| {
         file.write_all(&bytes)?;
         file.sync_all()?;
@@ -697,11 +698,13 @@ fn publish_book_with_nonce(
         drop(file);
         if *replace {
             fs::rename(&tmp, path)?;
+            temp_present = false;
             *replace = true;
         } else {
             fs::hard_link(&tmp, path)?;
             *replace = true;
             fs::remove_file(&tmp)?;
+            temp_present = false;
         }
         let parent = path
             .parent()
@@ -711,7 +714,8 @@ fn publish_book_with_nonce(
         bitcoin_rs_storage::checkpoint::fs::sync_dir(&dir)?;
         Ok(())
     })();
-    if result.is_err() {
+    // Once installation vacates the name, it no longer identifies our file.
+    if result.is_err() && temp_present {
         let _ = fs::remove_file(&tmp);
     }
     result
