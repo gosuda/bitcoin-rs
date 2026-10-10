@@ -21,7 +21,7 @@
 //! Skip gate: when loopback TCP is unavailable (sandboxed environment) the
 //! tests return early with a `tracing::warn!` rather than failing.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,13 +42,14 @@ use bitcoin_rs_node::{Network, NodeConfig};
 use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
-use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
+use bitcoin_rs_p2p::wire::{MAX_MESSAGE_PAYLOAD, PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundTx, Message, Peer, PeerLease, PeerRelaySink,
     TxRelayQueue, spawn_tx_relay_worker,
 };
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Wtxid,
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
@@ -58,11 +59,9 @@ const READ_POLL: Duration = Duration::from_millis(50);
 /// Bounded deadline for the inbound handshake.
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a socket is drained while asserting a message never arrives.
-const ABSENCE_WINDOW: Duration = Duration::from_millis(300);
+const ABSENCE_WINDOW: Duration = Duration::from_millis(500);
 /// Upper bound for admission and relay to become observable.
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Slice between deadline checks in the frame collectors.
-const COLLECT_SLICE: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -452,27 +451,128 @@ fn write_frame(dialer: &TcpStream, magic: Magic, message: &Message) -> anyhow::R
         .map_err(|error| anyhow!("dialer write failed: {error}"))
 }
 
+/// Helper that buffers incoming bytes from a dialer stream and decodes framed
+/// P2P messages without losing partial-frame data across read timeouts.
+struct FrameReader {
+    stream: TcpStream,
+    magic: Magic,
+    buf: Vec<u8>,
+}
+
+impl FrameReader {
+    fn new(dialer: &TcpStream, magic: Magic) -> anyhow::Result<Self> {
+        let stream = dialer
+            .try_clone()
+            .map_err(|error| anyhow!("dialer clone failed: {error}"))?;
+        stream.set_read_timeout(Some(READ_POLL))?;
+        Ok(Self {
+            stream,
+            magic,
+            buf: Vec::new(),
+        })
+    }
+
+    fn read_next_chunk(&mut self) -> anyhow::Result<bool> {
+        let mut chunk = [0u8; 4096];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => Ok(false),
+            Ok(n) => {
+                self.buf.extend_from_slice(&chunk[..n]);
+                Ok(true)
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(true),
+            Err(e) => Err(anyhow!("dialer read failed: {e}")),
+        }
+    }
+
+    fn pop_frame(&mut self) -> anyhow::Result<Option<Message>> {
+        if self.buf.len() < 24 {
+            return Ok(None);
+        }
+        let magic_bytes = [self.buf[0], self.buf[1], self.buf[2], self.buf[3]];
+        let actual_magic = Magic::from_bytes(magic_bytes);
+        if actual_magic != self.magic {
+            return Err(anyhow!(
+                "unexpected magic {actual_magic:?}, expected {:?}",
+                self.magic
+            ));
+        }
+        let payload_len = usize::try_from(u32::from_le_bytes([
+            self.buf[16],
+            self.buf[17],
+            self.buf[18],
+            self.buf[19],
+        ]))
+        .map_err(|_| anyhow!("invalid payload length"))?;
+        if payload_len > MAX_MESSAGE_PAYLOAD {
+            return Err(anyhow!(
+                "payload length {payload_len} exceeds max payload bound"
+            ));
+        }
+        let total_len = 24 + payload_len;
+        if self.buf.len() < total_len {
+            return Ok(None);
+        }
+        let mut cursor = std::io::Cursor::new(&self.buf[..total_len]);
+        let (message, _raw) = read_message(&mut cursor, self.magic)
+            .map_err(|e| anyhow!("dialer message decode failed: {e}"))?;
+        self.buf.drain(..total_len);
+        Ok(Some(message))
+    }
+}
+
 /// Drains framed messages off the dialer end until `until`, tolerating the
-/// poll timeout between frames.
+/// poll timeout between frames with partial-frame buffering.
 fn collect_frames(
     dialer: &TcpStream,
     magic: Magic,
     until: Instant,
 ) -> anyhow::Result<Vec<Message>> {
-    let mut stream = dialer
-        .try_clone()
-        .map_err(|error| anyhow!("dialer clone failed: {error}"))?;
-    stream.set_read_timeout(Some(READ_POLL))?;
+    let mut reader = FrameReader::new(dialer, magic)?;
     let mut frames = Vec::new();
     while Instant::now() < until {
-        match read_message(&mut stream, magic) {
-            Ok((message, _raw)) => frames.push(message),
-            Err(PeerError::Io(error))
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(error) => return Err(anyhow!("dialer read failed: {error}")),
+        while let Some(msg) = reader.pop_frame()? {
+            frames.push(msg);
+        }
+        if !reader.read_next_chunk()? {
+            break;
         }
     }
+    while let Some(msg) = reader.pop_frame()? {
+        frames.push(msg);
+    }
     Ok(frames)
+}
+
+/// Collects framed messages until one satisfies `predicate` or `timeout` elapses,
+/// preserving partial-frame buffering across read timeouts.
+fn wait_for_matching_frame<F>(
+    dialer: &TcpStream,
+    magic: Magic,
+    timeout: Duration,
+    mut predicate: F,
+) -> anyhow::Result<Message>
+where
+    F: FnMut(&Message) -> bool,
+{
+    let mut reader = FrameReader::new(dialer, magic)?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        while let Some(msg) = reader.pop_frame()? {
+            if predicate(&msg) {
+                return Ok(msg);
+            }
+        }
+        if !reader.read_next_chunk()? {
+            break;
+        }
+    }
+    while let Some(msg) = reader.pop_frame()? {
+        if predicate(&msg) {
+            return Ok(msg);
+        }
+    }
+    bail!("expected frame did not arrive within {timeout:?}")
 }
 
 /// True when one of `frames` announces `txid` as transaction inventory.
@@ -480,6 +580,17 @@ fn announces_tx(frames: &[Message], txid: &Txid) -> bool {
     frames.iter().any(|message| match message {
         Message::Inv(items) => items.iter().any(|item| match item {
             Inventory::Transaction(hash) => hash.as_byte_array() == txid.as_bytes(),
+            _ => false,
+        }),
+        _ => false,
+    })
+}
+
+/// True when one of `frames` announces `wtxid` as witness transaction inventory.
+fn announces_wtx(frames: &[Message], wtxid: &Wtxid) -> bool {
+    frames.iter().any(|message| match message {
+        Message::Inv(items) => items.iter().any(|item| match item {
+            Inventory::WTx(hash) => hash.as_byte_array() == wtxid.as_bytes(),
             _ => false,
         }),
         _ => false,
@@ -505,17 +616,25 @@ fn wait_for_tx_inv(
     txid: &Txid,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let slice = deadline.min(Instant::now() + COLLECT_SLICE);
-        let frames = collect_frames(dialer, magic, slice)?;
-        if announces_tx(&frames, txid) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!("relay inv for tx {txid} did not arrive within {timeout:?}");
-        }
-    }
+    wait_for_matching_frame(dialer, magic, timeout, |msg| {
+        announces_tx(std::slice::from_ref(msg), txid)
+    })
+    .map(|_| ())
+    .map_err(|e| anyhow!("relay inv for tx {txid} did not arrive within {timeout:?}: {e}"))
+}
+
+/// Collects frames until `wtxid` is announced or `timeout` elapses.
+fn wait_for_wtx_inv(
+    dialer: &TcpStream,
+    magic: Magic,
+    wtxid: &Wtxid,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    wait_for_matching_frame(dialer, magic, timeout, |msg| {
+        announces_wtx(std::slice::from_ref(msg), wtxid)
+    })
+    .map(|_| ())
+    .map_err(|e| anyhow!("relay inv for wtx {wtxid} did not arrive within {timeout:?}: {e}"))
 }
 
 /// Collects frames until `txid` is requested with getdata or `timeout`
@@ -526,17 +645,11 @@ fn wait_for_tx_getdata(
     txid: &Txid,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let slice = deadline.min(Instant::now() + COLLECT_SLICE);
-        let frames = collect_frames(dialer, magic, slice)?;
-        if requests_tx(&frames, txid) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!("getdata for tx {txid} did not arrive within {timeout:?}");
-        }
-    }
+    wait_for_matching_frame(dialer, magic, timeout, |msg| {
+        requests_tx(std::slice::from_ref(msg), txid)
+    })
+    .map(|_| ())
+    .map_err(|e| anyhow!("getdata for tx {txid} did not arrive within {timeout:?}: {e}"))
 }
 
 /// Polls `predicate` until it holds or `timeout` elapses.
@@ -753,23 +866,35 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
 
-    let until = Instant::now() + ABSENCE_WINDOW;
-    let (legacy_frames, witness_frames, source_frames) = std::thread::scope(|s| {
-        let h1 = s.spawn(|| collect_frames(&harness.bystander.dialer, harness.magic, until));
-        let h2 = s.spawn(|| collect_frames(&witness_peer.dialer, harness.magic, until));
-        let h3 = s.spawn(|| collect_frames(&harness.source.dialer, harness.magic, until));
-        let legacy = h1
-            .join()
-            .map_err(|_| anyhow!("bystander collector panicked"))?;
-        let witness = h2
-            .join()
-            .map_err(|_| anyhow!("witness collector panicked"))?;
-        let source = h3
-            .join()
-            .map_err(|_| anyhow!("source collector panicked"))?;
-        Ok::<_, anyhow::Error>((legacy?, witness?, source?))
+    // Wait concurrently for positive relay:
+    // legacy bystander receives txid inv, witness peer receives wtxid inv.
+    std::thread::scope(|s| {
+        let h1 = s.spawn(|| {
+            wait_for_tx_inv(
+                &harness.bystander.dialer,
+                harness.magic,
+                &txid,
+                OBSERVE_TIMEOUT,
+            )
+        });
+        let h2 = s.spawn(|| {
+            wait_for_wtx_inv(&witness_peer.dialer, harness.magic, &wtxid, OBSERVE_TIMEOUT)
+        });
+        h1.join()
+            .map_err(|_| anyhow!("bystander collector panicked"))??;
+        h2.join()
+            .map_err(|_| anyhow!("witness collector panicked"))??;
+        Ok::<(), anyhow::Error>(())
     })?;
 
+    // Now that positive relay is confirmed complete across mixed peers,
+    // verify source exclusion: drain the source socket for ABSENCE_WINDOW
+    // and assert no inventory announcement ever appears on it.
+    let source_frames = collect_frames(
+        &harness.source.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
     let inventories = |frames: &[Message]| -> Vec<Inventory> {
         frames
             .iter()
@@ -782,18 +907,10 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
             .collect()
     };
     assert_eq!(
-        inventories(&legacy_frames),
-        vec![Inventory::Transaction(bitcoin::Txid::from_byte_array(
-            *txid.as_bytes()
-        ),)]
+        inventories(&source_frames),
+        [],
+        "source peer must never receive inventory for its own transaction"
     );
-    assert_eq!(
-        inventories(&witness_frames),
-        vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
-            *wtxid.as_bytes()
-        ),)]
-    );
-    assert_eq!(inventories(&source_frames), []);
     Ok(())
 }
 

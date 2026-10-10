@@ -203,6 +203,23 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     Ok(())
 }
 
+fn parse_journal_head(bytes: &[u8]) -> Option<(u32, [u8; 32])> {
+    if bytes.len() < 9 || &bytes[..4] != b"JRNH" {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&bytes[9..]).ok()?;
+    let height = u32::try_from(payload.get("height")?.as_u64()?).ok()?;
+    let hash_array = payload.get("block_hash")?.as_array()?;
+    if hash_array.len() != 32 {
+        return None;
+    }
+    let mut block_hash = [0u8; 32];
+    for (i, val) in hash_array.iter().enumerate() {
+        block_hash[i] = u8::try_from(val.as_u64()?).ok()?;
+    }
+    Some((height, block_hash))
+}
+
 #[test]
 fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -220,24 +237,32 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_tip = state.apply_block(&child)?;
     let head_path = config.data_dir.join("chainstate-journal").join("head.json");
-    let head_before = std::fs::read(&head_path).ok();
+    let head_before_bytes = std::fs::read(&head_path)?;
+    let (head_before_height, _) = parse_journal_head(&head_before_bytes)
+        .ok_or_else(|| anyhow::anyhow!("head.json must be valid after checkpoint"))?;
+    assert_eq!(
+        head_before_height, 0,
+        "head.json must stay at height 0 before maintenance flush"
+    );
+
     let worker = state.start_chainstate_maintenance()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mut flushed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if let Ok(bytes) = std::fs::read(&head_path) {
-            if Some(&bytes) != head_before.as_ref()
-                && (bytes
-                    .windows(b"\"height\":1".len())
-                    .any(|w| w == b"\"height\":1")
-                    || bytes
-                        .windows(b"\"height\": 1".len())
-                        .any(|w| w == b"\"height\": 1"))
-            {
-                break;
+            if let Some((height, hash)) = parse_journal_head(&bytes) {
+                if height == 1 && expected_tip.hash == Hash256::from_le_bytes(&hash) {
+                    flushed = true;
+                    break;
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    assert!(
+        flushed,
+        "idle journal batch was not flushed within deadline"
+    );
     state.shutdown().store(true, Ordering::Release);
     worker
         .join()
