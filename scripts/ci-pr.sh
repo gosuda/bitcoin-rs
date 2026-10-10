@@ -80,6 +80,9 @@ test_crates_profiles() {
   # it must run in the PR lane, not only the merge-only workspace lane.
   profile "test: bitcoin-rs-primitives" \
     cargo_test -p bitcoin-rs-primitives
+  # The offline CLI uses the checked-in Core snapshot, not a running daemon.
+  profile "test: bitcoin-rs-snapshot" \
+    cargo_test -p bitcoin-rs-snapshot
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-chainstate (native,fjall)" \
@@ -110,7 +113,8 @@ test_workspace_profiles() {
     cargo_test --workspace \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
       --exclude bitcoin-rs-p2p \
-      --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc
+      --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc \
+      --exclude bitcoin-rs-snapshot
   # The RPC package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
