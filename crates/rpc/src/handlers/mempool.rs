@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
@@ -66,7 +67,25 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 /// transaction references while locked; hex encoding and JSON serialization
 /// happen after the guard is released.
 pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let (outputs, options) = spending_prevout_arguments(params)?;
+    let bound = spending_prevout_arguments(params)?;
+    let array = super::params_array(bound.as_ref())?;
+    super::ensure_at_most_params(bound.as_ref(), 2)?;
+    // Binding fills omitted positions with null. Preserve this method's
+    // existing missing-outputs error without conflating it with an explicit
+    // null supplied by the caller. Name/collision validation has already run.
+    if params.is_object()
+        && params.get("outputs").is_none()
+        && params
+            .get("args")
+            .and_then(JsonContainerTrait::as_array)
+            .is_none_or(sonic_rs::Array::is_empty)
+    {
+        return Err(RpcError::InvalidParams("outputs is required"));
+    }
+    let outputs = array
+        .first()
+        .ok_or(RpcError::InvalidParams("outputs is required"))?;
+    let options = array.get(1).cloned().unwrap_or_default();
     if !outputs.is_array() && !options.is_null() && !options.is_object() {
         return Err(RpcError::InvalidType(format!(
             "Wrong type passed:\n{{\n    \"Position 1 (outputs)\": \"JSON value of type {} is not of expected type array\",\n    \"Position 2 (options)\": \"JSON value of type {} is not of expected type object\"\n}}",
@@ -187,82 +206,38 @@ fn check_prevout_fields(
     Ok(())
 }
 
-/// Bind the method's named forms, including Core's optional `args` prefix.
-fn spending_prevout_arguments(params: &Value) -> Result<(&Value, Value), RpcError> {
-    if let Some(array) = params.as_array() {
-        if array.len() > 2 {
-            return Err(RpcError::InvalidParams("too many parameters"));
-        }
-        return Ok((
-            array
-                .first()
-                .ok_or(RpcError::InvalidParams("outputs is required"))?,
-            array.get(1).cloned().unwrap_or_default(),
-        ));
+/// Fold this method's named-only option keys before ordinary argument binding.
+fn spending_prevout_arguments(params: &Value) -> Result<Cow<'_, Value>, RpcError> {
+    let option_names = ["mempool_only", "return_spending_tx"];
+    if !params.is_object() || !option_names.iter().any(|name| params.get(*name).is_some()) {
+        return super::bind_named_params(params, &["outputs", "options"]);
     }
     let object = params
         .as_object()
-        .ok_or(RpcError::InvalidParams("params must be an array or object"))?;
-    if let Some(key) = object
-        .iter()
-        .map(|(key, _)| key)
-        .filter(|key| {
-            ![
-                "outputs",
-                "options",
-                "mempool_only",
-                "return_spending_tx",
-                "args",
-            ]
-            .contains(key)
-        })
-        .min()
-    {
-        return Err(RpcError::InvalidParameter(format!(
-            "Unknown named parameter {key}"
-        )));
-    }
-    // Core consumes the named `args` key even when it is not an array.
-    let args = params.get("args").and_then(JsonContainerTrait::as_array);
-    if args.is_some_and(|args| args.len() > 2) {
-        return Err(RpcError::InvalidParams("too many parameters"));
-    }
-    let mut options = Value::default();
-    for key in ["mempool_only", "return_spending_tx"] {
-        if let Some(value) = params.get(key) {
-            if params.get("options").is_some() {
+        .ok_or(RpcError::InvalidParams("params must be an object"))?;
+    super::ensure_unique_named_params(object)?;
+    if params.get("options").is_some() {
+        for key in option_names {
+            if params.get(key).is_some() {
                 return Err(RpcError::InvalidParameter(format!(
                     "Parameter options conflicts with parameter {key}"
                 )));
             }
-            if options.is_null() {
-                options = sonic_rs::json!({});
-            }
-            let _ = options.insert(key, value.clone());
         }
     }
-    if let Some(value) = params.get("options") {
-        options = value.clone();
-    }
-    for (index, key) in [(0, "outputs"), (1, "options")] {
-        let named = params.get(key).is_some() || (index == 1 && !options.is_null());
-        if named && args.is_some_and(|args| args.len() > index) {
-            return Err(RpcError::InvalidParameter(format!(
-                "Parameter {key} specified twice both as positional and named argument"
-            )));
+    let mut normalized = sonic_rs::Object::new();
+    let mut options = sonic_rs::Object::new();
+    for (key, value) in object {
+        if option_names.contains(&key) {
+            options.insert(key, value.clone());
+        } else {
+            normalized.insert(key, value.clone());
         }
     }
-    let outputs = params
-        .get("outputs")
-        .or_else(|| args.and_then(|args| args.first()))
-        .ok_or(RpcError::InvalidParams("outputs is required"))?;
-    if options.is_null() {
-        options = args
-            .and_then(|args| args.get(1))
-            .cloned()
-            .unwrap_or_default();
-    }
-    Ok((outputs, options))
+    normalized.insert("options", Value::from(options));
+    let normalized = Value::from(normalized);
+    super::bind_named_params(&normalized, &["outputs", "options"])
+        .map(|bound| Cow::Owned(bound.into_owned()))
 }
 
 pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
