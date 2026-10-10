@@ -119,6 +119,7 @@ fn bind_rpc(
             chain_network: state.config().network,
             chain_transition: state.stable_read(),
             block_body_source: Some(block_body_source),
+            block_undo_source: Some(chainstate.clone()),
             prune_service: state.prune_service(),
             closed_for_recovery: chainstate.closed_for_recovery_reader(),
             chain_control: Some(Arc::new(RpcChainControl {

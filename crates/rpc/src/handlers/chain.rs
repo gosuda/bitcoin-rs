@@ -536,12 +536,25 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["blockhash", "verbosity"])?;
+    let params = bound.as_ref();
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbosity = getblock_verbosity(params)?;
-    let record = ctx
-        .chain
-        .block_by_hash(hash)
-        .ok_or(RpcError::NotFound("block not found"))?;
+    let _render = if verbosity >= 2 {
+        Some(ctx.try_acquire_block_render().ok_or_else(|| {
+            RpcError::Misc("too many concurrent full-block reads; retry".to_owned())
+        })?)
+    } else {
+        None
+    };
+    let record = if verbosity >= 2 && ctx.chain.block_undo_source.is_some() {
+        // Undo reads use the bounded owner; avoid a legacy metadata read
+        // before acquiring the shared materialization permit.
+        ctx.chain.header_record(hash)
+    } else {
+        ctx.chain.block_by_hash(hash)
+    }
+    .ok_or(RpcError::NotFound("block not found"))?;
     if verbosity == 0 {
         let Some(block_payload_hex) = ctx.chain.block_body_hex(&record) else {
             return Err(RpcError::NotFound("block data pruned"));
@@ -1439,7 +1452,9 @@ fn block_verbose_typed(
         .chain
         .chain_work_hex_for_hash(Hash256::from(record.hash))
         .unwrap_or_else(|| "00".to_owned());
-    let next_block_hash = next_applied_block_hash(ctx, &view, record.height);
+    let next_block_hash = (block_confirmations > 0)
+        .then(|| next_applied_block_hash(ctx, &view, record.height))
+        .flatten();
     if !include_block_fields {
         return typed_to_sonic(&v31::GetBlockHeaderVerbose {
             hash: record.hash.to_string(),
@@ -1460,7 +1475,7 @@ fn block_verbose_typed(
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
         });
     }
-    let (_bytes, block) = decode_block(ctx, record)?;
+    let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
     let size = i64_saturated_len(block.total_size());
@@ -1493,16 +1508,7 @@ fn block_verbose_typed(
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
         });
     }
-    // Verbosity 3 serves the verbosity-2 shape here: no prevout source is
-    // wired into block rendering, so per-input prevouts stay absent.
-    let mut txs = Vec::with_capacity(block.txs.len());
-    for tx in &block.txs {
-        txs.push(v31::GetBlockVerboseTwoTransaction {
-            transaction: convert::raw_transaction_verbose(tx, ctx.chain.chain_network, None)?,
-            fee: None,
-        });
-    }
-    typed_to_sonic_omitting_nulls(&v31::GetBlockVerboseTwo {
+    let base = v31::GetBlockVerboseTwo {
         hash: record.hash.to_string(),
         confirmations: block_confirmations,
         size,
@@ -1513,7 +1519,7 @@ fn block_verbose_typed(
         version: header.version,
         version_hex,
         merkle_root: header.merkle_root.to_string_be(),
-        tx: txs,
+        tx: Vec::new(),
         time: i64::from(header.time),
         median_time: Some(i64_saturated(u64::from(mediantime))),
         nonce: i64::from(header.nonce),
@@ -1521,10 +1527,89 @@ fn block_verbose_typed(
         target: compact_target_hex(header.bits),
         difficulty: ctx.chain.difficulty_for_bits(header.bits),
         chain_work: chainwork_hex,
-        n_tx: i64_saturated_len(record.tx_count),
-        previous_block_hash: Some(header.prev_blockhash.to_string()),
+        n_tx: i64_saturated_len(block.txs.len()),
+        previous_block_hash: (record.height > 0).then(|| header.prev_blockhash.to_string()),
         next_block_hash: next_block_hash.map(|hash| hash.to_string()),
-    })
+    };
+    render_detailed_block(
+        &base,
+        &block,
+        spent.as_deref(),
+        verbosity,
+        ctx.chain.chain_network,
+    )
+}
+
+type SpentCoins = Vec<Vec<bitcoin_rs_utxo::UtxoCoin>>;
+
+fn block_with_spends(
+    ctx: &Context,
+    record: &BlockRecord,
+    view: &AppliedView,
+    verbosity: u64,
+) -> Result<(Block, Option<SpentCoins>), RpcError> {
+    if verbosity >= 2
+        && let Some(source) = &ctx.chain.block_undo_source
+    {
+        let result = source
+            .block_spends(record.hash.into(), view.hash(ctx.chain.chain_network))
+            .map_err(block_spends_error)?;
+        let spent = match result.spent {
+            Ok(spent) => Some(spent),
+            Err(
+                bitcoin_rs_utxo::contract::HistoryUnavailable::Missing
+                | bitcoin_rs_utxo::contract::HistoryUnavailable::Pruned { .. },
+            ) => None,
+            Err(reason) => {
+                return Err(block_spends_error(
+                    bitcoin_rs_utxo::contract::BlockSpendsError::History(reason),
+                ));
+            }
+        };
+        return Ok((result.block, spent));
+    }
+    let (_, block) = decode_block(ctx, record)?;
+    Ok((block, None))
+}
+
+fn block_spends_error(error: bitcoin_rs_utxo::contract::BlockSpendsError) -> RpcError {
+    use bitcoin_rs_utxo::contract::{BlockSpendsError as E, BoundedReadError, HistoryUnavailable};
+    match error {
+        E::UnknownBlock => RpcError::InvalidAddressOrKey("Block not found".to_owned()),
+        E::History(HistoryUnavailable::Pruned { .. }) => RpcError::Misc("Block not available (pruned data)".to_owned()),
+        E::History(HistoryUnavailable::Missing) | E::BodyRead(BoundedReadError::Storage(_)) => RpcError::Misc("Block not found on disk".to_owned()),
+        E::Undo(_) | E::Corrupt(_) | E::BoundedRead(BoundedReadError::Storage(_)) => RpcError::CoreInternal(
+            "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.".to_owned()),
+        other => RpcError::Misc(other.to_string()),
+    }
+}
+
+fn render_detailed_block(
+    base: &v31::GetBlockVerboseTwo,
+    block: &Block,
+    spent: Option<&[Vec<bitcoin_rs_utxo::UtxoCoin>]>,
+    verbosity: u64,
+    network: Network,
+) -> Result<Value, RpcError> {
+    if spent.is_some_and(|spent| spent.len() != block.txs.len()) {
+        return Err(RpcError::CoreInternal(
+            "block undo transaction count differs".to_owned(),
+        ));
+    }
+    let tx = block
+        .txs
+        .iter()
+        .enumerate()
+        .map(|(index, tx)| {
+            let coins = spent.and_then(|spent| spent.get(index)).map(Vec::as_slice);
+            crate::tx_render::transaction_json_with_spends(tx, network, coins, verbosity >= 3)
+        })
+        .collect::<Result<Vec<_>, RpcError>>()?;
+    // Header/common fields retain the pinned DTO. Transaction values use the
+    // existing Core renderer because its wire version spans all u32 values.
+    let mut value = typed_to_sonic_omitting_nulls(base)?;
+    let _ = value.insert("tx", json!(tx));
+    Ok(value)
 }
 
 fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
@@ -1805,6 +1890,36 @@ mod tests {
         let fields = compute_fee_fields(&ctx, &block)
             .unwrap_or_else(|err| panic!("coinbase-only fees should not need txindex: {err}"));
         assert_eq!(fields, FeeFields::default());
+    }
+
+    #[test]
+    fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
+        use bitcoin_rs_utxo::contract::{BlockSpendsError, HistoryUnavailable};
+        let corruption = block_spends_error(BlockSpendsError::Corrupt("fixture"));
+        assert_eq!(corruption.code(), -32603);
+        assert_eq!(
+            corruption.to_string(),
+            "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event."
+        );
+        assert_eq!(
+            block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
+                below: 10
+            }))
+            .code(),
+            -1
+        );
+        assert_eq!(
+            block_spends_error(BlockSpendsError::History(HistoryUnavailable::Missing)).code(),
+            -1
+        );
+        assert_eq!(block_spends_error(BlockSpendsError::Retry).code(), -1);
+        assert_eq!(
+            block_spends_error(BlockSpendsError::BodyRead(
+                bitcoin_rs_utxo::contract::BoundedReadError::Unsupported
+            ))
+            .code(),
+            -1
+        );
     }
 
     #[test]
@@ -2376,7 +2491,6 @@ mod tests {
         });
 
         let ctx = Arc::new(ctx);
-        let b2_text = b2_hash.to_string();
         let mut seen_a = false;
         let mut seen_b = false;
         // Sampling runs until both publications have answered, not for a fixed
@@ -2397,10 +2511,9 @@ mod tests {
                     next.is_none_or(Value::is_null),
                     "under the a1 tip the next applied height is unmined, yet {next:?} appeared"
                 ),
-                -1 => assert_eq!(
-                    next.and_then(Value::as_str),
-                    Some(b2_text.as_str()),
-                    "off the applied chain, only the b2 branch's next hash is coherent"
+                -1 => assert!(
+                    next.is_none_or(Value::is_null),
+                    "Core omits the successor of a block outside the applied chain"
                 ),
                 other => panic!("confirmations {other} matches no published branch"),
             }

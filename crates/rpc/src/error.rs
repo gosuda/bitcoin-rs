@@ -59,6 +59,9 @@ pub enum RpcError {
     /// Bitcoin Core `RPC_MISC_ERROR` (-1), including unavailable optional indexes.
     #[error("{0}")]
     Misc(String),
+    /// Bitcoin Core internal failure whose wire message has no local prefix.
+    #[error("{0}")]
+    CoreInternal(String),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -109,7 +112,9 @@ impl RpcError {
             Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
             Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
-            Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
+            Self::MethodDisabled(_) | Self::Internal(_) | Self::CoreInternal(_) => {
+                Self::INTERNAL_ERROR
+            }
         }
     }
 }

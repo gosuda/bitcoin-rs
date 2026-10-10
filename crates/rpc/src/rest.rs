@@ -116,7 +116,7 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
         return route_blockhash_by_height(ctx, suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/spenttxouts/") {
-        return route_spent_txouts(suffix);
+        return route_spent_txouts(ctx, suffix);
     }
     not_found()
 }
@@ -171,7 +171,7 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
     let Some(record) = ctx.chain.record_for_hash(hash) else {
         return not_found_with(format!("{hash_text} not found"));
     };
-    let Some(_render) = ctx.try_acquire_rest_render() else {
+    let Some(_render) = ctx.try_acquire_block_render() else {
         return service_unavailable("too many concurrent full-block REST requests");
     };
     let body = match bounded_block_body(ctx, &record) {
@@ -217,7 +217,7 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
     let Some(record) = ctx.chain.record_for_hash(hash) else {
         return not_found_with(format!("{hash_text} not found"));
     };
-    let Some(_render) = ctx.try_acquire_rest_render() else {
+    let Some(_render) = ctx.try_acquire_block_render() else {
         return service_unavailable("too many concurrent full-block REST requests");
     };
     let body = match bounded_block_body(ctx, &record) {
@@ -559,19 +559,89 @@ fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
     }
 }
 
-/// Core `/rest/spenttxouts/<hash>.<ext>`.
-///
-/// This node does not retain undo data, so every well-formed request answers
-/// Core's undo-unavailable error.
-fn route_spent_txouts(suffix: &str) -> Response {
+/// Core spent outputs use ordinary `TxOut` encoding, never native undo bytes.
+fn route_spent_txouts(ctx: &Context, suffix: &str) -> Response {
+    use bitcoin_rs_utxo::contract::{BlockSpendsError as E, BoundedReadError, HistoryUnavailable};
     let (hash_text, format) = split_format(suffix);
-    if Hash256::from_str(hash_text).is_err() {
+    if hash_text.contains('/') {
+        return bad_request("Invalid URI format. Expected /rest/spenttxouts/<hash>.<ext>");
+    }
+    let Ok(hash) = Hash256::from_str(hash_text) else {
         return bad_request(format!("Invalid hash: {hash_text}"));
+    };
+    let format = format.unwrap_or("");
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let view = ctx.chain.applied_view();
+    let rows = if hash == ctx.chain.chain_network.genesis_block_hash() {
+        vec![Vec::new()]
+    } else {
+        let Some(source) = &ctx.chain.block_undo_source else {
+            return if ctx.chain.height_for_hash(hash).is_some() {
+                not_found_with(format!("{hash_text} undo not available"))
+            } else {
+                not_found_with(format!("{hash_text} not found"))
+            };
+        };
+        match source.block_spends(hash, view.hash(ctx.chain.chain_network)) {
+            Ok(result) => match result.spent {
+                Ok(spent) => spent,
+                Err(
+                    reason @ (HistoryUnavailable::Reserved { .. } | HistoryUnavailable::Shutdown),
+                ) => return service_unavailable(reason.to_string()),
+                Err(HistoryUnavailable::Missing | HistoryUnavailable::Pruned { .. }) => {
+                    return not_found_with(format!("{hash_text} undo not available"));
+                }
+            },
+            Err(E::UnknownBlock) => return not_found_with(format!("{hash_text} not found")),
+            Err(
+                error @ (E::Retry
+                | E::Closed
+                | E::ResourceLimit
+                | E::BodyRead(_)
+                | E::BoundedRead(
+                    BoundedReadError::Unsupported | BoundedReadError::Limit { .. },
+                )
+                | E::History(
+                    HistoryUnavailable::Reserved { .. }
+                    | HistoryUnavailable::Missing
+                    | HistoryUnavailable::Shutdown,
+                )),
+            ) => {
+                return service_unavailable(error.to_string());
+            }
+            Err(_) => return not_found_with(format!("{hash_text} undo not available")),
+        }
+    };
+    match format {
+        "json" => {
+            let rows = rows.iter().map(|coins| coins.iter().map(|coin| json!({
+                "value": tx_render::btc_amount_json(coin.txout.value.to_sat()),
+                "scriptPubKey": tx_render::script_pub_key_json(&coin.txout.script_pubkey, ctx.chain.chain_network)
+            })).collect::<Vec<_>>()).collect::<Vec<_>>();
+            text_response("application/json", sonic_bytes(&json!(rows)))
+        }
+        "hex" | "bin" => {
+            let mut bytes = Vec::new();
+            append_compact_size(&mut bytes, rows.len());
+            for coins in rows {
+                append_compact_size(&mut bytes, coins.len());
+                for coin in coins {
+                    bytes.extend_from_slice(&consensus_bytes(&coin.txout));
+                }
+            }
+            if format == "hex" {
+                text_response(
+                    "text/plain",
+                    format!("{}\n", bytes.to_lower_hex_string()).into_bytes(),
+                )
+            } else {
+                binary_response("application/octet-stream", &bytes)
+            }
+        }
+        _ => format_not_found(available_formats()),
     }
-    if format.is_none() {
-        return format_not_found(available_formats());
-    }
-    not_found_with(format!("{hash_text} undo not available"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,8 +1124,8 @@ mod tests {
         ctx.chain.add_block(record);
         ctx.chain.block_body_source = Some(Arc::new(PanicBlockSource));
         publish_active_chain(&ctx, &[block.header]);
-        let _first = ctx.try_acquire_rest_render().expect("first permit");
-        let _second = ctx.try_acquire_rest_render().expect("second permit");
+        let _first = ctx.try_acquire_block_render().expect("first permit");
+        let _second = ctx.try_acquire_block_render().expect("second permit");
         let ctx = Arc::new(ctx);
 
         for path in [
@@ -1940,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn spenttxouts_returns_unavailable() {
+    fn spenttxouts_unknown_block_is_not_found() {
         let ctx = Arc::new(Context::new());
         let hash = "0000000000000000000000000000000000000000000000000000000000000001";
         for format in ["json", "hex", "bin"] {
@@ -1954,7 +2024,7 @@ mod tests {
             assert!(
                 String::from_utf8(response.body)
                     .expect("body")
-                    .contains("undo not available"),
+                    .contains("not found"),
                 "{format}"
             );
         }

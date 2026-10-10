@@ -10,7 +10,7 @@ use bitcoin_rs_primitives::{BlockHash, Network, Tx, TxIn, TxOut, consensus_bytes
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness};
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueMutTrait as _, Value, json};
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
@@ -117,6 +117,63 @@ pub(crate) fn transaction_json(
         }
     }
     value
+}
+
+/// Extends the canonical transaction projection with certified block inputs.
+///
+/// Core's unsigned transaction version remains owned by `transaction_json`;
+/// the pinned verbose transaction DTO cannot represent its full wire range.
+/// Header version semantics are independent and unchanged.
+pub(crate) fn transaction_json_with_spends(
+    tx: &Tx,
+    network: Network,
+    coins: Option<&[bitcoin_rs_utxo::UtxoCoin]>,
+    include_prevouts: bool,
+) -> Result<Value, crate::error::RpcError> {
+    use crate::error::RpcError;
+    let mut value = transaction_json(tx, network, None);
+    let Some(coins) = coins.filter(|_| !is_coinbase(tx)) else {
+        return Ok(value);
+    };
+    if coins.len() != tx.inputs.len() {
+        return Err(RpcError::CoreInternal(
+            "block prevout count differs from input count".to_owned(),
+        ));
+    }
+    let inputs = coins.iter().try_fold(0_u64, |sum, coin| {
+        sum.checked_add(coin.txout.value.to_sat())
+    });
+    let outputs = tx
+        .outputs
+        .iter()
+        .try_fold(0_u64, |sum, output| sum.checked_add(output.value.to_sat()));
+    let fee = inputs
+        .zip(outputs)
+        .and_then(|(inputs, outputs)| inputs.checked_sub(outputs))
+        .ok_or_else(|| {
+            RpcError::CoreInternal("block undo has inconsistent transaction values".to_owned())
+        })?;
+    let _ = value.insert("fee", btc_amount_json(fee));
+    if include_prevouts {
+        let vin = value
+            .get_mut("vin")
+            .and_then(|vin| vin.as_array_mut())
+            .ok_or_else(|| {
+                RpcError::CoreInternal("transaction projection has no inputs".to_owned())
+            })?;
+        for (input, coin) in vin.iter_mut().zip(coins) {
+            let _ = input.insert(
+                "prevout",
+                json!({
+                    "generated": coin.coinbase,
+                    "height": coin.height,
+                    "value": btc_amount_json(coin.txout.value.to_sat()),
+                    "scriptPubKey": script_pub_key_json(&coin.txout.script_pubkey, network)
+                }),
+            );
+        }
+    }
+    Ok(value)
 }
 
 /// Render a `scriptPubKey` object in Bitcoin Core's verbose shape.

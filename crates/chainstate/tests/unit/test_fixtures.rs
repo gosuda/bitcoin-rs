@@ -63,6 +63,28 @@ pub(crate) struct MemoryBodies {
 }
 
 impl BlockBodyStore for MemoryBodies {
+    fn load_block_body_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::BoundedReadError> {
+        self.bodies
+            .read()
+            .get(&(height, hash))
+            .map(|body| {
+                if body.len() > max_bytes {
+                    Err(bitcoin_rs_storage::BoundedReadError::Limit {
+                        size: body.len(),
+                        limit: max_bytes,
+                    })
+                } else {
+                    Ok(body.clone())
+                }
+            })
+            .transpose()
+    }
+
     fn persist_block_body(
         &self,
         height: u32,

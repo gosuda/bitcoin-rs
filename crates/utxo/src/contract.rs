@@ -300,6 +300,150 @@ pub enum UndoLoadError {
     },
 }
 
+/// Pruning availability remains owned by storage; RPC receives the same typed reasons.
+pub use bitcoin_rs_storage::{BoundedReadError, pruning::HistoryUnavailable};
+
+/// Read-only access to certified, retained block inputs. Implemented by chainstate.
+pub trait BlockUndoSource: Send + Sync {
+    /// Reads one complete block/input view without exposing storage mutation.
+    fn block_spends(
+        &self,
+        hash: Hash256,
+        expected_applied_hash: Hash256,
+    ) -> Result<BlockSpends, BlockSpendsError>;
+}
+
+/// A verified block body and its input-ordered spent coins.
+#[derive(Debug)]
+pub struct BlockSpends {
+    /// Body whose hash and commitments were checked by the read owner.
+    pub block: Block,
+    /// Complete input rows (coinbase empty), or the typed reason this body
+    /// has no certified retained undo. Partial rows are never returned.
+    pub spent: Result<Vec<Vec<UtxoCoin>>, HistoryUnavailable>,
+}
+
+/// A retained-history query never turns an unavailable or corrupt record into coins.
+#[derive(Debug, thiserror::Error)]
+pub enum BlockSpendsError {
+    /// The header authority does not know this hash.
+    #[error("Block not found")]
+    UnknownBlock,
+    /// The storage owner refused history acquisition or the row is absent.
+    #[error(transparent)]
+    History(#[from] HistoryUnavailable),
+    /// Expected undo is missing or malformed; preserve the owning typed failure.
+    #[error(transparent)]
+    Undo(#[from] UndoLoadError),
+    /// Reading the durable receipt failed.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    /// A bounded block-body read failed or refused the copy.
+    #[error("block body read: {0}")]
+    BodyRead(#[source] bitcoin_rs_storage::BoundedReadError),
+    /// A bounded undo read failed or refused the record before copying it.
+    #[error(transparent)]
+    BoundedRead(#[from] bitcoin_rs_storage::BoundedReadError),
+    /// A body, input, or undo metadata fact is inconsistent.
+    #[error("inconsistent retained block/undo: {0}")]
+    Corrupt(&'static str),
+    /// A receipt or retention lease changed while bytes were being read.
+    #[error("chain history changed during the query; retry")]
+    Retry,
+    /// Authoritative state is closed for recovery.
+    #[error("chain history is unavailable while the node is closed for recovery")]
+    Closed,
+    /// Materializing this request exceeds the query's documented budget.
+    #[error("block undo query exceeds its read budget")]
+    ResourceLimit,
+}
+
+/// Decodes the existing undo format with allocation counts bounded by `block`.
+///
+/// The body's inputs bound external restores; its outputs bound BIP30
+/// overwritten restores and removals. Persistence/disconnect decoding is unchanged.
+pub fn decode_undo_record_for_block(
+    bytes: &[u8],
+    block: &Block,
+) -> Result<UndoBatch, UndoCodecError> {
+    let inputs = block
+        .txs
+        .iter()
+        .filter(|tx| !is_coinbase_tx(tx))
+        .map(|tx| tx.inputs.len())
+        .sum::<usize>();
+    let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
+    undo_codec::decode_bounded(
+        bytes,
+        block.block_hash().into(),
+        inputs.saturating_add(outputs),
+        outputs,
+    )
+}
+
+/// Projects rollback facts into transaction/input order without changing their format.
+///
+/// Same-block outputs are absent from net undo and come from earlier transactions
+/// in the authenticated body. Extra BIP30 overwritten-output restorations are
+/// rollback facts, not transaction inputs, and are deliberately not emitted.
+pub fn block_spent_outputs(
+    block: &Block,
+    height: u32,
+    undo: &UndoBatch,
+) -> Result<Vec<Vec<UtxoCoin>>, BlockSpendsError> {
+    let restores: hashbrown::HashMap<_, _> = undo
+        .restores()
+        .iter()
+        .map(|coin| (coin.outpoint, coin))
+        .collect();
+    let mut earlier: hashbrown::HashMap<Txid, (&Tx, bool)> = hashbrown::HashMap::new();
+    let mut spent = Vec::with_capacity(block.txs.len());
+    for tx in &block.txs {
+        let coinbase = is_coinbase_tx(tx);
+        let mut inputs = Vec::with_capacity(if coinbase { 0 } else { tx.inputs.len() });
+        if !coinbase {
+            for input in &tx.inputs {
+                let outpoint = input.previous_output;
+                let txid = outpoint.txid;
+                let vout = outpoint.vout;
+                let coin = if let Some((parent, generated)) = earlier.get(&txid) {
+                    let txout = usize::try_from(vout)
+                        .ok()
+                        .and_then(|vout| parent.outputs.get(vout))
+                        .ok_or(BlockSpendsError::Corrupt(
+                            "same-block prevout index is absent",
+                        ))?;
+                    UtxoCoin {
+                        outpoint,
+                        txout: txout.clone(),
+                        coinbase: *generated,
+                        height,
+                    }
+                } else {
+                    let coin = restores
+                        .get(&outpoint)
+                        .ok_or(BlockSpendsError::Corrupt("input is absent from block undo"))?;
+                    if coin.height >= height {
+                        return Err(BlockSpendsError::Corrupt(
+                            "external prevout height is not historical",
+                        ));
+                    }
+                    UtxoCoin {
+                        outpoint,
+                        txout: coin.txout.clone(),
+                        coinbase: coin.coinbase,
+                        height: coin.height,
+                    }
+                };
+                inputs.push(coin);
+            }
+        }
+        spent.push(inputs);
+        earlier.insert(tx.txid(), (tx, coinbase));
+    }
+    Ok(spent)
+}
+
 /// Only `Refused` leaves state untouched; the rest fire after the marker is
 /// armed and may leave state torn for recovery to reconcile.
 #[derive(Debug, thiserror::Error)]
@@ -628,6 +772,85 @@ mod tests {
             value: Amount::from_sat(value),
             script_pubkey: Script::from_bytes(vec![0x51]),
         }
+    }
+
+    #[test]
+    fn spent_output_projection_orders_inputs_and_ignores_bip30_restorations() -> TestResult {
+        let mut cb = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: vec![0x01, 0x01].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![coin(50)],
+        };
+        let spend = |previous_output, value| Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![coin(value)],
+        };
+        let parent = spend(FUNDED, 800);
+        let same_block = OutPoint::new(parent.txid(), 0);
+        let child = spend(same_block, 700);
+        let mut undo = UndoBatch::empty();
+        // BIP30 overwrite restoration precedes inputs in native rollback order.
+        undo.restore(UtxoAdd::new(OutPoint::new(cb.txid(), 0), coin(60), true, 1));
+        undo.restore(UtxoAdd::new(FUNDED, coin(900), true, 2));
+        let block = Block {
+            header: bitcoin_rs_primitives::Network::Regtest
+                .genesis_block()
+                .header,
+            txs: vec![cb.clone(), parent, child],
+        };
+        let spent = block_spent_outputs(&block, HEIGHT, &undo)?;
+        assert_eq!(spent[0], Vec::<UtxoCoin>::new());
+        assert_eq!(
+            spent[1],
+            vec![UtxoCoin {
+                outpoint: FUNDED,
+                txout: coin(900),
+                coinbase: true,
+                height: 2
+            }]
+        );
+        assert_eq!(
+            spent[2],
+            vec![UtxoCoin {
+                outpoint: same_block,
+                txout: coin(800),
+                coinbase: false,
+                height: HEIGHT
+            }]
+        );
+        let missing = UndoBatch::empty();
+        assert!(matches!(
+            block_spent_outputs(&block, HEIGHT, &missing),
+            Err(BlockSpendsError::Corrupt(_))
+        ));
+        // The bounded codec rejects counts that cannot belong to this body
+        // before allocating decoded restores. Ordinary persistence decoding is
+        // deliberately unchanged.
+        cb.outputs.clear();
+        let no_outputs = Block {
+            header: block.header,
+            txs: vec![cb],
+        };
+        let bytes = crate::undo_codec::encode(&undo, no_outputs.block_hash().into());
+        assert!(decode_undo_record(&bytes, no_outputs.block_hash().into()).is_ok());
+        assert!(matches!(
+            decode_undo_record_for_block(&bytes, &no_outputs),
+            Err(UndoCodecError::BlockCountLimit { .. })
+        ));
+        Ok(())
     }
 
     struct NoSpend;

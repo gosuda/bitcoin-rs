@@ -89,7 +89,7 @@ declare_rows! {
     "getblockcount", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockcount);
     "getblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockhash);
     "getbestblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getbestblockhash);
-    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Response is the pinned corepc v31 verbose contract; verbosity 3 serves the verbosity-2 shape because no prevout source exists — Core returns prevouts at verbosity 3 (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblock);
+    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", Some(chain::getblock);
     "getblockheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockheader);
     "getblockstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockstats);
     "verifychain", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Levels 3 and 4 omit Core's block disconnect and reconnect checks; level 3 behaves as level 2 and level 4 does not replay the UTXO set (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::verifychain);
@@ -251,7 +251,7 @@ declare_rows! {
     // -- REST (Core StartREST registration order) --------------------
     "/rest/tx/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/notxdetails/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
-    "/rest/block/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
+    "/rest/block/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Full transaction projection omits undo fees and prevouts; the shared undo read capability is used by spenttxouts and getblock verbosity 2/3.", "0.4.0", None;
     "/rest/blockpart/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "bin/hex only; JSON rejected, matching Core's /rest/blockpart (bitcoin-core/src/rest.cpp rest_block_part).", "0.4.0", None;
     "/rest/chaininfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/mempool/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
@@ -260,7 +260,7 @@ declare_rows! {
     "/rest/deploymentinfo/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/deploymentinfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
-    "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs).", "0.4.0", None;
+    "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Serves retained certified undo in Core bin/hex/json formats. Older uncertified stale rows remain unavailable; transient retained-body absence and resource budgets return retry responses. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", None;
     "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;
 
     // -- ZMQ topics --------------------------------------------------

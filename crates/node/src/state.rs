@@ -486,7 +486,7 @@ impl NodeState {
     /// authoritative — after crash recovery — so the index reconciles against
     /// the real chainstate and never mistakes a recovered gap for a stale branch.
     pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
-        let history = self.storage.index_history();
+        let history = self.storage.bounded_history();
         self.derived_index.start(&self.chainstate, history)
     }
 
