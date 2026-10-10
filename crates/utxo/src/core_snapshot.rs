@@ -314,6 +314,8 @@ impl<'a, R: Read> Decoder<'a, R> {
                     });
                 }
                 Ok(n) => {
+                    // Read returns at most the remaining slice length; its
+                    // full end position was checked against max_bytes above.
                     self.consumed += u64::try_from(n).unwrap_or(0);
                     bytes = &mut bytes[n..];
                 }

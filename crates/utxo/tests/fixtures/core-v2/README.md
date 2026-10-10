@@ -32,7 +32,8 @@ cmp /tmp/core-v2-reproduction/blocks200.json \
   crates/utxo/tests/fixtures/core-v2/blocks200.json
 ~~~
 
-The generator verifies the pinned reference binary digest and refuses an
+The generator retains all integrity checks under python -O or PYTHONOPTIMIZE.
+It verifies the pinned reference binary digest and refuses an
 existing output datadir. It constructs blocks according to the independent
 upstream sequence, submits them to Core, asks Core to serialize the snapshot,
 and checks Core's base/commitment responses. It does not write snapshot bytes

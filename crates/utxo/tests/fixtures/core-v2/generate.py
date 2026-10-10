@@ -13,6 +13,10 @@ BINARY_SHA256 = '986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a0
 u32 = lambda n: struct.pack('<I', n)
 u64 = lambda n: struct.pack('<Q', n)
 def dsha(data): return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+def require_equal(actual, expected, description):
+    if actual != expected:
+        raise RuntimeError(f'{description}: expected {expected!r}, got {actual!r}')
+
 def script_num(n):
     if n <= 16: return bytes([0x50+n])
     raw = n.to_bytes((n.bit_length()+7)//8, 'little')
@@ -32,7 +36,7 @@ def blocks():
         header = prefix+u32(nonce)
         prev = dsha(header)
         yield (header+b'\x01'+tx).hex()
-    assert prev[::-1].hex() == BASE
+    require_equal(prev[::-1].hex(), BASE, 'generated chain base')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,13 +71,14 @@ def main():
         for block in block_hex:
             result=rpc('submitblock',[block])
             if result is not None: raise RuntimeError('submitblock rejected: '+str(result))
-        assert rpc('getblockcount') == 200
-        assert rpc('getbestblockhash') == BASE
+        require_equal(rpc('getblockcount'), 200, 'Core block count')
+        require_equal(rpc('getbestblockhash'), BASE, 'Core chain base')
         stats=rpc('gettxoutsetinfo',['hash_serialized_3'])
-        assert stats['hash_serialized_3'] == COMMITMENT, stats
+        require_equal(stats['hash_serialized_3'], COMMITMENT, 'Core UTXO commitment')
         result=rpc('dumptxoutset',[str(output/'core200.dat'),'latest'])
-        assert result['base_hash'] == BASE and result['coins_written'] == 200, result
-        assert result['txoutset_hash'] == COMMITMENT, result
+        require_equal(result['base_hash'], BASE, 'snapshot base')
+        require_equal(result['coins_written'], 200, 'snapshot coin count')
+        require_equal(result['txoutset_hash'], COMMITMENT, 'snapshot commitment')
         snapshot=output/'core200.dat'
         manifest={'reference':'Bitcoin Core v31.1','binary_sha256':actual,'source':'https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/test/util/mining.cpp#L33-L64','snapshot_sha256':hashlib.sha256(snapshot.read_bytes()).hexdigest(),'size_bytes':snapshot.stat().st_size,'dumptxoutset':result,'gettxoutsetinfo':stats}
         (output/'blocks200.json').write_text(json.dumps(block_hex)+'\n')
