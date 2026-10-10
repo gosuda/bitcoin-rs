@@ -172,8 +172,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     lease: &PeerLease,
     deadline: Instant,
 ) -> Result<(), PeerError> {
-    let (remote_version, _) = read_handshake_message(peer, lease, deadline)?;
-    let responses = dispatch_inbound(peer, &remote_version)?;
+    let (_, responses) = next_handshake_step(peer, lease, deadline)?;
 
     peer.state = PeerState::VersionExchange;
     peer.send(&Message::Version(version_message(
@@ -187,14 +186,31 @@ pub fn run_inbound_handshake<S: Read + Write>(
     }
 
     while peer.state != PeerState::Ready {
-        let (inbound, _) = read_handshake_message(peer, lease, deadline)?;
-        let responses = dispatch_inbound(peer, &inbound)?;
+        let (_, responses) = next_handshake_step(peer, lease, deadline)?;
         for response in responses {
             peer.send(&response)?;
         }
     }
     send_post_verack_messages(peer)?;
     Ok(())
+}
+
+/// Return the accepted handshake message and its responses. Protected connections
+/// discard recoverable violations without widening the existing deadline.
+pub(crate) fn next_handshake_step<S: Read>(
+    peer: &mut Peer<S>,
+    lease: &PeerLease,
+    deadline: Instant,
+) -> Result<(Message, Vec<Message>), PeerError> {
+    loop {
+        let (message, _) = read_handshake_message(peer, lease, deadline)?;
+        match dispatch_inbound(peer, &message) {
+            Err(error) if lease.ignores_protocol_error(&error) => {
+                tracing::warn!(node_id = lease.node_id(), %error, "protected peer protocol violation ignored");
+            }
+            result => return result.map(|responses| (message, responses)),
+        }
+    }
 }
 
 /// Reads one handshake message, retrying transient poll timeouts.
@@ -219,6 +235,10 @@ pub(crate) fn read_handshake_message<S: Read>(
             )));
         }
         match peer.read_message() {
+            Err(error) if lease.ignores_protocol_error(&error) => {
+                tracing::warn!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
+                continue;
+            }
             Ok((message, raw)) => {
                 if matches!(message, Message::Version(_)) {
                     peer.version_received_time = Some(

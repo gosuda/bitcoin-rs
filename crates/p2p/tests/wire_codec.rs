@@ -134,7 +134,7 @@ fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), Peer
         );
 
         match read_message(&mut Cursor::new(frame(cap + 1)?), Magic::BITCOIN) {
-            Err(PeerError::Protocol(message)) => assert_eq!(message, refusal, "{command}"),
+            Err(PeerError::Misbehavior(message)) => assert_eq!(message, refusal, "{command}"),
             other => panic!("{command} above the cap must be refused, got {other:?}"),
         }
     }

@@ -183,6 +183,7 @@ impl<S: Read> Peer<S> {
         crate::wire::read_message_with(&mut self.stream, self.magic, |command, payload| {
             crate::net_trace::inbound_message(net_trace, command, payload);
         })
+        .map_err(PeerError::inbound)
     }
 }
 

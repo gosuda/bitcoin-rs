@@ -432,3 +432,42 @@ fn mining_payout_address_must_match_the_resolved_network() {
     };
     assert!(resolve(&[&layer]).is_err());
 }
+
+#[test]
+fn operator_noban_defaults_empty_and_uses_the_subnet_owner() -> Result<()> {
+    assert_eq!(
+        NodeConfig::default_for_network(Network::Regtest)
+            .p2p
+            .noban_subnets,
+        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+    );
+    let layer: UserConfig = toml::from_str(
+        r#"network = "regtest"
+p2p_noban = ["192.0.2.99/24", "::1"]
+"#,
+    )?;
+    let config = resolve(&[&layer])?;
+    assert_eq!(config.p2p.noban_subnets[0].to_string(), "192.0.2.0/24");
+    assert!(config.p2p.noban_subnets[0].contains("::ffff:192.0.2.1".parse()?));
+    assert_eq!(config.p2p.noban_subnets[1].to_string(), "::1/128");
+    assert!(toml::from_str::<UserConfig>(r#"p2p_noban = ["192.0.2.0/99"]"#).is_err());
+    let mut environment = UserConfig::default();
+    environment.apply_env(
+        "BITCOIN_RS_P2P_NOBAN",
+        std::ffi::OsStr::new("198.51.100.1, ::1"),
+    )?;
+    let config = resolve(&[&layer, &environment])?;
+    assert_eq!(config.p2p.noban_subnets[0].to_string(), "198.51.100.1/32");
+    assert_eq!(config.p2p.noban_subnets.len(), 2);
+    environment.apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new(""))?;
+    assert_eq!(
+        resolve(&[&layer, &environment])?.p2p.noban_subnets,
+        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+    );
+    assert!(
+        environment
+            .apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new("bad-subnet"))
+            .is_err()
+    );
+    Ok(())
+}

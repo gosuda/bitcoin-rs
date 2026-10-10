@@ -190,6 +190,22 @@ impl LivePeer {
         Ok(())
     }
 
+    /// Prove that all previously sent frames were processed and the connection
+    /// still accepts traffic, using the protocol's ping/pong barrier.
+    pub fn ping_barrier(&mut self, nonce: u64, deadline: Instant) -> Result<()> {
+        self.send(NetworkMessage::Ping(nonce), deadline)?;
+        for _ in 0..128 {
+            match self.recv(deadline)? {
+                NetworkMessage::Pong(reply) if reply == nonce => return Ok(()),
+                NetworkMessage::Ping(reply) => self.send(NetworkMessage::Pong(reply), deadline)?,
+                _ => {}
+            }
+        }
+        Err(Error::Protocol(
+            "ping barrier message budget exhausted".to_owned(),
+        ))
+    }
+
     /// Read one wire frame, marking the peer dropped on hard failures.
     fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage> {
         match read_frame(&mut self.stream, deadline, &mut self.pending) {

@@ -354,7 +354,7 @@ impl ChainQuery for ActiveChainQuery {
                 }
                 Some(Message::BlockTxn(BlockTxn { transactions }))
             })
-            .map_err(|_| PeerError::Protocol("getblocktxn index out of range"))
+            .map_err(|_| PeerError::Misbehavior("getblocktxn index out of range"))
     }
 }
 
@@ -1308,7 +1308,7 @@ mod tests {
             &|| true,
         );
         assert!(
-            matches!(out_of_range, Err(PeerError::Protocol(_))),
+            matches!(out_of_range, Err(PeerError::Misbehavior(_))),
             "an out-of-range index is a protocol disconnect"
         );
 
@@ -1558,7 +1558,7 @@ mod tests {
                 );
                 if let Some(expected) = expected {
                     assert!(
-                        matches!(result, Err(PeerError::Protocol(message)) if message == expected),
+                        matches!(result, Err(PeerError::Misbehavior(message)) if message == expected),
                         "invalid request must disconnect, got {result:?}"
                     );
                 } else {

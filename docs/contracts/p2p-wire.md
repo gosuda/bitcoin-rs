@@ -38,6 +38,12 @@ This page assigns ownership and cites proof under the
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
+- Automatic discouragement is owned by the P2P service's `BannedReader` and
+  bounded ephemeral policy. The listener records only typed remote violations
+  from a current lease. Immutable exclusion snapshots precede address-book
+  locks; socket admission rechecks them. Manual/local/operator protection and
+  the exact Core deviations are specified in policy §6, with deterministic
+  ownership/expiry tests and the real-process `peer_discouragement` comparison.
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
 - Parent requests validate the delivering connection and enqueue under the

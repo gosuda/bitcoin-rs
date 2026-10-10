@@ -292,6 +292,7 @@ impl NodeState {
                     .collect(),
                 dns_port: config.network.default_p2p_port(),
                 fixed_peers: config.p2p.connect.clone(),
+                noban_subnets: config.p2p.noban_subnets.clone(),
                 outbound_full_relay_slots,
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,

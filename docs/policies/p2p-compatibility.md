@@ -130,31 +130,66 @@ refusals suppress the exact wtxid, not legacy txid inventory or another
 witness variant. The cache and retry lifecycle are governed by
 [MPL-04](../contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
 
-## 6. Message Policy: Reject-or-Ignore, Disconnect Where Core Disconnects
+## 6. Message policy and automatic discouragement
 
-| Condition | bitcoin-rs action | Core 31.1 action |
+The P2P service owns both the existing in-memory manual subnet bans and a
+separate bounded, process-local set of discouraged **exact IP addresses**.
+There is no additive score or second persisted ban database. `listbanned` and
+`clearbanned` describe only manual bans. An ordinary automatic peer's current
+connection records a typed remote protocol violation before teardown; an old
+lease cannot punish its same-address replacement. Local queue saturation,
+network inactivity, startup cancellation, insufficient advertised services,
+transport I/O/timeouts, and local encoding failures never discourage an IP.
+
+| Condition | bitcoin-rs action for an ordinary automatic nonlocal peer | Core 31.1 reference |
 | :--- | :--- | :--- |
-| Unknown command, peer ready | ignore, stay connected | ignore |
-| Non-handshake command before readiness | disconnect | disconnect (misbehavior), except Core's handshake whitelist (§7) |
-| Payload fails to decode | disconnect (typed `PeerError::Encode`) | disconnect (misbehavior) |
-| Checksum mismatch | disconnect | disconnect |
-| Wrong network magic | disconnect | disconnect |
-| Declared length > 32 MiB | disconnect | disconnect (above Core's 4 MiB cap) |
-| `inv`/`getdata`/`notfound` > 50 000 vectors | disconnect | misbehavior 40 → eventual ban |
-| `addr`/`addrv2` > 1 000 entries | disconnect | misbehavior → eventual ban |
-| Locator > 101 hashes | disconnect (checked before any state mutation) | misbehavior 255 → ban |
-| `headers` > 2 000 entries | disconnect | misbehavior |
-| `verack` before `version`; duplicate `version`; feature message while disconnected | disconnect | misbehavior |
-| Idle connection | `ping` once a direction has been idle 2 min; disconnect once a direction is silent past 20 min | `ping` per 2 min regardless of traffic; disconnect when the outstanding ping goes unanswered for 20 min (`PING_INTERVAL`, `net_processing.cpp:125`; `TIMEOUT_INTERVAL`, `net.h:59`; `MaybeSendPing`, `net_processing.cpp:5698-5712`; `InactivityCheck`, `net.cpp:2043-2090`) |
-| `tx` or a transaction `inv` on a block-relay-only connection | disconnect (protocol violation) | disconnect (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`; the `inv` branch at `net_processing.cpp:4385-4390`) |
-| `addr` or `addrv2` on a block-relay-only connection | ignored | ignored (address relay declined, `SetupAddressRelay`, `net_processing.cpp:5952-5970`) |
+| Unknown command after readiness | ignore | ignore |
+| Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
+| Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
+| Checksum failure | disconnect and temporarily avoid the IP | Core v1 rejects the message and resets its decoder; this remains a stricter bitcoin-rs policy |
+| Invalid command bytes, wrong magic, or length above 32 MiB | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection is separate from `Misbehaving`; Core's message-size cap is 4 MiB |
+| `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000 | disconnect and temporarily avoid the IP | the relevant Core handlers mark for discouragement |
+| Locator above 101 or `notfound` above 50,000 | disconnect and temporarily avoid the IP | Core directly disconnects oversized locators; oversized `notfound` is ignored by request handling, without generic punishment |
+| Invalid `getblocktxn` index structure or indexes beyond the available block | disconnect and temporarily avoid the IP | Core marks out-of-range block transaction indexes for discouragement |
+| `tx` or transaction `inv` on a block-relay-only connection | disconnect without discouragement | connection-role rejection; not a new numeric penalty |
+| `addr` or `addrv2` on a block-relay-only connection | ignore | address relay is declined |
+| Idle connection | ping once a direction has been idle 2 minutes; disconnect once a direction is silent past 20 minutes; no discouragement | periodic ping and outstanding-ping timeout remain distinct from misconduct |
+| Valid traffic exceeds local queue/request budgets | bounded accounting, backpressure or connection-local cancellation | resource management, not a generic punishment score |
 
-**Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (setban-style), held in memory. Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
+Discouragement retains at most 4,096 canonical IPs for one monotonic hour.
+Repetition does not refresh the deadline or add another queue entry. At the
+capacity bound the oldest entry is evicted. Core instead uses a rolling Bloom
+filter with 50,000 elements and no explicit time expiry. The exact-set bound
+keeps this auxiliary policy finite and avoids probabilistic false positives;
+its smaller retention window is an explicit deviation, not a performance claim.
+Selection snapshots are captured before the address-book lock and applied to
+regular candidates, feelers and restart anchors. Inbound accepts and outbound
+socket admission recheck current policy, including after a queued dial connects.
 
-Structural invariants, verified by the deterministic fixtures (`crates/p2p/tests/core_compat.rs`):
+Manual connections and operator-protected peers discard a fully consumed bad
+message and continue. An unread/unsafe frame still closes the transport without
+address discouragement, as do unrelated I/O and resource failures. Other local
+peers disconnect without recording their address. Locality follows Core's
+`CNetAddr::IsLocal`: IPv4 0/8 and 127/8, and IPv6 `::1`; IPv4-mapped IPv6 is
+canonicalized before matching. Private LAN addresses are not implicitly local.
 
-- A rejected bound check fires *before* the FSM advances, so a rejected message never mutates peer state.
-- No inbound message — valid, malformed, or unknown — can stall or abort the listener; errors tear down only their own connection. The accept loop and other peers continue (this is the peer-facing face of the never-block-core invariant).
+The optional `--p2p-noban <IP/CIDR,...>` setting (TOML `p2p_noban`, environment
+`BITCOIN_RS_P2P_NOBAN`) defaults to an empty list. The existing `IpSubnet` owner
+parses and normalizes it. Permission is derived only from the actual socket IP,
+never from a peer's advertised addresses. `getpeerinfo.permissions` reports
+`noban` for these connections. This is an automatic-discouragement exemption,
+not Core's complete permission framework: explicit manual ban admission still
+wins, and transaction relay, fee filters, resource budgets and connection roles
+remain unchanged. No `Relay`, `ForceRelay`, `Addr` or generic permission flags
+are inferred.
+
+References: pinned Core v31.1 [Misbehaving and exemption handling](https://github.com/bitcoin/bitcoin/blob/v31.1/src/net_processing.cpp),
+[rolling discouraged set](https://github.com/bitcoin/bitcoin/blob/v31.1/src/banman.h),
+[v1 checksum rejection](https://github.com/bitcoin/bitcoin/blob/v31.1/src/net.cpp),
+and [canonical local-address classes](https://github.com/bitcoin/bitcoin/blob/v31.1/src/netaddress.cpp).
+The process comparison in `e2e/tests/peer_discouragement.rs` uses an oversized
+`headers` count, which actually reaches Core's `Misbehaving`, to test ordinary
+local disconnect/reconnect and operator `NoBan` survival via a ping/pong barrier.
 
 ## 7. Deviation Ledger
 
@@ -379,7 +414,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    A stale queue item cannot dispatch after its reservation was returned.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
-7. **Automatic misbehavior bans** (§6) absent; manual bans only.
+7. **Automatic discouragement** (§6) uses bounded exact-IP expiry rather than Core's rolling Bloom filter. The explicit strict-parser, transport and permission differences are listed in §6; there is no additive score.
 8. **Chain-sync timeout scope**: a full-relay outbound connection that stops bringing a better chain is timed out as Core does (`ConsiderEviction`, `net_processing.cpp:5498-5550`), with one `getheaders` probe at 20 minutes (`CHAIN_SYNC_TIMEOUT`, definition `net_processing.cpp:109`) and the first four outbound connections to reach the tip protected (`MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT`, definition `net_processing.cpp:107`). Protection and the timeout both key on a tip the peer actually handed us, never on the height its handshake claimed: Core reads `pindexBestKnownBlock` there, not `nStartingHeight` (use-site `net_processing.cpp:3203-3210`). An operator-pinned connection is exempt in both, as it is in Core: `IsOutboundOrBlockRelayConn()` excludes `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Block-relay-only connections are exempt here; Core times out both outbound classes. A connection dialed for blocks alone is therefore never replaced by this timer.
 9. **Download budgets**: bitcoin-rs bounds one sync at `PENDING_BUDGET = 256` in-flight bodies and `RECEIVED_BLOCK_BUDGET = 256` staged bodies (`crates/p2p/src/download_window/policy.rs:54,58`), and stripes at `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16` once `MIN_PEERS_FOR_FANOUT = 8` eligible peers exist (`:107,116`), where Core runs one `BLOCK_DOWNLOAD_WINDOW = 1024` ahead of the last common block with the same 16 per peer (`net_processing.cpp:151,133`). The 256 depth is measured, not assumed: a bounded 0–150,000 daemon single-peer IBD run at this window was 1.52× the 128-block control (`crates/p2p/src/download_window/policy.rs:50-51`). The shallower window is a bounded divergence kept by operator decision: it caps buffered bodies and re-request work per connection instead of matching Core's depth.
 10. **Extra-peer selection**: once a stale tip needs no extra full-relay connection, bitcoin-rs retires the newest automatic full-relay outbound connection that sits one beyond the slots and is older than `MINIMUM_CONNECT_TIME` (`retire_extra_full_relay_connection`, `crates/p2p/src/service.rs:976`). An operator-pinned connection is outside the count and the victim set both, as in Core: neither `IsFullOutboundConn()` nor `IsBlockOnlyConn()` includes `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`). Core's `EvictExtraOutboundPeers` (`net_processing.cpp:5604-5668`) instead retires the connection that announced a block longest ago, breaking a tie by dropping the most recently connected one. The retired count is the same; the retired connection is not. A pinned outbound peer therefore neither creates an excess nor stands as a victim, matching `IsFullOutboundConn`/`IsBlockOnlyConn` excluding `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`).

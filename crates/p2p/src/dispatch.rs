@@ -484,16 +484,16 @@ fn serve_block_txn(
 /// or not strictly increasing.
 ///
 /// PRE: the request carries decoded absolute indexes. POST: a malformed list
-/// returns `PeerError::Protocol` and the connection drops through the
+/// returns `PeerError::Misbehavior` and ordinary connections drop through the
 /// listener's error path. INVARIANT: a malformed list never reaches a chain
 /// query, including on a node with no chain at all — one decision at the
 /// inbound boundary (Core 31.1 `net_processing.cpp:4560-4574`).
 fn ensure_block_txn_indexes_valid(request: &BlockTransactionsRequest) -> Result<(), PeerError> {
     if request.indexes.is_empty() {
-        return Err(PeerError::Protocol("getblocktxn with empty index list"));
+        return Err(PeerError::Misbehavior("getblocktxn with empty index list"));
     }
     if request.indexes.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(PeerError::Protocol(
+        return Err(PeerError::Misbehavior(
             "getblocktxn indexes not strictly increasing",
         ));
     }
@@ -505,14 +505,14 @@ fn ensure_block_locator_within_bounds(
     error: &'static str,
 ) -> Result<(), PeerError> {
     if locator_hashes.len() > MAX_LOCATOR_HASHES {
-        return Err(PeerError::Protocol(error));
+        return Err(PeerError::Misbehavior(error));
     }
     Ok(())
 }
 
 fn ensure_inventory_request_within_bounds(items: &[Inventory]) -> Result<(), PeerError> {
     if !is_within_inventory_bound(items) {
-        return Err(PeerError::Protocol("getdata inventory too large"));
+        return Err(PeerError::Misbehavior("getdata inventory too large"));
     }
     Ok(())
 }
@@ -749,7 +749,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(PeerError::Protocol("getheaders locator too large"))
+            Err(PeerError::Misbehavior("getheaders locator too large"))
         ));
         assert_eq!(peer_snapshot(&peer), before);
     }
@@ -768,7 +768,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(PeerError::Protocol("getblocks locator too large"))
+            Err(PeerError::Misbehavior("getblocks locator too large"))
         ));
         assert_eq!(peer_snapshot(&peer), before);
     }
@@ -903,7 +903,7 @@ mod tests {
             let mut peer = ready_peer();
             let outcome = dispatch_collect(&mut peer, &message, case);
             assert!(
-                matches!(outcome, Err(PeerError::Protocol(_))),
+                matches!(outcome, Err(PeerError::Misbehavior(_))),
                 "a malformed getblocktxn must disconnect, got {outcome:?}",
             );
         }
@@ -1274,7 +1274,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(PeerError::Protocol("getdata inventory too large"))
+            Err(PeerError::Misbehavior("getdata inventory too large"))
         ));
         assert_eq!(peer_snapshot(&peer), before);
     }

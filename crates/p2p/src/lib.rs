@@ -90,3 +90,6 @@ pub use wire::{Message, PeerError};
 pub use wtxid::WtxidRelayState;
 
 pub use download_window::default_sync_budget;
+
+/// Bounded automatic reconnect avoidance; manual bans retain their owner.
+pub mod discouragement;

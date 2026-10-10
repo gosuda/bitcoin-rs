@@ -86,6 +86,8 @@ pub struct P2pServiceConfig {
     pub dns_port: u16,
     /// Fixed connect endpoints. Non-empty disables DNS maintenance.
     pub fixed_peers: Vec<String>,
+    /// Operator-protected subnets, exempt from automatic discouragement only.
+    pub noban_subnets: Vec<crate::IpSubnet>,
     /// Total automatic peer connections, the Core maximum inbound and
     /// outbound admission is derived from.
     ///
@@ -117,6 +119,7 @@ impl Default for P2pServiceConfig {
             dns_seeds: Vec::new(),
             dns_port: 0,
             fixed_peers: Vec::new(),
+            noban_subnets: Vec::new(),
             max_peer_connections: DEFAULT_MAX_PEER_CONNECTIONS,
             outbound_full_relay_slots: DEFAULT_OUTBOUND_FULL_RELAY_SLOTS,
             outbound_block_relay_slots: DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
@@ -266,20 +269,68 @@ struct ActiveOutbound {
     manual: bool,
 }
 
-/// Cloneable, read-only capability for querying the active manual ban list.
+/// Cloneable read capability for manual bans and automatic reconnect policy.
 ///
-/// Ban mutations remain with the P2P service; connection workers only test
-/// addresses against the active table.
+/// Manual mutations remain with the P2P service. Its connection workers record
+/// typed remote violations through the private ephemeral policy boundary.
 #[derive(Clone, Debug)]
 pub struct BannedReader {
     inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    discouraged: Arc<Mutex<crate::discouragement::DiscouragedPeers>>,
+    protected: Arc<[crate::IpSubnet]>,
 }
 
 impl BannedReader {
     /// Wraps the shared ban table in a read-only reader capability.
     #[must_use]
-    pub const fn new(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
-        Self { inner }
+    pub fn new(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
+        Self::with_protection(inner, Vec::new())
+    }
+
+    fn with_protection(
+        inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+        protected: Vec<crate::IpSubnet>,
+    ) -> Self {
+        Self {
+            inner,
+            discouraged: Arc::new(Mutex::new(
+                crate::discouragement::DiscouragedPeers::default(),
+            )),
+            protected: protected.into(),
+        }
+    }
+
+    /// Snapshot all reconnect exclusions before taking an address-book lock.
+    #[must_use]
+    pub fn automatic_snapshot(
+        &self,
+        now: SystemTime,
+    ) -> crate::discouragement::AutomaticPeerPolicy {
+        let banned = self.inner.read().clone();
+        let discouraged = self.discouraged.lock().snapshot(Instant::now());
+        crate::discouragement::AutomaticPeerPolicy {
+            banned,
+            discouraged,
+            protected: Arc::clone(&self.protected),
+            now,
+        }
+    }
+
+    /// Whether operator configuration protects this actual socket address.
+    #[must_use]
+    pub fn is_noban(&self, ip: std::net::IpAddr) -> bool {
+        self.protected.iter().any(|subnet| subnet.contains(ip))
+    }
+
+    /// Exact-IP ephemeral avoidance, kept separate from the manual ban view.
+    #[must_use]
+    pub fn is_discouraged(&self, ip: std::net::IpAddr) -> bool {
+        !self.is_noban(ip) && self.discouraged.lock().contains(ip, Instant::now())
+    }
+
+    // Only current, typed remote violations at the connection boundary call this.
+    pub(crate) fn discourage(&self, ip: std::net::IpAddr) {
+        self.discouraged.lock().insert(ip, Instant::now());
     }
 
     /// Acquires a shared read lock on the ban list.
@@ -314,7 +365,7 @@ pub struct P2pService {
     worker_shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
-    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    banned: BannedReader,
     address_book: Arc<crate::addrman::AddressBook>,
     added_nodes: Arc<RwLock<Vec<SocketAddr>>>,
     outbound_tx: Sender<OutboundDial>,
@@ -356,6 +407,10 @@ impl P2pService {
             config.allow_local_addresses,
             config.asmap_path.as_deref(),
         );
+        let banned = BannedReader::with_protection(
+            Arc::new(RwLock::new(Vec::new())),
+            config.noban_subnets.clone(),
+        );
         Self {
             config,
             address_book,
@@ -364,7 +419,7 @@ impl P2pService {
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
             session_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
-            banned: Arc::new(RwLock::new(Vec::new())),
+            banned,
             added_nodes: Arc::new(RwLock::new(Vec::new())),
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
@@ -815,25 +870,28 @@ impl P2pService {
 
     /// Adds or replaces one manual ban entry.
     pub fn set_ban(&self, entry: crate::BannedSubnet) {
-        let mut banned = self.banned.write();
+        let mut banned = self.banned.inner.write();
         banned.retain(|current| current.subnet != entry.subnet);
         banned.push(entry);
     }
 
     /// Removes one manual ban entry.
     pub fn remove_ban(&self, subnet: crate::IpSubnet) {
-        self.banned.write().retain(|entry| entry.subnet != subnet);
+        self.banned
+            .inner
+            .write()
+            .retain(|entry| entry.subnet != subnet);
     }
 
     /// Clears all manual bans.
     pub fn clear_banned(&self) {
-        self.banned.write().clear();
+        self.banned.inner.write().clear();
     }
 
     /// Returns a read-only reader for the active manual bans.
     #[must_use]
     pub fn banned_reader(&self) -> BannedReader {
-        BannedReader::new(Arc::clone(&self.banned))
+        self.banned.clone()
     }
 
     /// Returns a snapshot of current manual bans.
@@ -1000,11 +1058,9 @@ fn spawn_feeler(
         .collect();
     let mut addresses: Vec<_> = active.keys().copied().collect();
     addresses.extend_from_slice(&connected);
-    let banned = shared.banned.read().clone();
-    let tick_time = SystemTime::now();
+    let policy = shared.banned.automatic_snapshot(SystemTime::now());
     let Some(addr) = book.feeler(&addresses, &connected, crate::addrman::now(), |addr| {
-        !is_manual_endpoint(manual, addr)
-            && !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
+        !is_manual_endpoint(manual, addr) && policy.allows(addr.ip())
     }) else {
         return;
     };
@@ -1171,10 +1227,15 @@ fn spawn_outbound_dial(
                 crate::listener::approximate_best_block_depth(shared.chain_query.as_deref());
             book.ordinary_services_eligible(dial.addr, depth)
         });
-    if !shared.activity.is_active()
-        || shared.session_cancel.load()
-        || !services_allowed
-        || shared.banned.is_banned(dial.addr.ip(), SystemTime::now())
+    let allowed = if dial.manual {
+        !shared.banned.is_banned(dial.addr.ip(), SystemTime::now())
+    } else {
+        shared
+            .banned
+            .automatic_snapshot(SystemTime::now())
+            .allows(dial.addr.ip())
+    };
+    if !shared.activity.is_active() || shared.session_cancel.load() || !services_allowed || !allowed
     {
         if let Some(book) = &shared.address_book {
             defer_rejected_dial(&dial, book, active);
@@ -1565,6 +1626,7 @@ fn queue_restart_anchors(
         return 0;
     }
     let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
+    let policy = maintenance.banned.automatic_snapshot(SystemTime::now());
     let manual = maintenance.manual_nodes.read();
     while let Some(addr) = anchors.pop_front() {
         if is_manual_endpoint(&manual, addr)
@@ -1572,7 +1634,7 @@ fn queue_restart_anchors(
             || !maintenance
                 .address_book
                 .ordinary_services_eligible(addr, depth)
-            || maintenance.banned.is_banned(addr.ip(), SystemTime::now())
+            || !policy.allows(addr.ip())
         {
             maintenance.address_book.return_restart_anchor(addr, now);
             continue;
@@ -1645,7 +1707,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 .filter(|session| !session.lease.is_cancelled())
                 .map(|session| session.addr)
                 .collect();
-            let banned = maintenance.banned.read().clone();
+            let policy = maintenance.banned.automatic_snapshot(tick_time);
             {
                 let manual = maintenance.manual_nodes.read();
                 if maintenance.shutdown.load(Ordering::Acquire)
@@ -1656,8 +1718,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 maintenance
                     .address_book
                     .resolve_collisions(&connected, now, |addr| {
-                        !is_manual_endpoint(&manual, addr)
-                            && !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
+                        !is_manual_endpoint(&manual, addr) && policy.allows(addr.ip())
                     });
             }
             // A fresh but unreachable book must not permanently suppress seed
@@ -1780,7 +1841,7 @@ fn queue_address_candidates(
     let needed = (maintenance.target + extra).saturating_sub(occupied + reserved_anchors);
     // Snapshot the ban table before taking the address-book lock. All candidates
     // in this tick see the same expiry time and no nested ban lock per record.
-    let banned = maintenance.banned.read().clone();
+    let policy = maintenance.banned.automatic_snapshot(tick_time);
     let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
     for _ in 0..needed {
@@ -1792,8 +1853,7 @@ fn queue_address_candidates(
         let Some(addr) = maintenance
             .address_book
             .select(&active, &grouped, now, depth, |addr| {
-                !is_manual_endpoint(&manual, addr)
-                    && !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
+                !is_manual_endpoint(&manual, addr) && policy.allows(addr.ip())
             })
         else {
             break;
@@ -2593,6 +2653,115 @@ mod tests {
             crate::addrman::AddressBook::open(Some(base), [1; 4], true, None).gossip(20_000)[0].0,
             20_000,
             "shutdown and anchor-consumption barriers bypass the periodic throttle"
+        );
+    }
+
+    #[test]
+    fn automatic_policy_and_manual_bans_are_distinct() {
+        let ip: std::net::IpAddr = "8.8.8.8".parse().expect("ip");
+        let protected: crate::IpSubnet = "8.8.8.0/24".parse().expect("subnet");
+        let service = P2pService::new(
+            P2pServiceConfig {
+                noban_subnets: vec![protected],
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let reader = service.banned_reader();
+        reader.discourage(ip);
+        assert!(reader.is_noban("::ffff:8.8.8.8".parse().expect("mapped ip")));
+        assert!(reader.automatic_snapshot(SystemTime::now()).allows(ip));
+        service.set_ban(crate::BannedSubnet {
+            subnet: protected,
+            banned_until: None,
+            ban_created: SystemTime::now(),
+            reason: "manual".into(),
+        });
+        assert!(!reader.automatic_snapshot(SystemTime::now()).allows(ip));
+        service.clear_banned();
+        assert!(reader.automatic_snapshot(SystemTime::now()).allows(ip));
+    }
+
+    #[test]
+    fn all_automatic_selection_classes_exclude_discouraged_addresses() {
+        let (maintenance, queue) = maintenance_fixture(4);
+        let now = crate::addrman::now();
+        for n in 1..100 {
+            let addr = SocketAddr::from(([8, n, 1, 1], 8333));
+            maintenance.address_book.learn_dns("seed", &[addr], now);
+            maintenance
+                .address_book
+                .learn_peer(addr.ip(), &[(addr, 9, now)], now);
+        }
+        assert!(
+            maintenance
+                .address_book
+                .select(&[], &[], now, u64::MAX, |_| true)
+                .is_some()
+        );
+        assert!(
+            maintenance
+                .address_book
+                .feeler(&[], &[], now, |_| true)
+                .is_some()
+        );
+        for n in 1..100 {
+            maintenance
+                .banned
+                .discourage(std::net::IpAddr::from([8, n, 1, 1]));
+        }
+        queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
+        assert!(
+            queue.is_empty(),
+            "regular selection must apply the policy snapshot"
+        );
+        let address = SocketAddr::from(([8, 1, 1, 1], 8333));
+        maintenance.address_book.succeeded(address, 9, now);
+        maintenance.address_book.remember_anchors(&[address], now);
+        let mut anchors: VecDeque<_> = maintenance.address_book.take_restart_anchors(now).into();
+        assert!(
+            maintenance.address_book.anchor_eligible(address, &[], now),
+            "anchor must otherwise be eligible"
+        );
+        queue_restart_anchors(&maintenance, &mut anchors, &mut None, &mut Vec::new(), now);
+        assert!(
+            !maintenance.address_book.is_pending(address),
+            "a discouraged anchor must release its standby reservation"
+        );
+        assert!(
+            queue.is_empty(),
+            "restart anchors must apply the same policy"
+        );
+        let (headers, _) = crossbeam_channel::unbounded();
+        let (blocks, _) = crossbeam_channel::unbounded();
+        let shared = crate::listener::ConnectionShared::new(
+            Arc::clone(&maintenance.peer_table),
+            maintenance.banned.clone(),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
+                &maintenance.network_active,
+            ))),
+            bitcoin_rs_chain::LatchReader::new(Arc::clone(&maintenance.shutdown)),
+            None,
+            Magic::BITCOIN,
+            headers,
+            blocks,
+            None,
+            None,
+            crate::listener::ListenerExtras::default(),
+        );
+        let mut active = HashMap::new();
+        let mut handles = Vec::new();
+        spawn_feeler(
+            &shared,
+            &maintenance.address_book,
+            &[],
+            &mut active,
+            &mut handles,
+            DEFAULT_MAX_PEER_CONNECTIONS,
+        );
+        assert!(
+            active.is_empty() && handles.is_empty(),
+            "feeler selection must not start a discouraged dial"
         );
     }
 
