@@ -326,10 +326,13 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    including genuine v3 files carrying anchors, are strict migration sources.
    Their service fields must be numeric u64; old null or missing fields remain
    invalid. Historical DNS zero/no-Good records cannot reveal whether zero was
-   actually observed. After exact-byte backup, only that ambiguous case is
-   inferred unknown and may retry; its next accepted VERSION records the
-   observation precisely. IP zero and every prior-Good zero stay known. No
-   source, success or failure value is rewritten to manufacture evidence.
+   actually observed. Decoding infers only that ambiguous case as unknown in
+   memory, where it may retry; its next accepted VERSION records the observation
+   precisely. Exact-byte backup gates publication of the upgraded file, not
+   in-memory discovery. If backup fails, the original file remains untouched and
+   the in-memory book runs with persistence disabled. IP zero and every
+   prior-Good zero stay known. No source, success or failure value is rewritten
+   to manufacture evidence.
    The v1 reader retains its original 4,096-record/64-source/slot checks;
    historical ASMap layouts validate source/record shape before re-bucketing.
    The actual source bytes are copied to an exclusive content-named
