@@ -226,7 +226,7 @@ impl ConnectionShared {
             if let Some(announcer) = &self.block_announcer {
                 announcer.on_peer_ready();
             }
-            if !lease.is_inbound() && !lease.is_manual() {
+            if !lease.is_inbound() {
                 if let Some(book) = &self.address_book {
                     book.succeeded(peer_addr, info.services, crate::addrman::now());
                 }
@@ -578,7 +578,7 @@ pub fn spawn_outbound_connection(
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_dial(addr, shared, role, false)
+    spawn_dial(addr, shared, role, false, false)
 }
 
 /// Spawn one operator-pinned outbound connection dial of `role`: an address
@@ -596,19 +596,20 @@ pub(crate) fn spawn_pinned_outbound_connection(
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_dial(addr, shared, role, true)
+    spawn_dial(addr, shared, role, true, false)
 }
 
-fn spawn_dial(
+pub(crate) fn spawn_dial(
     addr: SocketAddr,
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
     pinned: bool,
+    count_failure: bool,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || run_outbound_connection(addr, &shared, role, pinned));
+        .spawn(move || run_outbound_connection(addr, &shared, role, pinned, count_failure));
 
     match result {
         Ok(handle) => handle,
@@ -628,6 +629,7 @@ fn run_outbound_connection(
     shared: &ConnectionShared,
     role: crate::peer_info::PeerRole,
     manual: bool,
+    count_failure: bool,
 ) -> Result<(), crate::wire::PeerError> {
     if shared.banned.is_banned(addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
@@ -639,8 +641,13 @@ fn run_outbound_connection(
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
     }
 
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .map_err(crate::wire::PeerError::Io)?;
+    let connection = TcpStream::connect_timeout(&addr, Duration::from_secs(10));
+    if let Some(book) = &shared.address_book {
+        // Like Core ConnectNode, record actual TCP attempts on success/failure,
+        // after local admission guards. Spawn failures/cancellation are not peer evidence.
+        book.attempted(addr, count_failure && !manual, crate::addrman::now());
+    }
+    let stream = connection.map_err(crate::wire::PeerError::Io)?;
     configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
     if shared.is_session_cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -3100,6 +3107,35 @@ mod ready_notify_tests {
         }
     }
 
+    #[test]
+    fn manual_outbound_ready_updates_known_address_health_without_automatic_claims() {
+        let mut shared = shared_with_notify_counter(&Arc::new(AtomicUsize::new(0)));
+        let now = crate::addrman::now();
+        let known = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        book.learn_dns("seed", &[known], now);
+        shared.address_book = Some(Arc::clone(&book));
+        let (tx, _) = crossbeam_channel::bounded(1);
+        let lease = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
+        shared.peer_table.register(known, lease.clone());
+        assert!(shared.publish_info_and_notify_ready(known, &lease, &peer_info(known, 0)));
+        assert_eq!(book.gossip(now)[0].1.services.to_u64(), 1);
+        assert_eq!(book.pending_count_excluding(&[]), 0);
+        book.queued(known);
+        assert!(shared.publish_info_and_notify_ready(known, &lease, &peer_info(known, 0)));
+        assert_eq!(
+            book.pending_count_excluding(&[]),
+            1,
+            "manual success does not transfer an existing automatic claim"
+        );
+        let unknown = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let manual = crate::PeerLease::new_manual(tx, crate::PeerRole::FullRelay);
+        shared.peer_table.register(unknown, manual.clone());
+        assert!(shared.publish_info_and_notify_ready(unknown, &manual, &peer_info(unknown, 0)));
+        assert_eq!(book.len(), 1, "Good does not insert manual endpoints");
+        assert_eq!(book.pending_count_excluding(&[]), 1);
+    }
+
     fn shared_with_notify_counter(notified: &Arc<AtomicUsize>) -> ConnectionShared {
         let notified = Arc::clone(notified);
         let mut shared = test_shared(
@@ -3297,6 +3333,38 @@ mod address_tests {
     use super::*;
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+
+    #[test]
+    fn local_dial_cancellation_is_not_attempt_evidence_but_tcp_failure_is() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let target = listener.local_addr().expect("address");
+        drop(listener);
+        let now = crate::addrman::now();
+        for cancelled in [true, false] {
+            let table = Arc::new(crate::PeerTable::new());
+            let (headers, _) = crossbeam_channel::unbounded();
+            let (blocks, _) = crossbeam_channel::unbounded();
+            let mut shared = test_shared(table, headers, blocks);
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+            book.learn_dns("seed", &[target], now - 31 * 86400);
+            shared.address_book = Some(Arc::clone(&book));
+            shared.session_cancel.store(cancelled);
+            assert!(
+                run_outbound_connection(target, &shared, crate::PeerRole::FullRelay, false, false)
+                    .is_err()
+            );
+            assert_eq!(
+                book.gossip(now).is_empty(),
+                cancelled,
+                "only an actual TCP attempt supplies Core's recent-attempt protection"
+            );
+            assert_eq!(
+                book.pending_count_excluding(&[]),
+                0,
+                "health updates do not invent automatic claims"
+            );
+        }
+    }
 
     #[test]
     fn outbound_wire_getaddr_never_serves_the_address_book() {

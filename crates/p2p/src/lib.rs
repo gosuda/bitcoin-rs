@@ -31,6 +31,7 @@ pub(crate) mod inbound;
 pub mod inv;
 /// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
+pub(crate) mod netgroup;
 
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;

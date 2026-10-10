@@ -1,11 +1,6 @@
-//! Bounded, non-consensus peer knowledge. DNS and wire gossip feed this one owner.
-//!
-//! Bucket placement is keyed and source-limited; gossip cannot replace retained
-//! peer knowledge. DNS recovery replaces only eligible same-source records.
-//! The on-disk book is auxiliary: unreadable/corrupt data is preserved and
-//! disables writes for this run, while in-memory discovery works.
-
-use std::collections::HashSet;
+//! P2P's single bounded AddrMan owner, following Core31.1 placement and selection.
+//! Membership is persisted with each endpoint; lookup tables are derived indexes.
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -13,37 +8,99 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bitcoin::secp256k1::rand::RngCore;
+use bitcoin::secp256k1::rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const MAX_RECORDS: usize = 4096;
-const MAX_SOURCE_GROUP: usize = 64;
-const NEW_SLOTS: u64 = 3072;
-const TRIED_SLOTS: u64 = 1024;
-const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const NEW_BUCKETS: usize = 1024;
+const TRIED_BUCKETS: usize = 256;
+const BUCKET_SIZE: usize = 64;
+const MAX_NEW_REFS: usize = 8;
+const MAX_RECORDS: usize = (NEW_BUCKETS + TRIED_BUCKETS) * BUCKET_SIZE;
+const EMPTY_SLOT: u32 = u32::MAX;
+const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const STALE_SECS: u64 = 30 * 24 * 60 * 60;
 const FUTURE_SKEW_SECS: u64 = 10 * 60;
-const RETRY_SECS: u64 = 60;
+const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
-// A shared response survives reconnects, as Core's response cache does. The
-// fixed 24-hour window is a bounded policy, not Core's randomized 21-27 hours.
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
+const VERSION: u32 = 5;
+// min GetChance=.01*.66^8; at zero-based proposal44 its product with1.2^44>1.
+const MAX_SELECTION_PROPOSALS: usize = 45;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Source {
+    Ip(IpAddr),
+    Internal([u8; 10]),
+    // v1 did not retain the original seed name or its full Core internal hash.
+    LegacyDns(u64),
+}
+impl Source {
+    fn dns(seed: &str) -> Self {
+        let hash = Sha256::digest(seed.as_bytes());
+        let mut bytes = [0; 10];
+        bytes.copy_from_slice(&hash[..10]);
+        Self::Internal(bytes)
+    }
+    fn group(&self) -> Vec<u8> {
+        match self {
+            Self::Ip(ip) => crate::netgroup::group(*ip),
+            Self::Internal(bytes) => {
+                let mut group = vec![6];
+                group.extend_from_slice(bytes);
+                group
+            }
+            Self::LegacyDns(id) => {
+                let mut hasher = Sha256::new();
+                hasher.update(b"bitcoin-rs v1 DNS source");
+                hasher.update(id.to_le_bytes());
+                let hash = hasher.finalize();
+                let mut group = vec![6];
+                group.extend_from_slice(&hash[..10]);
+                group
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Candidate {
     addr: SocketAddr,
     services: u64,
-    source_group: u64,
-    source_ip: Option<IpAddr>,
+    source: Source,
     last_seen: u64,
-    last_attempt: u64,
     last_success: u64,
-    failures: u8,
+    failures: u32,
     tried: bool,
+    #[serde(deserialize_with = "read_new_buckets")]
+    new_buckets: Vec<u16>,
+    #[serde(skip)]
+    last_attempt: u64,
+    #[serde(skip)]
+    last_count_attempt: u64,
+}
+impl Candidate {
+    fn terrible(&self, now: u64) -> bool {
+        if now.saturating_sub(self.last_attempt) <= 60 {
+            return false;
+        }
+        self.last_seen > now.saturating_add(FUTURE_SKEW_SECS)
+            || now.saturating_sub(self.last_seen) > STALE_SECS
+            || self.last_success == 0 && self.failures >= 3
+            || now.saturating_sub(self.last_success) > 7 * 24 * 60 * 60 && self.failures >= 10
+    }
+    fn chance(&self, now: u64) -> f64 {
+        let recent = if now.saturating_sub(self.last_attempt) < 600 {
+            0.01
+        } else {
+            1.0
+        };
+        recent * 0.66_f64.powi(i32::try_from(self.failures.min(8)).unwrap_or(8))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -52,27 +109,34 @@ struct Stored {
     version: u32,
     magic: [u8; 4],
     secret: [u8; 32],
+    #[serde(deserialize_with = "read_records")]
     records: Vec<Candidate>,
 }
 
 struct Manager {
     stored: Stored,
+    by_addr: HashMap<SocketAddr, usize>,
+    new: Vec<u32>,
+    tried: Vec<u32>,
+    rng: StdRng,
+    last_good: u64,
+    #[cfg(test)]
+    selection_proposals: usize,
+    #[cfg(test)]
+    selection_positions: usize,
     allow_local: bool,
     path: Option<PathBuf>,
     writable: bool,
     revision: u64,
     saved_revision: u64,
     published: bool,
-    cursor: u64,
     gossip_cursor: usize,
     gossip_cache: Option<(Instant, Vec<(u32, bitcoin::p2p::address::Address)>)>,
     pending: HashSet<SocketAddr>,
 }
 
-/// Shared peer-discovery owner; no chainstate or connection leases are stored.
 pub(crate) struct AddressBook {
     state: Mutex<Manager>,
-    // Serialize publication without holding the in-memory state lock across I/O.
     publication: Mutex<()>,
 }
 
@@ -81,6 +145,330 @@ pub(crate) fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// Core HashWriter framing. These vectors are all shorter than253 bytes.
+fn vector(bytes: &[u8], output: &mut Vec<u8>) {
+    output.push(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
+    output.extend_from_slice(bytes);
+}
+fn cheap_hash(bytes: &[u8]) -> u64 {
+    let hash = Sha256::digest(Sha256::digest(bytes));
+    let mut first = [0; 8];
+    first.copy_from_slice(&hash[..8]);
+    u64::from_le_bytes(first)
+}
+fn endpoint_key(addr: SocketAddr) -> Vec<u8> {
+    let mut bytes = match addr.ip() {
+        IpAddr::V4(ip) => ip.to_ipv6_mapped().octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
+    };
+    bytes.extend_from_slice(&addr.port().to_be_bytes());
+    bytes
+}
+fn new_bucket(secret: &[u8; 32], addr: SocketAddr, source_group: &[u8]) -> usize {
+    let mut bytes = secret.to_vec();
+    vector(&crate::netgroup::group(addr.ip()), &mut bytes);
+    vector(source_group, &mut bytes);
+    let first = cheap_hash(&bytes) % 64;
+    let mut bytes = secret.to_vec();
+    vector(source_group, &mut bytes);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    usize::try_from(cheap_hash(&bytes) % 1024).unwrap_or_default()
+}
+fn tried_bucket(secret: &[u8; 32], addr: SocketAddr) -> usize {
+    let mut bytes = secret.to_vec();
+    vector(&endpoint_key(addr), &mut bytes);
+    let first = cheap_hash(&bytes) % 8;
+    let mut bytes = secret.to_vec();
+    vector(&crate::netgroup::group(addr.ip()), &mut bytes);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    usize::try_from(cheap_hash(&bytes) % 256).unwrap_or_default()
+}
+fn bucket_position(secret: &[u8; 32], addr: SocketAddr, new: bool, bucket: usize) -> usize {
+    let mut bytes = secret.to_vec();
+    bytes.push(if new { b'N' } else { b'K' });
+    bytes.extend_from_slice(&i32::try_from(bucket).unwrap_or_default().to_le_bytes());
+    vector(&endpoint_key(addr), &mut bytes);
+    usize::try_from(cheap_hash(&bytes) % 64).unwrap_or_default()
+}
+
+impl Manager {
+    fn new(magic: [u8; 4], allow_local: bool, path: Option<PathBuf>) -> Self {
+        let mut rng = StdRng::from_entropy();
+        let mut secret = [0; 32];
+        rng.fill_bytes(&mut secret);
+        Self {
+            stored: Stored {
+                version: VERSION,
+                magic,
+                secret,
+                records: Vec::new(),
+            },
+            by_addr: HashMap::new(),
+            new: vec![EMPTY_SLOT; NEW_BUCKETS * BUCKET_SIZE],
+            tried: vec![EMPTY_SLOT; TRIED_BUCKETS * BUCKET_SIZE],
+            rng,
+            last_good: 1,
+            #[cfg(test)]
+            selection_proposals: 0,
+            #[cfg(test)]
+            selection_positions: 0,
+            allow_local,
+            path,
+            writable: true,
+            revision: 0,
+            saved_revision: 0,
+            published: false,
+            gossip_cursor: 0,
+            gossip_cache: None,
+            pending: HashSet::new(),
+        }
+    }
+    fn new_slot(&self, addr: SocketAddr, bucket: usize) -> usize {
+        bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, true, bucket)
+    }
+    fn tried_slot(&self, addr: SocketAddr) -> usize {
+        let bucket = tried_bucket(&self.stored.secret, addr);
+        bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, false, bucket)
+    }
+    fn install_indexes(&mut self) {
+        self.by_addr.clear();
+        self.new.fill(EMPTY_SLOT);
+        self.tried.fill(EMPTY_SLOT);
+        for (index, entry) in self.stored.records.iter().enumerate() {
+            self.by_addr.insert(entry.addr, index);
+            let id = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+            if entry.tried {
+                let slot = self.tried_slot(entry.addr);
+                self.tried[slot] = id;
+            } else {
+                for bucket in &entry.new_buckets {
+                    let slot = self.new_slot(entry.addr, usize::from(*bucket));
+                    self.new[slot] = id;
+                }
+            }
+        }
+    }
+    fn remove_identity(&mut self, index: usize) {
+        debug_assert!(
+            !self.stored.records[index].tried && self.stored.records[index].new_buckets.is_empty()
+        );
+        let addr = self.stored.records[index].addr;
+        self.by_addr.remove(&addr);
+        self.stored.records.swap_remove(index);
+        if let Some(moved) = self.stored.records.get(index) {
+            let addr = moved.addr;
+            let tried = moved.tried;
+            let buckets = moved.new_buckets.clone();
+            self.by_addr.insert(addr, index);
+            let id = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+            if tried {
+                let slot = self.tried_slot(addr);
+                self.tried[slot] = id;
+            } else {
+                for bucket in buckets {
+                    let slot = self.new_slot(addr, usize::from(bucket));
+                    self.new[slot] = id;
+                }
+            }
+        }
+    }
+    fn clear_new(&mut self, slot: usize) {
+        let id = self.new[slot];
+        if id == EMPTY_SLOT {
+            return;
+        }
+        self.new[slot] = EMPTY_SLOT;
+        let index = usize::try_from(id).unwrap_or_default();
+        self.stored.records[index]
+            .new_buckets
+            .retain(|bucket| usize::from(*bucket) != slot / BUCKET_SIZE);
+        if self.stored.records[index].new_buckets.is_empty() {
+            self.remove_identity(index);
+        }
+    }
+    fn promote(&mut self, addr: SocketAddr) -> bool {
+        let Some(&index) = self.by_addr.get(&addr) else {
+            return false;
+        };
+        if self.stored.records[index].tried {
+            return false;
+        }
+        let slot = self.tried_slot(addr);
+        if self.tried[slot] != EMPTY_SLOT {
+            return false;
+        }
+        let buckets = std::mem::take(&mut self.stored.records[index].new_buckets);
+        for bucket in buckets {
+            let slot = self.new_slot(addr, usize::from(bucket));
+            self.new[slot] = EMPTY_SLOT;
+        }
+        self.stored.records[index].tried = true;
+        self.tried[slot] = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+        true
+    }
+    fn learn(
+        &mut self,
+        addr: SocketAddr,
+        services: u64,
+        source: Source,
+        seen: u64,
+        now: u64,
+        time_penalty: u64,
+    ) -> bool {
+        let addr = canonical(addr);
+        if !routable(addr, self.allow_local)
+            || seen > now.saturating_add(FUTURE_SKEW_SECS)
+            || now.saturating_sub(seen) > STALE_SECS
+        {
+            return false;
+        }
+        let time_penalty = if matches!(&source, Source::Ip(ip) if crate::netgroup::canonical_ip(*ip) == addr.ip())
+        {
+            0
+        } else {
+            time_penalty
+        };
+        let existing = self.by_addr.get(&addr).copied();
+        let mut refs = 0;
+        if let Some(index) = existing {
+            let entry = &mut self.stored.records[index];
+            let before = (entry.last_seen, entry.services);
+            let interval = if now.saturating_sub(seen) < 24 * 60 * 60 {
+                60 * 60
+            } else {
+                24 * 60 * 60
+            };
+            if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
+                entry.last_seen = seen.saturating_sub(time_penalty);
+            }
+            entry.services |= services;
+            if before != (entry.last_seen, entry.services) {
+                self.revision = self.revision.wrapping_add(1);
+            }
+            if seen <= entry.last_seen || entry.tried || entry.new_buckets.len() >= MAX_NEW_REFS {
+                return false;
+            }
+            refs = entry.new_buckets.len();
+            if refs != 0 && self.rng.gen_range(0..(1_usize << refs)) != 0 {
+                return false;
+            }
+        }
+        let bucket = new_bucket(&self.stored.secret, addr, &source.group());
+        let slot = self.new_slot(addr, bucket);
+        let occupant = self.new[slot];
+        if occupant != EMPTY_SLOT {
+            let old = &self.stored.records[usize::try_from(occupant).unwrap_or_default()];
+            if old.addr == addr {
+                return false;
+            }
+            let final_pending = old.new_buckets.len() == 1 && self.pending.contains(&old.addr);
+            if final_pending || !(old.terrible(now) || old.new_buckets.len() > 1 && refs == 0) {
+                return false;
+            }
+        }
+        // Slot geometry bounds identities without a competing global/source quota.
+        if existing.is_none() && self.stored.records.len() == MAX_RECORDS && occupant == EMPTY_SLOT
+        {
+            return false;
+        }
+        self.clear_new(slot);
+        let index = if let Some(index) = self.by_addr.get(&addr).copied() {
+            index
+        } else {
+            if self.stored.records.len() >= MAX_RECORDS {
+                return false;
+            }
+            let index = self.stored.records.len();
+            self.stored.records.push(Candidate {
+                addr,
+                services,
+                source,
+                last_seen: seen.saturating_sub(time_penalty),
+                last_success: 0,
+                failures: 0,
+                tried: false,
+                new_buckets: Vec::new(),
+                last_attempt: 0,
+                last_count_attempt: 0,
+            });
+            self.by_addr.insert(addr, index);
+            index
+        };
+        self.stored.records[index]
+            .new_buckets
+            .push(u16::try_from(bucket).unwrap_or_default());
+        self.new[slot] = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+    fn select(&mut self, eligible: &[bool], now: u64) -> Option<SocketAddr> {
+        #[cfg(test)]
+        {
+            self.selection_proposals = 0;
+            self.selection_positions = 0;
+        }
+        let mut new_buckets = [false; NEW_BUCKETS];
+        let mut tried_buckets = [false; TRIED_BUCKETS];
+        for (entry, eligible) in self.stored.records.iter().zip(eligible) {
+            if !eligible {
+                continue;
+            }
+            if entry.tried {
+                tried_buckets[tried_bucket(&self.stored.secret, entry.addr)] = true;
+            } else {
+                for bucket in &entry.new_buckets {
+                    new_buckets[usize::from(*bucket)] = true;
+                }
+            }
+        }
+        let new: Vec<_> = new_buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, set)| set.then_some(i))
+            .collect();
+        let tried: Vec<_> = tried_buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, set)| set.then_some(i))
+            .collect();
+        if new.is_empty() && tried.is_empty() {
+            return None;
+        }
+        let search_tried = new.is_empty() || !tried.is_empty() && self.rng.gen_bool(0.5);
+        let buckets = if search_tried { &tried } else { &new };
+        let table = if search_tried { &self.tried } else { &self.new };
+        let mut factor = 1.0;
+        for _ in 0..MAX_SELECTION_PROPOSALS {
+            #[cfg(test)]
+            {
+                self.selection_proposals += 1;
+            }
+            let bucket = buckets[self.rng.gen_range(0..buckets.len())];
+            let start = self.rng.gen_range(0..BUCKET_SIZE);
+            let id = (0..BUCKET_SIZE).find_map(|offset| {
+                #[cfg(test)]
+                {
+                    self.selection_positions += 1;
+                }
+                let id = table[bucket * BUCKET_SIZE + (start + offset) % BUCKET_SIZE];
+                if id == EMPTY_SLOT {
+                    return None;
+                }
+                let index = usize::try_from(id).unwrap_or_default();
+                eligible[index].then_some(index)
+            })?;
+            let entry = &self.stored.records[id];
+            let draw = f64::from(self.rng.gen_range(0..(1_u32 << 30)));
+            if draw < factor * entry.chance(now) * f64::from(1_u32 << 30) {
+                return Some(entry.addr);
+            }
+            factor *= 1.2;
+        }
+        debug_assert!(false, "minimum chance guarantees acceptance by proposal45");
+        None
+    }
 }
 
 fn canonical(addr: SocketAddr) -> SocketAddr {
@@ -130,7 +518,7 @@ fn routable(addr: SocketAddr, allow_local: bool) -> bool {
     }
 }
 
-fn prefix_group(ip: IpAddr) -> u64 {
+fn legacy_prefix(ip: IpAddr) -> u64 {
     match ip {
         IpAddr::V4(ip) => {
             let bytes = ip.octets();
@@ -138,7 +526,7 @@ fn prefix_group(ip: IpAddr) -> u64 {
         }
         IpAddr::V6(ip) => {
             if let Some(ip) = ip.to_ipv4_mapped() {
-                return prefix_group(ip.into());
+                return legacy_prefix(ip.into());
             }
             let bytes = ip.octets();
             (2_u64 << 48) | u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -146,191 +534,50 @@ fn prefix_group(ip: IpAddr) -> u64 {
     }
 }
 
-impl Manager {
-    fn expire(&mut self, now: u64) {
-        let before = self.stored.records.len();
-        self.stored.records.retain(|entry| {
-            now.saturating_sub(entry.last_seen) <= STALE_SECS || self.pending.contains(&entry.addr)
-        });
-        if before != self.stored.records.len() {
-            self.revision = self.revision.wrapping_add(1);
-        }
-    }
-
-    fn slot(&self, candidate: &Candidate, tried: bool) -> u64 {
-        let mut hash = Sha256::new();
-        hash.update(self.stored.secret);
-        hash.update(prefix_group(candidate.addr.ip()).to_le_bytes());
-        if !tried {
-            hash.update(candidate.source_group.to_le_bytes());
-        }
-        // Limit each target/source pair to sixteen positions, spread by the endpoint.
-        let bucket = u64::from_le_bytes(hash.finalize()[..8].try_into().unwrap_or_default());
-        let endpoint = Sha256::digest(candidate.addr.to_string().as_bytes());
-        let offset = u64::from(endpoint[0] & 15);
-        if tried {
-            NEW_SLOTS + (bucket % (TRIED_SLOTS / 16)) * 16 + offset
-        } else {
-            (bucket % (NEW_SLOTS / 16)) * 16 + offset
-        }
-    }
-
-    fn learn(
-        &mut self,
-        addr: SocketAddr,
-        services: u64,
-        source_group: u64,
-        source_ip: Option<IpAddr>,
-        seen: u64,
-        now: u64,
-    ) -> bool {
-        self.expire(now);
-        let addr = canonical(addr);
-        if !routable(addr, self.allow_local)
-            || seen > now.saturating_add(FUTURE_SKEW_SECS)
-            || now.saturating_sub(seen) > STALE_SECS
-        {
-            return false;
-        }
-        if let Some(existing) = self
-            .stored
-            .records
-            .iter_mut()
-            .find(|entry| entry.addr == addr)
-        {
-            let before = (existing.last_seen, existing.services);
-            existing.last_seen = existing.last_seen.max(seen);
-            // Hearsay must not rewrite a proven peer's services.
-            if !existing.tried {
-                existing.services |= services;
-            }
-            if (existing.last_seen, existing.services) != before {
-                self.revision = self.revision.wrapping_add(1);
-            }
-            return false;
-        }
-        let candidate = Candidate {
-            addr,
-            services,
-            source_group,
-            source_ip,
-            last_seen: seen,
-            last_attempt: 0,
-            last_success: 0,
-            failures: 0,
-            tried: false,
-        };
-        let slot = self.slot(&candidate, false);
-        // Adapt Core's IsTerrible health thresholds for replacement admission:
-        // future timestamps beyond the admission skew are eligible; otherwise
-        // never-success candidates need three failures, old successes need ten
-        // and a week without success. Retain peer knowledge until an actual
-        // admissible same-seed replacement exists (including with DNS disabled).
-        // Pending and last-minute attempts are never replacement victims.
-        let replaceable = |old: &Candidate| {
-            source_ip.is_none()
-                && old.source_group == source_group
-                && now.saturating_sub(old.last_attempt) > RETRY_SECS
-                && (old.last_seen > now.saturating_add(FUTURE_SKEW_SECS)
-                    || (old.last_success == 0 && old.failures >= 3)
-                    || (old.last_success != 0
-                        && now.saturating_sub(old.last_success) > 7 * 24 * 60 * 60
-                        && old.failures >= 10))
-                && !self.pending.contains(&old.addr)
-        };
-        let mut victim = self
-            .stored
-            .records
-            .iter()
-            .position(|entry| self.slot(entry, entry.tried) == slot);
-        if victim.is_some_and(|index| !replaceable(&self.stored.records[index])) {
-            return false;
-        }
-        let source_full = self
-            .stored
-            .records
-            .iter()
-            .filter(|entry| entry.source_group == source_group)
-            .count()
-            >= MAX_SOURCE_GROUP;
-        if victim.is_none() && (source_full || self.stored.records.len() >= MAX_RECORDS) {
-            victim = self
-                .stored
-                .records
-                .iter()
-                .enumerate()
-                .filter(|(_, old)| replaceable(old))
-                .max_by_key(|(_, old)| (old.failures, std::cmp::Reverse(old.last_attempt)))
-                .map(|(index, _)| index);
-            if victim.is_none() {
-                return false;
-            }
-        }
-        if let Some(index) = victim {
-            self.stored.records.swap_remove(index);
-        }
-        self.stored.records.push(candidate);
-        self.revision = self.revision.wrapping_add(1);
-        true
-    }
-}
-
 impl AddressBook {
     pub(crate) fn open(path: Option<PathBuf>, magic: [u8; 4], allow_local: bool) -> Arc<Self> {
-        let mut secret = [0; 32];
-        bitcoin::secp256k1::rand::thread_rng().fill_bytes(&mut secret);
-        let mut manager = Manager {
-            stored: Stored {
-                version: 1,
-                magic,
-                secret,
-                records: Vec::new(),
-            },
-            allow_local,
-            path: path.as_deref().map(|base| network_path(base, magic)),
-            writable: true,
-            revision: 0,
-            saved_revision: 0,
-            published: false,
-            cursor: 0,
-            gossip_cursor: 0,
-            gossip_cache: None,
-            pending: HashSet::new(),
-        };
-        if let Some(scoped) = &manager.path {
-            match read_book(scoped, Some(magic), allow_local) {
-                Ok(Some(stored)) => {
-                    manager.stored = stored;
-                    manager.published = true;
-                }
-                Ok(None) => {
-                    // The old unscoped file is a read-only migration source.
-                    // Never overwrite it, including for a different P2P magic.
-                    if let Some(legacy) = path {
-                        match read_book(&legacy, None, true) {
-                            Ok(Some(stored)) if stored.magic == magic => {
-                                if stored
-                                    .records
-                                    .iter()
-                                    .all(|entry| routable(entry.addr, allow_local))
-                                {
-                                    manager.stored = stored;
-                                    manager.revision = 1;
-                                } else {
-                                    tracing::warn!(path = %legacy.display(), "legacy address book contains inadmissible addresses; preserving file and using memory discovery");
-                                    manager.writable = false;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                tracing::warn!(path = %legacy.display(), %error, "legacy address book unavailable; preserving file and using memory discovery until the operator resolves it");
-                                manager.writable = false;
-                            }
-                        }
+        let scoped = path.as_deref().map(|base| network_path(base, magic));
+        let mut manager = Manager::new(magic, allow_local, scoped.clone());
+        if let Some(scoped) = scoped {
+            let loaded = match read_book(&scoped, Some(magic), allow_local) {
+                Ok(Some(loaded)) => Some((scoped, true, loaded)),
+                Ok(None) => path.and_then(|legacy| match read_book(&legacy, None, true) {
+                    Ok(Some(loaded)) if loaded.stored.magic == magic => Some((legacy, false, loaded)),
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::warn!(path=%legacy.display(), %error, "legacy address book unavailable; preserving file and disabling writes");
+                        manager.writable = false; None
                     }
-                }
+                }),
                 Err(error) => {
-                    tracing::warn!(path = %scoped.display(), %error, "address book unavailable; preserving file, using memory discovery without overwriting it");
+                    tracing::warn!(path=%scoped.display(), %error, "address book unavailable; preserving file and disabling writes");
+                    manager.writable = false; None
+                }
+            };
+            if let Some((source_path, scoped_source, loaded)) = loaded {
+                if loaded
+                    .stored
+                    .records
+                    .iter()
+                    .all(|entry| routable(entry.addr, allow_local))
+                {
+                    manager.stored = loaded.stored;
+                    manager.published = scoped_source;
+                    if loaded.legacy {
+                        if let Err(error) = backup_legacy(&source_path, &loaded.bytes) {
+                            tracing::warn!(path=%source_path.display(), %error, "address book migration backup failed; preserving source and disabling writes");
+                            manager.writable = false;
+                        }
+                        manager.rebucket_legacy();
+                        manager.revision = 1;
+                    } else {
+                        manager.install_indexes();
+                    }
+                    if !scoped_source {
+                        manager.revision = manager.revision.wrapping_add(1);
+                    }
+                } else {
+                    tracing::warn!(path=%source_path.display(), "legacy address book contains inadmissible addresses; preserving file and disabling writes");
                     manager.writable = false;
                 }
             }
@@ -340,38 +587,32 @@ impl AddressBook {
             publication: Mutex::new(()),
         })
     }
-
     pub(crate) fn refresh_connected(&self, active: &[SocketAddr], now: u64) {
         let mut manager = self.state.lock();
         let mut changed = false;
-        for entry in &mut manager.stored.records {
-            if active.contains(&entry.addr) && now.saturating_sub(entry.last_seen) >= 3600 {
-                entry.last_seen = now;
-                changed = true;
+        for addr in active {
+            if let Some(index) = manager.by_addr.get(addr).copied() {
+                let entry = &mut manager.stored.records[index];
+                if now.saturating_sub(entry.last_seen) > 20 * 60 {
+                    entry.last_seen = now;
+                    changed = true;
+                }
             }
         }
         if changed {
             manager.revision = manager.revision.wrapping_add(1);
         }
     }
-
-    pub(crate) fn expire(&self, now: u64) {
-        self.state.lock().expire(now);
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.state.lock().stored.records.len()
     }
-
     pub(crate) fn learn_dns(&self, seed: &str, addresses: &[SocketAddr], now: u64) {
-        let hash = Sha256::digest(seed.as_bytes());
-        let source = u64::from_le_bytes(hash[..8].try_into().unwrap_or_default());
+        let source = Source::dns(seed);
         let mut manager = self.state.lock();
-        for &addr in addresses.iter().take(MAX_SOURCE_GROUP) {
-            manager.learn(addr, 0, source, None, now, now);
+        for &addr in addresses.iter().take(MAX_DNS_RESULTS) {
+            manager.learn(addr, 0, source.clone(), now, now, 0);
         }
     }
-
     pub(crate) fn learn_peer(
         &self,
         source: IpAddr,
@@ -380,25 +621,11 @@ impl AddressBook {
     ) {
         let mut manager = self.state.lock();
         for &(addr, services, seen) in addresses.iter().take(MAX_GOSSIP) {
-            manager.learn(
-                addr,
-                services,
-                prefix_group(source),
-                Some(source),
-                seen,
-                now,
-            );
+            manager.learn(addr, services, Source::Ip(source), seen, now, 2 * 60 * 60);
         }
     }
-
-    // The maintenance worker selects, claims, then enqueues each automatic dial.
-    // A failed enqueue releases the claim; the drain retains it through the
-    // connection thread's lifetime. Callbacks must not do I/O or acquire locks.
-    /// `connected` suppresses exact endpoints in any direction (Core
-    /// `setConnected` covers inbound too). `grouped` suppresses whole network
-    /// groups and must carry outbound sessions only: inbound peers inject
-    /// their source groups voluntarily and could otherwise suppress arbitrary
-    /// candidate groups from automatic selection.
+    /// Exact endpoint exclusion includes inbound; diversity excludes only outbound
+    /// and currently pending work. Policy callbacks run outside the state lock.
     pub(crate) fn select(
         &self,
         connected: &[SocketAddr],
@@ -406,49 +633,46 @@ impl AddressBook {
         now: u64,
         mut allowed: impl FnMut(SocketAddr) -> bool,
     ) -> Option<SocketAddr> {
+        let addresses: Vec<_> = {
+            let manager = self.state.lock();
+            manager
+                .stored
+                .records
+                .iter()
+                .map(|entry| entry.addr)
+                .collect()
+        };
+        let allowed: HashSet<_> = addresses
+            .into_iter()
+            .filter(|addr| allowed(*addr))
+            .collect();
         let mut manager = self.state.lock();
-        manager.cursor = manager.cursor.wrapping_add(1);
-        let prefer_new = manager.cursor.is_multiple_of(4);
+        // Membership, health and pending state may have changed during callback
+        // evaluation. Only the pure per-address policy decisions were captured.
         let groups: HashSet<_> = grouped
             .iter()
             .chain(&manager.pending)
-            .map(|addr| prefix_group(addr.ip()))
+            .map(|addr| crate::netgroup::group(addr.ip()))
             .collect();
-        let cursor = manager.cursor;
-        manager
+        let eligible: Vec<_> = manager
             .stored
             .records
             .iter()
-            .filter(|entry| {
-                !connected.contains(&entry.addr)
+            .map(|entry| {
+                allowed.contains(&entry.addr)
+                    && !connected.contains(&entry.addr)
                     && !manager.pending.contains(&entry.addr)
-                    && !groups.contains(&prefix_group(entry.addr.ip()))
-                    && now.saturating_sub(entry.last_seen) <= STALE_SECS
-                    && (entry.last_attempt == 0
-                        || now.saturating_sub(entry.last_attempt)
-                            >= RETRY_SECS.saturating_mul(u64::from(entry.failures).max(1)))
-                    && allowed(entry.addr)
+                    && !groups.contains(&crate::netgroup::group(entry.addr.ip()))
             })
-            .max_by_key(|entry| {
-                let mixed = manager
-                    .slot(entry, entry.tried)
-                    .wrapping_add(cursor.wrapping_mul(1_103_515_245));
-                (
-                    entry.tried != prefer_new,
-                    std::cmp::Reverse(entry.failures),
-                    mixed % u64::try_from(MAX_RECORDS).unwrap_or(u64::MAX),
-                )
-            })
-            .map(|entry| entry.addr)
+            .collect();
+        manager.select(&eligible, now)
     }
-
     pub(crate) fn queued(&self, addr: SocketAddr) {
         self.state.lock().pending.insert(addr);
     }
     pub(crate) fn unqueue(&self, addr: SocketAddr) {
         self.state.lock().pending.remove(&addr);
     }
-    /// Outstanding automatic claims not already counted as live sessions.
     pub(crate) fn pending_count_excluding(&self, active: &[SocketAddr]) -> usize {
         self.state
             .lock()
@@ -457,53 +681,40 @@ impl AddressBook {
             .filter(|addr| !active.contains(addr))
             .count()
     }
-
-    pub(crate) fn attempted(&self, addr: SocketAddr, now: u64) {
+    pub(crate) fn attempted(&self, addr: SocketAddr, count_failure: bool, now: u64) {
         let mut manager = self.state.lock();
-        manager.pending.insert(addr);
-        if let Some(entry) = manager
-            .stored
-            .records
-            .iter_mut()
-            .find(|entry| entry.addr == addr)
-        {
+        let last_good = manager.last_good;
+        if let Some(index) = manager.by_addr.get(&addr).copied() {
+            let entry = &mut manager.stored.records[index];
             entry.last_attempt = now;
-            entry.failures = entry.failures.saturating_add(1);
+            if count_failure && entry.last_count_attempt < last_good {
+                entry.last_count_attempt = now;
+                entry.failures = entry.failures.saturating_add(1);
+                manager.revision = manager.revision.wrapping_add(1);
+            }
+        }
+    }
+    pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
+        let mut manager = self.state.lock();
+        manager.last_good = now;
+        let Some(index) = manager.by_addr.get(&addr).copied() else {
+            return;
+        };
+        let entry = &mut manager.stored.records[index];
+        let changed =
+            entry.last_success != now || entry.failures != 0 || entry.services != services;
+        entry.last_success = now;
+        entry.last_attempt = now;
+        entry.failures = 0;
+        entry.services = services;
+        let promoted = manager.promote(addr);
+        if changed || promoted {
             manager.revision = manager.revision.wrapping_add(1);
         }
     }
-
-    pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
-        let mut manager = self.state.lock();
-        let Some(index) = manager
-            .stored
-            .records
-            .iter()
-            .position(|entry| entry.addr == addr)
-        else {
-            return;
-        };
-        let target = manager.slot(&manager.stored.records[index], true);
-        let vacant = !manager
-            .stored
-            .records
-            .iter()
-            .enumerate()
-            .any(|(other, entry)| other != index && manager.slot(entry, entry.tried) == target);
-        let entry = &mut manager.stored.records[index];
-        entry.services = services;
-        entry.last_success = now;
-        entry.last_attempt = 0;
-        entry.last_seen = now;
-        entry.failures = 0;
-        entry.tried = entry.tried || vacant;
-        manager.revision = manager.revision.wrapping_add(1);
-    }
-
     pub(crate) fn gossip(&self, now: u64) -> Vec<(u32, bitcoin::p2p::address::Address)> {
         self.gossip_at(now, Instant::now())
     }
-
     fn gossip_at(&self, now: u64, tick: Instant) -> Vec<(u32, bitcoin::p2p::address::Address)> {
         let mut manager = self.state.lock();
         if let Some((expires, response)) = &manager.gossip_cache {
@@ -518,7 +729,7 @@ impl AddressBook {
             let index = (start + offset) % len;
             manager.gossip_cursor = (index + 1) % len;
             let entry = &manager.stored.records[index];
-            if now.saturating_sub(entry.last_seen) > STALE_SECS {
+            if entry.terrible(now) {
                 continue;
             }
             gossip.push((
@@ -535,7 +746,6 @@ impl AddressBook {
         manager.gossip_cache = Some((tick + GOSSIP_CACHE_TTL, gossip.clone()));
         gossip
     }
-
     pub(crate) fn save(&self) {
         let _publication = self.publication.lock();
         let (path, stored, revision, mut published) = {
@@ -562,7 +772,7 @@ impl AddressBook {
                 manager.published = true;
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "address book publication not confirmed durable; retaining dirty state for retry");
+                tracing::warn!(path=%path.display(), %error, "address book publication not confirmed durable; retaining dirty state for retry");
             }
         }
     }
@@ -587,11 +797,204 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn read_book(
-    path: &std::path::Path,
-    magic: Option<[u8; 4]>,
-    allow_local: bool,
-) -> io::Result<Option<Stored>> {
+struct Loaded {
+    stored: Stored,
+    legacy: bool,
+    bytes: Vec<u8>,
+}
+
+fn read_new_buckets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u16>, D::Error> {
+    struct Buckets;
+    impl<'de> serde::de::Visitor<'de> for Buckets {
+        type Value = Vec<u16>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most eight New bucket IDs")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut result = Vec::new();
+            while let Some(bucket) = sequence.next_element()? {
+                if result.len() == MAX_NEW_REFS {
+                    return Err(serde::de::Error::custom("too many New references"));
+                }
+                result.push(bucket);
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_seq(Buckets)
+}
+fn read_records<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Candidate>, D::Error> {
+    struct Records;
+    impl<'de> serde::de::Visitor<'de> for Records {
+        type Value = Vec<Candidate>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("bounded address records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut result = Vec::new();
+            while let Some(entry) = sequence.next_element()? {
+                if result.len() == MAX_RECORDS {
+                    return Err(serde::de::Error::custom("too many address records"));
+                }
+                result.push(entry);
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_seq(Records)
+}
+
+// The current public v1 format is read only for validated, backed-up migration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCandidate {
+    addr: SocketAddr,
+    services: u64,
+    source_group: u64,
+    source_ip: Option<IpAddr>,
+    last_seen: u64,
+    last_attempt: u64,
+    last_success: u64,
+    failures: u8,
+    tried: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    records: Vec<LegacyCandidate>,
+}
+
+fn validate_current(stored: &Stored, allow_local: bool) -> io::Result<()> {
+    if stored.version != VERSION || stored.records.len() > MAX_RECORDS {
+        return Err(invalid("address book version/count"));
+    }
+    let mut endpoints = HashSet::new();
+    let mut slots = HashSet::new();
+    for entry in &stored.records {
+        if !routable(entry.addr, allow_local)
+            || canonical(entry.addr) != entry.addr
+            || !endpoints.insert(entry.addr)
+            || entry.new_buckets.len() > MAX_NEW_REFS
+            || entry.tried && (entry.last_success == 0 || !entry.new_buckets.is_empty())
+            || !entry.tried && entry.new_buckets.is_empty()
+        {
+            return Err(invalid("invalid address book record"));
+        }
+        if entry.tried {
+            let bucket = tried_bucket(&stored.secret, entry.addr);
+            let position = bucket_position(&stored.secret, entry.addr, false, bucket);
+            if !slots.insert((false, bucket, position)) {
+                return Err(invalid("Tried bucket collision"));
+            }
+        } else {
+            let mut buckets = HashSet::new();
+            for &bucket in &entry.new_buckets {
+                let bucket = usize::from(bucket);
+                if bucket >= NEW_BUCKETS
+                    || !buckets.insert(bucket)
+                    || !slots.insert((
+                        true,
+                        bucket,
+                        bucket_position(&stored.secret, entry.addr, true, bucket),
+                    ))
+                {
+                    return Err(invalid("invalid/colliding New reference"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn legacy_slot(secret: &[u8; 32], entry: &LegacyCandidate) -> u64 {
+    let mut hash = Sha256::new();
+    hash.update(secret);
+    hash.update(legacy_prefix(entry.addr.ip()).to_le_bytes());
+    if !entry.tried {
+        hash.update(entry.source_group.to_le_bytes());
+    }
+    let mut first = [0; 8];
+    first.copy_from_slice(&hash.finalize()[..8]);
+    let bucket = u64::from_le_bytes(first);
+    let endpoint = Sha256::digest(entry.addr.to_string().as_bytes());
+    let offset = u64::from(endpoint[0] & 15);
+    if entry.tried {
+        3072 + bucket % 64 * 16 + offset
+    } else {
+        bucket % 192 * 16 + offset
+    }
+}
+fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
+    if old.version != 1 || old.records.len() > 4096 {
+        return Err(invalid("legacy address book version/count"));
+    }
+    let mut addresses = HashSet::new();
+    let mut sources = HashMap::new();
+    let mut slots = HashSet::new();
+    for entry in &old.records {
+        if !routable(entry.addr, allow_local)
+            || canonical(entry.addr) != entry.addr
+            || !addresses.insert(entry.addr)
+            || entry
+                .source_ip
+                .is_some_and(|ip| legacy_prefix(ip) != entry.source_group)
+            || entry.tried && entry.last_success == 0
+            || !slots.insert(legacy_slot(&old.secret, entry))
+        {
+            return Err(invalid("invalid legacy address record"));
+        }
+        let count = sources.entry(entry.source_group).or_insert(0_usize);
+        *count += 1;
+        if *count > 64 {
+            return Err(invalid("legacy source limit"));
+        }
+    }
+    let records = old
+        .records
+        .into_iter()
+        .map(|entry| {
+            // Core's local attempt timestamps are deliberately not restored.
+            let _ = entry.last_attempt;
+            Candidate {
+                addr: entry.addr,
+                services: entry.services,
+                source: entry
+                    .source_ip
+                    .map_or(Source::LegacyDns(entry.source_group), Source::Ip),
+                last_seen: entry.last_seen,
+                last_success: entry.last_success,
+                failures: u32::from(entry.failures),
+                tried: entry.tried,
+                new_buckets: Vec::new(),
+                last_attempt: 0,
+                last_count_attempt: 0,
+            }
+        })
+        .collect();
+    Ok(Stored {
+        version: VERSION,
+        magic: old.magic,
+        secret: old.secret,
+        records,
+    })
+}
+fn read_book(path: &Path, magic: Option<[u8; 4]>, allow_local: bool) -> io::Result<Option<Loaded>> {
+    #[derive(Deserialize)]
+    struct Header {
+        version: u32,
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -611,52 +1014,116 @@ fn read_book(
     if Sha256::digest(&bytes[..payload_len])[..] != bytes[payload_len..] {
         return Err(invalid("address book checksum"));
     }
-    let stored: Stored = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-    if stored.version != 1
-        || magic.is_some_and(|magic| stored.magic != magic)
-        || stored.records.len() > MAX_RECORDS
-    {
-        return Err(invalid("address book version/network/count"));
-    }
-    let mut addresses = HashSet::new();
-    let mut source_counts = std::collections::HashMap::new();
-    for entry in &stored.records {
-        if !routable(entry.addr, allow_local)
-            || canonical(entry.addr) != entry.addr
-            || !addresses.insert(entry.addr)
-            || entry
-                .source_ip
-                .is_some_and(|ip| prefix_group(ip) != entry.source_group)
-            || entry.tried && entry.last_success == 0
-        {
-            return Err(invalid("invalid/duplicate address book record"));
+    let header: Header = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+    let legacy = header.version == 1;
+    let stored = if legacy {
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(invalid("legacy address book size"));
         }
-        let count = source_counts.entry(entry.source_group).or_insert(0_usize);
-        *count += 1;
-        if *count > MAX_SOURCE_GROUP {
-            return Err(invalid("address book source limit"));
-        }
-    }
-    let view = Manager {
-        stored,
-        allow_local,
-        path: None,
-        writable: false,
-        revision: 0,
-        saved_revision: 0,
-        published: false,
-        cursor: 0,
-        gossip_cursor: 0,
-        gossip_cache: None,
-        pending: HashSet::new(),
+        let old = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+        convert_legacy(old, allow_local)?
+    } else if header.version == VERSION {
+        let stored: Stored =
+            serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+        validate_current(&stored, allow_local)?;
+        stored
+    } else {
+        return Err(invalid("unsupported address book schema"));
     };
-    let mut slots = HashSet::new();
-    for entry in &view.stored.records {
-        if !slots.insert(view.slot(entry, entry.tried)) {
-            return Err(invalid("address book bucket collision"));
-        }
+    if magic.is_some_and(|magic| magic != stored.magic) {
+        return Err(invalid("address book network"));
     }
-    Ok(Some(view.stored))
+    Ok(Some(Loaded {
+        stored,
+        legacy,
+        bytes,
+    }))
+}
+fn backup_legacy(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use bitcoin::hex::DisplayHex as _;
+    let digest = Sha256::digest(bytes);
+    let backup = path.with_extension(format!("v1-{}.bak", digest[..].to_lower_hex_string()));
+    match fs::symlink_metadata(&backup) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.len() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+            {
+                return Err(invalid("migration backup size/type"));
+            }
+            // Read, revalidate and flush the same handle. Windows requires
+            // GENERIC_WRITE for FlushFileBuffers even when bytes are unchanged.
+            let mut file = OpenOptions::new().read(true).write(true).open(&backup)?;
+            let mut existing = Vec::new();
+            (&mut file)
+                .take(MAX_FILE_BYTES + 1)
+                .read_to_end(&mut existing)?;
+            if existing != bytes {
+                return Err(invalid("migration backup differs"));
+            }
+            file.sync_all()?;
+            let parent = backup
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            bitcoin_rs_storage::checkpoint::fs::sync_dir(
+                &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,
+            )
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            publish_bytes_with_nonce(&backup, bytes, &mut false, || {
+                bitcoin::secp256k1::rand::thread_rng().next_u64()
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+impl Manager {
+    fn rebucket_legacy(&mut self) {
+        let mut records = std::mem::take(&mut self.stored.records);
+        let before = records.len();
+        records.sort_by_key(|entry| {
+            (
+                std::cmp::Reverse(entry.tried),
+                std::cmp::Reverse(entry.last_success),
+                entry.addr,
+            )
+        });
+        self.by_addr.clear();
+        self.new.fill(EMPTY_SLOT);
+        self.tried.fill(EMPTY_SLOT);
+        let mut demoted = 0;
+        for mut entry in records {
+            let tried_slot = self.tried_slot(entry.addr);
+            if entry.tried && self.tried[tried_slot] == EMPTY_SLOT {
+                let index = self.stored.records.len();
+                self.tried[tried_slot] = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+                self.by_addr.insert(entry.addr, index);
+                self.stored.records.push(entry);
+                continue;
+            }
+            let bucket = new_bucket(&self.stored.secret, entry.addr, &entry.source.group());
+            let slot = self.new_slot(entry.addr, bucket);
+            if self.new[slot] != EMPTY_SLOT {
+                continue;
+            }
+            if entry.tried {
+                demoted += 1;
+                entry.tried = false;
+            }
+            entry.new_buckets = vec![u16::try_from(bucket).unwrap_or_default()];
+            let index = self.stored.records.len();
+            self.new[slot] = u32::try_from(index).unwrap_or(EMPTY_SLOT);
+            self.by_addr.insert(entry.addr, index);
+            self.stored.records.push(entry);
+        }
+        tracing::info!(
+            before,
+            retained = self.stored.records.len(),
+            demoted,
+            dropped = before - self.stored.records.len(),
+            "migrated backed-up address book to Core placement"
+        );
+    }
 }
 
 fn publish_book(path: &Path, stored: &Stored, replace: &mut bool) -> io::Result<()> {
@@ -669,7 +1136,7 @@ fn publish_book_with_nonce(
     path: &Path,
     stored: &Stored,
     replace: &mut bool,
-    mut nonce: impl FnMut() -> u64,
+    nonce: impl FnMut() -> u64,
 ) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(stored).map_err(io::Error::other)?;
     let checksum = Sha256::digest(&bytes);
@@ -677,6 +1144,15 @@ fn publish_book_with_nonce(
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
         return Err(invalid("address book too large"));
     }
+    publish_bytes_with_nonce(path, &bytes, replace, nonce)
+}
+
+fn publish_bytes_with_nonce(
+    path: &Path,
+    bytes: &[u8],
+    replace: &mut bool,
+    mut nonce: impl FnMut() -> u64,
+) -> io::Result<()> {
     let (tmp, mut file) = {
         let mut attempts = 0;
         loop {
@@ -695,7 +1171,7 @@ fn publish_book_with_nonce(
     };
     let mut temp_present = true;
     let result = (|| {
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         // Close before publication for Windows. Initial publication must not
         // clobber an operator file created since open/migration observed absence.
@@ -727,627 +1203,4 @@ fn publish_book_with_nonce(
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-
-    fn addr(n: u8) -> SocketAddr {
-        SocketAddr::new(Ipv4Addr::new(8, n, 1, 1).into(), 8333)
-    }
-    fn book() -> Arc<AddressBook> {
-        AddressBook::open(None, [1; 4], false)
-    }
-
-    #[test]
-    fn unproven_addresses_need_a_successful_outbound_handshake() {
-        let book = book();
-        book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
-        assert!(!book.state.lock().stored.records[0].tried);
-        book.attempted(addr(1), 10_001);
-        assert_eq!(book.select(&[], &[], 10_002, |_| true), None);
-        book.succeeded(addr(1), 9, 10_003);
-        assert!(book.state.lock().stored.records[0].tried);
-        assert_eq!(book.state.lock().stored.records[0].failures, 0);
-    }
-
-    #[test]
-    fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
-        let book = book();
-        for n in 1..200 {
-            book.learn_peer(addr(200).ip(), &[(addr(n), 9, 10_000)], 10_000);
-        }
-        assert!(book.len() <= MAX_SOURCE_GROUP);
-        let picked = book.select(&[], &[], 10_000, |_| true).expect("candidate");
-        book.queued(picked);
-        assert_ne!(book.select(&[], &[], 10_000, |_| true), Some(picked));
-        assert_eq!(book.select(&[], &[], 10_000, |_| false), None);
-        book.unqueue(picked);
-        let same_group = SocketAddr::new(picked.ip(), 8334);
-        assert_ne!(
-            book.select(&[], &[same_group], 10_000, |_| true),
-            Some(picked)
-        );
-        // Inbound connections suppress the exact endpoint but never its group.
-        assert!(book.select(&[same_group], &[], 10_000, |_| true).is_some());
-        assert_ne!(book.select(&[picked], &[], 10_000, |_| true), Some(picked));
-        assert!(book.gossip(10_000).len() <= MAX_GOSSIP);
-    }
-
-    #[test]
-    fn invalid_and_duplicate_addresses_do_not_create_records() {
-        let book = book();
-        book.learn_peer(
-            addr(2).ip(),
-            &[
-                ("127.0.0.1:1".parse().expect("addr"), 9, 10_000),
-                (addr(1), 9, 20_000),
-            ],
-            10_000,
-        );
-        assert_eq!(book.len(), 0);
-        book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000); 2], 10_000);
-        assert_eq!(book.len(), 1);
-    }
-
-    #[test]
-    fn restart_roundtrip_and_corruption_preserves_operator_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("peers.dat");
-        let book = AddressBook::open(Some(path.clone()), [1; 4], false);
-        book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
-        book.succeeded(addr(1), 9, 10_001);
-        book.save();
-        let restored = AddressBook::open(Some(path.clone()), [1; 4], false);
-        assert_eq!(restored.len(), 1);
-        assert!(restored.state.lock().stored.records[0].tried);
-        for corrupt in [b"truncated".to_vec(), vec![0; 40]] {
-            fs::write(network_path(&path, [1; 4]), &corrupt).expect("corrupt fixture");
-            let recovered = AddressBook::open(Some(path.clone()), [1; 4], false);
-            recovered.learn_peer(addr(2).ip(), &[(addr(3), 9, 10_000)], 10_000);
-            recovered.save();
-            assert_eq!(
-                fs::read(network_path(&path, [1; 4])).expect("read"),
-                corrupt
-            );
-            assert_eq!(recovered.len(), 1);
-        }
-    }
-    #[test]
-    fn promotion_collision_never_overwrites_a_proven_peer() {
-        let book = book();
-        let first = addr(1);
-        book.learn_peer(addr(2).ip(), &[(first, 9, 10_000)], 10_000);
-        book.succeeded(first, 9, 10_001);
-        let incumbent = book.state.lock().stored.records[0].clone();
-        let challenger = {
-            let manager = book.state.lock();
-            let target = manager.slot(&incumbent, true);
-            (1..65535_u16)
-                .map(|port| SocketAddr::new(first.ip(), port))
-                .find(|candidate| {
-                    *candidate != first
-                        && manager.slot(
-                            &Candidate {
-                                addr: *candidate,
-                                ..incumbent.clone()
-                            },
-                            true,
-                        ) == target
-                })
-                .expect("slot collision")
-        };
-        book.learn_peer(addr(3).ip(), &[(challenger, 9, 10_000)], 10_000);
-        book.succeeded(challenger, 9, 10_002);
-        let manager = book.state.lock();
-        assert!(
-            manager
-                .stored
-                .records
-                .iter()
-                .find(|entry| entry.addr == first)
-                .expect("incumbent")
-                .tried
-        );
-        assert!(
-            !manager
-                .stored
-                .records
-                .iter()
-                .find(|entry| entry.addr == challenger)
-                .expect("challenger")
-                .tried
-        );
-    }
-
-    #[test]
-    fn scoped_network_books_and_stale_temporary_files_are_independent() {
-        let dir = tempfile::tempdir().expect("dir");
-        let base = dir.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false);
-        book.learn_dns("seed", &[addr(1)], 10_000);
-        book.save();
-        let original = fs::read(&path).expect("read");
-        let other = AddressBook::open(Some(base.clone()), [2; 4], false);
-        other.learn_dns("seed", &[addr(2)], 10_000);
-        other.save();
-        assert_eq!(fs::read(&path).expect("read"), original);
-        assert_eq!(AddressBook::open(Some(base), [2; 4], false).len(), 1);
-        let stale = path.with_extension(format!("tmp-{}", std::process::id()));
-        fs::write(&stale, b"operator-owned stale temporary file").expect("fixture");
-        book.attempted(addr(1), 10_001);
-        book.save();
-        assert_ne!(fs::read(&path).expect("read"), original);
-        assert_eq!(
-            fs::read(&stale).expect("read"),
-            b"operator-owned stale temporary file"
-        );
-        let manager = book.state.lock();
-        assert_eq!(manager.revision, manager.saved_revision);
-    }
-
-    #[test]
-    fn legacy_import_retains_original_and_scoped_state_wins() {
-        let dir = tempfile::tempdir().expect("dir");
-        let base = dir.path().join("peers.dat");
-        let source = book();
-        source.learn_dns("seed", &[addr(1)], 10_000);
-        let stored = source.state.lock().stored.clone();
-        publish_book(&base, &stored, &mut false).expect("legacy fixture");
-        let original = fs::read(&base).expect("legacy bytes");
-        let migrated = AddressBook::open(Some(base.clone()), [1; 4], false);
-        assert_eq!(migrated.state.lock().stored.secret, stored.secret);
-        assert_eq!(migrated.len(), 1);
-        migrated.save();
-        assert_eq!(
-            fs::read(network_path(&base, [1; 4])).expect("scoped bytes"),
-            original
-        );
-        assert_eq!(fs::read(&base).expect("legacy unchanged"), original);
-        fs::write(&base, b"future format unknown to this node").expect("unknown legacy");
-        assert_eq!(
-            AddressBook::open(Some(base.clone()), [1; 4], false).len(),
-            1
-        );
-        let unknown = AddressBook::open(Some(base.clone()), [3; 4], false);
-        unknown.learn_dns("seed", &[addr(2)], 10_000);
-        unknown.save();
-        assert!(!network_path(&base, [3; 4]).exists());
-        assert_eq!(
-            fs::read(&base).expect("unknown retained"),
-            b"future format unknown to this node"
-        );
-    }
-
-    #[test]
-    fn valid_foreign_legacy_and_raced_destination_are_never_overwritten() {
-        let dir = tempfile::tempdir().expect("dir");
-        let base = dir.path().join("peers.dat");
-        let source = book();
-        source.learn_dns("seed", &[addr(1)], 10_000);
-        publish_book(&base, &source.state.lock().stored, &mut false).expect("legacy fixture");
-        let original = fs::read(&base).expect("legacy bytes");
-        let foreign = AddressBook::open(Some(base.clone()), [2; 4], false);
-        foreign.learn_dns("seed", &[addr(2)], 10_000);
-        foreign.save();
-        assert_eq!(
-            AddressBook::open(Some(base.clone()), [2; 4], false).len(),
-            1
-        );
-        assert_eq!(fs::read(&base).expect("retained"), original);
-        let raced = AddressBook::open(Some(base.clone()), [3; 4], false);
-        raced.learn_dns("seed", &[addr(3)], 10_000);
-        let path = network_path(&base, [3; 4]);
-        fs::write(&path, b"operator created this after open").expect("raced destination");
-        raced.save();
-        assert_eq!(
-            fs::read(path).expect("preserved"),
-            b"operator created this after open"
-        );
-        assert!(!raced.state.lock().published);
-    }
-
-    #[test]
-    fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
-        let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("peers.dat");
-        let stale = path.with_extension(format!("tmp-{}-{:016x}", std::process::id(), 7));
-        fs::write(&stale, b"stale").expect("fixture");
-        let source = book();
-        source.learn_dns("seed", &[addr(1)], 10_000);
-        let stored = source.state.lock().stored.clone();
-        let mut calls = 0;
-        let mut installed = false;
-        let error = publish_book_with_nonce(&path, &stored, &mut installed, || {
-            calls += 1;
-            7
-        })
-        .expect_err("collision bound");
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(calls, MAX_TEMP_ATTEMPTS);
-        assert!(!installed);
-        calls = 0;
-        publish_book_with_nonce(&path, &stored, &mut installed, || {
-            calls += 1;
-            if calls == 1 { 7 } else { 8 }
-        })
-        .expect("retry with unique name");
-        assert!(installed);
-        assert_eq!(calls, 2);
-        assert_eq!(fs::read(&stale).expect("stale retained"), b"stale");
-        assert_eq!(
-            read_book(&path, Some([1; 4]), false)
-                .expect("published")
-                .expect("exists")
-                .records
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn failed_fresh_seed_quota_admits_a_recovery_candidate_without_evicting_proven_or_pending() {
-        let book = book();
-        for n in 1..=255 {
-            book.learn_dns("seed", &[addr(n)], 10_000);
-        }
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        let retained: Vec<_> = book
-            .state
-            .lock()
-            .stored
-            .records
-            .iter()
-            .map(|entry| entry.addr)
-            .collect();
-        for &candidate in &retained {
-            book.attempted(candidate, 10_001);
-            book.unqueue(candidate);
-            book.attempted(candidate, 10_062);
-            book.unqueue(candidate);
-            book.attempted(candidate, 10_123);
-            book.unqueue(candidate);
-        }
-        let proven = retained[0];
-        let collision_proven = retained[1];
-        let pending = retained[2];
-        book.succeeded(proven, 9, 10_183);
-        // Success with a tried-slot collision is still proven, even in new.
-        book.state
-            .lock()
-            .stored
-            .records
-            .iter_mut()
-            .find(|entry| entry.addr == collision_proven)
-            .expect("retained")
-            .last_success = 10_183;
-        book.queued(pending);
-        let fresh = (1..=255)
-            .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
-            .find(|candidate| {
-                book.learn_dns("seed", &[*candidate], 10_184);
-                book.state
-                    .lock()
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == *candidate)
-            })
-            .expect("fresh seed endpoint admitted despite a full source quota");
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        assert_eq!(
-            book.select(&[], &[], 10_184, |candidate| candidate == fresh),
-            Some(fresh)
-        );
-        let manager = book.state.lock();
-        for protected in [proven, collision_proven, pending] {
-            assert!(
-                manager
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == protected)
-            );
-        }
-    }
-    #[test]
-    fn restarted_future_dated_seed_quota_allows_bounded_replacement_after_clock_rollback() {
-        // Core 31.1 AddrInfo::IsTerrible admits future-dated records as victims
-        // beyond ten minutes, but still protects attempts in the last minute.
-        let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("peers.dat");
-        let book = AddressBook::open(Some(path.clone()), [1; 4], false);
-        for n in 1..=255 {
-            book.learn_dns("seed", &[addr(n)], 10_601);
-        }
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        let protected = {
-            let mut manager = book.state.lock();
-            let entries = &mut manager.stored.records;
-            entries[0].last_seen = 10_600;
-            entries[1].last_attempt = 9_940;
-            [entries[0].addr, entries[1].addr, entries[2].addr]
-        };
-        book.save();
-        drop(book);
-        let book = AddressBook::open(Some(path), [1; 4], false);
-        book.queued(protected[2]);
-        book.expire(10_000);
-        assert_eq!(
-            book.len(),
-            MAX_SOURCE_GROUP,
-            "clock rollback alone must retain peer data"
-        );
-        book.learn_dns("seed", &[SocketAddr::from(([0, 0, 0, 0], 0))], 10_000);
-        assert_eq!(
-            book.len(),
-            MAX_SOURCE_GROUP,
-            "invalid replacement must retain peer data"
-        );
-        let fresh = (1..=255)
-            .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
-            .find(|candidate| {
-                book.learn_dns("seed", &[*candidate], 10_000);
-                book.state
-                    .lock()
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == *candidate)
-            })
-            .expect("future-dated source quota must admit a valid same-seed replacement");
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        assert_eq!(
-            book.select(&[], &[], 10_000, |candidate| candidate == fresh),
-            Some(fresh)
-        );
-        let manager = book.state.lock();
-        for protected in protected {
-            assert!(
-                manager
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == protected)
-            );
-        }
-    }
-
-    #[test]
-    fn old_successes_need_local_failure_evidence_and_an_admissible_replacement() {
-        let book = book();
-        for n in 1..=255 {
-            book.learn_dns("seed", &[addr(n)], 10_000);
-        }
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        let retained: Vec<_> = book
-            .state
-            .lock()
-            .stored
-            .records
-            .iter()
-            .map(|entry| entry.addr)
-            .collect();
-        let now = 10_000 + 8 * 24 * 60 * 60;
-        for &candidate in &retained {
-            book.succeeded(candidate, 9, 10_001);
-            for attempt in 0..10 {
-                book.attempted(candidate, now - 500 + attempt * 10);
-                book.unqueue(candidate);
-            }
-        }
-        let recent = retained[0];
-        let pending = retained[1];
-        let just_tried = retained[2];
-        book.succeeded(recent, 9, now - 100);
-        // Even repeated failures do not discredit a success within the week.
-        book.state
-            .lock()
-            .stored
-            .records
-            .iter_mut()
-            .find(|entry| entry.addr == recent)
-            .expect("recent")
-            .failures = 10;
-        book.queued(pending);
-        book.attempted(just_tried, now - 1);
-        book.unqueue(just_tried);
-        book.expire(now);
-        assert_eq!(
-            book.len(),
-            MAX_SOURCE_GROUP,
-            "without fresh DNS input, a local outage must not erase retained peer knowledge"
-        );
-        book.learn_dns("seed", &[SocketAddr::from(([0, 0, 0, 0], 0))], now);
-        assert_eq!(
-            book.len(),
-            MAX_SOURCE_GROUP,
-            "invalid DNS input cannot retire candidates"
-        );
-        let fresh = (1..=255)
-            .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
-            .find(|candidate| {
-                book.learn_dns("seed", &[*candidate], now);
-                book.state
-                    .lock()
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == *candidate)
-            })
-            .expect("fresh endpoint admitted over a locally discredited old success");
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        assert_eq!(
-            book.select(&[], &[], now, |candidate| candidate == fresh),
-            Some(fresh)
-        );
-        let manager = book.state.lock();
-        for protected in [recent, pending, just_tried] {
-            assert!(
-                manager
-                    .stored
-                    .records
-                    .iter()
-                    .any(|entry| entry.addr == protected)
-            );
-        }
-    }
-
-    #[test]
-    fn a_populated_stale_book_can_bootstrap_and_reuse_source_quota_after_restart() {
-        let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("peers.dat");
-        let book = AddressBook::open(Some(path.clone()), [1; 4], false);
-        for n in 1..200 {
-            book.learn_dns("seed", &[addr(n)], 10_000);
-        }
-        assert_eq!(book.len(), MAX_SOURCE_GROUP);
-        book.save();
-        let restored = AddressBook::open(Some(path), [1; 4], false);
-        restored.expire(10_001 + STALE_SECS);
-        assert_eq!(
-            restored.len(),
-            0,
-            "stale records cannot suppress DNS replenishment"
-        );
-        restored.learn_dns("seed", &[addr(201)], 10_001 + STALE_SECS);
-        assert_eq!(
-            restored.select(&[], &[], 10_001 + STALE_SECS, |_| true),
-            Some(addr(201))
-        );
-        book.learn_dns("seed", &[addr(202)], 10_001 + STALE_SECS);
-        assert_eq!(book.len(), 1, "learn also releases a stale source quota");
-    }
-    #[test]
-    fn a_long_lived_ready_connection_keeps_its_candidate_while_offline_peers_expire() {
-        let book = book();
-        book.learn_dns("seed", &[addr(1)], 10_000);
-        for candidate in (2..=255).map(addr) {
-            book.learn_dns("seed", &[candidate], 10_000);
-            if book.len() == 2 {
-                break;
-            }
-        }
-        assert_eq!(book.len(), 2, "fixture needs a distinct offline candidate");
-        book.succeeded(addr(1), 9, 10_001);
-        let later = 10_002 + STALE_SECS;
-        book.refresh_connected(&[addr(1)], later);
-        book.expire(later);
-        let manager = book.state.lock();
-        assert_eq!(manager.stored.records.len(), 1);
-        assert_eq!(manager.stored.records[0].addr, addr(1));
-        assert!(manager.stored.records[0].tried);
-    }
-    #[test]
-    fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
-        let dir = tempfile::tempdir().expect("dir");
-        let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false);
-        book.learn_peer(addr(2).ip(), &[(addr(1), 1, 10_000)], 10_000);
-        book.save();
-        let clean = book.state.lock().saved_revision;
-        book.learn_peer(addr(3).ip(), &[(addr(1), 1, 9_999); 32], 10_000);
-        assert_eq!(
-            book.state.lock().revision,
-            clean,
-            "unchanged duplicate reports cannot schedule disk writes"
-        );
-        book.learn_peer(addr(2).ip(), &[(addr(1), 8, 10_000)], 10_000);
-        assert_ne!(
-            book.state.lock().revision,
-            clean,
-            "new service evidence is persisted"
-        );
-        book.succeeded(addr(1), 9, 10_001);
-        book.save();
-        let clean = book.state.lock().saved_revision;
-        book.learn_peer(addr(2).ip(), &[(addr(1), 64, 10_001)], 10_001);
-        assert_eq!(
-            book.state.lock().revision,
-            clean,
-            "hearsay cannot replace proven services"
-        );
-        book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_002)], 10_002);
-        assert_ne!(
-            book.state.lock().revision,
-            clean,
-            "new last-seen evidence is persisted"
-        );
-    }
-
-    #[test]
-    fn gossip_cache_is_shared_stable_until_expiry_and_rotates_new_discoveries() {
-        let book = book();
-        for n in 1..200 {
-            book.learn_dns("seed", &[addr(n)], 10_000);
-        }
-        assert_eq!(book.len(), 64);
-        let tick = Instant::now();
-        let before = book.state.lock().revision;
-        let first = book.gossip_at(10_000, tick);
-        assert_eq!(first.len(), 32);
-        assert_eq!(book.state.lock().revision, before);
-        let fresh = (1..=255)
-            .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
-            .find(|candidate| {
-                book.learn_dns("other-seed", &[*candidate], 10_001);
-                book.len() > 64
-            })
-            .expect("new discovery");
-        let updated = first[0].1.socket_addr().expect("endpoint");
-        book.refresh_connected(&[updated], 20_000);
-        let before = book.state.lock().revision;
-        for seconds in 0..100 {
-            assert_eq!(
-                book.gossip_at(20_000 + seconds, tick + Duration::from_secs(seconds)),
-                first,
-                "reconnects and new learning cannot enumerate or invalidate the cached wire response"
-            );
-        }
-        let second = book.gossip_at(20_100, tick + GOSSIP_CACHE_TTL);
-        assert_ne!(first, second);
-        let third = book.gossip_at(20_100, tick + 2 * GOSSIP_CACHE_TTL);
-        assert!(
-            second
-                .iter()
-                .chain(&third)
-                .any(|(_, address)| address.socket_addr().ok() == Some(fresh))
-        );
-        assert_eq!(book.state.lock().revision, before, "cache is not persisted");
-        assert_eq!(
-            book.gossip_at(20_101 + STALE_SECS, tick + 3 * GOSSIP_CACHE_TTL),
-            []
-        );
-    }
-
-    #[test]
-    fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
-        let book = book();
-        book.learn_dns("seed", &[addr(1)], 10_000);
-        let other = SocketAddr::new(addr(1).ip(), 18333);
-        // A vacant different new slot is needed for both same-group records.
-        let candidate = (1..65535)
-            .map(|port| SocketAddr::new(other.ip(), port))
-            .find(|&candidate| {
-                if candidate == addr(1) {
-                    return false;
-                }
-                book.learn_dns("seed", &[candidate], 10_000);
-                book.len() == 2
-            })
-            .expect("two same-group endpoints");
-        book.queued(addr(1));
-        book.attempted(addr(1), 10_001);
-        assert_eq!(book.pending_count_excluding(&[]), 1);
-        assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
-        assert_eq!(
-            book.select(&[], &[], 10_100, |_| true),
-            None,
-            "in-flight groups stay exclusive beyond retry time"
-        );
-        book.unqueue(addr(1));
-        assert!(
-            book.select(&[], &[], 10_100, |_| true)
-                .is_some_and(|a| a == addr(1) || a == candidate)
-        );
-    }
-}
+mod tests;

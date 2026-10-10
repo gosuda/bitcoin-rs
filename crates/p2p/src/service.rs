@@ -455,6 +455,7 @@ impl P2pService {
         let full_relay_slots = self.config.outbound_full_relay_slots;
         let block_relay_slots = self.config.outbound_block_relay_slots;
         let active_limit = self.config.total_outbound_active_limit();
+        let max_peer_connections = self.config.max_peer_connections;
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
@@ -503,12 +504,12 @@ impl P2pService {
                         spawn_outbound_dial(
                             &dial,
                             &shared,
-                            &peer_table,
                             &mut active,
                             &mut handles,
                             full_relay_slots,
                             block_relay_slots,
                             extra_dial,
+                            max_peer_connections,
                         );
                     }
                     let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
@@ -535,12 +536,12 @@ impl P2pService {
                     spawn_outbound_dial(
                         &dial,
                         &shared,
-                        &peer_table,
                         &mut active,
                         &mut handles,
                         full_relay_slots,
                         block_relay_slots,
                         extra_dial,
+                        max_peer_connections,
                     );
                 }
                 for dial in parked {
@@ -961,18 +962,32 @@ fn dial_outbound_role(
     )
 }
 
+// PeerTable registers outbound leases only after TCP establishment. Like Core's
+// CNode census, handshake-in-progress and manual persistent sessions count;
+// queued/inflight dial work and inbound/cancelled sessions do not.
+fn count_address_failure(peer_table: &crate::PeerTable, maximum: usize) -> bool {
+    let groups: std::collections::HashSet<_> = peer_table
+        .sessions()
+        .into_iter()
+        .filter(|session| !session.lease.is_inbound() && !session.lease.is_cancelled())
+        .map(|session| crate::netgroup::group(session.addr.ip()))
+        .collect();
+    groups.len() >= maximum.saturating_sub(1).min(2)
+}
+
 /// Starts one accepted dial: skips addresses already running or connected,
 /// picks the relay role, and records the in-flight attempt.
 fn spawn_outbound_dial(
     dial: &OutboundDial,
     shared: &crate::listener::ConnectionShared,
-    peer_table: &crate::PeerTable,
     active: &mut HashMap<SocketAddr, ActiveOutbound>,
     handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
     full_relay_slots: usize,
     block_relay_slots: usize,
     extra_dial: bool,
+    max_peer_connections: usize,
 ) {
+    let peer_table = shared.peer_table.as_ref();
     if active.contains_key(&dial.addr) || peer_table.is_connected(dial.addr) {
         // A manual request cannot release a queued automatic request's claim.
         // A duplicate automatic request also cannot release a running automatic
@@ -996,15 +1011,16 @@ fn spawn_outbound_dial(
         block_relay_slots,
         extra_dial,
     );
+    let count_failure = !dial.manual && count_address_failure(peer_table, max_peer_connections);
     if !dial.manual {
         if let Some(book) = &shared.address_book {
-            book.attempted(dial.addr, crate::addrman::now());
+            book.queued(dial.addr);
         }
     }
     let handle = if dial.manual {
         crate::listener::spawn_pinned_outbound_connection(dial.addr, shared.clone(), role)
     } else {
-        crate::listener::spawn_outbound_connection(dial.addr, shared.clone(), role)
+        crate::listener::spawn_dial(dial.addr, shared.clone(), role, false, count_failure)
     };
     active.insert(
         dial.addr,
@@ -1216,6 +1232,32 @@ fn park_automatic_dial(
     true
 }
 
+// One census preserves all automatic ready roles for recovery, but publishing
+// a block-relay peer's connection time through gossip would violate its privacy.
+fn refresh_ready_addresses(
+    book: &crate::addrman::AddressBook,
+    peer_table: &crate::PeerTable,
+    now: u64,
+) -> usize {
+    let ready: Vec<_> = peer_table
+        .sessions()
+        .into_iter()
+        .filter(|session| {
+            !session.lease.is_inbound()
+                && !session.lease.is_manual()
+                && !session.lease.is_cancelled()
+                && session.info.is_some()
+        })
+        .collect();
+    let full_relay: Vec<_> = ready
+        .iter()
+        .filter(|session| session.lease.role().relays_transactions())
+        .map(|session| session.addr)
+        .collect();
+    book.refresh_connected(&full_relay, now);
+    ready.len()
+}
+
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
     // Give a populated book one cooldown to establish a connection before
@@ -1233,26 +1275,14 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let ready: Vec<_> = maintenance
-            .peer_table
-            .sessions()
-            .into_iter()
-            .filter(|session| {
-                !session.lease.is_inbound()
-                    && !session.lease.is_manual()
-                    && !session.lease.is_cancelled()
-                    && session.info.is_some()
-            })
-            .map(|session| session.addr)
-            .collect();
-        maintenance.address_book.refresh_connected(&ready, now);
-        maintenance.address_book.expire(now);
+        let ready_count =
+            refresh_ready_addresses(&maintenance.address_book, &maintenance.peer_table, now);
         if maintenance.network_active.load(Ordering::Acquire) {
             // A fresh but unreachable book must not permanently suppress seed
             // recovery. Retained candidates remain usable with DNS disabled.
             if dns_recovery_due(
                 maintenance.address_book.len(),
-                ready.len(),
+                ready_count,
                 maintenance.target,
                 Instant::now(),
                 &mut next_dns,
@@ -1923,6 +1953,93 @@ mod tests {
     }
 
     #[test]
+    fn block_relay_readiness_counts_for_dns_without_refreshing_gossip_time() {
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false);
+        let full = SocketAddr::from(([8, 1, 1, 1], 8333));
+        book.learn_dns("seed", &[full], 5000);
+        let block = (2..=255)
+            .map(|n| SocketAddr::from(([8, n, 1, 1], 8333)))
+            .find(|peer| {
+                book.learn_dns("seed", &[*peer], 5000);
+                book.len() == 2
+            })
+            .expect("distinct candidate slot");
+        let table = crate::PeerTable::new();
+        for (addr, block_only) in [(full, false), (block, true)] {
+            let (tx, _) = crossbeam_channel::bounded(1);
+            let lease = if block_only {
+                crate::PeerLease::new_block_relay(tx)
+            } else {
+                crate::PeerLease::new(tx)
+            };
+            table.register(addr, lease.clone());
+            let info = crate::PeerInfo {
+                addr,
+                version: 70016,
+                wtxid_relay: false,
+                compact_block_relay: false,
+                send_headers: false,
+                services: 9,
+                user_agent: String::new(),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: addr,
+                time_offset: 0,
+                counters: Arc::new(crate::PeerCounters::default()),
+            };
+            assert!(table.publish_info(addr, &lease, info));
+        }
+        assert_eq!(refresh_ready_addresses(&book, &table, 10_000), 2);
+        let response = book.gossip(10_000);
+        for (addr, expected) in [(full, 10_000), (block, 5000)] {
+            let timestamp = response
+                .iter()
+                .find(|(_, advertised)| advertised.socket_addr().ok() == Some(addr))
+                .expect("advertised")
+                .0;
+            assert_eq!(timestamp, expected);
+        }
+    }
+
+    #[test]
+    fn failure_accounting_uses_persistent_tcp_groups_including_manual_before_ready() {
+        let table = crate::PeerTable::new();
+        assert!(!count_address_failure(&table, 125));
+        assert!(count_address_failure(&table, 1));
+        let (tx, _) = crossbeam_channel::bounded(1);
+        let automatic = crate::PeerLease::new(tx.clone());
+        table.register(SocketAddr::from(([8, 1, 1, 1], 8333)), automatic);
+        assert!(!count_address_failure(&table, 125));
+        assert!(count_address_failure(&table, 2));
+        let same_group = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
+        table.register(SocketAddr::from(([8, 1, 2, 2], 8333)), same_group);
+        assert!(!count_address_failure(&table, 125));
+        let manual = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
+        table.register(SocketAddr::from(([8, 2, 1, 1], 8333)), manual.clone());
+        assert!(
+            table
+                .sessions()
+                .iter()
+                .all(|session| session.info.is_none())
+        );
+        assert!(
+            count_address_failure(&table, 125),
+            "Core counts established TCP sessions before handshake publication"
+        );
+        manual.cancel();
+        table.register(
+            SocketAddr::from(([8, 3, 1, 1], 8333)),
+            crate::PeerLease::new_inbound(tx),
+        );
+        assert!(
+            !count_address_failure(&table, 125),
+            "inbound and cancelled sessions do not certify connectivity"
+        );
+    }
+
+    #[test]
     fn auxiliary_save_interval_retains_immediate_explicit_save() {
         let dir = tempfile::tempdir().expect("dir");
         let base = dir.path().join("peers.dat");
@@ -1941,16 +2058,16 @@ mod tests {
             crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
             1
         );
-        book.expire(10_001 + 30 * 24 * 60 * 60);
+        book.refresh_connected(&[addr], 20_000);
         save_address_book_if_due(&book, tick + Duration::from_secs(901), &mut next);
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
-            1
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).gossip(20_000)[0].0,
+            10_000
         );
         book.save();
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base), [1; 4], true).len(),
-            0,
+            crate::addrman::AddressBook::open(Some(base), [1; 4], true).gossip(20_000)[0].0,
+            20_000,
             "shutdown and anchor-consumption barriers bypass the periodic throttle"
         );
     }
@@ -1972,7 +2089,9 @@ mod tests {
         let parked = rx.try_recv().expect("queued");
         queue_address_candidates(&maintenance, 10_000, tick);
         assert_eq!(rx.len(), 2, "parking keeps the claim occupied");
-        maintenance.address_book.attempted(parked.addr, 10_001);
+        maintenance
+            .address_book
+            .attempted(parked.addr, true, 10_001);
         queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100));
         assert_eq!(
             rx.len(),
@@ -2102,7 +2221,7 @@ mod tests {
         let (headers, _) = crossbeam_channel::bounded(1);
         let (blocks, _) = crossbeam_channel::bounded(1);
         let mut shared = crate::listener::ConnectionShared::new(
-            table.clone(),
+            table,
             BannedReader::fixture_empty(),
             Arc::new(crate::NetworkActivity::from_shared(Arc::new(
                 AtomicBool::new(true),
@@ -2131,12 +2250,12 @@ mod tests {
         spawn_outbound_dial(
             &OutboundDial::pinned(address),
             &shared,
-            &table,
             &mut active,
             &mut handles,
             1,
             0,
             false,
+            DEFAULT_MAX_PEER_CONNECTIONS,
         );
         assert_eq!(
             book.pending_count_excluding(&[]),
