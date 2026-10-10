@@ -299,5 +299,5 @@ opt-level = 1
 debug     = "limited"
 
 [profile.test]
-opt-level = 1
+opt-level = 3
 debug     = "limited"
