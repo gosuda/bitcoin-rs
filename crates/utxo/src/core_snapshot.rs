@@ -49,6 +49,11 @@ pub struct SnapshotLimits {
     pub max_script_bytes: u64,
     /// Maximum live outputs in one transaction group.
     pub max_coins_per_txid: u32,
+    /// Maximum transaction groups sharing the UTXO owner's eight-byte key
+    /// prefix. Core's byte order makes these groups contiguous. This rejects
+    /// repeated identical-hash work before inserting another colliding record;
+    /// it does not promise a wall-clock bound for all hash-table probe patterns.
+    pub max_txids_per_prefix: u32,
 }
 
 impl Default for SnapshotLimits {
@@ -58,6 +63,7 @@ impl Default for SnapshotLimits {
             max_coins: 250_000_000,
             max_script_bytes: 32 * 1024 * 1024 * 1024,
             max_coins_per_txid: 1_000_000,
+            max_txids_per_prefix: 64,
         }
     }
 }
@@ -449,11 +455,27 @@ impl<'a, R: Read> Decoder<'a, R> {
         let set = UtxoSet::new();
         let mut remaining = count;
         let mut previous_txid: Option<[u8; 32]> = None;
+        let mut prefix_run = 0_u64;
         while remaining > 0 {
             let txid_bytes = self.array::<32>()?;
             if previous_txid.is_some_and(|previous| previous >= txid_bytes) {
                 return Err(SnapshotError::TransactionOrder);
             }
+            let txid = Hash256::from_le_bytes(&txid_bytes);
+            let key = UtxoKey::from_txid(&Txid::from(txid));
+            let prefix = key.to_prefix();
+            prefix_run = if previous_txid.is_some_and(|previous| previous[..prefix.len()] == prefix)
+            {
+                // The prior run passed a u32 budget, so this addition fits u64.
+                prefix_run + 1
+            } else {
+                1
+            };
+            check_limit(
+                "txids per UTXO prefix",
+                prefix_run,
+                u64::from(limits.max_txids_per_prefix),
+            )?;
             previous_txid = Some(txid_bytes);
             let group = self.compact_size()?;
             if group == 0 {
@@ -499,8 +521,7 @@ impl<'a, R: Read> Decoder<'a, R> {
                     height,
                 ));
             }
-            let txid = Hash256::from_le_bytes(&txid_bytes);
-            set.insert_snapshot_record(UtxoKey::from_txid(&Txid::from(txid)), txid, &outputs)?;
+            set.insert_snapshot_record(key, txid, &outputs)?;
             remaining -= group;
         }
         Ok(set)

@@ -323,6 +323,7 @@ fn all_limits_are_enforced_including_aggregate_scripts_and_header_bytes() {
         max_coins: 200,
         max_script_bytes: 6_800,
         max_coins_per_txid: 1,
+        max_txids_per_prefix: 64,
     };
     assert!(read_and_verify(&mut Cursor::new(CORE), Network::Regtest, exact).is_ok());
     let mut reader = Cursor::new(group(1, &[0, 1]));
@@ -331,6 +332,7 @@ fn all_limits_are_enforced_including_aggregate_scripts_and_header_bytes() {
         200,
         SnapshotLimits {
             max_coins_per_txid: 1,
+            max_txids_per_prefix: 64,
             ..defaults
         },
     );
@@ -461,4 +463,71 @@ fn short_reads_interrupts_and_io_failures_keep_their_meaning() {
     assert!(
         matches!(read_metadata(&mut Failed), Err(SnapshotError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied)
     );
+}
+
+/// Strict Core ordering does not make untrusted txids random. The native
+/// UTXO hash is their eight-byte prefix, so reject an excessive same-key run
+/// before decoding or inserting its next record.
+#[test]
+fn repeated_utxo_prefix_is_limited_before_the_next_group_is_decoded() {
+    fn colliding_group(suffix: u8) -> Vec<u8> {
+        let mut bytes = group(0, &[0]);
+        bytes[8] = suffix;
+        bytes
+    }
+    let mut bytes = colliding_group(1);
+    bytes.extend(colliding_group(2));
+    let accepted_bytes = bytes.len();
+    bytes.extend(colliding_group(3));
+    let limits = SnapshotLimits {
+        max_txids_per_prefix: 2,
+        ..SnapshotLimits::default()
+    };
+    let mut input = Cursor::new(&bytes);
+    assert!(matches!(
+        Decoder::new(&mut input, 1000).coins(3, 200, limits),
+        Err(SnapshotError::LimitExceeded {
+            resource: "txids per UTXO prefix",
+            actual: 3,
+            limit: 2,
+        })
+    ));
+    assert_eq!(
+        input.position(),
+        u64::try_from(accepted_bytes + 32).expect("fixture position")
+    );
+    assert!(
+        Decoder::new(&mut Cursor::new(&bytes[..accepted_bytes]), 1000)
+            .coins(2, 200, limits)
+            .is_ok()
+    );
+
+    // The run resets when the authoritative key prefix changes.
+    let mut distinct = colliding_group(1);
+    let mut next_prefix = colliding_group(2);
+    next_prefix[7] = 1;
+    distinct.extend(next_prefix);
+    let one = SnapshotLimits {
+        max_txids_per_prefix: 1,
+        ..limits
+    };
+    assert!(
+        Decoder::new(&mut Cursor::new(&distinct), 1000)
+            .coins(2, 200, one)
+            .is_ok()
+    );
+    let mut input = Cursor::new(colliding_group(1));
+    let none = SnapshotLimits {
+        max_txids_per_prefix: 0,
+        ..limits
+    };
+    assert!(matches!(
+        Decoder::new(&mut input, 1000).coins(1, 200, none),
+        Err(SnapshotError::LimitExceeded {
+            actual: 1,
+            limit: 0,
+            ..
+        })
+    ));
+    assert_eq!(input.position(), 32);
 }

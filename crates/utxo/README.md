@@ -54,7 +54,12 @@ the reader does not imitate Core's malformed-input script substitutions.
 `SnapshotLimits` bounds encoded bytes (including the header), live output count,
 aggregate decompressed script bytes, and outputs per txid before growing the
 corresponding state. Defaults are 32 GiB encoded bytes, 250 million coins,
-32 GiB aggregate scripts and one million outputs per group. The EOF check reads
+32 GiB aggregate scripts and one million outputs per group. A separate default
+budget permits at most 64 transaction groups per eight-byte UTXO key prefix.
+Sorted groups make this run contiguous, so the reader can reject excessive
+identical-hash insertion work before decoding the next record without a second
+UTXO index. This is an input-resource policy, not a consensus rule; it does not
+establish a wall-clock guarantee for every hash-table probe pattern. The EOF check reads
 at most one additional byte. These limits bound work and retained input-derived
 state, not process RSS. The UTXO set and per-shard commitment sorting remain
 memory-resident and have additional allocation overhead; large-file runs require
