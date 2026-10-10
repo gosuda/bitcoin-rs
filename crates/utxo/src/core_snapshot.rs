@@ -1,16 +1,20 @@
 //! Bitcoin Core portable snapshot v2 input.
 //!
 //! The header is untrusted metadata. Full loading resolves a compiled network
-//! anchor, decodes into the existing UTXO set, and checks its state commitment.
+//! anchor, checks the commitment of staged existing records, and only then
+//! installs them into the existing UTXO set.
 //! Native bitcoin-rs v4 checkpoint serialization is a separate format.
 
 use std::io::{self, Read};
 
-use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, Txid, varint};
-use hashbrown::HashSet;
+use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, varint};
 use thiserror::Error;
 
-use crate::{UtxoError, UtxoKey, UtxoSet, record::OwnedUtxoOut};
+use crate::{
+    UtxoError, UtxoSet,
+    record::{OwnedUtxoOut, UtxoRecord},
+    snapshot::SerializedUtxoHasher,
+};
 
 const MAGIC: [u8; 5] = *b"utxo\xff";
 const VERSION: u16 = 2;
@@ -34,10 +38,12 @@ pub struct SnapshotMetadata {
 
 /// Resource budgets enforced before growing decoded state.
 ///
-/// Coin and aggregate script bounds constrain retained state; the per-txid
-/// bound also constrains temporary output and duplicate-index collections.
-/// They are not an allocator/RSS quota: the UTXO set, hash tables and commitment
-/// sorting have additional overhead. Verification materializes the set in RAM.
+/// Coin and aggregate script bounds constrain retained record payloads; the
+/// per-txid bound also constrains temporary output sorting. Before authentication,
+/// records live in a vector without a hash table. After authentication, payloads
+/// move into the UTXO set while the vector's allocation is still retained.
+/// These bounds are not an allocator/RSS quota: staging, hash tables and other
+/// allocation overhead remain additional. Verification materializes state in RAM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotLimits {
     /// Maximum encoded bytes, including the header; at most one extra byte is
@@ -49,11 +55,6 @@ pub struct SnapshotLimits {
     pub max_script_bytes: u64,
     /// Maximum live outputs in one transaction group.
     pub max_coins_per_txid: u32,
-    /// Maximum transaction groups sharing the UTXO owner's eight-byte key
-    /// prefix. Core's byte order makes these groups contiguous. This rejects
-    /// repeated identical-hash work before inserting another colliding record;
-    /// it does not promise a wall-clock bound for all hash-table probe patterns.
-    pub max_txids_per_prefix: u32,
 }
 
 impl Default for SnapshotLimits {
@@ -63,7 +64,6 @@ impl Default for SnapshotLimits {
             max_coins: 250_000_000,
             max_script_bytes: 32 * 1024 * 1024 * 1024,
             max_coins_per_txid: 1_000_000,
-            max_txids_per_prefix: 64,
         }
     }
 }
@@ -221,9 +221,11 @@ pub fn read_metadata(reader: &mut impl Read) -> Result<SnapshotMetadata, Snapsho
 /// Decodes an entire Core v2 file and verifies its compiled state commitment.
 ///
 /// No file is modified. Unknown anchors and oversized declared counts are
-/// rejected before allocating a UTXO set. Core-generated groups are checked in
-/// byte order so duplicate txids cannot overwrite existing records. Input bytes
-/// and decoded resources are bounded independently of untrusted counts.
+/// rejected before allocating records. Core-generated groups are checked in
+/// byte order and each group's vouts are sorted for duplicate detection and the
+/// shared commitment serializer. Only a matching compiled commitment allows
+/// record payloads to move into the UTXO hash table. Input bytes and decoded
+/// resources are bounded independently of untrusted counts.
 pub fn read_and_verify(
     reader: &mut impl Read,
     network: Network,
@@ -243,15 +245,19 @@ pub fn read_and_verify(
             network,
             base_hash: metadata.base_block_hash,
         })?;
-    let set = decoder.coins(metadata.coins_count, anchor.height, limits)?;
+    let (records, hash_serialized) = decoder.coins(metadata.coins_count, anchor.height, limits)?;
     decoder.end()?;
-    let hash_serialized =
-        set.with_stable_view(|view| view.hash_serialized_3_at_height(anchor.height))?;
     if hash_serialized != anchor.hash_serialized {
         return Err(SnapshotError::CommitmentMismatch {
             expected: anchor.hash_serialized,
             actual: hash_serialized,
         });
+    }
+    // The only inputs reaching the identity-hashed UTXO table now belong to
+    // the compiled state. Forged colliding txids never reach insertion.
+    let set = UtxoSet::new();
+    for record in records {
+        set.insert_snapshot_record(record);
     }
     Ok(CoreSnapshot {
         set,
@@ -445,37 +451,26 @@ impl<'a, R: Read> Decoder<'a, R> {
         count: u64,
         base_height: u32,
         limits: SnapshotLimits,
-    ) -> Result<UtxoSet, SnapshotError> {
+    ) -> Result<(Vec<UtxoRecord>, Hash256), SnapshotError> {
         check_limit("coins", count, limits.max_coins)?;
         check_limit(
             "addressable coins",
             count,
             u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         )?;
-        let set = UtxoSet::new();
+        // Temporary transaction staging holds the existing record payloads,
+        // without a hash table or a second coin representation. The vector
+        // grows only after a complete bounded group has arrived.
+        let mut records = Vec::new();
+        let mut commitment = SerializedUtxoHasher::new();
         let mut remaining = count;
         let mut previous_txid: Option<[u8; 32]> = None;
-        let mut prefix_run = 0_u64;
         while remaining > 0 {
             let txid_bytes = self.array::<32>()?;
             if previous_txid.is_some_and(|previous| previous >= txid_bytes) {
                 return Err(SnapshotError::TransactionOrder);
             }
             let txid = Hash256::from_le_bytes(&txid_bytes);
-            let key = UtxoKey::from_txid(&Txid::from(txid));
-            let prefix = key.to_prefix();
-            prefix_run = if previous_txid.is_some_and(|previous| previous[..prefix.len()] == prefix)
-            {
-                // The prior run passed a u32 budget, so this addition fits u64.
-                prefix_run + 1
-            } else {
-                1
-            };
-            check_limit(
-                "txids per UTXO prefix",
-                prefix_run,
-                u64::from(limits.max_txids_per_prefix),
-            )?;
             previous_txid = Some(txid_bytes);
             let group = self.compact_size()?;
             if group == 0 {
@@ -490,16 +485,12 @@ impl<'a, R: Read> Decoder<'a, R> {
                 u64::from(limits.max_coins_per_txid),
             )?;
             let mut outputs = Vec::new();
-            let mut seen = HashSet::new();
             for _ in 0..group {
                 let raw_vout = self.compact_size()?;
                 let vout = u32::try_from(raw_vout)
                     .ok()
                     .filter(|value| *value != u32::MAX)
                     .ok_or(SnapshotError::InvalidOutpoint { vout: raw_vout })?;
-                if !seen.insert(vout) {
-                    return Err(SnapshotError::DuplicateOutpoint { vout });
-                }
                 let code = u32::try_from(self.core_varint(u64::from(u32::MAX))?)
                     .map_err(|_| SnapshotError::VarIntOverflow)?;
                 let height = code >> 1;
@@ -521,10 +512,22 @@ impl<'a, R: Read> Decoder<'a, R> {
                     height,
                 ));
             }
-            set.insert_snapshot_record(key, txid, &outputs)?;
+            // Core's disk-key order is not a numeric-vout contract. Sorting
+            // also detects duplicates without hashing untrusted indices.
+            outputs.sort_unstable_by_key(|output| output.vout);
+            for pair in outputs.windows(2) {
+                if pair[0].vout == pair[1].vout {
+                    return Err(SnapshotError::DuplicateOutpoint { vout: pair[0].vout });
+                }
+            }
+            let record = UtxoRecord::from_owned_outputs(txid, &outputs)?;
+            for output in record.outputs() {
+                commitment.add(txid_bytes, output, Some(base_height))?;
+            }
+            records.push(record);
             remaining -= group;
         }
-        Ok(set)
+        Ok((records, commitment.finish()))
     }
 
     fn end(&mut self) -> Result<(), SnapshotError> {

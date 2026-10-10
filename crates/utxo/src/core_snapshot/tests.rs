@@ -44,7 +44,16 @@ fn script(bytes: &[u8]) -> Result<Vec<u8>, SnapshotError> {
 }
 
 fn body(bytes: &[u8], count: u64) -> Result<crate::UtxoSet, SnapshotError> {
-    Decoder::new(&mut Cursor::new(bytes), 1_000_000).coins(count, 200, SnapshotLimits::default())
+    let (records, _) = Decoder::new(&mut Cursor::new(bytes), 1_000_000).coins(
+        count,
+        200,
+        SnapshotLimits::default(),
+    )?;
+    let set = crate::UtxoSet::new();
+    for record in records {
+        set.insert_snapshot_record(record);
+    }
+    Ok(set)
 }
 
 fn group(txid: u8, indices: &[u64]) -> Vec<u8> {
@@ -73,6 +82,15 @@ fn genuine_core_dump_matches_compiled_anchor_and_full_state() {
     assert_eq!(loaded.anchor.height, 200);
     assert_eq!(loaded.anchor.chain_tx_count, 201);
     assert_eq!(loaded.hash_serialized, loaded.anchor.hash_serialized);
+    assert_eq!(
+        loaded
+            .set
+            .lock_stable_view()
+            .hash_serialized_3()
+            .expect("materialized commitment"),
+        loaded.hash_serialized,
+        "staging and stable-view traversals share the Core commitment",
+    );
     assert_eq!(loaded.bytes_read, 14_439);
     assert_eq!(
         loaded.metadata.base_block_hash.to_string(),
@@ -323,7 +341,6 @@ fn all_limits_are_enforced_including_aggregate_scripts_and_header_bytes() {
         max_coins: 200,
         max_script_bytes: 6_800,
         max_coins_per_txid: 1,
-        max_txids_per_prefix: 64,
     };
     assert!(read_and_verify(&mut Cursor::new(CORE), Network::Regtest, exact).is_ok());
     let mut reader = Cursor::new(group(1, &[0, 1]));
@@ -332,7 +349,6 @@ fn all_limits_are_enforced_including_aggregate_scripts_and_header_bytes() {
         200,
         SnapshotLimits {
             max_coins_per_txid: 1,
-            max_txids_per_prefix: 64,
             ..defaults
         },
     );
@@ -465,69 +481,88 @@ fn short_reads_interrupts_and_io_failures_keep_their_meaning() {
     );
 }
 
-/// Strict Core ordering does not make untrusted txids random. The native
-/// UTXO hash is their eight-byte prefix, so reject an excessive same-key run
-/// before decoding or inserting its next record.
+/// Forged txids must not reach the identity-hashed UTXO table before the
+/// compiled commitment matches. Exercise both identical full hashes and
+/// distinct hashes sharing the low bucket and high tag bits.
 #[test]
-fn repeated_utxo_prefix_is_limited_before_the_next_group_is_decoded() {
-    fn colliding_group(suffix: u8) -> Vec<u8> {
-        let mut bytes = group(0, &[0]);
-        bytes[8] = suffix;
-        bytes
+fn forged_collision_families_never_enter_the_utxo_hash_table() {
+    const RECORDS: u32 = 4096;
+    for same_full_hash in [true, false] {
+        let mut bytes = CORE[..51].to_vec();
+        bytes[43..51].copy_from_slice(&u64::from(RECORDS).to_le_bytes());
+        for index in 0..RECORDS {
+            let mut record = group(0, &[0]);
+            if same_full_hash {
+                record[8..12].copy_from_slice(&index.to_be_bytes());
+            } else {
+                // Distinct eight-byte keys, with low 32 and high 8 bits zero.
+                record[4..7].copy_from_slice(&index.to_be_bytes()[1..]);
+            }
+            bytes.extend(record);
+        }
+        let before = crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
+        assert!(matches!(
+            read_and_verify(
+                &mut Cursor::new(&bytes),
+                Network::Regtest,
+                SnapshotLimits::default()
+            ),
+            Err(SnapshotError::CommitmentMismatch { .. })
+        ));
+        assert_eq!(
+            crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+            before
+        );
     }
-    let mut bytes = colliding_group(1);
-    bytes.extend(colliding_group(2));
-    let accepted_bytes = bytes.len();
-    bytes.extend(colliding_group(3));
-    let limits = SnapshotLimits {
-        max_txids_per_prefix: 2,
-        ..SnapshotLimits::default()
-    };
-    let mut input = Cursor::new(&bytes);
-    assert!(matches!(
-        Decoder::new(&mut input, 1000).coins(3, 200, limits),
-        Err(SnapshotError::LimitExceeded {
-            resource: "txids per UTXO prefix",
-            actual: 3,
-            limit: 2,
-        })
-    ));
+    // The instrumentation observes the real successful insertion boundary.
+    let before = crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
+    assert!(
+        read_and_verify(
+            &mut Cursor::new(CORE),
+            Network::Regtest,
+            SnapshotLimits::default()
+        )
+        .is_ok()
+    );
     assert_eq!(
-        input.position(),
-        u64::try_from(accepted_bytes + 32).expect("fixture position")
+        crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+        before + 200
     );
-    assert!(
-        Decoder::new(&mut Cursor::new(&bytes[..accepted_bytes]), 1000)
-            .coins(2, 200, limits)
-            .is_ok()
-    );
+}
 
-    // The run resets when the authoritative key prefix changes.
-    let mut distinct = colliding_group(1);
-    let mut next_prefix = colliding_group(2);
-    next_prefix[7] = 1;
-    distinct.extend(next_prefix);
-    let one = SnapshotLimits {
-        max_txids_per_prefix: 1,
-        ..limits
-    };
-    assert!(
-        Decoder::new(&mut Cursor::new(&distinct), 1000)
-            .coins(2, 200, one)
-            .is_ok()
+#[test]
+fn staged_records_sort_vouts_and_move_their_payloads_without_copying() {
+    let bytes = group(1, &[9, 1, 3]);
+    let (records, hash) = Decoder::new(&mut Cursor::new(bytes), 1000)
+        .coins(3, 200, SnapshotLimits::default())
+        .expect("bounded staged records");
+    assert_eq!(
+        records[0]
+            .outputs()
+            .map(|output| output.vout)
+            .collect::<Vec<_>>(),
+        vec![1, 3, 9]
     );
-    let mut input = Cursor::new(colliding_group(1));
-    let none = SnapshotLimits {
-        max_txids_per_prefix: 0,
-        ..limits
-    };
+    let first_script = records[0]
+        .outputs()
+        .next()
+        .expect("first coin")
+        .script_pubkey
+        .as_ptr();
+    let set = crate::UtxoSet::new();
+    for record in records {
+        set.insert_snapshot_record(record);
+    }
+    set.with_stable_view(|view| {
+        assert_eq!(view.hash_serialized_3().expect("stable-view hash"), hash);
+        view.for_each_all(|outpoint, script| {
+            if outpoint.vout == 1 {
+                assert_eq!(script.as_ptr(), first_script, "record payload was moved");
+            }
+        });
+    });
     assert!(matches!(
-        Decoder::new(&mut input, 1000).coins(1, 200, none),
-        Err(SnapshotError::LimitExceeded {
-            actual: 1,
-            limit: 0,
-            ..
-        })
+        body(&group(1, &[1, 9, 1]), 3),
+        Err(SnapshotError::DuplicateOutpoint { vout: 1 })
     ));
-    assert_eq!(input.position(), 32);
 }

@@ -22,7 +22,6 @@ fuzz_target!(|data: &[u8]| {
             max_coins: 1000,
             max_script_bytes: 100_000,
             max_coins_per_txid: 1000,
-            max_txids_per_prefix: 8,
         },
     );
 });

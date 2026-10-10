@@ -37,8 +37,11 @@ Native checkpoint loading is a clean-cutover contract: `read_snapshot_strict_v4`
 
 `core_snapshot::read_metadata` parses only the fixed Core v2 header. Its network
 magic, base hash and output count remain untrusted. `read_and_verify` selects a
-compiled `AssumeUtxoData` by network and base hash, loads the entire file into the
-existing `UtxoSet`, and recomputes `hash_serialized_3` against that anchor. Height
+compiled `AssumeUtxoData` by network and base hash, stages the existing owned
+UTXO records, and recomputes `hash_serialized_3` against that anchor before any
+hash-table insertion. The same per-coin serializer serves the existing UTXO
+stable-view commitment. After the commitment matches, record payloads move into
+the existing `UtxoSet` without copying. Height
 and cumulative transaction count come from the compiled pin, never the file.
 A successful result establishes pinned-state consistency; historical validation
 from genesis remains the chainstate manager's responsibility.
@@ -54,15 +57,15 @@ the reader does not imitate Core's malformed-input script substitutions.
 `SnapshotLimits` bounds encoded bytes (including the header), live output count,
 aggregate decompressed script bytes, and outputs per txid before growing the
 corresponding state. Defaults are 32 GiB encoded bytes, 250 million coins,
-32 GiB aggregate scripts and one million outputs per group. A separate default
-budget permits at most 64 transaction groups per eight-byte UTXO key prefix.
-Sorted groups make this run contiguous, so the reader can reject excessive
-identical-hash insertion work before decoding the next record without a second
-UTXO index. This is an input-resource policy, not a consensus rule; it does not
-establish a wall-clock guarantee for every hash-table probe pattern. The EOF check reads
-at most one additional byte. These limits bound work and retained input-derived
-state, not process RSS. The UTXO set and per-shard commitment sorting remain
-memory-resident and have additional allocation overhead; large-file runs require
+32 GiB aggregate scripts and one million outputs per group. Before authentication,
+strict txid order and per-group numeric-vout sorting detect duplicates without
+hashing attacker-controlled keys. A temporary vector owns the existing compact
+records; its allocation remains while authenticated payloads move into the UTXO
+hash table. Forged collision families are rejected before that insertion boundary.
+No alternate coin model or durable staging format is introduced. The EOF check
+reads at most one additional byte. These limits bound work and retained input-derived
+state, not process RSS. Staged record owners, group sorting and the final UTXO
+set remain memory-resident and have additional allocation overhead; large-file runs require
 operator-selected budgets and measured RSS. Header inspection does not scan or
 validate the body.
 

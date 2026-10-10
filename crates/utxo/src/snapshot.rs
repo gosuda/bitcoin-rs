@@ -7,7 +7,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::{
     UtxoError, UtxoKey, UtxoSet, UtxoSetView,
-    record::{OneUtxoOut, OwnedUtxoOut},
+    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
 };
 
 const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
@@ -193,8 +193,8 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     let set = UtxoSet::new();
     let mut seen_vouts = HashSet::new();
     for _ in 0..record_count_usize {
-        let (key, txid, outputs) = read_snapshot_record_v4(reader, &mut seen_vouts)?;
-        set.insert_snapshot_record(key, txid, &outputs)?;
+        let (txid, outputs) = read_snapshot_record_v4(reader, &mut seen_vouts)?;
+        set.insert_snapshot_record(UtxoRecord::from_owned_outputs(txid, &outputs)?);
         for output in &outputs {
             observer.observe_coin(SnapshotCoin {
                 txid,
@@ -240,15 +240,15 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
 fn read_snapshot_record_v4(
     reader: &mut impl Read,
     seen_vouts: &mut HashSet<u32>,
-) -> Result<(UtxoKey, Hash256, Vec<OwnedUtxoOut>), UtxoError> {
+) -> Result<(Hash256, Vec<OwnedUtxoOut>), UtxoError> {
     let record_header_bytes =
         read_array::<{ core::mem::size_of::<SnapshotRecordHeaderV4>() }>(reader)?;
-    let (key, txid) = decode_record_identity(&record_header_bytes)?;
+    let txid = decode_record_identity(&record_header_bytes)?;
     let outputs = read_snapshot_outputs(reader, read_u32(&record_header_bytes, 41), seen_vouts)?;
-    Ok((key, txid, outputs))
+    Ok((txid, outputs))
 }
 
-fn decode_record_identity(header: &[u8]) -> Result<(UtxoKey, Hash256), UtxoError> {
+fn decode_record_identity(header: &[u8]) -> Result<Hash256, UtxoError> {
     let shard_idx = header[0];
     let mut prefix = [0_u8; 8];
     prefix.copy_from_slice(&header[1..9]);
@@ -257,7 +257,7 @@ fn decode_record_identity(header: &[u8]) -> Result<(UtxoKey, Hash256), UtxoError
     let txid = Hash256::from_le_bytes(&txid_bytes);
     let key = UtxoKey::from_prefix(prefix);
     validate_snapshot_key(key, txid, shard_idx)?;
-    Ok((key, txid))
+    Ok(txid)
 }
 
 fn read_snapshot_outputs(
@@ -321,7 +321,7 @@ fn hash_serialized_3_stable_inner(
     view: &UtxoSetView<'_>,
     snapshot_height: Option<u32>,
 ) -> Result<Hash256, UtxoError> {
-    let mut engine = Sha256::new();
+    let mut engine = SerializedUtxoHasher::new();
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
             let mut entries = Vec::with_capacity(table.output_count());
@@ -341,36 +341,58 @@ fn hash_serialized_3_stable_inner(
             });
 
             for entry in entries {
-                if let Some(snapshot_height) = snapshot_height
-                    && entry.output.height > snapshot_height
-                {
-                    return Err(UtxoError::SnapshotCoinHeightOutOfRange {
-                        height: entry.output.height,
-                        snapshot_height,
-                    });
-                }
-                engine.update(entry.txid_le);
-                engine.update(entry.output.vout.to_le_bytes());
-                let code = (entry.output.height << 1) | u32::from(entry.output.coinbase);
-                engine.update(code.to_le_bytes());
-                engine.update(entry.output.value.to_le_bytes());
-                let script_len = u64::try_from(entry.output.script_pubkey.len()).map_err(|_| {
-                    UtxoError::ScriptTooLarge {
-                        len: entry.output.script_pubkey.len(),
-                    }
-                })?;
-                let encoded_len = varint::encode(script_len);
-                engine.update(encoded_len.as_slice());
-                engine.update(entry.output.script_pubkey);
+                engine.add(entry.txid_le, entry.output, snapshot_height)?;
             }
             Ok::<(), UtxoError>(())
         })?;
     }
 
-    let first = engine.finalize();
-    let second = Sha256::digest(first);
-    let bytes: [u8; 32] = second.into();
-    Ok(Hash256::from_le_bytes(&bytes))
+    Ok(engine.finish())
+}
+
+/// The single per-coin serialization owner for Core's `HASH_SERIALIZED`
+/// commitment. Callers supply coins in raw-txid, numeric-vout order.
+pub(crate) struct SerializedUtxoHasher(Sha256);
+
+impl SerializedUtxoHasher {
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        txid_le: [u8; 32],
+        output: OneUtxoOut<'_>,
+        snapshot_height: Option<u32>,
+    ) -> Result<(), UtxoError> {
+        if let Some(snapshot_height) = snapshot_height
+            && output.height > snapshot_height
+        {
+            return Err(UtxoError::SnapshotCoinHeightOutOfRange {
+                height: output.height,
+                snapshot_height,
+            });
+        }
+        self.0.update(txid_le);
+        self.0.update(output.vout.to_le_bytes());
+        let code = (output.height << 1) | u32::from(output.coinbase);
+        self.0.update(code.to_le_bytes());
+        self.0.update(output.value.to_le_bytes());
+        let script_len =
+            u64::try_from(output.script_pubkey.len()).map_err(|_| UtxoError::ScriptTooLarge {
+                len: output.script_pubkey.len(),
+            })?;
+        self.0.update(varint::encode(script_len).as_slice());
+        self.0.update(output.script_pubkey);
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Hash256 {
+        let first = self.0.finalize();
+        let second = Sha256::digest(first);
+        let bytes: [u8; 32] = second.into();
+        Hash256::from_le_bytes(&bytes)
+    }
 }
 
 impl UtxoSetView<'_> {
