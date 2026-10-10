@@ -4,13 +4,15 @@ name: template-provider-lockfile
 # own Cargo.lock. Its deps are all registry crates — unlike fuzz/ it has no
 # `path` deps on crates/* — so only edits to its own Cargo.toml can invalidate
 # its lockfile, and this cheap metadata check owns drift detection for just
-# that manifest. No other workflow builds the bridge: ci.yml covers only the
-# root workspace, so this is the sole guard.
+# that manifest. Cargo.lock is in the trigger too, so lockfile-only edits or
+# deletion are still validated. No other workflow builds the bridge: ci.yml
+# covers only the root workspace, so this is the sole guard.
 on:
   pull_request:
     branches: ['**']
     paths:
       - 'tools/stratum-sv2/template-provider/Cargo.toml'
+      - 'tools/stratum-sv2/template-provider/Cargo.lock'
       - '.github/workflows/template-provider-lockfile.yml'
   workflow_dispatch:
 
