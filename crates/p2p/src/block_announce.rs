@@ -202,6 +202,46 @@ impl BlockAnnouncer {
         state
             .high_bandwidth_requested_peers
             .retain(|candidate| *candidate != source);
+        // Keep the table's `bip152_hb_to` snapshot consistent for the window
+        // where the entry outlives the worker's set membership.
+        self.peers.note_high_bandwidth_selected(source, false);
+    }
+
+    /// Initial fill: offer unused high-bandwidth slots to eligible peers,
+    /// proven deliverers first. Pushes the fresh promotions into `sent`.
+    fn fill_high_bandwidth_slots(
+        &self,
+        state: &mut AnnounceState,
+        eligible: &[(PeerSource, u64)],
+        sent: &mut Vec<(SocketAddr, Message)>,
+    ) {
+        // BIP152 asks for high-bandwidth slots to go to peers that recently
+        // delivered blocks quickly. Filling strictly in session order
+        // freezes the initial fill on whoever connected first — measured
+        // live on testnet4, where a fresh v2/`hb=true` peer never won a
+        // slot from the earliest-connected Core relayers — so prefer proven
+        // deliverers here. Ties (all-zero sequences on quiet networks) keep
+        // session order because the sort is stable; the rotation pass in
+        // the caller still owns later upgrades.
+        let mut fill_order = eligible.to_vec();
+        fill_order.sort_by_key(|&(_, sequence)| std::cmp::Reverse(sequence));
+        for &(source, _) in &fill_order {
+            if state.high_bandwidth_requested_peers.len() >= MAX_HIGH_BANDWIDTH_PEERS {
+                break;
+            }
+            if state.high_bandwidth_requested_peers.contains(&source) {
+                continue;
+            }
+            let message = Message::SendCmpct(SendCmpct {
+                send_compact: true,
+                version: 2,
+            });
+            if self.peers.send(source, message.clone()).is_ok() {
+                state.high_bandwidth_requested_peers.push(source);
+                self.peers.note_high_bandwidth_selected(source, true);
+                sent.push((source.addr, message));
+            }
+        }
     }
 
     /// Reconciles the selected high-bandwidth compact-relay peers against
@@ -239,28 +279,14 @@ impl BlockAnnouncer {
             state
                 .high_bandwidth_requested_peers
                 .retain(|candidate| *candidate != source);
+            self.peers.note_high_bandwidth_selected(source, false);
             if send_succeeded {
                 sent.push((source.addr, message));
             }
         }
 
         if selection_open {
-            for &(source, _) in &eligible {
-                if state.high_bandwidth_requested_peers.len() >= MAX_HIGH_BANDWIDTH_PEERS {
-                    break;
-                }
-                if state.high_bandwidth_requested_peers.contains(&source) {
-                    continue;
-                }
-                let message = Message::SendCmpct(SendCmpct {
-                    send_compact: true,
-                    version: 2,
-                });
-                if self.peers.send(source, message.clone()).is_ok() {
-                    state.high_bandwidth_requested_peers.push(source);
-                    sent.push((source.addr, message));
-                }
-            }
+            self.fill_high_bandwidth_slots(&mut state, &eligible, &mut sent);
 
             while let Some(&(candidate, candidate_sequence)) = eligible
                 .iter()
@@ -288,6 +314,7 @@ impl BlockAnnouncer {
                 }
 
                 let demoted = state.high_bandwidth_requested_peers.remove(demote_index);
+                self.peers.note_high_bandwidth_selected(demoted, false);
                 let demote = Message::SendCmpct(SendCmpct {
                     send_compact: false,
                     version: 2,
@@ -302,6 +329,7 @@ impl BlockAnnouncer {
                 });
                 if self.peers.send(candidate, promote.clone()).is_ok() {
                     state.high_bandwidth_requested_peers.push(candidate);
+                    self.peers.note_high_bandwidth_selected(candidate, true);
                     sent.push((candidate.addr, promote));
                 } else {
                     break;
@@ -317,6 +345,26 @@ impl BlockAnnouncer {
             .into_iter()
             .filter(|session| session.info.is_some() && !session.lease.is_cancelled())
             .collect()
+    }
+
+    /// Why the planner fell back to a plain `inv` for one peer. Kept out of
+    /// `planned_announcements` so the decision skeleton stays readable.
+    fn inv_fallback_reason(
+        send_headers: bool,
+        known_position: Option<(Hash256, u32)>,
+        tip_height: u32,
+    ) -> &'static str {
+        if !send_headers {
+            "sendheaders not negotiated"
+        } else if known_position.is_none() {
+            "no demonstrated anchor"
+        } else if !known_position.is_some_and(|(_, known_height)| {
+            tip_height - known_height <= u32::try_from(MAX_BLOCKS_TO_ANNOUNCE).unwrap_or(u32::MAX)
+        }) {
+            "anchor beyond MAX_BLOCKS_TO_ANNOUNCE"
+        } else {
+            "headers walk unavailable"
+        }
     }
 
     fn planned_announcements(&self, tip: CommittedTip) -> Vec<PlannedAnnouncement> {
@@ -364,12 +412,28 @@ impl BlockAnnouncer {
                             message: msg,
                             confirms_tip: true,
                         });
+                        tracing::debug!(
+                            peer = %addr,
+                            tip_height = tip.height,
+                            mode = "compact",
+                            "block announcement planned"
+                        );
                         continue;
                     }
                 }
             }
 
             // Option B: Headers-First Announcement (BIP130)
+            //
+            // Anchoring requires a demonstrated position: a tip this
+            // connection delivered and the node accepted (`demonstrated_tips`
+            // from a headers-download round, or its last announced block). A
+            // sendheaders peer that only listens for announcements has no
+            // anchor, so it stays on the `inv` fallback — measured live on
+            // testnet4 and pinned by
+            // `test_sendheaders_peer_without_demonstrated_tip_gets_inv`.
+            // Core additionally anchors on the peer's own announcements;
+            // closing that gap is a sync-credit change, not a planner one.
             let send_headers = session.info.as_ref().is_some_and(|i| i.send_headers);
             if send_headers {
                 if let Some((known_hash, known_height)) = known_position
@@ -392,6 +456,12 @@ impl BlockAnnouncer {
                                 message: Message::Headers(headers),
                                 confirms_tip: true,
                             });
+                            tracing::debug!(
+                                peer = %addr,
+                                tip_height = tip.height,
+                                mode = "headers",
+                                "block announcement planned"
+                            );
                             continue;
                         }
                     }
@@ -399,6 +469,7 @@ impl BlockAnnouncer {
             }
 
             // Option C: `inv` Compatibility Fallback
+            let reason = Self::inv_fallback_reason(send_headers, known_position, tip.height);
             let block_inv =
                 Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
             planned.push(PlannedAnnouncement {
@@ -406,6 +477,13 @@ impl BlockAnnouncer {
                 message: Message::Inv(vec![block_inv]),
                 confirms_tip: false,
             });
+            tracing::debug!(
+                peer = %addr,
+                tip_height = tip.height,
+                mode = "inv",
+                reason,
+                "block announcement planned"
+            );
         }
 
         planned
@@ -774,6 +852,121 @@ mod tests {
 
         let received = rx.try_recv().expect("peer received message");
         assert!(matches!(received, Message::Inv(_)));
+    }
+
+    #[test]
+    fn test_high_bandwidth_fill_prefers_proven_deliverers() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        // Four eligible compact peers connected in order; a4 delivered three
+        // blocks and a1 one, the middle two none. BIP152 wants the slots on
+        // the proven deliverers, deepest sequence first. All peers are set
+        // up before any compact preference is recorded so the explicit
+        // reconcile below is the only one that sees eligible peers.
+        let addrs = [
+            test_addr(1201),
+            test_addr(1202),
+            test_addr(1203),
+            test_addr(1204),
+        ];
+        let _peers: Vec<_> = addrs
+            .iter()
+            .map(|addr| setup_peer(&table, &announcer, *addr, false))
+            .collect();
+        for addr in addrs {
+            note_compact_preference(&table, addr, true, 2);
+        }
+        table.note_useful_block(source(&table, addrs[0]));
+        for _ in 0..3 {
+            table.note_useful_block(source(&table, addrs[3]));
+        }
+
+        let sent = announcer.reconcile_high_bandwidth_peers();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            announcer.high_bandwidth_requested_peers(),
+            vec![addrs[3], addrs[0], addrs[1]]
+        );
+
+        // The selection is written through to the snapshot rpc reads.
+        for (addr, expected) in addrs.iter().zip([true, true, false, true]) {
+            let state = table
+                .announcement_state(source(&table, *addr))
+                .expect("published peer");
+            assert_eq!(
+                state.selected_high_bandwidth, expected,
+                "bip152_hb_to must reflect the worker's selection"
+            );
+        }
+    }
+
+    #[test]
+    fn test_high_bandwidth_fill_keeps_session_order_without_evidence() {
+        // All sequences zero (quiet network): the stable sort keeps session
+        // order, so the fill behaves exactly like the old connection-order
+        // rule whenever no peer has delivered blocks yet.
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        let addrs = [
+            test_addr(1211),
+            test_addr(1212),
+            test_addr(1213),
+            test_addr(1214),
+        ];
+        let _peers: Vec<_> = addrs
+            .iter()
+            .map(|addr| setup_peer(&table, &announcer, *addr, false))
+            .collect();
+        for addr in addrs {
+            note_compact_preference(&table, addr, true, 2);
+        }
+
+        let sent = announcer.reconcile_high_bandwidth_peers();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            announcer.high_bandwidth_requested_peers(),
+            vec![addrs[0], addrs[1], addrs[2]]
+        );
+    }
+
+    #[test]
+    fn test_sendheaders_peer_without_demonstrated_tip_gets_inv() {
+        // Live-measured on testnet4: a sendheaders peer that never
+        // participates in a headers-download round has no demonstrated
+        // anchor, so the planner conservatively falls back to `inv` instead
+        // of BIP130 `headers`. See the Option B comment in
+        // `planned_announcements`.
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        let addr = test_addr(1221);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        // No mark_known: the peer demonstrated nothing.
+
+        let sent = announcer.process_tip();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(sent[0].1, Message::Inv(_)));
+        assert!(
+            matches!(rx.try_recv(), Ok(Message::Inv(_))),
+            "an unanchored sendheaders peer must get the inv fallback"
+        );
     }
 
     #[test]

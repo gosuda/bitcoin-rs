@@ -39,6 +39,16 @@ pub struct PeerSession {
     /// [`PeerInfo::best_known_height`], the P2P-03 credit this does not
     /// disturb.
     pub(crate) headers_horizon: Option<u32>,
+    /// Whether we have currently selected this peer for high-bandwidth
+    /// compact-block push — Core's `getpeerinfo.bip152_hb_to`: we asked the
+    /// peer (via `sendcmpct(true)`) to announce new blocks to us as
+    /// unsolicited `cmpctblock` instead of `inv`.
+    pub bip152_hb_to: bool,
+    /// Whether this peer has selected us for high-bandwidth compact-block
+    /// push — Core's `getpeerinfo.bip152_hb_from`: the peer asked us (via
+    /// its `sendcmpct(true)`) to announce new blocks to it as unsolicited
+    /// `cmpctblock` instead of `inv`.
+    pub bip152_hb_from: bool,
 }
 
 /// Announcement-relevant state owned by the live peer connection.
@@ -49,6 +59,11 @@ pub(crate) struct PeerAnnouncementState {
     pub(crate) compact_version: Option<u64>,
     pub(crate) supports_compact_v2: bool,
     pub(crate) useful_block_sequence: u64,
+    /// Whether the announcement worker currently selects this peer for
+    /// high-bandwidth push (`bip152_hb_to`). Selection authority lives in
+    /// the worker; the table is the snapshot rpc reads, so promotions and
+    /// demotions are written through here.
+    pub(crate) selected_high_bandwidth: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +93,8 @@ impl Entry {
             info: self.info.clone(),
             demonstrated_tips: self.demonstrated_tips.clone(),
             headers_horizon: self.headers_horizon,
+            bip152_hb_to: self.announcement.selected_high_bandwidth,
+            bip152_hb_from: self.announcement.compact_high_bandwidth == Some(true),
         }
     }
 }
@@ -419,6 +436,20 @@ impl PeerTable {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         true
+    }
+
+    /// Records whether the announcement worker currently selects the current
+    /// connection for high-bandwidth compact-block push (`bip152_hb_to`).
+    /// The worker keeps the authoritative set; this mirror exists so the
+    /// `sessions()` snapshot rpc reads reports the live selection.
+    pub(crate) fn note_high_bandwidth_selected(&self, source: PeerSource, selected: bool) {
+        let mut entries = self.entries.write();
+        if let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        {
+            entry.announcement.selected_high_bandwidth = selected;
+        }
     }
 
     /// Returns announcement state for the current published connection.

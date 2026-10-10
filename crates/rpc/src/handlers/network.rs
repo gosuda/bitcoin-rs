@@ -243,8 +243,14 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             version: peer.version,
             subversion: peer.user_agent.clone(),
             inbound: peer.inbound,
-            bip152_hb_to: false,
-            bip152_hb_from: false,
+            // Core's `bip152_hb_to`/`bip152_hb_from` (v25+): whether WE have
+            // selected this peer as a high-bandwidth compact-block relay
+            // (the announcement worker's current set), and whether the peer
+            // has selected US (its `sendcmpct(true)` preference recorded at
+            // handshake). High-bandwidth peers announce new blocks as
+            // unsolicited `cmpctblock` instead of `inv`.
+            bip152_hb_to: session.bip152_hb_to,
+            bip152_hb_from: session.bip152_hb_from,
             // Core 31 does not emit `startingheight` at all -- the name does
             // not appear anywhere in its source. corepc keeps the field
             // `Option` for older versions, so `None` is what v31 looks like.
