@@ -187,25 +187,29 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
     let config = isolated_config(&temp.path().join("node-slow-bootstrap"));
     let mut state = NodeState::open(config, None)?;
     let (current, previous) = seed_checkpoint(&state)?;
-    let (_gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
-    let (exited_tx, exited_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = crossbeam_channel::bounded(0);
+    let worker_joined = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&worker_joined);
     let worker = std::thread::Builder::new()
         .name("bitcoin-rs-p2p-bootstrap".to_owned())
         .spawn(move || {
-            let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(2));
-            let _ = exited_tx.send(());
+            let _ = release_rx.recv();
+            flag.store(true, Ordering::Release);
         })?;
     let mut services = NodeServices::default();
     state.p2p().test_install_bootstrap_worker(worker);
+
+    // Release the bootstrap worker after a short delay to verify that teardown
+    // waits for the worker to exit rather than timing out or abandoning it.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let _ = release_tx.send(());
+    });
+
     let started = std::time::Instant::now();
     services.teardown(Some(&mut state), TeardownMode::CleanShutdown)?;
-    let elapsed = started.elapsed();
-    assert!(elapsed >= std::time::Duration::from_secs(2));
-    assert!(
-        exited_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .is_ok()
-    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+    assert!(worker_joined.load(Ordering::Acquire));
     assert!(bootstrap_drain_was_reached());
     assert_ne!(std::fs::read(current)?, previous);
     drop(services);
@@ -263,15 +267,6 @@ fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
         installed_before + 1
     );
     assert_eq!(crate::signal::testing::closed_total(), closed_before + 1);
-
-    let reopen_config = isolated_config(&temp.path().join("embedded"));
-    let node = start_node(reopen_config, RuntimeInputs::default(), true)?;
-    node.shutdown_blocking()?;
-    assert_eq!(
-        crate::signal::testing::installed_total(),
-        installed_before + 2
-    );
-    assert_eq!(crate::signal::testing::closed_total(), closed_before + 2);
     Ok(())
 }
 

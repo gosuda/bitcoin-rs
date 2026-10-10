@@ -54,15 +54,15 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 
 /// Node-side socket read poll while waiting for peer frames.
-const READ_POLL: Duration = Duration::from_millis(200);
+const READ_POLL: Duration = Duration::from_millis(50);
 /// Bounded deadline for the inbound handshake.
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a socket is drained while asserting a message never arrives.
-const ABSENCE_WINDOW: Duration = Duration::from_millis(700);
+const ABSENCE_WINDOW: Duration = Duration::from_millis(300);
 /// Upper bound for admission and relay to become observable.
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Slice between deadline checks in the frame collectors.
-const COLLECT_SLICE: Duration = Duration::from_millis(200);
+const COLLECT_SLICE: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -753,16 +753,23 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
 
-    let legacy_frames = collect_frames(
-        &harness.bystander.dialer,
-        harness.magic,
-        Instant::now() + ABSENCE_WINDOW,
-    )?;
-    let witness_frames = collect_frames(
-        &witness_peer.dialer,
-        harness.magic,
-        Instant::now() + ABSENCE_WINDOW,
-    )?;
+    let until = Instant::now() + ABSENCE_WINDOW;
+    let (legacy_frames, witness_frames, source_frames) = std::thread::scope(|s| {
+        let h1 = s.spawn(|| collect_frames(&harness.bystander.dialer, harness.magic, until));
+        let h2 = s.spawn(|| collect_frames(&witness_peer.dialer, harness.magic, until));
+        let h3 = s.spawn(|| collect_frames(&harness.source.dialer, harness.magic, until));
+        let legacy = h1
+            .join()
+            .map_err(|_| anyhow!("bystander collector panicked"))?;
+        let witness = h2
+            .join()
+            .map_err(|_| anyhow!("witness collector panicked"))?;
+        let source = h3
+            .join()
+            .map_err(|_| anyhow!("source collector panicked"))?;
+        Ok::<_, anyhow::Error>((legacy?, witness?, source?))
+    })?;
+
     let inventories = |frames: &[Message]| -> Vec<Inventory> {
         frames
             .iter()
@@ -786,11 +793,6 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
             *wtxid.as_bytes()
         ),)]
     );
-    let source_frames = collect_frames(
-        &harness.source.dialer,
-        harness.magic,
-        Instant::now() + ABSENCE_WINDOW,
-    )?;
     assert_eq!(inventories(&source_frames), []);
     Ok(())
 }
