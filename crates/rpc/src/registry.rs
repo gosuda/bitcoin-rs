@@ -11,7 +11,7 @@ use sonic_rs::Value;
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{chain, mempool, mining, network, tx, util};
+use crate::handlers::{chain, mempool, mining, network, psbt, tx, util};
 use crate::manifest::{CORE_VERSION, Entry, NO_WALLET, Status, SurfaceKind};
 
 /// Signature of one dispatch arm.
@@ -177,7 +177,7 @@ declare_rows! {
     "combinerawtransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Raw-transaction combination not implemented.", "n/a", None;
     "converttopsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
     "createpsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
-    "decodepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
+    "decodepsbt", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Public PSBT metadata projection in crates/rpc/src/handlers/psbt.rs uses the shared bounded codec (16 MiB encoded, 10000 items, 100000 map entries plus library read limits). Explicit DEFAULT/unknown Taproot signatures, uncompressed BIP32 origins, mismatched hash preimages and other stricter typed fields are rejected; Core accepts descriptive metadata in those measured cases. Typed TapTree sibling order, compact usage help, and unadapted malformed-field diagnostics differ; see API-02 and pinned process vectors.", "0.12.0", Some(psbt::decodepsbt);
     "decodescript", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers.", "0.12.0", Some(util::decodescript);
     "descriptorprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "fundrawtransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;

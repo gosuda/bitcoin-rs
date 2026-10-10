@@ -12,6 +12,7 @@ pub(crate) mod chain;
 pub(crate) mod mempool;
 pub(crate) mod mining;
 pub(crate) mod network;
+pub(crate) mod psbt;
 pub(crate) mod tx;
 pub(crate) mod util;
 

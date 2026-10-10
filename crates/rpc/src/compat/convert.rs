@@ -2,9 +2,9 @@
 //!
 //! Every conversion between this node's native primitives and the
 //! `bitcoin`/`corepc-types` vocabulary crosses the RPC boundary here, by
-//! consensus-byte round trip or explicit field mapping. Handlers build
-//! `corepc_types::v31` values and emit them through [`typed_to_sonic`]; they
-//! never hand-assemble response JSON.
+//! consensus-byte round trip or explicit field mapping. Handlers use typed
+//! `corepc_types::v31` values or shared projections where the pinned typed schema
+//! cannot represent the full Core response.
 //!
 //! Address strings, `asm`, and `desc` are wire-format strings that must match
 //! Bitcoin Core byte-for-byte; they ride the sanctioned rust-bitcoin seam
@@ -14,8 +14,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use bitcoin::Address;
+use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_primitives::{CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes,
+};
 use bitcoin_rs_script::{
     is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_push_only, multisig_key_count,
     witness_program,
@@ -24,6 +28,43 @@ use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use crate::error::RpcError;
 use crate::tx_render;
+
+/// Copy a public library transaction into native primitives without reparsing.
+/// This preserves wire integer bits and incomplete zero-input PSBT transactions.
+#[must_use]
+pub(crate) fn native_transaction(tx: &bitcoin::Transaction) -> Tx {
+    Tx {
+        version: tx.version.0,
+        lock_time: LockTime::from_consensus(tx.lock_time.to_consensus_u32()),
+        inputs: tx
+            .input
+            .iter()
+            .map(|input| TxIn {
+                previous_output: OutPoint::new(
+                    Txid::from(Hash256::from_le_bytes(
+                        &input.previous_output.txid.to_byte_array(),
+                    )),
+                    input.previous_output.vout,
+                ),
+                script_sig: Script::from_bytes(input.script_sig.as_bytes().to_vec()),
+                sequence: Sequence::from_consensus(input.sequence.to_consensus_u32()),
+                witness: Witness::from(
+                    input.witness.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                ),
+            })
+            .collect(),
+        outputs: tx.output.iter().map(native_output).collect(),
+    }
+}
+
+/// Copy an output at the same RPC boundary, retaining signed-wire amount bits.
+#[must_use]
+pub(crate) fn native_output(output: &bitcoin::TxOut) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(output.value.to_sat()),
+        script_pubkey: Script::from_bytes(output.script_pubkey.as_bytes().to_vec()),
+    }
+}
 
 /// Maps a native network onto the rust-bitcoin network for the sanctioned
 /// address seams (`Address` parsing requires it).

@@ -55,7 +55,7 @@
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
-  `deriveaddresses`, `decodescript`, `scantxoutset`, `combinepsbt`, and `finalizepsbt`
+  `deriveaddresses`, `decodescript`, `scantxoutset`, `combinepsbt`, `finalizepsbt`, and `decodepsbt`
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
 
@@ -121,6 +121,19 @@
   compressed. Taproot-origin leaf hashes use Core sorted-set semantics in the
   single typed representation on decode and an encoding copy. No wallet, signing authority, or parallel PSBT
   parser is introduced.
+
+- `decodepsbt` projects global, input, and output public metadata through the
+  shared codec and Core script/transaction renderer. Empty global arrays/maps
+  remain present; optional empty fields are omitted. Fees use the shared
+  non-witness-first UTXO selection, signed decimal amounts, money-range checks,
+  and omission when supplied inputs cannot form a complete valid total.
+  BIP373 MuSig2 entries use the codec-validated raw unknown fields, with no
+  parallel parser or signing/key-store state. Proprietary subtypes include
+  canonical extended CompactSize values. Positional/named/null/type cases and
+  full metadata JSON are exercised against pinned Core processes.
+  In addition to shared codec deviations, the library rejects a mismatched
+  hash preimage that Core describes without checking the hash. Wrong-arity
+  help is compact; unadapted malformed-library-field diagnostic text can differ.
 
 ### `API-03`: REST dialect
 

@@ -42,6 +42,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/minimum_fee_filter/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
+| `decodepsbt` | 0.12.0 | Public PSBT metadata projection in crates/rpc/src/handlers/psbt.rs uses the shared bounded codec (16 MiB encoded, 10000 items, 100000 map entries plus library read limits). Explicit DEFAULT/unknown Taproot signatures, uncompressed BIP32 origins, mismatched hash preimages and other stricter typed fields are rejected; Core accepts descriptive metadata in those measured cases. Typed TapTree sibling order, compact usage help, and unadapted malformed-field diagnostics differ; see API-02 and pinned process vectors. |
 | `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers. |
 
 ### Implemented (unverified)
@@ -129,7 +130,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `combinerawtransaction` | n/a | Raw-transaction combination not implemented. |
 | `converttopsbt` | n/a | PSBT creation not implemented. |
 | `createpsbt` | n/a | PSBT creation not implemented. |
-| `decodepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
 | `descriptorprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
 | `fundrawtransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
 | `getprivatebroadcastinfo` | n/a | Private-broadcast store not implemented. |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 22, Implemented (unverified) 59, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 23, Implemented (unverified) 59, Extension 2, Disabled 0, Unimplemented 91 - total 175.
