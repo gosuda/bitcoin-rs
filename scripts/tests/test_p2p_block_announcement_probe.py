@@ -1,8 +1,11 @@
 """Offline regressions for the live block-announcement wire probe."""
 
 import importlib.util
+import io
+import json
 import socket
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -76,6 +79,35 @@ class P2pBlockAnnouncementProbeTest(unittest.TestCase):
 
         self.assertEqual(command, "headers")
         self.assertTrue(saw_abandoned)
+
+    def test_rpc_decodes_http_error_body(self):
+        error_payload = json.dumps(
+            {"error": {"code": -1, "message": "duplicate-invalid"}}
+        ).encode()
+        http_error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8332",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(error_payload),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(RuntimeError) as context:
+                probe.rpc(8332, "auth", "generateblock", ["addr", []])
+        self.assertIn("duplicate-invalid", str(context.exception))
+
+    def test_rpc_handles_non_json_http_error(self):
+        http_error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8332",
+            code=502,
+            msg="Bad Gateway",
+            hdrs=None,
+            fp=io.BytesIO(b"gateway error"),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(RuntimeError) as context:
+                probe.rpc(8332, "auth", "generateblock", ["addr", []])
+        self.assertIn("failed with HTTP 502: Bad Gateway", str(context.exception))
 
 
 if __name__ == "__main__":

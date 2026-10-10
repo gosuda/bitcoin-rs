@@ -11,6 +11,7 @@ import os
 import socket
 import struct
 import time
+import urllib.error
 import urllib.request
 
 
@@ -74,8 +75,14 @@ def rpc(port: int, authentication: str, method: str, params: list[object] | None
             "Content-Type": "text/plain",
         },
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        decoded = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            decoded = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            decoded = json.load(error)
+        except Exception:
+            raise RuntimeError(f"{method} failed with HTTP {error.code}: {error.reason}") from error
     if decoded.get("error") is not None:
         raise RuntimeError(f"{method} failed: {decoded['error']}")
     return decoded["result"]
@@ -281,8 +288,9 @@ def main() -> None:
             peer.drain()
 
     rpc(core_rpc_port, core_auth, "invalidateblock", [first_tip])
-    rpc(core_rpc_port, core_auth, "generateblock", [mining_address, []])
-    reorg_tip = rpc(core_rpc_port, core_auth, "generateblock", [mining_address, []])["hash"]
+    reorg_address = rpc(core_rpc_port, core_auth, "getnewaddress")
+    rpc(core_rpc_port, core_auth, "generateblock", [reorg_address, []])
+    reorg_tip = rpc(core_rpc_port, core_auth, "generateblock", [reorg_address, []])["hash"]
     wait_for_rs_tip(rs_rpc_port, rs_auth, reorg_tip)
     reorg, stale = observe_round(peers, reorg_tip, first_tip)
 
