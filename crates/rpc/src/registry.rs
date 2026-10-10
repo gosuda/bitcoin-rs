@@ -256,7 +256,7 @@ declare_rows! {
     "/rest/chaininfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/mempool/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/headers/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs).", "0.4.0", None;
-    "/rest/getutxos", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs).", "0.4.0", None;
+    "/rest/getutxos", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "GET and bounded canonical binary/hex POST share UTXO and mempool lookup. Intentionally corrects Core 31.1 POST string-length-prefix decoding; rejects mixed inputs, JSON bodies and trailing data. POST limit: 2048 bytes, 15 outpoints.", "0.4.0", None;
     "/rest/deploymentinfo/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/deploymentinfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;

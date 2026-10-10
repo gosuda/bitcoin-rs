@@ -204,7 +204,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `/rest/headers/` | 0.4.0 | Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs). |
-| `/rest/getutxos` | 0.4.0 | URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs). |
+| `/rest/getutxos` | 0.4.0 | GET and bounded canonical binary/hex POST share UTXO and mempool lookup. Intentionally corrects Core 31.1 POST string-length-prefix decoding; rejects mixed inputs, JSON bodies and trailing data. POST limit: 2048 bytes, 15 outpoints. |
 | `/rest/spenttxouts/` | 0.4.0 | Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs). |
 
 ### Implemented (unverified)

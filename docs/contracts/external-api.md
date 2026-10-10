@@ -68,6 +68,26 @@
   unknown block hash returns an empty 200, matching the pinned Core
   behavior.
 
+- `/rest/getutxos` GET URI input and POST binary/hex input share one
+  authoritative UTXO/mempool lookup. POST reads a bool and canonical
+  CompactSize outpoint vector directly, limited to 15 outpoints and a
+  2048-byte wire body before allocation. JSON bodies, mixed input sources,
+  malformed/trailing data and oversized requests fail with HTTP 400.
+  Empty serialized vectors are valid; URI requests still require outpoints.
+- Plain coin reads capture tip and coins under the existing stable chain
+  read role. Mixed reads retain one pool view and reject a changed/odd
+  chain generation. Rendering happens after guards are dropped. Pool-created
+  outputs use Core REST's `MEMPOOL_HEIGHT` value, 2147483647.
+- The canonical POST decoder intentionally corrects Core 31.1's incoming
+  string-length-prefix bug; the registry retains `Deviation`. Independent
+  wire fixtures and same-tip Core GET establish intended response bytes;
+  Core POST's measured different answer is an explicit known gap.
+- Evidence: `rest::tests::getutxos_post_canonical_wire_and_input_boundaries`,
+  `getutxos_post_uses_the_existing_applied_view_and_generation_fence`,
+  `getutxos_plain_read_waits_for_the_chain_transition`,
+  `server::tests::getutxos_post_preserves_http_security_and_limits`, and
+  `bin/bitcoin-rs/tests/rest_getutxos_process.rs`.
+
 ### `API-04`: ZMQ notification contract
 
 
