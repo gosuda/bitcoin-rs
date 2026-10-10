@@ -13,7 +13,7 @@ Every sample in a cell records six identities. The T02 collector rejects a sampl
 | Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
 | Corpus | Corpus digest, height range, stop height and stop hash |
 | Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
-| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Toolchain | `rustc 1.99.0`, edition 2024, profile, enabled features |
 | Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
 
 ## Acceptance rule

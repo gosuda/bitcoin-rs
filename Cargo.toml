@@ -22,7 +22,7 @@ members = [
 
 [workspace.package]
 edition      = "2024"
-rust-version = "1.95.0"
+rust-version = "1.99.0"
 license      = "Apache-2.0"
 repository   = "https://github.com/gosuda/bitcoin-rs"
 version      = "0.12.0"
@@ -96,7 +96,7 @@ windows-sys = { version = "=0.61.2", features = [
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
-corepc-types = { version = "0.15.0", default-features = false, features = [
+corepc-types = { version = "0.16.0", default-features = false, features = [
     "std", "serde-deny-unknown-fields",
 ] }
 
@@ -184,9 +184,12 @@ clap       = { version = ">=4.6, <5",   default-features = false, features = [
 # --- Observability ------------------------------------------------------------
 tracing            = { version = ">=0.1.44, <0.2", default-features = false, features = ["std", "attributes"] }
 # USDT probe emission for the consensus crate's `trace` module (optional;
-# pulled in only by the `usdt` feature). Apache-2.0, pure Rust, no C toolchain or AWS-LC/ring providers.
+# pulled in only by the `usdt` feature). Apache-2.0, no AWS-LC/ring providers.
 # `default-features = false` drops the `asm` feature, an empty marker in 0.6.0 —
 # `.note.stapsdt` emission is unconditional and asserted by sdt_notes in CI.
+# Build-time chain caveat: dtrace-parser → pest 2.9.3 now compiles `psm`/`stacker`
+# target assembly via `cc`, so builds enabling this feature need a C toolchain
+# even though the usdt crates themselves are pure Rust.
 usdt               = { version = "=0.6.0", default-features = false }
 tracing-subscriber = { version = ">=0.3.23, <0.4", default-features = false, features = [
     "std", "fmt", "registry", "ansi", "env-filter", "json", "smallvec",
@@ -198,7 +201,7 @@ metrics                     = { version = ">=0.24.6, <0.25" }
 # defaults; crates/node serves Prometheus text over its own listener.
 metrics-exporter-prometheus = { version = ">=0.18, <0.19", default-features = false }
 # quanta: monotonic TSC clock for hot-path timing. No special features needed.
-quanta                      = { version = ">=0.12.6, <0.13", default-features = false }
+quanta                      = { version = ">=0.13.0, <0.14", default-features = false }
 
 # --- Signals ------------------------------------------------------------------
 signal-hook = { version = ">=0.4.4, <0.5", default-features = false }

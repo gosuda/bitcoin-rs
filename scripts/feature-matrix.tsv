@@ -1,6 +1,9 @@
 # name	package	lane	args
 # Owner of the supported feature combinations (FEAT-01).
-# lane=pure: no C++ / libbitcoinkernel / rocksdb
+# lane=pure: no C++ / libbitcoinkernel / rocksdb engines. Build scripts in the
+# dependency graph may still invoke cc (e.g. usdt -> dtrace-parser -> pest 2.9.3
+# compiles psm/stacker target assembly), so `pure` lanes are C++-engine-free,
+# not C-toolchain-free.
 # lane=native: needs cmake+libboost (kernel) and/or C storage engines
 bin-default	bitcoin-rs	pure	--no-default-features --features fjall,redb,zmq
 bin-usdt	bitcoin-rs	pure	--no-default-features --features fjall,usdt

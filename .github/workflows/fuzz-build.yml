@@ -3,9 +3,10 @@ name: fuzz-build
 # Compile every fuzz target when fuzz/ files or root workspace dependency
 # declarations change. fuzz/ is a separate Cargo workspace, so its own
 # fuzz/Cargo.lock is covered by fuzz/**; the root Cargo.lock does not resolve
-# the fuzz build. Crate-only edits are checked by the daily-fuzz campaign,
-# rather than making every ordinary code PR pay for a fuzz build. The daily
-# workflow also owns execution and corpus updates.
+# the fuzz build. Crate-manifest edits are covered by the cheap fuzz-lockfile
+# drift check and the daily-fuzz campaign, rather than making every ordinary
+# code PR pay for a fuzz build. The daily workflow also owns execution and
+# corpus updates.
 on:
   pull_request:
     branches: ['**']
@@ -40,5 +41,9 @@ jobs:
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # cargo-fuzz
         with:
           tool: cargo-fuzz@0.13.2
+      # fuzz/ pulls in root workspace crates by path, so root workspace
+      # version-pin bumps can invalidate fuzz/Cargo.lock; --locked fails fast
+      # when fuzz/Cargo.lock was not regenerated for them.
+      - run: cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
       # cargo-fuzz can otherwise select an unavailable musl target.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
