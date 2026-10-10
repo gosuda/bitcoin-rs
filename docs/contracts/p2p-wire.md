@@ -28,7 +28,11 @@ This page assigns ownership and cites proof under the
   count, and stripped transaction spans into its payload, following BIP144.
   Both forms validate the complete borrowed layout without materializing
   scripts or witnesses; malformed bodies are never forwarded. Both forms
-  recheck active-chain identity after preparing the payload. The decoder
+  resolve `(height, hash)` directly and recheck serving eligibility after
+  preparing the payload. Stored stale blocks remain servable under the policy
+  document's validation and age bounds; unsolicited announcements remain
+  active-only. Response depth uses the applied frontier rather than unapplied
+  headers. The decoder
   still types inbound `block` as `Message::Block`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership

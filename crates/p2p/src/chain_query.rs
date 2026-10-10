@@ -1,4 +1,4 @@
-//! Active-chain serving for `getheaders` / `getdata`.
+//! Active-chain header walks and hash-addressed block serving.
 //!
 //! Locator interpretation, header-walk policy, and inventory serving live
 //! here. [`BlockTree`] answers active-chain identity; [`BlockBodySource`]
@@ -11,7 +11,9 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, ChainWork, TipReader};
+use bitcoin_rs_chain::{
+    BlockBodySource, BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader,
+};
 use bitcoin_rs_primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network, deserialize};
 #[cfg(test)]
@@ -27,6 +29,19 @@ const MAX_CMPCTBLOCK_DEPTH: u32 = 5;
 /// Depth from the active tip for which a `getblocktxn` is still answered with a
 /// `blocktxn`.
 const MAX_BLOCKTXN_DEPTH: u32 = 10;
+
+/// Core 31.1 `BlockRequestAllowed`: stale-block fingerprinting bound, in seconds.
+const STALE_RELAY_AGE_LIMIT: u32 = 30 * 24 * 60 * 60;
+
+#[derive(Clone, Copy)]
+enum ServingPolicy {
+    /// Unsolicited announcements must still name the applied, selected chain.
+    Announcement,
+    /// Full/compact inventory replies, including deep getblocktxn fallback.
+    Inventory,
+    /// Shallow getblocktxn uses stored data without the stale-age gate in Core.
+    BlockTransactions,
+}
 
 /// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
@@ -64,32 +79,53 @@ impl ActiveChainQuery {
         self
     }
 
-    /// The active height of one block with the tip height it was observed
-    /// under, both read in one guard so a depth is a snapshot of one tree
-    /// state.
-    fn active_position(&self, hash: BlockHash) -> Option<(u32, u32)> {
+    /// Resolve a hash against one tree view and the applied frontier. Header
+    /// selection alone is not evidence of body validation. Off-chain inventory
+    /// replies require a count recorded by application (or authenticated restore)
+    /// and Core's timestamp/proof-equivalent age checks. Shallow getblocktxn
+    /// follows Core's `HAVE_DATA` path; the body source proves data availability.
+    fn serving_position(&self, hash: BlockHash, policy: ServingPolicy) -> Option<(u32, u32)> {
         let tree = self.block_tree.read();
-        let tip = tree.tip()?;
-        let height = tree.active_height_of(tip.tip_id, hash.into())?;
-        Some((tip.height, height))
+        let tip = self.applied_tip.load_full()?;
+        let applied = tree.node(tip.tip_id).ok()?;
+        if applied.hash != tip.hash || applied.height != tip.height {
+            return None;
+        }
+        let node_id = tree.lookup(hash.into())?;
+        let node = tree.node(node_id).ok()?;
+        if node.status == NodeStatus::Invalid {
+            return None;
+        }
+        let on_applied = tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id);
+        let allowed = match policy {
+            ServingPolicy::Announcement => {
+                let best = tree.tip()?;
+                on_applied && tree.active_height_of(best.tip_id, hash.into()) == Some(node.height)
+            }
+            ServingPolicy::BlockTransactions
+                if !beyond_depth(tip.height, node.height, MAX_BLOCKTXN_DEPTH) =>
+            {
+                true
+            }
+            ServingPolicy::Inventory | ServingPolicy::BlockTransactions => {
+                on_applied
+                    || (node.chain_tx_count.get().is_some()
+                        && stale_block_is_recent(&tree, node, self.network))
+            }
+        };
+        allowed.then_some((tip.height, node.height))
     }
 
-    /// The validated stored body of one active block, with the tip height
-    /// re-read in the guard that proved its membership after the load.
-    ///
-    /// PRE: `height` is the block's active height as first observed.
-    /// POST: return the raw consensus payload and the observing tip height
-    /// only while the block is still active at `height`; `None` leaves the
-    /// request unanswered. With `include_witness` false, transaction
-    /// witnesses are stripped from the returned payload.
-    /// INVARIANT: no body is served for a block that left the active chain,
-    /// and the tip height comes from the same guard as that proof, so a
-    /// depth decision is never made from two different tree states.
-    fn load_active_block(
+    /// Load the exact (height, hash) body outside the tree lock, validate its
+    /// encoding and hash, then recheck eligibility and applied depth. A reorg
+    /// may retain a servable stale block; removal, invalidation or aging out
+    /// during I/O must still refuse it. Announcements remain active-only.
+    fn load_block(
         &self,
         height: u32,
         hash: BlockHash,
         include_witness: bool,
+        policy: ServingPolicy,
     ) -> Option<(bytes::Bytes, u32)> {
         let bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
         let header = bytes
@@ -119,10 +155,8 @@ impl ActiveChainQuery {
         };
         drop(block);
         let bytes = stripped.unwrap_or(bytes);
-        let tree = self.block_tree.read();
-        let tip = tree.tip()?;
-        (tree.active_height_of(tip.tip_id, hash.into()) == Some(height))
-            .then(|| (bytes::Bytes::from(bytes), tip.height))
+        let (tip_height, current_height) = self.serving_position(hash, policy)?;
+        (current_height == height).then(|| (bytes::Bytes::from(bytes), tip_height))
     }
 
     /// The stored body as a `block` payload, witnesses retained.
@@ -132,7 +166,7 @@ impl ActiveChainQuery {
         hash: BlockHash,
         include_witness: bool,
     ) -> Option<Message> {
-        self.load_active_block(height, hash, include_witness)
+        self.load_block(height, hash, include_witness, ServingPolicy::Inventory)
             .map(|(body, _)| Message::BlockPayload(body))
     }
 }
@@ -219,7 +253,7 @@ impl ChainQuery for ActiveChainQuery {
         hash: BlockHash,
         compact_version: Option<u64>,
     ) -> Option<Message> {
-        self.compact_block_for(height, hash, compact_version)
+        self.compact_block_for(height, hash, compact_version, ServingPolicy::Announcement)
     }
 
     fn committed_tip(&self) -> Option<CommittedTip> {
@@ -249,7 +283,9 @@ impl ChainQuery for ActiveChainQuery {
                 outcome.not_found.push(*item);
                 continue;
             };
-            let Some((tip_height, height)) = self.active_position(request.hash()) else {
+            let Some((tip_height, height)) =
+                self.serving_position(request.hash(), ServingPolicy::Inventory)
+            else {
                 outcome.not_found.push(*item);
                 continue;
             };
@@ -275,10 +311,11 @@ impl ChainQuery for ActiveChainQuery {
     /// them), the whole witness-bearing `block` for a deeper one, and
     /// `None` for a block this node cannot serve or while the `headroom`
     /// gate is saturated; `Err` reports an index past the end of the body.
-    /// INVARIANT: a deep request is never answered with a small `blocktxn`
-    /// and never left unanswered while its body is available (Core 31.1
-    /// `net_processing.cpp:4590-4624`); `headroom` is evaluated immediately
-    /// before the body load, so a saturated gate materializes no body.
+    /// INVARIANT: deep requests use full-block inventory policy, including
+    /// stale-block age/validation restrictions; shallow stored stale blocks
+    /// remain reconstructible (Core 31.1 `net_processing.cpp:4333-4391`).
+    /// `headroom` is evaluated immediately before loading, so a saturated
+    /// gate materializes no body.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -286,14 +323,21 @@ impl ChainQuery for ActiveChainQuery {
         headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError> {
         let hash = native_block_hash(request.block_hash);
-        let Some((tip_height, height)) = self.active_position(hash) else {
+        let Some((tip_height, height)) =
+            self.serving_position(hash, ServingPolicy::BlockTransactions)
+        else {
             return Ok(None);
         };
         let deep = beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH);
         if !headroom() {
             return Ok(None);
         }
-        let Some((payload, tip_height)) = self.load_active_block(height, hash, true) else {
+        let policy = if deep {
+            ServingPolicy::Inventory
+        } else {
+            ServingPolicy::BlockTransactions
+        };
+        let Some((payload, tip_height)) = self.load_block(height, hash, true, policy) else {
             return Ok(None);
         };
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
@@ -324,19 +368,21 @@ fn strip_witnesses(transactions: &mut BlockTransactions) {
 }
 
 impl ActiveChainQuery {
-    /// Builds one `cmpctblock` for an active-chain body at the requesting
-    /// peer's negotiated BIP152 version.
+    /// Builds one compact response under the caller's announcement or
+    /// inventory policy at the negotiated BIP152 version.
     fn compact_block_for(
         &self,
         height: u32,
         hash: BlockHash,
         compact_version: Option<u64>,
+        policy: ServingPolicy,
     ) -> Option<Message> {
+        self.serving_position(hash, policy)?;
         let version = u32::try_from(compact_version?).ok()?;
         if version != 1 && version != 2 {
             return None;
         }
-        let (payload, tip_height) = self.load_active_block(height, hash, true)?;
+        let (payload, tip_height) = self.load_block(height, hash, true, policy)?;
         if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
             return Some(Message::BlockPayload(payload));
         }
@@ -367,9 +413,39 @@ impl ActiveChainQuery {
             {
                 self.full_block_response(height, hash, true)
             }
-            BlockRequest::Compact(hash) => self.compact_block_for(height, hash, compact_version),
+            BlockRequest::Compact(hash) => {
+                self.compact_block_for(height, hash, compact_version, ServingPolicy::Inventory)
+            }
         }
     }
+}
+
+/// Bitcoin Core v31.1 `BlockRequestAllowed` and `GetBlockProofEquivalentTime`
+/// at commit 9be056a8a72b624dae9623b2f7bded92c2a21c91. The proof-time difference
+/// is signed: a block with at least best-header work is not too old. Overflow
+/// in the positive work-time product fails closed, like Core's int64 saturation.
+fn stale_block_is_recent(
+    tree: &BlockTree,
+    node: &bitcoin_rs_chain::BlockTreeNode,
+    network: Network,
+) -> bool {
+    let Some(best_tip) = tree.tip() else {
+        return false;
+    };
+    let Ok(best) = tree.node(best_tip.tip_id) else {
+        return false;
+    };
+    if best.header.time.saturating_sub(node.header.time) >= STALE_RELAY_AGE_LIMIT {
+        return false;
+    }
+    if node.chainwork >= best.chainwork {
+        return true;
+    }
+    let work = bitcoin_rs_chain::block_work(&best.header);
+    work != ChainWork::ZERO
+        && (best.chainwork - node.chainwork)
+            .checked_mul(ChainWork::from(network.target_spacing_seconds()))
+            .is_some_and(|scaled| scaled / work < ChainWork::from(STALE_RELAY_AGE_LIMIT))
 }
 
 /// Whether one block sits deeper below the active tip than `limit`.
@@ -377,7 +453,7 @@ const fn beyond_depth(tip_height: u32, height: u32, limit: u32) -> bool {
     tip_height.saturating_sub(height) > limit
 }
 
-/// Which active-chain body one block-typed inventory item asks for.
+/// Which hash-addressed body one block-typed inventory item asks for.
 #[derive(Clone, Copy, Debug)]
 enum BlockRequest {
     Full {
@@ -1572,6 +1648,469 @@ mod tests {
         let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
         applied_tip.store(block_tree.read().tip());
         ActiveChainQuery::new(block_tree, applied_tip, network)
+    }
+
+    struct StaleFixture {
+        query: ActiveChainQuery,
+        stale: Block,
+        winner: Block,
+        source: Arc<CountingBodySource>,
+    }
+
+    /// A previously applied block at height one and a different applied winner
+    /// at the same height. Counts are recorded through the chain owner's API.
+    fn stale_query(depth: u32) -> Result<StaleFixture, Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let stale = block_at(&headers, 1)?;
+        let query = query_with(headers)?;
+        let winner;
+        {
+            let mut tree = query.block_tree.write();
+            let genesis = tree
+                .node_at_height_from(tree.tip_id().ok_or("tip")?, 0)
+                .ok_or("genesis")?;
+            tree.record_applied_tx_count(genesis, 1)?;
+            let stale_id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
+            tree.record_applied_tx_count(stale_id, 2)?;
+            let header = test_header(tree.node(genesis)?.hash.into(), 100);
+            winner = Block {
+                header,
+                txs: vec![test_tx(3), test_tx(4)],
+            };
+            let mut parent = tree.insert_node(Some(genesis), header, NodeStatus::HeaderValid)?;
+            tree.record_applied_tx_count(parent, 2)?;
+            for nonce in 0..depth {
+                let header = test_header(tree.node(parent)?.hash.into(), 101 + nonce);
+                parent = tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?;
+            }
+            query.applied_tip.store(tree.tip());
+        }
+        let source = Arc::new(CountingBodySource {
+            bodies: vec![
+                (1, stale.block_hash(), consensus_bytes(&stale)),
+                (1, winner.block_hash(), consensus_bytes(&winner)),
+            ],
+            loads: AtomicUsize::new(0),
+            tripwire: None,
+        });
+        Ok(StaleFixture {
+            query: query.with_block_body_source(source.clone()),
+            stale,
+            winner,
+            source,
+        })
+    }
+
+    #[test]
+    fn stored_stale_blocks_are_hash_addressed_without_becoming_announcements()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let StaleFixture {
+            query,
+            stale,
+            winner,
+            source,
+        } = stale_query(1)?;
+        for block in [&stale, &winner] {
+            let wire = wire_hash(block.block_hash());
+            for item in [
+                Inventory::Block(wire),
+                Inventory::WitnessBlock(wire),
+                Inventory::CompactBlock(wire),
+            ] {
+                let mut messages = Vec::new();
+                let result =
+                    query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |m| {
+                        messages.push(m);
+                        Ok(())
+                    })?;
+                assert_eq!(result.not_found, []);
+                match &messages[0] {
+                    Message::BlockPayload(payload) => {
+                        assert_eq!(payload_body(payload)?.block_hash(), wire);
+                    }
+                    Message::CmpctBlock(compact) => {
+                        assert_eq!(compact.compact_block.header.block_hash(), wire);
+                    }
+                    other => panic!("unexpected response {other:?}"),
+                }
+            }
+            let request = BlockTransactionsRequest {
+                block_hash: wire,
+                indexes: vec![1],
+            };
+            let Some(Message::BlockTxn(response)) =
+                query.block_transactions(&request, Some(2), &|| true)?
+            else {
+                panic!("stored shallow block must answer");
+            };
+            assert_eq!(response.transactions.block_hash, wire);
+            let expected: RegistryBlock = bitcoin::consensus::deserialize(&consensus_bytes(block))?;
+            assert_eq!(
+                response.transactions.transactions,
+                vec![expected.txdata[1].clone()]
+            );
+        }
+        let before = source.loads.load(Ordering::Relaxed);
+        assert!(ChainQuery::compact_block_for(&query, 1, stale.block_hash(), Some(2)).is_none());
+        assert_eq!(
+            source.loads.load(Ordering::Relaxed),
+            before,
+            "stale announcements load no body"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_serving_keeps_depth_headroom_and_unknown_rules()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (depth, blocktxn) in [(10, true), (11, false)] {
+            let StaleFixture {
+                query,
+                stale,
+                source,
+                ..
+            } = stale_query(depth)?;
+            let request = BlockTransactionsRequest {
+                block_hash: wire_hash(stale.block_hash()),
+                indexes: vec![1],
+            };
+            assert!(
+                query
+                    .block_transactions(&request, Some(2), &|| false)?
+                    .is_none()
+            );
+            let outcome = query.serve_inventory_blocks(
+                &[Inventory::WitnessBlock(request.block_hash)],
+                Some(2),
+                &|| false,
+                &mut |_| panic!("no headroom"),
+            )?;
+            assert!(outcome.halted);
+            assert_eq!(source.loads.load(Ordering::Relaxed), 0);
+            let reply = query
+                .block_transactions(&request, Some(2), &|| true)?
+                .ok_or("stale reply")?;
+            assert_eq!(matches!(reply, Message::BlockTxn(_)), blocktxn);
+            if let Message::BlockPayload(payload) = reply {
+                assert_eq!(payload_body(&payload)?.block_hash(), request.block_hash);
+            }
+            let unknown = BlockTransactionsRequest {
+                block_hash: WireBlockHash::from_byte_array([99; 32]),
+                indexes: vec![0],
+            };
+            assert!(
+                query
+                    .block_transactions(&unknown, Some(2), &|| panic!(
+                        "unknown must not ask for headroom"
+                    ))?
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stale_inventory_requires_validation_and_core_age_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Core 31.1 BlockRequestAllowed uses strict < 30 days independently
+        // for timestamp age and proof-equivalent age; regtest work is 2 and
+        // spacing 600s, so 4320 blocks is exactly 30 days.
+        for (time_age, work_blocks, validated, allowed) in [
+            (2_591_999, 4_319, true, true),
+            (2_592_000, 4_319, true, false),
+            (2_591_999, 4_320, true, false),
+            (0, 0, false, false),
+        ] {
+            let StaleFixture {
+                query,
+                stale,
+                source,
+                ..
+            } = stale_query(1)?;
+            {
+                let mut tree = query.block_tree.write();
+                let stale_id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
+                if !validated {
+                    tree.restore_chain_tx_count(stale_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)?;
+                }
+                let stale_work = tree.node(stale_id)?.chainwork;
+                let best_id = tree.tip_id().ok_or("tip")?;
+                let best = tree.node_mut(best_id)?;
+                best.header.time = stale.header.time + time_age;
+                best.chainwork = stale_work + ChainWork::from(work_blocks * 2_u32);
+            }
+            let hash = wire_hash(stale.block_hash());
+            let outcome = query.serve_inventory_blocks(
+                &[Inventory::WitnessBlock(hash)],
+                None,
+                &|| true,
+                &mut |_| Ok(()),
+            )?;
+            assert_eq!(outcome.not_found.is_empty(), allowed);
+            assert_eq!(source.loads.load(Ordering::Relaxed), usize::from(allowed));
+            // Shallow HAVE_DATA requests intentionally do not inherit the
+            // inventory age/validation filter (Core GETBLOCKTXN).
+            assert!(
+                query
+                    .block_transactions(
+                        &BlockTransactionsRequest {
+                            block_hash: hash,
+                            indexes: vec![1]
+                        },
+                        Some(2),
+                        &|| true
+                    )?
+                    .is_some()
+            );
+        }
+        // Deep getblocktxn takes inventory policy, including stale-age refusal.
+        let StaleFixture {
+            query,
+            stale,
+            source,
+            ..
+        } = stale_query(11)?;
+        {
+            let mut tree = query.block_tree.write();
+            let tip = tree.tip_id().ok_or("tip")?;
+            tree.node_mut(tip)?.header.time = stale.header.time + 2_592_000;
+        }
+        assert!(
+            query
+                .block_transactions(
+                    &BlockTransactionsRequest {
+                        block_hash: wire_hash(stale.block_hash()),
+                        indexes: vec![1]
+                    },
+                    Some(2),
+                    &|| true
+                )?
+                .is_none()
+        );
+        assert_eq!(source.loads.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_invalid_or_missing_bodies_are_not_served() -> Result<(), Box<dyn std::error::Error>> {
+        let StaleFixture {
+            mut query, stale, ..
+        } = stale_query(1)?;
+        query.block_body_source = None;
+        let request = BlockTransactionsRequest {
+            block_hash: wire_hash(stale.block_hash()),
+            indexes: vec![1],
+        };
+        assert!(
+            query
+                .block_transactions(&request, Some(2), &|| true)?
+                .is_none()
+        );
+        let StaleFixture {
+            query,
+            stale,
+            source,
+            ..
+        } = stale_query(1)?;
+        {
+            let mut tree = query.block_tree.write();
+            let id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
+            tree.invalidate_subtree(id)?;
+        }
+        assert!(
+            query
+                .block_transactions(&request, Some(2), &|| true)?
+                .is_none()
+        );
+        let result = query.serve_inventory_blocks(
+            &[Inventory::WitnessBlock(request.block_hash)],
+            None,
+            &|| true,
+            &mut |_| panic!("invalid"),
+        )?;
+        assert_eq!(result.not_found.len(), 1);
+        assert_eq!(source.loads.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn serving_depth_uses_applied_tip_when_headers_are_ahead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(15);
+        let block = block_at(&headers, 1)?;
+        let query = chain_at(&headers[..2], 1, &block)?;
+        {
+            let mut tree = query.block_tree.write();
+            for header in &headers[2..] {
+                tree.insert_header(*header, NodeStatus::HeaderValid)?;
+            }
+        }
+        let request = BlockTransactionsRequest {
+            block_hash: wire_hash(block.block_hash()),
+            indexes: vec![1],
+        };
+        assert!(matches!(
+            query.block_transactions(&request, Some(2), &|| true)?,
+            Some(Message::BlockTxn(_))
+        ));
+        let mut messages = Vec::new();
+        query.serve_inventory_blocks(
+            &[Inventory::CompactBlock(request.block_hash)],
+            Some(2),
+            &|| true,
+            &mut |m| {
+                messages.push(m);
+                Ok(())
+            },
+        )?;
+        assert!(matches!(messages.as_slice(), [Message::CmpctBlock(_)]));
+        Ok(())
+    }
+
+    #[test]
+    fn serving_rechecks_reorg_invalidation_and_age_after_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct RacingSource {
+            source: Arc<CountingBodySource>,
+            tree: BlockTreeReader,
+            applied: TipReader,
+            change: u8,
+        }
+        impl BlockBodySource for RacingSource {
+            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+                let mut tree = self.tree.write();
+                match self.change {
+                    1 => {
+                        let id = tree.lookup(hash.into())?;
+                        tree.invalidate_subtree(id).ok()?;
+                    }
+                    2 => {
+                        let tip = tree.tip_id()?;
+                        tree.node_mut(tip).ok()?.header.time = 2_592_001;
+                    }
+                    _ => {}
+                }
+                self.applied.store(tree.tip());
+                drop(tree);
+                self.source.block_body(height, hash)
+            }
+        }
+        for change in 0..3 {
+            let StaleFixture {
+                mut query,
+                stale,
+                source,
+                ..
+            } = stale_query(1)?;
+            // Capture the old applied tip while the competing headers already
+            // lead. The body read publishes the reorg, invalidation, or age change.
+            {
+                let tree = query.block_tree.read();
+                let id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
+                let n = tree.node(id)?;
+                query
+                    .applied_tip
+                    .store(Some(Arc::new(bitcoin_rs_chain::TipSnapshot {
+                        tip_id: id,
+                        height: n.height,
+                        hash: n.hash,
+                        chainwork: n.chainwork,
+                        chain_tx_count: n.chain_tx_count,
+                    })));
+            }
+            query.block_body_source = Some(Arc::new(RacingSource {
+                source: source.clone(),
+                tree: query.block_tree.clone(),
+                applied: query.applied_tip.clone(),
+                change,
+            }));
+            let hash = wire_hash(stale.block_hash());
+            let mut messages = Vec::new();
+            let outcome = query.serve_inventory_blocks(
+                &[Inventory::WitnessBlock(hash)],
+                None,
+                &|| true,
+                &mut |m| {
+                    messages.push(m);
+                    Ok(())
+                },
+            )?;
+            assert_eq!(source.loads.load(Ordering::Relaxed), 1);
+            if change == 0 {
+                assert_eq!(outcome.not_found, []);
+                let [Message::BlockPayload(payload)] = messages.as_slice() else {
+                    panic!("reorg retains stored stale response");
+                };
+                assert_eq!(payload_body(payload)?.block_hash(), hash);
+            } else {
+                assert_eq!(messages, []);
+                assert_eq!(outcome.not_found, vec![Inventory::WitnessBlock(hash)]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct AdvancingSource {
+            source: Arc<CountingBodySource>,
+            tree: BlockTreeReader,
+            applied: TipReader,
+            change: u8,
+        }
+        impl BlockBodySource for AdvancingSource {
+            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+                let mut tree = self.tree.write();
+                let old_tip = tree.tip_id()?;
+                let mut header = test_header(tree.node(old_tip).ok()?.hash.into(), 200);
+                if self.change == 2 {
+                    header.time = 2_592_001;
+                }
+                tree.insert_node(Some(old_tip), header, NodeStatus::HeaderValid)
+                    .ok()?;
+                if self.change == 1 {
+                    let stale_id = tree.lookup(hash.into())?;
+                    tree.restore_chain_tx_count(stale_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)
+                        .ok()?;
+                }
+                self.applied.store(tree.tip());
+                drop(tree);
+                self.source.block_body(height, hash)
+            }
+        }
+        for change in 0..3 {
+            let StaleFixture {
+                mut query,
+                stale,
+                source,
+                ..
+            } = stale_query(10)?;
+            query.block_body_source = Some(Arc::new(AdvancingSource {
+                source: source.clone(),
+                tree: query.block_tree.clone(),
+                applied: query.applied_tip.clone(),
+                change,
+            }));
+            let request = BlockTransactionsRequest {
+                block_hash: wire_hash(stale.block_hash()),
+                indexes: vec![1],
+            };
+            let result = query.block_transactions(&request, Some(2), &|| true)?;
+            assert_eq!(source.loads.load(Ordering::Relaxed), 1);
+            if change == 0 {
+                let Some(Message::BlockPayload(payload)) = result else {
+                    panic!("crossing depth ten must use full-block inventory policy");
+                };
+                assert_eq!(payload_body(&payload)?.block_hash(), request.block_hash);
+            } else {
+                assert!(
+                    result.is_none(),
+                    "deep fallback must reject absent validation or stale age"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn query_with(headers: Vec<Header>) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {
