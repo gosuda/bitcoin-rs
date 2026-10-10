@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       # The formal lane runs the pinned solver identity, not whatever
       # python3 a hosted runner happened to ship; typing.TypeIs parity with
       # the comparator lane is not needed here, so 3.11 is the documented
