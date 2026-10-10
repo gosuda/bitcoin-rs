@@ -17,6 +17,9 @@
 #[path = "support/reference_set.rs"]
 mod reference_set;
 
+#[path = "support/script_decode_cases.rs"]
+mod script_decode_cases;
+
 #[path = "support/policy_cases.rs"]
 mod policy_cases;
 

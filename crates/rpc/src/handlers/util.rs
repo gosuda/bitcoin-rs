@@ -29,6 +29,31 @@ fn conf_target_blocks(conf_target: u64) -> u32 {
     u32::try_from(conf_target).unwrap_or(u32::MAX)
 }
 
+/// Decode a script without querying chain state or supplying wallet keys.
+pub(crate) fn decodescript(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["hexstring"])?;
+    let params = bound.as_ref();
+    let array = params_array(params)?;
+    if array.len() != 1 {
+        return Err(RpcError::Misc("decodescript \"hexstring\"".to_owned()));
+    }
+    let hex = array[0]
+        .as_str()
+        .ok_or_else(|| super::wrong_type(1, "hexstring", &array[0], "string"))?;
+    if hex.len() > crate::server::MAX_BODY_BYTES {
+        return Err(RpcError::InvalidParameter(
+            "script exceeds the RPC request byte limit".to_owned(),
+        ));
+    }
+    let script = bitcoin::ScriptBuf::from_hex(hex).map_err(|_| {
+        RpcError::InvalidParameter(format!("argument must be hexadecimal string (not '{hex}')"))
+    })?;
+    Ok(crate::tx_render::decoded_script_json(
+        script.as_bytes(),
+        ctx.chain.chain_network,
+    ))
+}
+
 /// `uptime` measures from the instant this context's RPC listener bound
 /// (recorded by `RpcServer::bind`), or from its first call for contexts
 /// that never bind a server.
@@ -2165,5 +2190,20 @@ mod deriveaddresses_tests {
             .unwrap_or_else(|| panic!("a testnet WIF must not derive on mainnet"));
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
         assert!(error.to_string().contains("test network"), "got {error}");
+    }
+}
+
+#[cfg(test)]
+mod script_decode_tests {
+    use super::*;
+
+    #[test]
+    fn direct_script_decode_obeys_the_transport_input_budget() {
+        let context = Arc::new(Context::new());
+        let oversized = "00".repeat(crate::server::MAX_BODY_BYTES / 2 + 1);
+        let result = decodescript(&context, &json!([oversized]));
+        assert!(
+            matches!(result, Err(RpcError::InvalidParameter(message)) if message == "script exceeds the RPC request byte limit")
+        );
     }
 }

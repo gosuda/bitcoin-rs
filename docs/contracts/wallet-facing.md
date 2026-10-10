@@ -15,7 +15,7 @@ stay in the external process.
   facts, not a second surface.
 - The consumer does not import `NodeState`, `UtxoSet`, index types, or
   other crate-internal handles, and it gets no datadir access. The
-  key-free helpers `getdescriptorinfo`, `deriveaddresses`, `scantxoutset`,
+  key-free helpers `getdescriptorinfo`, `deriveaddresses`, `decodescript`, `scantxoutset`,
   `combinepsbt`, `finalizepsbt`, and `sendrawtransaction` remain node
   RPCs because they need no key custody.
 - Privileged access fails by design. Import, datadir, and internal-state

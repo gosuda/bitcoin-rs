@@ -304,7 +304,7 @@ pub(crate) fn script_pub_key_typed(
 #[must_use]
 fn script_sig_typed(script: &[u8]) -> corepc_types::ScriptSig {
     corepc_types::ScriptSig {
-        asm: script_asm(script),
+        asm: tx_render::script_asm(script, true),
         hex: script.to_lower_hex_string(),
     }
 }
@@ -701,7 +701,7 @@ mod tests {
             anchor
                 .get("desc")
                 .and_then(sonic_rs::JsonValueTrait::as_str),
-            Some("addr(bc1pfeessrawgf)")
+            Some("addr(bc1pfeessrawgf)#d6x2lh3c")
         );
         assert_eq!(
             anchor

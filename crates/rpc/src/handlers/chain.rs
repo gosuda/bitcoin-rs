@@ -1502,7 +1502,7 @@ fn block_verbose_typed(
             fee: None,
         });
     }
-    typed_to_sonic(&v31::GetBlockVerboseTwo {
+    typed_to_sonic_omitting_nulls(&v31::GetBlockVerboseTwo {
         hash: record.hash.to_string(),
         confirmations: block_confirmations,
         size,

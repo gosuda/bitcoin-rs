@@ -223,7 +223,7 @@ fn txout_typed(
     coinbase: bool,
     best_block: Hash256,
 ) -> Result<Value, RpcError> {
-    typed_to_sonic(&v31::GetTxOut {
+    typed_to_sonic_omitting_nulls(&v31::GetTxOut {
         best_block: best_block.to_string(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
@@ -555,7 +555,7 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
-    typed_to_sonic(&v31::DecodeRawTransaction(convert::raw_transaction(
+    typed_to_sonic_omitting_nulls(&v31::DecodeRawTransaction(convert::raw_transaction(
         &tx,
         ctx.chain.chain_network,
     )?))

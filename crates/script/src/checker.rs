@@ -373,7 +373,10 @@ impl<'a> TxSignatureChecker<'a> {
 /// Empty signatures are allowed (clean false). Under `DERSIG`, `LOW_S`, or
 /// `STRICTENC`, the signature must be valid DER. Under `LOW_S`, the S value
 /// must be low. Under `STRICTENC`, the hashtype must be defined.
-fn check_signature_encoding(sig: &[u8], flags: VerifyFlags) -> Result<(), ScriptError> {
+///
+/// # Errors
+/// Returns the typed DER, high-S, or undefined-hashtype failure selected by `flags`.
+pub fn check_signature_encoding(sig: &[u8], flags: VerifyFlags) -> Result<(), ScriptError> {
     // Empty signature is always allowed (not strictly DER, but valid for
     // CHECK(MULTI)SIG dummy / null-fail purposes).
     if sig.is_empty() {
