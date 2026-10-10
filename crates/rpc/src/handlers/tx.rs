@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 use hashbrown::HashSet;
@@ -551,10 +552,17 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring"])?;
+    let bound = super::bind_named_params(params, &["hexstring", "iswitness"])?;
     let params = bound.as_ref();
-    let raw = required_str(params, 0, "raw transaction is required")?;
-    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    let array = checked_transaction_arguments(
+        params,
+        "decoderawtransaction",
+        &["hexstring", "iswitness"],
+        1,
+        &[(0, "string", false), (1, "bool", true)],
+    )?;
+    let raw = required_str(params, 0, "hexstring is required")?;
+    let tx = decode_rpc_transaction(raw, array.get(1).and_then(JsonValueTrait::as_bool))?;
     let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
     if let Some(object) = value.as_object_mut() {
         object.remove(&"hex");
@@ -562,115 +570,431 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     Ok(value)
 }
 
-const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
+const CREATE_TRANSACTION_ARGUMENTS: &[&str] =
+    &["inputs", "outputs", "locktime", "replaceable", "version"];
 
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
-    let params = bound.as_ref();
-    let array = params_array(params)?;
-    let inputs = array
-        .first()
-        .and_then(|value| value.as_array())
-        .ok_or(RpcError::InvalidParams("inputs must be an array"))?;
-    let outputs = array
+    let tx = construct_transaction(ctx, params, "createrawtransaction")?;
+    typed_to_sonic(&v31::CreateRawTransaction(
+        consensus_bytes(&tx).to_lower_hex_string(),
+    ))
+}
+
+pub(crate) fn createpsbt(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    blank_psbt(construct_transaction(ctx, params, "createpsbt")?)
+}
+
+pub(crate) fn converttopsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let names = &["hexstring", "permitsigdata", "iswitness"];
+    let bound = super::bind_named_params(params, names)?;
+    let array = checked_transaction_arguments(
+        bound.as_ref(),
+        "converttopsbt",
+        names,
+        1,
+        &[(0, "string", false), (1, "bool", true), (2, "bool", true)],
+    )?;
+    let raw = required_str(bound.as_ref(), 0, "hexstring is required")?;
+    let permitsigdata = array
         .get(1)
-        .and_then(|value| value.as_object())
-        .ok_or(RpcError::InvalidParams("outputs must be an object"))?;
-    let locktime = match array.get(2) {
-        None => 0_u32,
-        Some(value) if value.is_null() => 0_u32,
-        Some(value) => {
-            let locktime = value
-                .as_u64()
-                .ok_or_else(|| RpcError::InvalidType("locktime must be an integer".to_owned()))?;
-            u32::try_from(locktime).map_err(|_| RpcError::InvalidParams("locktime exceeds u32"))?
-        }
-    };
-    let replaceable = optional_bool(params, 3, false)?;
+        .and_then(JsonValueTrait::as_bool)
+        .unwrap_or(false);
+    let mut tx = decode_rpc_transaction(raw, array.get(2).and_then(JsonValueTrait::as_bool))?;
+    if !permitsigdata
+        && tx
+            .inputs
+            .iter()
+            .any(|input| !input.script_sig.is_empty() || !input.witness.is_empty())
+    {
+        return Err(RpcError::Deserialization(
+            "Inputs must not have scriptSigs and scriptWitnesses".to_owned(),
+        ));
+    }
+    for input in &mut tx.inputs {
+        input.script_sig.clear();
+        input.witness.clear();
+    }
+    blank_psbt(tx)
+}
 
-    // BIP125 opt-in sequence; 0xFFFFFFFF = final (no RBF, no locktime).
-    let default_sequence: u32 = if replaceable {
-        0xFFFF_FFFD
+/// Core `DecodeHexTx` tries exact extended and legacy encodings and prefers
+/// the one with sane scripts. This selects an interpretation; it does not
+/// reject an otherwise decodable transaction for invalid script opcodes.
+fn decode_rpc_transaction(raw: &str, iswitness: Option<bool>) -> Result<Tx, RpcError> {
+    use bitcoin_rs_primitives::layout::ParsedTransaction;
+    if raw.len() > crate::server::MAX_BODY_BYTES {
+        return Err(RpcError::InvalidParameter(
+            "hexstring exceeds RPC request size limit".to_owned(),
+        ));
+    }
+    let bytes =
+        hex_decode(raw).map_err(|_| RpcError::Deserialization("TX decode failed".to_owned()))?;
+    let decode = |witness| {
+        ParsedTransaction::parse_exact_with_witness(&bytes, witness)
+            .ok()
+            .map(|parsed| parsed.materialize())
+    };
+    let mut extended = (iswitness != Some(false)).then(|| decode(true)).flatten();
+    if let Some(tx) = extended.take_if(|tx| transaction_scripts_sane(tx)) {
+        return Ok(tx);
+    }
+    let mut legacy = (iswitness != Some(true)).then(|| decode(false)).flatten();
+    if let Some(tx) = legacy.take_if(|tx| transaction_scripts_sane(tx)) {
+        return Ok(tx);
+    }
+    extended
+        .or(legacy)
+        .ok_or_else(|| RpcError::Deserialization("TX decode failed".to_owned()))
+}
+
+fn transaction_scripts_sane(tx: &Tx) -> bool {
+    let sane = |script: &Script| {
+        script.len() <= bitcoin_rs_script::MAX_SCRIPT_SIZE
+            && bitcoin_rs_script::has_valid_ops(script)
+    };
+    let coinbase = tx.inputs.len() == 1
+        && tx
+            .inputs
+            .first()
+            .is_some_and(|input| input.previous_output.is_null());
+    (coinbase || tx.inputs.iter().all(|input| sane(&input.script_sig)))
+        && tx.outputs.iter().all(|output| sane(&output.script_pubkey))
+}
+
+/// Both creator RPCs build the same unsigned transaction. No chain, mempool,
+/// wallet, or key lookup participates; only the selected address network does.
+fn construct_transaction(ctx: &Context, params: &Value, method: &str) -> Result<Tx, RpcError> {
+    let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
+    let array = checked_transaction_arguments(
+        bound.as_ref(),
+        method,
+        CREATE_TRANSACTION_ARGUMENTS,
+        2,
+        &[
+            (0, "array", false),
+            (2, "number", true),
+            (3, "bool", true),
+            (4, "number", true),
+        ],
+    )?;
+    // Core evaluates the unsigned version RPC argument before entering
+    // ConstructTransaction, whose locktime check precedes version range.
+    let version = array
+        .get(4)
+        .filter(|v| !v.is_null())
+        .map_or(Ok(2), core_integer::<u32>)?;
+    let locktime = array
+        .get(2)
+        .filter(|v| !v.is_null())
+        .map_or(Ok(0), core_integer::<i64>)?;
+    let locktime = u32::try_from(locktime).map_err(|_| {
+        RpcError::InvalidParameter("Invalid parameter, locktime out of range".to_owned())
+    })?;
+    if !(1..=3).contains(&version) {
+        return Err(RpcError::InvalidParameter(
+            "Invalid parameter, version out of range(1~3)".to_owned(),
+        ));
+    }
+    let replaceable = array.get(3).and_then(JsonValueTrait::as_bool);
+    let default_sequence = if replaceable.unwrap_or(true) {
+        0xffff_fffd
+    } else if locktime != 0 {
+        0xffff_fffe
     } else {
-        0xFFFF_FFFF
+        u32::MAX
     };
+    let input_values = array
+        .first()
+        .and_then(|v| v.as_array())
+        .ok_or(RpcError::InvalidParams("inputs are required"))?;
+    let inputs = transaction_inputs(input_values, default_sequence)?;
+    let outputs = transaction_outputs(
+        array
+            .get(1)
+            .ok_or(RpcError::InvalidParams("outputs are required"))?,
+        ctx.chain.chain_network,
+    )?;
+    if replaceable == Some(true)
+        && !inputs.is_empty()
+        && !inputs
+            .iter()
+            .any(|input| input.sequence.to_consensus() < 0xffff_fffe)
+    {
+        return Err(RpcError::InvalidParameter(
+            "Invalid parameter combination: Sequence number(s) contradict replaceable option"
+                .to_owned(),
+        ));
+    }
+    let tx = Tx {
+        version: i32::try_from(version)
+            .map_err(|_| RpcError::Misc("JSON integer out of range".to_owned()))?,
+        lock_time: LockTime::from_consensus(locktime),
+        inputs,
+        outputs,
+    };
+    if tx.total_size() > crate::server::MAX_BODY_BYTES {
+        return Err(RpcError::InvalidParameter(
+            "transaction exceeds RPC request size limit".to_owned(),
+        ));
+    }
+    Ok(tx)
+}
 
-    let mut tx_inputs = Vec::with_capacity(inputs.len());
-    let mut seen = HashSet::new();
-    for input in inputs {
-        let object = input
-            .as_object()
-            .ok_or_else(|| RpcError::InvalidType("input must be an object".to_owned()))?;
-        let txid = parse_txid(
-            object
-                .get(&"txid")
-                .and_then(JsonValueTrait::as_str)
-                .ok_or(RpcError::InvalidParams("input txid is required"))?,
-            "txid",
-        )?;
-        let vout = object
-            .get(&"vout")
-            .and_then(JsonValueTrait::as_u64)
-            .ok_or(RpcError::InvalidParams("input vout is required"))?;
-        let vout = u32::try_from(vout).map_err(|_| RpcError::InvalidParams("vout exceeds u32"))?;
-        if !seen.insert((txid, vout)) {
-            return Err(RpcError::InvalidParams("duplicate input specified"));
+/// Core's `RPCArg` type check gathers all positional mismatches before value
+/// parsing. Outputs are deliberately unchecked here: `NormalizeOutputs` owns
+/// their accepted object/array forms and distinct null failure.
+fn checked_transaction_arguments<'a>(
+    params: &'a Value,
+    method: &str,
+    names: &[&str],
+    required: usize,
+    types: &[(usize, &str, bool)],
+) -> Result<&'a sonic_rs::Array, RpcError> {
+    let array = params_array(params)?;
+    if !(required..=names.len()).contains(&array.len()) {
+        return Err(RpcError::Misc(format!(
+            "{method}: incorrect number of parameters"
+        )));
+    }
+    let null = Value::new_null();
+    let mut failures = Vec::new();
+    for &(index, expected, optional) in types {
+        let value = array.get(index).unwrap_or(&null);
+        if optional && value.is_null() {
+            continue;
         }
-        let sequence = match object.get(&"sequence") {
-            None => default_sequence,
-            Some(value) => {
-                let sequence = value.as_u64().ok_or_else(|| {
-                    RpcError::InvalidType("sequence must be an integer".to_owned())
-                })?;
-                u32::try_from(sequence)
-                    .map_err(|_| RpcError::InvalidParams("sequence exceeds u32"))?
-            }
-        };
-        tx_inputs.push(TxIn {
+        let actual = super::json_type_name(value);
+        if actual != expected {
+            let name = names.get(index).copied().unwrap_or("argument");
+            failures.push(format!(
+                "    \"Position {} ({name})\": \"JSON value of type {actual} is not of expected type {expected}\"",
+                index + 1,
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(RpcError::InvalidType(format!(
+            "Wrong type passed:\n{{\n{}\n}}",
+            failures.join(",\n")
+        )));
+    }
+    Ok(array)
+}
+
+/// `UniValue::getInt` parses the complete JSON number text into the target
+/// integer type; decimal/exponent spellings and overflow are runtime -1.
+fn core_integer<T: core::str::FromStr>(value: &Value) -> Result<T, RpcError> {
+    core_scalar_text(value)?
+        .parse()
+        .map_err(|_| RpcError::Misc("JSON integer out of range".to_owned()))
+}
+
+/// `UniValue::getValStr` spelling, bounded before cloning caller-owned text.
+/// Type checks remain with each consumer: data accepts scalar coercion, while
+/// amounts and integer parameters require their declared JSON types.
+fn core_scalar_text(value: &Value) -> Result<String, RpcError> {
+    let raw = value.as_raw_number();
+    let text = if let Some(text) = value.as_str() {
+        Cow::Borrowed(text)
+    } else if let Some(raw) = raw.as_ref() {
+        Cow::Borrowed(raw.as_str())
+    } else if value.is_number() {
+        Cow::Owned(value.to_string())
+    } else if value.as_bool() == Some(true) {
+        Cow::Borrowed("1")
+    } else {
+        Cow::Borrowed("")
+    };
+    if text.len() > crate::server::MAX_BODY_BYTES {
+        return Err(RpcError::InvalidParameter(
+            "value exceeds RPC request size limit".to_owned(),
+        ));
+    }
+    Ok(text.into_owned())
+}
+
+fn transaction_inputs(
+    values: &sonic_rs::Array,
+    default_sequence: u32,
+) -> Result<Vec<TxIn>, RpcError> {
+    // A serialized input needs at least 41 bytes. Reuse the listener's
+    // request budget for direct calls before allocating transaction inputs.
+    if values.len() > crate::server::MAX_BODY_BYTES / 41 {
+        return Err(RpcError::InvalidParameter(
+            "transaction exceeds RPC request size limit".to_owned(),
+        ));
+    }
+    let mut inputs = Vec::new();
+    let null = Value::new_null();
+    for input in values {
+        if !input.is_object() {
+            return Err(super::wrong_type_plain(input, "object"));
+        }
+        let txid = input.get("txid").unwrap_or(&null);
+        let txid = txid
+            .as_str()
+            .ok_or_else(|| super::wrong_type_plain(txid, "string"))?;
+        let txid = parse_txid(txid, "txid")?;
+        let vout = input
+            .get("vout")
+            .filter(JsonValueTrait::is_number)
+            .ok_or_else(|| {
+                RpcError::InvalidParameter("Invalid parameter, missing vout key".to_owned())
+            })?;
+        let vout = core_integer::<i32>(vout)?;
+        let vout = u32::try_from(vout).map_err(|_| {
+            RpcError::InvalidParameter("Invalid parameter, vout cannot be negative".to_owned())
+        })?;
+        let sequence = input
+            .get("sequence")
+            .filter(JsonValueTrait::is_number)
+            .map_or_else(|| Ok(i64::from(default_sequence)), core_integer::<i64>)?;
+        let sequence = u32::try_from(sequence).map_err(|_| {
+            RpcError::InvalidParameter(
+                "Invalid parameter, sequence number is out of range".to_owned(),
+            )
+        })?;
+        inputs.push(TxIn {
             previous_output: OutPoint::new(txid, vout),
             script_sig: Script::new(),
             sequence: Sequence::from_consensus(sequence),
             witness: Witness::new(),
         });
     }
+    Ok(inputs)
+}
 
-    // Address parsing requires bitcoin::Network (sanctioned seam).
-    let network = convert::bitcoin_network(ctx.chain.chain_network);
-    let mut tx_outputs = Vec::with_capacity(outputs.len());
-    for (key, value) in outputs {
-        if key == "data" {
-            let data_hex = value.as_str().ok_or_else(|| {
-                RpcError::InvalidType("data output must be a hex string".to_owned())
+fn transaction_outputs(
+    value: &Value,
+    network: bitcoin_rs_primitives::Network,
+) -> Result<Vec<TxOut>, RpcError> {
+    let max_outputs = crate::server::MAX_BODY_BYTES / 9;
+    let limit_error =
+        || RpcError::InvalidParameter("transaction exceeds RPC request size limit".to_owned());
+    let mut entries = Vec::new();
+    if value.is_null() {
+        return Err(RpcError::InvalidParameter(
+            "Invalid parameter, output argument must be non-null".to_owned(),
+        ));
+    }
+    if let Some(object) = value.as_object() {
+        if object.len() > max_outputs {
+            return Err(limit_error());
+        }
+        entries.extend(object.iter());
+    } else {
+        let array = value
+            .as_array()
+            .ok_or_else(|| super::wrong_type_plain(value, "array"))?;
+        if array.len() > max_outputs {
+            return Err(limit_error());
+        }
+        for item in array {
+            let object = item.as_object().ok_or_else(|| {
+                RpcError::InvalidParameter(
+                    "Invalid parameter, key-value pair not an object as expected".to_owned(),
+                )
             })?;
-            let data = hex_decode(data_hex)?;
+            if object.len() != 1 {
+                return Err(RpcError::InvalidParameter(
+                    "Invalid parameter, key-value pair must contain exactly one key".to_owned(),
+                ));
+            }
+            entries.extend(object.iter());
+        }
+    }
+    let mut first_values = hashbrown::HashMap::new();
+    let mut destinations = HashSet::new();
+    let mut has_data = false;
+    let mut outputs = Vec::new();
+    for (key, value) in entries {
+        // Core retains duplicate keys when normalizing output arrays, and
+        // its lookup retrieves the first value before duplicate rejection.
+        let value = *first_values.entry(key).or_insert(value);
+        if key == "data" {
+            if has_data {
+                return Err(RpcError::InvalidParameter(
+                    "Invalid parameter, duplicate key: data".to_owned(),
+                ));
+            }
+            has_data = true;
+            let text = core_scalar_text(value)?;
+            let data = hex_decode(&text)
+                .ok()
+                .filter(|bytes| !bytes.is_empty())
+                .ok_or_else(|| {
+                    RpcError::InvalidParameter(format!(
+                        "Data must be hexadecimal string (not '{text}')"
+                    ))
+                })?;
             let mut script = vec![opcode::OP_RETURN];
             script.extend_from_slice(&push_data(&data));
-            tx_outputs.push(TxOut {
+            outputs.push(TxOut {
                 value: Amount::ZERO,
                 script_pubkey: Script::from_bytes(script),
             });
-            continue;
+        } else {
+            let address = bitcoin::Address::from_str(key).ok().and_then(|address| {
+                address
+                    .require_network(convert::bitcoin_network(network))
+                    .ok()
+            });
+            let amount = parse_btc_amount(value)?;
+            let address = address.ok_or_else(|| {
+                RpcError::InvalidAddressOrKey(format!("Invalid Bitcoin address: {key}"))
+            })?;
+            let script = address.script_pubkey().into_bytes();
+            if !destinations.insert(script.clone()) {
+                return Err(RpcError::InvalidParameter(format!(
+                    "Invalid parameter, duplicated address: {key}"
+                )));
+            }
+            outputs.push(TxOut {
+                value: Amount::from_sat(amount),
+                script_pubkey: Script::from_bytes(script),
+            });
         }
-
-        let address = bitcoin::Address::from_str(key)
-            .map_err(|_| RpcError::InvalidParams("invalid Bitcoin address"))?
-            .require_network(network)
-            .map_err(|_| RpcError::InvalidParams("invalid Bitcoin address"))?;
-        tx_outputs.push(TxOut {
-            value: Amount::from_sat(parse_btc_amount(value)?),
-            script_pubkey: Script::from_bytes(address.script_pubkey().as_bytes().to_vec()),
-        });
     }
+    Ok(outputs)
+}
 
-    let tx = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(locktime),
-        inputs: tx_inputs,
-        outputs: tx_outputs,
+/// The PSBT library owns PSBT serialization. Construct its transaction at the
+/// existing native/PSBT boundary, preserving incomplete zero-input forms that
+/// cannot be sent through a witness-aware transaction decoder.
+fn blank_psbt(tx: Tx) -> Result<Value, RpcError> {
+    crate::psbt::check_item_count(tx.inputs.len(), tx.outputs.len())
+        .map_err(crate::psbt::DecodeError::into_rpc)?;
+    let unsigned_tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version(tx.version),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(tx.lock_time.to_consensus()),
+        input: tx
+            .inputs
+            .into_iter()
+            .map(|input| {
+                let (txid, vout) = (input.previous_output.txid, input.previous_output.vout);
+                bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::from_byte_array(*txid.as_bytes()),
+                        vout,
+                    },
+                    script_sig: bitcoin::ScriptBuf::from_bytes(input.script_sig.to_vec()),
+                    sequence: bitcoin::Sequence(input.sequence.to_consensus()),
+                    witness: bitcoin::Witness::from_slice(input.witness.as_slice()),
+                }
+            })
+            .collect(),
+        output: tx
+            .outputs
+            .into_iter()
+            .map(|output| bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(output.value.to_sat()),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(output.script_pubkey.to_vec()),
+            })
+            .collect(),
     };
-    typed_to_sonic(&v31::CreateRawTransaction(
-        consensus_bytes(&tx).to_lower_hex_string(),
-    ))
+    let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(unsigned_tx)
+        .map_err(|error| RpcError::Internal(format!("unsigned transaction: {error}")))?;
+    Ok(json!(crate::psbt::encode(&psbt)?))
 }
 
 /// Deserialize a raw transaction hex string, reporting failures as Core's
@@ -738,18 +1062,86 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
 }
 
 fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
-    if let Some(number) = value.as_f64() {
-        return sats_from_btc(number, "Invalid amount");
+    if !value.is_str() && !value.is_number() {
+        return Err(RpcError::InvalidType(
+            "Amount is not a number or string".to_owned(),
+        ));
     }
-    if let Some(text) = value.as_str() {
-        let number: f64 = text
-            .parse()
-            .map_err(|_| RpcError::InvalidParams("Invalid amount"))?;
-        return sats_from_btc(number, "Invalid amount");
+    let text = core_scalar_text(value)?;
+    let signed = fixed_point_satoshis(&text)
+        .ok_or_else(|| RpcError::InvalidType("Invalid amount".to_owned()))?;
+    let satoshis = u64::try_from(signed)
+        .ok()
+        .filter(|amount| *amount <= Amount::MAX_MONEY.to_sat())
+        .ok_or_else(|| RpcError::InvalidType("Amount out of range".to_owned()))?;
+    Ok(satoshis)
+}
+
+/// Core 31.1 `ParseFixedPoint(value, 8)`: exact decimal/exponent parsing with
+/// its 18-digit intermediate bound, followed separately by `MoneyRange`.
+/// Trailing zeroes are deferred, so precision is assessed without rounding.
+fn fixed_point_satoshis(text: &str) -> Option<i64> {
+    const LIMIT: i64 = 999_999_999_999_999_999;
+    let (negative, text) = text.strip_prefix('-').map_or((false, text), |s| (true, s));
+    let (decimal, exponent) = if let Some(index) = text.find(['e', 'E']) {
+        let (decimal, exponent) = text.split_at(index);
+        let exponent = exponent.get(1..)?;
+        let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        (decimal, exponent.parse::<i64>().ok()?)
+    } else {
+        (text, 0)
+    };
+    let (integer, fraction) = if let Some((integer, fraction)) = decimal.split_once('.') {
+        if fraction.is_empty() {
+            return None;
+        }
+        (integer, fraction)
+    } else {
+        (decimal, "")
+    };
+    if integer.is_empty() || (integer.len() > 1 && integer.starts_with('0')) {
+        return None;
     }
-    Err(RpcError::InvalidType(
-        "amount must be a number or string".to_owned(),
-    ))
+    if !integer
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let integer_digits = if integer == "0" { "" } else { integer };
+    let mut mantissa = 0_i64;
+    let mut trailing_zeroes = 0_u32;
+    for digit in integer_digits.bytes().chain(fraction.bytes()) {
+        if digit == b'0' {
+            trailing_zeroes = trailing_zeroes.checked_add(1)?;
+        } else {
+            if mantissa != 0 {
+                mantissa =
+                    mantissa.checked_mul(10_i64.checked_pow(trailing_zeroes.checked_add(1)?)?)?;
+            }
+            mantissa = mantissa.checked_add(i64::from(digit - b'0'))?;
+            if mantissa > LIMIT {
+                return None;
+            }
+            trailing_zeroes = 0;
+        }
+    }
+    let scale = exponent
+        .checked_sub(i64::try_from(fraction.len()).ok()?)?
+        .checked_add(i64::from(trailing_zeroes))?
+        .checked_add(8)?;
+    if !(0..18).contains(&scale) {
+        return None;
+    }
+    let amount = mantissa.checked_mul(10_i64.checked_pow(u32::try_from(scale).ok()?)?)?;
+    if amount > LIMIT {
+        return None;
+    }
+    Some(if negative { -amount } else { amount })
 }
 
 // ---------------------------------------------------------------------------

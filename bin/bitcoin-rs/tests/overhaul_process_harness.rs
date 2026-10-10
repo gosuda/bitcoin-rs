@@ -29,6 +29,9 @@ mod policy_cases;
 #[path = "support/spending_prevout_cases.rs"]
 mod spending_prevout_cases;
 
+#[path = "support/psbt_creation_cases.rs"]
+mod psbt_creation_cases;
+
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -229,6 +232,16 @@ fn named_rpc_arguments_follow_core() {
             .expect("candidate JSON");
         compare_reply(body, &reference, &candidate).expect("duplicate-name refusal matches Core");
     }
+    core.stop().expect("core stop");
+    node.stop().expect("node stop");
+}
+
+#[test]
+fn psbt_creation_and_conversion_follow_core() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    psbt_creation_cases::creation(&mut core, &mut node);
+    psbt_creation_cases::conversion(&mut core, &mut node);
     core.stop().expect("core stop");
     node.stop().expect("node stop");
 }

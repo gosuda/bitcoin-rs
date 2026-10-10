@@ -16,8 +16,8 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     consensus_bytes, deserialize,
 };
+use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
-use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
@@ -430,7 +430,7 @@ fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn createrawtransaction_rejects_duplicate_input() {
+fn createrawtransaction_preserves_duplicate_inputs_without_admitting_them() {
     let mut ctx = Context::new();
     ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
@@ -441,8 +441,104 @@ fn createrawtransaction_rejects_duplicate_input() {
     ]);
     let outputs = json!({"data": "00"});
 
-    let err = handler
+    // Core's creator preserves inputs; consensus/admission decides whether
+    // the resulting transaction can be spent or relayed.
+    let result = handler
         .dispatch("createrawtransaction", &json!([inputs, outputs]))
-        .expect_err("duplicate input should be rejected");
-    assert_eq!(err.code(), RpcError::INVALID_PARAMS);
+        .expect("duplicate inputs are preserved by the creator");
+    let bytes = hex_decode(result.as_str().expect("raw hex")).expect("hex bytes");
+    let tx: Tx = deserialize(&bytes).expect("created transaction");
+    assert_eq!(tx.inputs.len(), 2);
+    assert_eq!(tx.inputs[0], tx.inputs[1]);
+}
+
+/// Captured from unmodified Core 31.1 on regtest: empty creators and default
+/// RBF/locktime/version choices are PSBT bytes, independent of our decoder.
+#[test]
+fn createpsbt_matches_core_unsigned_vectors() {
+    let mut ctx = Context::new();
+    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    let handler = Handler::new(Arc::new(ctx));
+    let input = json!({"txid": "11".repeat(32), "vout": 0});
+    for (params, expected) in [
+        (json!([[], []]), "cHNidP8BAAoCAAAAAAAAAAAAAA=="),
+        (
+            json!([[input], [{"bcrt1pfeesnyr2tx": "0.00000001"}]]),
+            "cHNidP8BAEACAAAAARERERERERERERERERERERERERERERERERERERERERERAAAAAAD9////AQEAAAAAAAAABFECTnMAAAAAAAAA",
+        ),
+        (
+            json!([[input], [], 1, false]),
+            "cHNidP8BADMCAAAAARERERERERERERERERERERERERERERERERERERERERERAAAAAAD+////AAEAAAAAAA==",
+        ),
+        (
+            json!([[input], [], 0, true, 3]),
+            "cHNidP8BADMDAAAAARERERERERERERERERERERERERERERERERERERERERERAAAAAAD9////AAAAAAAAAA==",
+        ),
+    ] {
+        let result = handler
+            .dispatch("createpsbt", &params)
+            .expect("Core creator vector");
+        assert_eq!(result.as_str(), Some(expected));
+    }
+}
+
+/// API-08's 16 MiB request budget also bounds direct hex helper calls before
+/// decoding or allocating a transaction/PSBT map.
+#[test]
+fn transaction_hex_helpers_bound_direct_inputs() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let params = json!(["0".repeat(16 * 1024 * 1024 + 1)]);
+    for method in ["converttopsbt", "decoderawtransaction"] {
+        let error = handler
+            .dispatch(method, &params)
+            .expect_err("direct input budget");
+        assert_eq!(error.code(), -8);
+    }
+}
+
+/// API-02 counts both input and output maps before constructing a PSBT.
+/// Raw creation retains its separate transaction-byte admission boundary.
+#[test]
+fn psbt_creators_enforce_shared_map_budget_without_limiting_raw_creation() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let input = json!({"txid": "11".repeat(32), "vout": 0});
+    for count in [9_999, 10_000] {
+        let params = json!([vec![input.clone(); count], {"data": "00"}]);
+        let raw = handler
+            .dispatch("createrawtransaction", &params)
+            .expect("raw creation is independent of the PSBT map budget");
+        let converted = json!([raw]);
+        for (method, params) in [("createpsbt", &params), ("converttopsbt", &converted)] {
+            let result = handler.dispatch(method, params);
+            if count == 9_999 {
+                assert!(result.is_ok(), "inclusive input plus output limit");
+            } else {
+                let error = result.expect_err("input plus output limit exceeded");
+                assert_eq!(error.code(), -8);
+                assert_eq!(error.to_string(), "PSBT exceeds the input/output limit");
+            }
+        }
+    }
+}
+
+/// The shared library cannot re-read a global map above 4,000,000 bytes.
+/// Both creators must use its guarded output encoder before returning a PSBT.
+#[test]
+fn psbt_creators_refuse_output_the_shared_library_cannot_read() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let params = json!([[{"txid": "11".repeat(32), "vout": 0}], {"data": "00".repeat(4_000_000)}]);
+    let raw = handler
+        .dispatch("createrawtransaction", &params)
+        .expect("raw transaction fits the byte budget");
+    let converted = json!([raw]);
+    for (method, params) in [("createpsbt", &params), ("converttopsbt", &converted)] {
+        let error = handler
+            .dispatch(method, params)
+            .expect_err("library read limit");
+        assert_eq!(error.code(), -8);
+        assert_eq!(
+            error.to_string(),
+            "PSBT output is not readable within library codec limits"
+        );
+    }
 }

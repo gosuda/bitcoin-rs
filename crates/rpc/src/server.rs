@@ -456,7 +456,13 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());
         }
     };
-    let request = match sonic_rs::from_str::<Value>(body) {
+    // Retain JSON number spelling until the method's numeric owner parses
+    // it. Rounding here could turn a sub-satoshi amount into an accepted one.
+    let mut deserializer = sonic_rs::Deserializer::from_str(body).use_rawnumber();
+    let request = match deserializer.deserialize::<Value>().and_then(|request| {
+        deserializer.end()?;
+        Ok(request)
+    }) {
         Ok(request) => request,
         Err(error) => {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());
