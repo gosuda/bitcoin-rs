@@ -385,14 +385,19 @@ impl PeerTable {
         }
     }
 
-    /// Records the latest remote compact-announcement preference for the
-    /// current connection.
+    /// Records the latest supported remote compact-announcement preference
+    /// for the current connection. Preferences for other versions do not
+    /// overwrite the negotiated v2 state, matching Core's `sendcmpct`
+    /// handling.
     pub(crate) fn note_compact_announcement(
         &self,
         source: PeerSource,
         high_bandwidth: bool,
         version: u64,
     ) -> bool {
+        if version != crate::peer::COMPACT_BLOCK_VERSION {
+            return false;
+        }
         let mut entries = self.entries.write();
         let Some(entry) = entries
             .get_mut(&source.addr)
@@ -1293,6 +1298,37 @@ mod tests {
         assert!(!table.compact_relay_of(addr(2)));
         table.register(addr(3), lease());
         assert!(!table.compact_relay_of(addr(3)));
+    }
+
+    #[test]
+    fn compact_announcement_ignores_unsupported_versions() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+        let source = current.source(addr(1));
+
+        assert!(!table.note_compact_announcement(source, true, 7));
+        assert!(!table.sessions()[0].bip152_hb_from);
+        assert_eq!(
+            table.announcement_state(source),
+            Some(PeerAnnouncementState::default())
+        );
+
+        assert!(table.note_compact_announcement(source, true, crate::peer::COMPACT_BLOCK_VERSION));
+        assert!(table.sessions()[0].bip152_hb_from);
+
+        assert!(!table.note_compact_announcement(source, false, 1));
+        assert_eq!(
+            table.announcement_state(source),
+            Some(PeerAnnouncementState {
+                compact_high_bandwidth: Some(true),
+                compact_version: Some(crate::peer::COMPACT_BLOCK_VERSION),
+                supports_compact_v2: true,
+                ..PeerAnnouncementState::default()
+            })
+        );
+        assert!(table.sessions()[0].bip152_hb_from);
     }
 
     #[test]
