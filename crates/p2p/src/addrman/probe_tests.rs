@@ -706,7 +706,10 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
     let book = book();
     book.learn_dns("seed", &[target()], EPOCH);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), None);
-    assert_eq!(book.select(&[], &[], EPOCH, |_| true), Some(target()));
+    assert_eq!(
+        book.select(&[], &[], EPOCH, u64::MAX, |_| true),
+        Some(target())
+    );
     book.learn_peer(addr(2).ip(), &[(target(), 1, EPOCH)], EPOCH);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
     book.state.lock().stored.records[0].services = 1024;
@@ -758,11 +761,14 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
     assert_eq!(book.take_restart_anchors(EPOCH + 1), [anchor]);
     book.reject_queued(anchor, false);
     assert!(book.is_pending(anchor));
-    assert_eq!(book.select(&[], &[], EPOCH + 2, |addr| addr == other), None);
+    assert_eq!(
+        book.select(&[], &[], EPOCH + 2, u64::MAX, |addr| addr == other),
+        None
+    );
     book.return_restart_anchor(anchor, EPOCH + 2);
     assert!(!book.is_pending(anchor));
     assert_eq!(
-        book.select(&[], &[], EPOCH + 2, |addr| addr == other),
+        book.select(&[], &[], EPOCH + 2, u64::MAX, |addr| addr == other),
         Some(other)
     );
     assert_eq!(

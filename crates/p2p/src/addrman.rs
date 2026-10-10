@@ -92,6 +92,17 @@ struct Candidate {
     last_count_attempt: u64,
 }
 impl Candidate {
+    fn ordinary_services_eligible(&self, best_block_depth: u64) -> bool {
+        // Native DNS discovery carries no service advertisement. Preserve that
+        // bootstrap path without inventing filtered-DNS flags or another field.
+        (self.services == 0
+            && self.last_success == 0
+            && matches!(self.source, Source::Internal(_) | Source::LegacyDns(_)))
+            || crate::listener::has_all_desirable_service_flags(
+                bitcoin::p2p::ServiceFlags::from(self.services),
+                best_block_depth,
+            )
+    }
     fn terrible(&self, now: u64) -> bool {
         if now.saturating_sub(self.last_attempt) <= 60 {
             return false;
@@ -422,6 +433,14 @@ impl Manager {
         }
         self.stored.anchors.sort_by_key(|anchor| anchor.addr);
         if self.stored.anchors != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+    fn set_services(&mut self, addr: SocketAddr, services: u64) {
+        if let Some(index) = self.by_addr.get(&addr).copied()
+            && self.stored.records[index].services != services
+        {
+            self.stored.records[index].services = services;
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -866,6 +885,7 @@ impl AddressBook {
         connected: &[SocketAddr],
         grouped: &[SocketAddr],
         now: u64,
+        best_block_depth: u64,
         mut allowed: impl FnMut(SocketAddr) -> bool,
     ) -> Option<SocketAddr> {
         let connected: HashSet<_> = connected.iter().copied().map(canonical).collect();
@@ -900,7 +920,8 @@ impl AddressBook {
             .records
             .iter()
             .map(|entry| {
-                allowed.contains(&entry.addr)
+                entry.ordinary_services_eligible(best_block_depth)
+                    && allowed.contains(&entry.addr)
                     && !connected.contains(&entry.addr)
                     && !manager.pending.contains_key(&entry.addr)
                     && !groups.contains(&manager.groups.group(entry.addr.ip()))
@@ -908,6 +929,19 @@ impl AddressBook {
             .collect();
         manager.select(&eligible, now)
     }
+    /// Ordinary admission rejects only currently known insufficient services.
+    /// Missing metadata remains permissive for non-book connection consumers.
+    pub(crate) fn ordinary_services_eligible(
+        &self,
+        addr: SocketAddr,
+        best_block_depth: u64,
+    ) -> bool {
+        let manager = self.state.lock();
+        manager.by_addr.get(&canonical(addr)).is_none_or(|index| {
+            manager.stored.records[*index].ordinary_services_eligible(best_block_depth)
+        })
+    }
+
     /// Applies Core's failure-count connectivity threshold to the caller's
     /// persistent outbound TCP snapshot using this book's configured classifier.
     /// Connection roles and leases remain owned by the caller.
@@ -1055,15 +1089,15 @@ impl AddressBook {
             }
         }
     }
+    /// Record an accepted VERSION's current service claim without certifying
+    /// success, promoting membership or changing any health timestamp.
+    pub(crate) fn set_services(&self, addr: SocketAddr, services: u64) {
+        self.state.lock().set_services(canonical(addr), services);
+    }
     pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
-        if let Some(index) = manager.by_addr.get(&addr).copied()
-            && manager.stored.records[index].services != services
-        {
-            manager.stored.records[index].services = services;
-            manager.revision = manager.revision.wrapping_add(1);
-        }
+        manager.set_services(addr, services);
         manager.good(addr, true, now);
     }
     pub(crate) fn resolve_collisions(

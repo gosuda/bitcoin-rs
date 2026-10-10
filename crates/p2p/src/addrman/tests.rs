@@ -15,7 +15,7 @@ fn unproven_addresses_need_a_successful_outbound_handshake() {
     assert!(!book.state.lock().stored.records[0].tried);
     book.queued(addr(1));
     book.attempted(addr(1), true, 10_001);
-    assert_eq!(book.select(&[], &[], 10_002, |_| true), None);
+    assert_eq!(book.select(&[], &[], 10_002, u64::MAX, |_| true), None);
     book.succeeded(addr(1), 9, 10_003);
     assert!(book.state.lock().stored.records[0].tried);
     assert_eq!(book.state.lock().stored.records[0].failures, 0);
@@ -28,19 +28,30 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
         book.learn_peer(addr(200).ip(), &[(addr(n), 9, 10_000)], 10_000);
     }
     assert!(book.len() <= 199);
-    let picked = book.select(&[], &[], 10_000, |_| true).expect("candidate");
+    let picked = book
+        .select(&[], &[], 10_000, u64::MAX, |_| true)
+        .expect("candidate");
     book.queued(picked);
-    assert_ne!(book.select(&[], &[], 10_000, |_| true), Some(picked));
-    assert_eq!(book.select(&[], &[], 10_000, |_| false), None);
+    assert_ne!(
+        book.select(&[], &[], 10_000, u64::MAX, |_| true),
+        Some(picked)
+    );
+    assert_eq!(book.select(&[], &[], 10_000, u64::MAX, |_| false), None);
     book.unqueue(picked);
     let same_group = SocketAddr::new(picked.ip(), 8334);
     assert_ne!(
-        book.select(&[], &[same_group], 10_000, |_| true),
+        book.select(&[], &[same_group], 10_000, u64::MAX, |_| true),
         Some(picked)
     );
     // Inbound connections suppress the exact endpoint but never its group.
-    assert!(book.select(&[same_group], &[], 10_000, |_| true).is_some());
-    assert_ne!(book.select(&[picked], &[], 10_000, |_| true), Some(picked));
+    assert!(
+        book.select(&[same_group], &[], 10_000, u64::MAX, |_| true)
+            .is_some()
+    );
+    assert_ne!(
+        book.select(&[picked], &[], 10_000, u64::MAX, |_| true),
+        Some(picked)
+    );
     assert!(book.gossip(10_000).len() <= MAX_GOSSIP);
 }
 
@@ -355,13 +366,13 @@ fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
     assert_eq!(book.pending_count_excluding(&[]), 1);
     assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
     assert_eq!(
-        book.select(&[], &[], 10_100, |_| true),
+        book.select(&[], &[], 10_100, u64::MAX, |_| true),
         None,
         "in-flight groups stay exclusive beyond retry time"
     );
     book.unqueue(addr(1));
     assert!(
-        book.select(&[], &[], 10_100, |_| true)
+        book.select(&[], &[], 10_100, u64::MAX, |_| true)
             .is_some_and(|a| a == addr(1) || a == candidate)
     );
 }
@@ -651,7 +662,7 @@ fn policy_callbacks_run_unlocked_and_selection_rechecks_pending() {
     book.learn_dns("seed", &[target()], EPOCH);
     let mut calls = 0;
     assert_eq!(
-        book.select(&[], &[], EPOCH, |addr| {
+        book.select(&[], &[], EPOCH, u64::MAX, |addr| {
             calls += 1;
             assert!(book.state.try_lock().is_some());
             book.queued(addr);
@@ -662,13 +673,16 @@ fn policy_callbacks_run_unlocked_and_selection_rechecks_pending() {
     assert_eq!(calls, 1);
     book.unqueue(target());
     let before = book.state.lock().rng.clone().next_u64();
-    assert_eq!(book.select(&[], &[], EPOCH, |_| false), None);
+    assert_eq!(book.select(&[], &[], EPOCH, u64::MAX, |_| false), None);
     assert_eq!(
         book.state.lock().rng.clone().next_u64(),
         before,
         "all excluded consumes no random proposals"
     );
-    assert_eq!(book.select(&[], &[], EPOCH, |_| true), Some(target()));
+    assert_eq!(
+        book.select(&[], &[], EPOCH, u64::MAX, |_| true),
+        Some(target())
+    );
 }
 
 #[test]
@@ -747,7 +761,7 @@ fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
         let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert_eq!(restored.len(), 1);
         assert_eq!(
-            restored.select(&[], &[], EPOCH, |_| true),
+            restored.select(&[], &[], EPOCH, u64::MAX, |_| true),
             Some(target()),
             "failed knowledge still selectable with DNS off"
         );
@@ -1361,7 +1375,7 @@ fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
     assert_eq!(book.pending_count_excluding(&[]), 1);
     assert_eq!(book.pending_count_excluding(&[alias]), 0);
     assert_eq!(book.pending_count_excluding(&[target()]), 0);
-    assert_eq!(book.select(&[], &[], EPOCH, |_| true), None);
+    assert_eq!(book.select(&[], &[], EPOCH, u64::MAX, |_| true), None);
     book.attempted(alias, false, EPOCH);
     book.succeeded(alias, 9, EPOCH + 1);
     assert_eq!(
@@ -1374,7 +1388,10 @@ fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
     book.queued(alias);
     book.unqueue(target());
     assert_eq!(book.pending_count_excluding(&[]), 0);
-    assert_eq!(book.select(&[], &[], EPOCH + 2, |_| true), Some(target()));
+    assert_eq!(
+        book.select(&[], &[], EPOCH + 2, u64::MAX, |_| true),
+        Some(target())
+    );
 }
 
 #[test]
@@ -1382,15 +1399,15 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
     let alias = core_mapped_alias();
     let book = oracle_book();
     book.learn_dns("seed", &[target()], EPOCH);
-    assert_eq!(book.select(&[alias], &[], EPOCH, |_| true), None);
+    assert_eq!(book.select(&[alias], &[], EPOCH, u64::MAX, |_| true), None);
     let different_port = SocketAddr::new(alias.ip(), 8334);
     assert_eq!(
-        book.select(&[different_port], &[], EPOCH, |_| true),
+        book.select(&[different_port], &[], EPOCH, u64::MAX, |_| true),
         Some(target()),
         "inbound exclusion remains exact endpoint only"
     );
     assert_eq!(
-        book.select(&[], &[different_port], EPOCH, |_| true),
+        book.select(&[], &[different_port], EPOCH, u64::MAX, |_| true),
         None,
         "outbound diversity still excludes the group"
     );
@@ -1399,7 +1416,7 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         .expect("different IPv6 transport endpoint");
     assert_ne!(endpoint_key(linked), endpoint_key(target()));
     assert_eq!(
-        book.select(&[linked], &[], EPOCH, |_| true),
+        book.select(&[linked], &[], EPOCH, u64::MAX, |_| true),
         Some(target()),
         "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
     );
@@ -1409,3 +1426,6 @@ mod asmap_tests;
 
 #[path = "probe_tests.rs"]
 mod probe_tests;
+
+#[path = "eligibility_tests.rs"]
+mod eligibility_tests;

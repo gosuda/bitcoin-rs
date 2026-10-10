@@ -447,7 +447,7 @@ impl P2pService {
                 return Err(error.into());
             }
         };
-        let bootstrap = match self.spawn_bootstrap_worker(dial_allowance) {
+        let bootstrap = match self.spawn_bootstrap_worker(dial_allowance, chain_query.cloned()) {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, Some(outbound));
@@ -611,6 +611,7 @@ impl P2pService {
     fn spawn_bootstrap_worker(
         &self,
         block_sync: Option<Arc<crate::sync::BlockSync>>,
+        chain_query: Option<Arc<dyn crate::ChainQuery>>,
     ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
             let shutdown = Arc::clone(&self.worker_shutdown);
@@ -652,6 +653,7 @@ impl P2pService {
             target,
             block_slots: self.config.outbound_block_relay_slots,
             block_sync,
+            chain_query,
             address_book: Arc::clone(&self.address_book),
             banned: self.banned_reader(),
             manual_nodes: Arc::clone(&self.added_nodes),
@@ -1171,8 +1173,16 @@ fn spawn_outbound_dial(
         addr: crate::addrman::canonical(dial.addr),
         ..*dial
     };
+    let services_allowed = dial.manual
+        || dial.purpose == DialPurpose::Feeler
+        || shared.address_book.as_ref().is_none_or(|book| {
+            let depth =
+                crate::listener::approximate_best_block_depth(shared.chain_query.as_deref());
+            book.ordinary_services_eligible(dial.addr, depth)
+        });
     if !shared.activity.is_active()
         || shared.session_cancel.load()
+        || !services_allowed
         || shared.banned.is_banned(dial.addr.ip(), SystemTime::now())
     {
         if let Some(book) = &shared.address_book {
@@ -1459,6 +1469,7 @@ struct AddressMaintenance {
     target: usize,
     block_slots: usize,
     block_sync: Option<Arc<crate::sync::BlockSync>>,
+    chain_query: Option<Arc<dyn crate::ChainQuery>>,
     address_book: Arc<crate::addrman::AddressBook>,
     banned: BannedReader,
     manual_nodes: Arc<RwLock<Vec<SocketAddr>>>,
@@ -1562,10 +1573,14 @@ fn queue_restart_anchors(
         maintenance.address_book.return_restart_anchors(now);
         return 0;
     }
+    let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
     while let Some(addr) = anchors.pop_front() {
         if is_manual_endpoint(&manual, addr)
             || !maintenance.address_book.anchor_eligible(addr, active, now)
+            || !maintenance
+                .address_book
+                .ordinary_services_eligible(addr, depth)
             || maintenance.banned.is_banned(addr.ip(), SystemTime::now())
         {
             maintenance.address_book.return_restart_anchor(addr, now);
@@ -1775,6 +1790,7 @@ fn queue_address_candidates(
     // Snapshot the ban table before taking the address-book lock. All candidates
     // in this tick see the same expiry time and no nested ban lock per record.
     let banned = maintenance.banned.read().clone();
+    let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
     for _ in 0..needed {
         if maintenance.shutdown.load(Ordering::Acquire)
@@ -1784,7 +1800,7 @@ fn queue_address_candidates(
         }
         let Some(addr) = maintenance
             .address_book
-            .select(&active, &grouped, now, |addr| {
+            .select(&active, &grouped, now, depth, |addr| {
                 !is_manual_endpoint(&manual, addr)
                     && !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
             })
@@ -2327,7 +2343,7 @@ mod tests {
         let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         book.learn_dns("seed", &[address], 10_000);
         book.queued(address);
-        assert_eq!(book.select(&[], &[], 10_000, |_| true), None);
+        assert_eq!(book.select(&[], &[], 10_000, u64::MAX, |_| true), None);
         let mut parked = VecDeque::from(vec![OutboundDial::auto(address); MAX_PARKED_DIALS]);
         assert!(!park_automatic_dial(
             &mut parked,
@@ -2335,7 +2351,10 @@ mod tests {
             &book,
             &HashMap::new()
         ));
-        assert_eq!(book.select(&[], &[], 10_000, |_| true), Some(address));
+        assert_eq!(
+            book.select(&[], &[], 10_000, u64::MAX, |_| true),
+            Some(address)
+        );
     }
     fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
         let (tx, rx) = crossbeam_channel::bounded(16);
@@ -2357,6 +2376,7 @@ mod tests {
                 seeds: Vec::new(),
                 target,
                 block_sync: None,
+                chain_query: None,
                 address_book: book,
                 banned: BannedReader::fixture_empty(),
             },
@@ -2712,7 +2732,9 @@ mod tests {
         service.join().expect("join");
         assert_eq!(service.address_book.pending_count_excluding(&[]), 0);
         assert_eq!(
-            service.address_book.select(&[], &[], now, |_| true),
+            service
+                .address_book
+                .select(&[], &[], now, u64::MAX, |_| true),
             Some(address)
         );
         service.set_network_active(true);
@@ -2964,7 +2986,7 @@ mod tests {
             let (maintenance, receiver) = maintenance_fixture(1);
             let book = &maintenance.address_book;
             let probe = book
-                .select(&[], &[], 10_000, |_| true)
+                .select(&[], &[], 10_000, u64::MAX, |_| true)
                 .expect("probe candidate");
             assert!(book.queued_feeler(probe));
             book.attempted(probe, true, 10_000);
@@ -3019,7 +3041,7 @@ mod tests {
         }
         let book = &maintenance.address_book;
         let anchor = book
-            .select(&[], &[], now, |_| true)
+            .select(&[], &[], now, u64::MAX, |_| true)
             .expect("eligible ordinary candidate");
         book.succeeded(anchor, 9, now);
         book.remember_anchors(&[anchor], now);
@@ -3397,7 +3419,10 @@ mod tests {
         book.succeeded(anchor, 9, 10_000);
         book.remember_anchors(&[anchor], 10_000);
         let mut anchors = book.take_restart_anchors(10_001).into();
-        assert_eq!(book.select(&[], &[], 10_001, |addr| addr == same_as), None);
+        assert_eq!(
+            book.select(&[], &[], 10_001, u64::MAX, |addr| addr == same_as),
+            None
+        );
         maintenance.banned = BannedReader::new(Arc::new(RwLock::new(vec![crate::BannedSubnet {
             subnet: "8.8.0.1/32".parse().expect("anchor ban"),
             banned_until: None,
@@ -3414,7 +3439,7 @@ mod tests {
         assert!(queue.try_recv().is_err());
         assert!(!book.is_pending(anchor));
         assert_eq!(
-            book.select(&[], &[], 10_002, |addr| addr == same_as),
+            book.select(&[], &[], 10_002, u64::MAX, |addr| addr == same_as),
             Some(same_as)
         );
         assert_eq!(saved_book(&path)["anchors"][0]["confirmed_at"], 10_000);
@@ -3459,5 +3484,174 @@ mod tests {
         );
         assert_eq!(saved_book(&path)["anchors"][0]["confirmed_at"], now);
         assert_eq!(book.take_restart_anchors(now), vec![address]);
+    }
+    struct ServiceTip(std::sync::atomic::AtomicU32);
+    impl crate::ChainQuery for ServiceTip {
+        fn headers_after(
+            &self,
+            _: &[bitcoin_rs_primitives::BlockHash],
+            _: bitcoin_rs_primitives::BlockHash,
+            _: usize,
+        ) -> Vec<bitcoin_rs_primitives::Header> {
+            Vec::new()
+        }
+        fn serve_inventory_blocks(
+            &self,
+            _: &[bitcoin::p2p::message_blockdata::Inventory],
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(crate::Message) -> Result<(), crate::PeerError>,
+        ) -> Result<crate::dispatch::InventoryServing, crate::PeerError> {
+            Ok(crate::dispatch::InventoryServing::default())
+        }
+        fn block_transactions(
+            &self,
+            _: &bitcoin::bip152::BlockTransactionsRequest,
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+        ) -> Result<Option<crate::Message>, crate::PeerError> {
+            Ok(None)
+        }
+        fn best_block_time(&self) -> Option<u32> {
+            Some(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    #[test]
+    fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
+        for tip_changes in [false, true] {
+            let server = TcpListener::bind("127.0.0.1:0").expect("listener");
+            server.set_nonblocking(true).expect("nonblocking");
+            let address = server.local_addr().expect("address");
+            let now = crate::addrman::now();
+            let tip = Arc::new(ServiceTip(std::sync::atomic::AtomicU32::new(
+                u32::try_from(now - 143 * 600).expect("tip time"),
+            )));
+            let query: Arc<dyn crate::ChainQuery> = tip.clone();
+            let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
+            book.learn_dns("seed", &[address], now);
+            book.succeeded(address, if tip_changes { 1032 } else { 9 }, now);
+            let (mut maintenance, queue) = maintenance_fixture(1);
+            maintenance.address_book = Arc::clone(&book);
+            maintenance.chain_query = Some(Arc::clone(&query));
+            queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
+            let candidate = queue.try_recv().expect("eligible candidate is queued");
+            let mut parked = VecDeque::new();
+            assert!(park_automatic_dial(
+                &mut parked,
+                candidate,
+                &book,
+                &HashMap::new()
+            ));
+            if tip_changes {
+                tip.0.store(
+                    u32::try_from(now - 144 * 600).expect("older tip"),
+                    Ordering::Release,
+                );
+            } else {
+                book.set_services(address, 1);
+            }
+            let mut shared = crate::listener::ConnectionShared::new(
+                Arc::clone(&maintenance.peer_table),
+                BannedReader::fixture_empty(),
+                Arc::new(crate::NetworkActivity::from_shared(Arc::new(
+                    AtomicBool::new(true),
+                ))),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Magic::REGTEST,
+                crossbeam_channel::bounded(1).0,
+                crossbeam_channel::bounded(1).0,
+                Some(query),
+                None,
+                crate::listener::ListenerExtras::default(),
+            );
+            shared.address_book = Some(Arc::clone(&book));
+            let mut active = HashMap::new();
+            let mut handles = Vec::new();
+            spawn_outbound_dial(
+                &parked.pop_front().expect("parked dial"),
+                &shared,
+                &mut active,
+                &mut handles,
+                1,
+                0,
+                false,
+                125,
+            );
+            assert_eq!(
+                handles.len(),
+                0,
+                "stale parked metadata never starts a worker"
+            );
+            assert!(
+                !book.is_pending(address),
+                "rejected ordinary claim is released"
+            );
+            let result = crate::listener::spawn_outbound_connection(
+                address,
+                shared,
+                crate::PeerRole::FullRelay,
+            )
+            .join()
+            .expect("thread");
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::PeerError::Protocol(
+                        "outbound peer lacks desirable services"
+                    ))
+                ),
+                "final listener admission must independently recheck"
+            );
+            assert!(
+                matches!(server.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                "no TCP connection reached the listener"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_selection_skips_known_incomplete_peer_and_anchor_return_preserves_age() {
+        let (mut maintenance, queue) = maintenance_fixture(1);
+        let directory = tempfile::tempdir().expect("directory");
+        let book = crate::addrman::AddressBook::open(
+            Some(directory.path().join("peers.dat")),
+            [1; 4],
+            false,
+            None,
+        );
+        maintenance.address_book = Arc::clone(&book);
+        let bad: SocketAddr = "8.8.8.8:8333".parse().expect("incomplete");
+        let healthy: SocketAddr = "9.9.9.9:8333".parse().expect("healthy");
+        book.learn_dns("seed", &[bad, healthy], 10_000);
+        book.succeeded(bad, 9, 10_000);
+        book.succeeded(healthy, 9, 10_000);
+        book.remember_anchors(&[bad], 10_000);
+        let mut anchors = book.take_restart_anchors(10_001).into();
+        book.set_services(bad, 1);
+        queue_restart_anchors(
+            &maintenance,
+            &mut anchors,
+            &mut None,
+            &mut Vec::new(),
+            10_002,
+        );
+        assert!(queue.try_recv().is_err());
+        assert!(!book.is_pending(bad));
+        assert_eq!(
+            saved_book(&directory.path().join("peers-01010101.dat"))["anchors"][0]["confirmed_at"],
+            10_000
+        );
+        queue_address_candidates(
+            &maintenance,
+            10_002,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10_002),
+            0,
+        );
+        assert_eq!(
+            queue.try_recv().expect("healthy ordinary candidate").addr,
+            healthy
+        );
     }
 }

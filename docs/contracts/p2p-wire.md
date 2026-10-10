@@ -315,7 +315,7 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   owns the capacity decision, and the accept loop in `serve`
   (`crates/p2p/src/listener.rs`) is its only inbound caller.
   `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
-  outbound service predicate.
+  ordinary outbound desirable-service predicate.
 - The accept loop reserves the connection's inbound lease before it spawns the
   handshake thread, and the reservation and the live inbound count are one
   table write operation. A socket that arrives at `max_inbound =
@@ -327,13 +327,19 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   set, so no independent counter can drift from it. Ban, inactive-network,
   session-cancellation, and accept-backoff behaviour are unchanged, and a
   failed spawn releases the reservation it took.
-- `run_outbound_handshake` ends the connection when the remote `version` does
+- Ordinary `run_outbound_handshake` ends the connection when the remote `version` does
   not offer the desirable set (`net_processing.cpp:1857-1872`, read for
   an outbound connection at `:3864-3871`): `NETWORK | WITNESS`, or
   `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks.
   The check runs before the peer is published as usable, so a dial that cannot
   serve blocks never occupies a selection slot that maintenance cannot replace.
-  Inbound handshakes are not service-gated, as in Core.
+  Inbound handshakes and VERSION-only feelers are not service-gated, as in Core.
+- Ordinary automatic selection, anchor admission, dispatch and the final
+  pre-TCP check reuse that predicate against current AddrMan service metadata.
+  Accepted ordinary VERSION updates metadata before service rejection without
+  marking Good. The native zero-service, no-Good DNS bootstrap exception and
+  its representation limit are owned by `docs/policies/p2p-compatibility.md`
+  section 7; manual dials and feelers bypass this metadata prefilter.
 - The advertised set follows the prune setting (`init.cpp:2022-2026`):
   `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when
   `storage.prune_target_mb > 0`, and both handshake paths use the same set from

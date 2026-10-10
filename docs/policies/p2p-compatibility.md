@@ -215,6 +215,24 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    queued/inflight work alone never certifies Good. Feeler targets require stored
    NETWORK or NETWORK_LIMITED service advertisement. DNS records retain unknown
    service bits and use ordinary selection until a handshake supplies them.
+   Ordinary candidate selection, restart-anchor admission, automatic dispatch
+   and the final pre-TCP check share the existing desirable-service predicate:
+   NETWORK plus WITNESS, or LIMITED plus WITNESS while approximate local tip
+   depth is below 144. Selection rechecks current record metadata after its
+   unlocked policy callback. Manual dials and feelers bypass this metadata
+   prefilter; ordinary received VERSION validation remains in place.
+
+   Accepted VERSION metadata overwrites the one stored service field before
+   ordinary service rejection, without marking Good, changing health times or
+   promoting membership. Later gossip may still OR service claims into that
+   same field; no second last-VERSION authority is introduced. The native DNS
+   bootstrap exemption is exactly zero services, zero last-success time and an
+   Internal or legacy-DNS original source. A successful NONE feeler therefore
+   remains Good/Tried but is excluded from ordinary dialing, including after
+   restart and DNS refresh. Without Good, the existing fields cannot distinguish
+   a rejected ordinary DNS VERSION reporting NONE from previously unknown DNS
+   services. This explicit limitation preserves bootstrap without a new fitness
+   flag and does not claim Core's service-filtered x9 DNS discovery.
    Feelers finish on a valid VERSION through the existing native parser/FSM,
    without readiness or sync work. This does not claim Core's inherited minimum
    protocol floor or connman-wide inbound self-nonce validation; ordinary
