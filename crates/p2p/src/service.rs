@@ -1269,7 +1269,15 @@ fn queue_address_candidates(maintenance: &AddressMaintenance, now: u64, tick_tim
             .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
     );
     let sessions = maintenance.peer_table.sessions();
+    // Connected-endpoint exclusion covers every direction; group diversity
+    // suppression counts outbound sessions only, so inbound peers cannot
+    // shrink the candidate space.
     let mut active: Vec<_> = sessions
+        .iter()
+        .filter(|session| !session.lease.is_cancelled())
+        .map(|session| session.addr)
+        .collect();
+    let grouped: Vec<_> = sessions
         .iter()
         .filter(|session| !session.lease.is_cancelled() && !session.lease.is_inbound())
         .map(|session| session.addr)
@@ -1292,9 +1300,12 @@ fn queue_address_candidates(maintenance: &AddressMaintenance, now: u64, tick_tim
         if maintenance.shutdown.load(Ordering::Acquire) {
             break;
         }
-        let Some(addr) = maintenance.address_book.select(&active, now, |addr| {
-            !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
-        }) else {
+        let Some(addr) = maintenance
+            .address_book
+            .select(&active, &grouped, now, |addr| {
+                !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
+            })
+        else {
             break;
         };
         maintenance.address_book.queued(addr);
@@ -1807,14 +1818,14 @@ mod tests {
         let book = crate::addrman::AddressBook::open(None, [1; 4], true);
         book.learn_dns("seed", &[address], 10_000);
         book.queued(address);
-        assert_eq!(book.select(&[], 10_000, |_| true), None);
+        assert_eq!(book.select(&[], &[], 10_000, |_| true), None);
         let mut parked = VecDeque::from(vec![OutboundDial::auto(address); MAX_PARKED_DIALS]);
         assert!(!park_automatic_dial(
             &mut parked,
             OutboundDial::auto(address),
             &book
         ));
-        assert_eq!(book.select(&[], 10_000, |_| true), Some(address));
+        assert_eq!(book.select(&[], &[], 10_000, |_| true), Some(address));
     }
     fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
         let (tx, rx) = crossbeam_channel::bounded(16);
@@ -1964,7 +1975,7 @@ mod tests {
         service.join().expect("join");
         assert_eq!(service.address_book.pending_count_excluding(&[]), 0);
         assert_eq!(
-            service.address_book.select(&[], now, |_| true),
+            service.address_book.select(&[], &[], now, |_| true),
             Some(address)
         );
         service.set_network_active(true);

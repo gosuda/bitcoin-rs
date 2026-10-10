@@ -336,16 +336,22 @@ impl AddressBook {
     // The maintenance worker selects, claims, then enqueues each automatic dial.
     // A failed enqueue releases the claim; the drain retains it through the
     // connection thread's lifetime. Callbacks must not do I/O or acquire locks.
+    /// `connected` suppresses exact endpoints in any direction (Core
+    /// `setConnected` covers inbound too). `grouped` suppresses whole network
+    /// groups and must carry outbound sessions only: inbound peers inject
+    /// their source groups voluntarily and could otherwise suppress arbitrary
+    /// candidate groups from automatic selection.
     pub(crate) fn select(
         &self,
-        active: &[SocketAddr],
+        connected: &[SocketAddr],
+        grouped: &[SocketAddr],
         now: u64,
         mut allowed: impl FnMut(SocketAddr) -> bool,
     ) -> Option<SocketAddr> {
         let mut manager = self.state.lock();
         manager.cursor = manager.cursor.wrapping_add(1);
         let prefer_new = manager.cursor.is_multiple_of(4);
-        let groups: HashSet<_> = active
+        let groups: HashSet<_> = grouped
             .iter()
             .chain(&manager.pending)
             .map(|addr| prefix_group(addr.ip()))
@@ -356,7 +362,7 @@ impl AddressBook {
             .records
             .iter()
             .filter(|entry| {
-                !active.contains(&entry.addr)
+                !connected.contains(&entry.addr)
                     && !manager.pending.contains(&entry.addr)
                     && !groups.contains(&prefix_group(entry.addr.ip()))
                     && now.saturating_sub(entry.last_seen) <= STALE_SECS
@@ -600,7 +606,7 @@ mod tests {
         book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
         assert!(!book.state.lock().stored.records[0].tried);
         book.attempted(addr(1), 10_001);
-        assert_eq!(book.select(&[], 10_002, |_| true), None);
+        assert_eq!(book.select(&[], &[], 10_002, |_| true), None);
         book.succeeded(addr(1), 9, 10_003);
         assert!(book.state.lock().stored.records[0].tried);
         assert_eq!(book.state.lock().stored.records[0].failures, 0);
@@ -613,13 +619,19 @@ mod tests {
             book.learn_peer(addr(200).ip(), &[(addr(n), 9, 10_000)], 10_000);
         }
         assert!(book.len() <= MAX_SOURCE_GROUP);
-        let picked = book.select(&[], 10_000, |_| true).expect("candidate");
+        let picked = book.select(&[], &[], 10_000, |_| true).expect("candidate");
         book.queued(picked);
-        assert_ne!(book.select(&[], 10_000, |_| true), Some(picked));
-        assert_eq!(book.select(&[], 10_000, |_| false), None);
+        assert_ne!(book.select(&[], &[], 10_000, |_| true), Some(picked));
+        assert_eq!(book.select(&[], &[], 10_000, |_| false), None);
         book.unqueue(picked);
         let same_group = SocketAddr::new(picked.ip(), 8334);
-        assert_ne!(book.select(&[same_group], 10_000, |_| true), Some(picked));
+        assert_ne!(
+            book.select(&[], &[same_group], 10_000, |_| true),
+            Some(picked)
+        );
+        // Inbound connections suppress the exact endpoint but never its group.
+        assert!(book.select(&[same_group], &[], 10_000, |_| true).is_some());
+        assert_ne!(book.select(&[picked], &[], 10_000, |_| true), Some(picked));
         assert!(book.gossip(10_000).len() <= MAX_GOSSIP);
     }
 
@@ -747,7 +759,7 @@ mod tests {
         );
         restored.learn_dns("seed", &[addr(201)], 10_001 + STALE_SECS);
         assert_eq!(
-            restored.select(&[], 10_001 + STALE_SECS, |_| true),
+            restored.select(&[], &[], 10_001 + STALE_SECS, |_| true),
             Some(addr(201))
         );
         book.learn_dns("seed", &[addr(202)], 10_001 + STALE_SECS);
@@ -860,13 +872,13 @@ mod tests {
         assert_eq!(book.pending_count_excluding(&[]), 1);
         assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
         assert_eq!(
-            book.select(&[], 10_100, |_| true),
+            book.select(&[], &[], 10_100, |_| true),
             None,
             "in-flight groups stay exclusive beyond retry time"
         );
         book.unqueue(addr(1));
         assert!(
-            book.select(&[], 10_100, |_| true)
+            book.select(&[], &[], 10_100, |_| true)
                 .is_some_and(|a| a == addr(1) || a == candidate)
         );
     }
