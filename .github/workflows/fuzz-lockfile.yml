@@ -1,0 +1,39 @@
+name: fuzz-lockfile
+
+# fuzz/ is a separate Cargo workspace with its own fuzz/Cargo.lock. Its direct
+# deps are declared inline, but its path deps on crates/* pull in those crates'
+# `workspace = true` transitive specs, so root Cargo.toml and
+# crates/*/Cargo.toml edits can invalidate fuzz/Cargo.lock. This cheap metadata
+# check owns drift detection on manifest-only PRs; fuzz-build.yml keeps its
+# narrow trigger so ordinary manifest PRs do not pay for a full fuzz build,
+# and the daily-fuzz campaign remains the fallback.
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
+      - '.github/workflows/fuzz-lockfile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-lockfile-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: never
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+        with:
+          toolchain: nightly
+      - run: cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
