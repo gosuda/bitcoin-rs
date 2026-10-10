@@ -216,10 +216,10 @@ fn decoded_getblocktxn(deltas: &[u64]) -> Result<Vec<u64>, PeerError> {
 /// BIP152 encodes `getblocktxn` indexes differentially: the first is absolute
 /// and each later one is a delta from the previous absolute index, so a `0`
 /// delta names the next transaction rather than repeating one. The decoder
-/// yields a strictly increasing absolute list, refuses a tail that cannot be
-/// added without overflowing, and decodes an empty list as empty — which is
-/// why refusing a malformed list belongs to dispatch, not to the codec
-/// (Core 31.1 `net_processing.cpp:4560-4574`).
+/// yields increasing `u64` indexes and refuses an overflowing tail. Core 31.1
+/// guarantees differential order over `uint16_t` indexes (`blockencodings.h:23-54`,
+/// `net_processing.cpp:4333-4340`), so this is not decoder-range parity. Both decode
+/// an empty list; rejecting it in native dispatch is stricter than Core policy.
 #[test]
 fn getblocktxn_differential_indexes_decode_to_absolute_order() -> Result<(), PeerError> {
     assert_eq!(decoded_getblocktxn(&[1, 0, 0])?, vec![1, 2, 3]);

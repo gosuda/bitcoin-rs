@@ -57,6 +57,29 @@ This page assigns ownership and cites proof under the
   so a same-address replacement never inherits or loses its predecessor's
   work.
 
+Proof: `crates/p2p/src/discouragement.rs` tests
+`avoidance_is_bounded_expires_and_does_not_refresh_on_repetition` and
+`mapped_addresses_share_identity_and_local_exemptions` cover retention,
+expiry and canonical/local identity. `crates/p2p/src/listener.rs`'s
+`discouragement_tests` cover current-lease attribution, native socket teardown
+and admission refusal, exemptions and protected handshake recovery.
+`crates/p2p/src/service.rs` tests `automatic_policy_and_manual_bans_are_distinct`
+and `all_automatic_selection_classes_exclude_discouraged_addresses` cover
+policy precedence and regular/feeler/anchor selection. The lock boundaries are
+exercised by `with_current_rejects_stale_source_and_holds_live_identity` in
+`crates/p2p/src/peer_table.rs` and
+`policy_callbacks_run_unlocked_and_selection_rechecks_pending` in
+`crates/p2p/src/addrman/tests.rs`.
+
+For the process comparison, set `BITCOIN_RS_NODE` to a binary built from the
+tested commit and `BITCOIN_RS_REFERENCE_BITCOIND` to the pinned Core binary.
+`cargo test -p bitcoin-rs-e2e --test peer_discouragement` runs
+`e2e/tests/peer_discouragement.rs` against pinned Core 31.1 and the candidate on
+loopback: protected oversized-headers senders remain connected, unprotected
+local senders disconnect and can reconnect, RPC reflects `noban`, and no manual
+ban is added. It does not test nonlocal Core avoidance, retention capacity or
+expiry.
+
 ### `P2P-03`: Demonstrated best-known-height credit and request eligibility
 
 - **Owner**: `crates/p2p/src/peer_table.rs` owns the per-connection credit

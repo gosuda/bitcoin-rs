@@ -480,14 +480,14 @@ fn serve_block_txn(
     Ok(())
 }
 
-/// Rejects a `getblocktxn` whose index list cannot name transactions: empty,
-/// or not strictly increasing.
+/// Enforces native decoded `getblocktxn` policy: nonempty, increasing indexes.
 ///
-/// PRE: the request carries decoded absolute indexes. POST: a malformed list
-/// returns `PeerError::Misbehavior` and ordinary connections drop through the
-/// listener's error path. INVARIANT: a malformed list never reaches a chain
-/// query, including on a node with no chain at all — one decision at the
-/// inbound boundary (Core 31.1 `net_processing.cpp:4560-4574`).
+/// PRE: the request carries decoded absolute indexes. POST: a rejected list
+/// returns `PeerError::Misbehavior` before any chain query, even without a chain.
+/// Core 31.1 establishes increasing wire indexes during deserialization
+/// (`blockencodings.h:23-54`, `net_processing.cpp:4333-4340`); the order check here
+/// also defends in-process requests. Empty-list rejection is stricter native
+/// policy: Core accepts an empty decoded list.
 fn ensure_block_txn_indexes_valid(request: &BlockTransactionsRequest) -> Result<(), PeerError> {
     if request.indexes.is_empty() {
         return Err(PeerError::Misbehavior("getblocktxn with empty index list"));
