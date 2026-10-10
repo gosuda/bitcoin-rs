@@ -64,6 +64,12 @@ fn format_error(error: &bitcoin::psbt::Error) -> String {
         Error::InvalidPublicKey(_)
         | Error::InvalidSecp256k1PublicKey(_)
         | Error::InvalidXOnlyPublicKey => "invalid public key encoding".to_owned(),
+        Error::ConsensusEncoding(bitcoin::consensus::encode::Error::Io(error))
+        | Error::Io(error)
+            if error.kind() == bitcoin::io::ErrorKind::UnexpectedEof =>
+        {
+            "SpanReader::read(): end of data: iostream error".to_owned()
+        }
         Error::ConsensusEncoding(_) | Error::Io(_) => {
             "end of data or invalid serialization: iostream error".to_owned()
         }
@@ -91,15 +97,16 @@ pub(crate) fn decode(encoded: &str) -> Result<Psbt, DecodeError> {
     }
     normalize_missing_witness_utxos(&mut psbt);
     measure(&psbt)?;
-    reject_explicit_default_signatures(&bytes, psbt.inputs.len())?;
+    validate_original_fields(&bytes, &psbt)?;
+    normalize_tap_origin_leaves(&mut psbt);
     validate(&psbt)?;
     Ok(psbt)
 }
 
-// The typed signature reader drops an explicit DEFAULT byte. Inspect only this
-// lossy field on the original, already library-validated framing, without
-// retaining a second representation or interpreting transactions/keys here.
-fn reject_explicit_default_signatures(bytes: &[u8], inputs: usize) -> Result<(), DecodeError> {
+// The typed reader loses explicit DEFAULT signature bytes and pubkey encoding
+// in BIP32 origins. Inspect these fields on original, library-validated framing;
+// keep no second representation and do not interpret transactions/keys here.
+fn validate_original_fields(bytes: &[u8], psbt: &Psbt) -> Result<(), DecodeError> {
     use bitcoin::consensus::Decodable as _;
     fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
         let length = bitcoin::VarInt::consensus_decode(bytes)
@@ -113,14 +120,22 @@ fn reject_explicit_default_signatures(bytes: &[u8], inputs: usize) -> Result<(),
         Ok(value)
     }
     let mut remaining = bytes.get(5..).ok_or(DecodeError::Trailing)?;
-    for map in 0..=inputs {
+    let inputs = psbt.inputs.len();
+    for map in 0..=inputs + psbt.outputs.len() {
         loop {
             let key = field(&mut remaining)?;
             if key.is_empty() {
                 break;
             }
             let value = field(&mut remaining)?;
+            let origin_type = if map <= inputs { 0x06 } else { 0x02 };
+            if map != 0 && key.first() == Some(&origin_type) && key.len() == 66 {
+                return Err(DecodeError::Field(
+                    "uncompressed BIP32 origin keys are not supported".to_owned(),
+                ));
+            }
             if map != 0
+                && map <= inputs
                 && matches!(key.first(), Some(0x13 | 0x14))
                 && value.len() == 65
                 && value[64] == 0
@@ -175,10 +190,8 @@ pub(crate) fn encode(psbt: &Psbt) -> Result<String, RpcError> {
             "library PSBT serialization left unread bytes".to_owned(),
         ));
     }
-    reject_explicit_default_signatures(&bytes, psbt.inputs.len()).map_err(|_| {
-        RpcError::InvalidParameter(
-            "PSBT output contains an explicit DEFAULT Taproot signature suffix".to_owned(),
-        )
+    validate_original_fields(&bytes, psbt).map_err(|_| {
+        RpcError::InvalidParameter("PSBT output contains an unsupported field encoding".to_owned())
     })?;
     Ok(crate::base64::encode(&bytes))
 }
@@ -206,8 +219,37 @@ fn normalize_missing_witness_utxos(psbt: &mut Psbt) {
     }
 }
 
+fn tap_origin_leaves(psbt: &Psbt) -> impl Iterator<Item = &Vec<bitcoin::TapLeafHash>> {
+    psbt.inputs
+        .iter()
+        .flat_map(|input| input.tap_key_origins.values())
+        .chain(
+            psbt.outputs
+                .iter()
+                .flat_map(|output| output.tap_key_origins.values()),
+        )
+        .map(|(leaves, _)| leaves)
+}
+
+fn normalize_tap_origin_leaves(psbt: &mut Psbt) {
+    for (leaves, _) in psbt
+        .inputs
+        .iter_mut()
+        .flat_map(|input| input.tap_key_origins.values_mut())
+        .chain(
+            psbt.outputs
+                .iter_mut()
+                .flat_map(|output| output.tap_key_origins.values_mut()),
+        )
+    {
+        leaves.sort_unstable();
+        leaves.dedup();
+    }
+}
+
 fn needs_core_serialization(psbt: &Psbt) -> bool {
     has_missing_witness_utxo(psbt)
+        || tap_origin_leaves(psbt).any(|leaves| leaves.windows(2).any(|pair| pair[0] >= pair[1]))
         || psbt.inputs.iter().any(|input| {
             input.final_script_sig.is_some()
                 || input.final_script_witness.is_some()
@@ -238,6 +280,7 @@ fn needs_core_serialization(psbt: &Psbt) -> bool {
 
 fn normalize_for_core_serialization(psbt: &mut Psbt) {
     normalize_missing_witness_utxos(psbt);
+    normalize_tap_origin_leaves(psbt);
     for output in &mut psbt.outputs {
         if output
             .redeem_script
@@ -797,6 +840,38 @@ mod tests {
             encode(&opaque).is_err(),
             "reserved unknown keys cannot bypass output admission"
         );
+    }
+
+    #[test]
+    fn origin_admission_and_leaf_sets_preserve_one_typed_owner() {
+        for side in ["input", "output"] {
+            assert!(matches!(
+                decode(&fixture(&format!("{side}-uncompressed-origin"))),
+                Err(DecodeError::Field(_))
+            ));
+            let mut psbt =
+                decode(&fixture(&format!("{side}-tap-origin-set"))).expect("Core leaf set");
+            let leaves = tap_origin_leaves(&psbt).next().expect("origin");
+            assert_eq!(leaves.len(), 2);
+            assert!(leaves[0] < leaves[1]);
+            let origins = if side == "input" {
+                &mut psbt.inputs[0].tap_key_origins
+            } else {
+                &mut psbt.outputs[0].tap_key_origins
+            };
+            let (leaves, _) = origins.values_mut().next().expect("origin");
+            leaves.reverse();
+            leaves.push(leaves[0]);
+            let decoded = decode(&encode(&psbt).expect("canonical set output")).expect("read back");
+            assert_eq!(tap_origin_leaves(&decoded).next().expect("origin").len(), 2);
+            assert_eq!(
+                tap_origin_leaves(&psbt)
+                    .next()
+                    .expect("caller preserved")
+                    .len(),
+                3
+            );
+        }
     }
 
     #[test]

@@ -115,7 +115,11 @@
   Core retains those bytes; dropping them could change signature validity.
   Unknown sighash values are also rejected instead of retained. Permanent
   `probe-taproot-65-explicit-default` and `probe-taproot-65-unknown` vectors record
-  those exact differences. No wallet, signing authority, or parallel PSBT
+  those exact differences. Uncompressed BIP32 origin keys are also rejected
+  on input/output maps before returning the lossy typed result, including
+  encoder read-back. The typed origin key would otherwise silently become
+  compressed. Taproot-origin leaf hashes use Core sorted-set semantics in the
+  single typed representation on decode and an encoding copy. No wallet, signing authority, or parallel PSBT
   parser is introduced.
 
 ### `API-03`: REST dialect

@@ -1009,6 +1009,32 @@
       "reason": "",
       "candidate_valid": false,
       "deviation": "typed signature restriction"
+    },
+    {
+      "name": "input-uncompressed-origin",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hQgYEeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hIOtp3JqPEZV2k+/wOEQio/Re0SKaFVBmcR9CP+xDUuAzerb7vVAAAgAEAAAAAAvEBCG91dHB1dC1hAA==",
+      "core_valid": true,
+      "candidate_valid": false,
+      "deviation": "uncompressed BIP32 origin keys rejected to prevent typed compression"
+    },
+    {
+      "name": "output-uncompressed-origin",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAALxAQhvdXRwdXQtYUICBHm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYSDradyajxGVdpPv8DhEIqP0XtEimhVQZnEfQj/sQ1LgM3q2+71QAAIABAAAAAA==",
+      "core_valid": true,
+      "candidate_valid": false,
+      "deviation": "uncompressed BIP32 origin keys rejected to prevent typed compression"
+    },
+    {
+      "name": "input-tap-origin-set",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hIRZ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGUDIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIRERERERERERERERERERERERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi3q2+7wAC8QEIb3V0cHV0LWEA",
+      "core_valid": true,
+      "exact_roundtrip": true
+    },
+    {
+      "name": "output-tap-origin-set",
+      "psbt": "cHNidP8BAD0BAAAAAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABkAAAAAQoAAAAAAAAAAVH0AQAAAALwAQdpbnB1dC1hAALxAQhvdXRwdXQtYSEHeb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hlAyIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiEREREREREREREREREREREREREREREREREREREREREREiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIt6tvu8A",
+      "core_valid": true,
+      "exact_roundtrip": true
     }
   ],
   "upstream_fixture_sha256": "1779e2a9a07476d72411d38a48986585e600915d8a3148b9becf8a985f781b87"

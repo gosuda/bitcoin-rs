@@ -21,7 +21,7 @@ fn shared_psbt_codec_follows_core_and_retains_legacy_error_classes() {
         if expected && case["candidate_valid"] == false {
             assert!(
                 reference.is_ok(),
-                "{name}: Core accepts opaque signature bytes"
+                "{name}: Core accepts supplied metadata encoding"
             );
             assert!(
                 matches!(candidate, Err(Error::Rpc { code: -32602, .. })),
