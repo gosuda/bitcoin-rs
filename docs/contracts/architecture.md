@@ -494,6 +494,13 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 
 ### `ARCH-09`: Authoritative owners and read-only capability boundaries
 
+- Active-tip waits use `chain::ActiveTipWait`, implemented directly by
+  `Chainstate` and composed in RPC's `ChainHandles`. The existing applied-tip
+  ArcSwap remains the sole published tip; one owner-local mutex/condition
+  variable coordinates publication and cancellation. Waiters release that
+  gate before acquiring transition exclusion. Each RPC dispatcher owns its request
+  budget and service cancellation latch, not another chain tip or event history.
+
 - Subsystems keep exactly one authoritative mutation owner for each piece of
   state. External consumers and cross-subsystem adapters receive read-only
   capabilities or single-consumer ownership rather than cloneable mutable handles:

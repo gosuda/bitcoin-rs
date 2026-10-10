@@ -40,6 +40,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/minimum_fee_filter/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
+| `waitforblock` | 0.13.0 | Durable active-tip waits. Timeout/cancellation may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33. |
+| `waitforblockheight` | 0.13.0 | Durable active-tip waits. Timeout/cancellation may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33. |
+| `waitfornewblock` | 0.13.0 | Durable active-tip waits. Timeout/cancellation may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33. |
 | `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers. |
 
 ### Implemented (unverified)
@@ -117,9 +120,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `reconsiderblock` | n/a | No manual reorg-control surface. |
 | `savemempool` | n/a | Mempool dump/reload persistence not implemented. |
 | `scanblocks` | n/a | No BIP157/158 filter index to scan. |
-| `waitforblock` | n/a | No long-poll wait surface. |
-| `waitforblockheight` | n/a | No long-poll wait surface. |
-| `waitfornewblock` | n/a | No long-poll wait surface. |
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 20, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 23, Implemented (unverified) 61, Extension 2, Disabled 0, Unimplemented 89 - total 175.

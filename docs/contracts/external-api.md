@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-33` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior;
 [Proven by](#proven-by) separates existing tests from planned comparisons.
 
@@ -573,6 +573,57 @@ owned by [wallet-facing.md](wallet-facing.md).
 - The HTTP request-body limit bounds externally supplied queries; this
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.
+
+### `API-33`: Active-tip waits
+
+- `waitfornewblock`, `waitforblock`, and `waitforblockheight` observe the
+  Chainstate-owned durable applied tip through `chain::ActiveTipWait`.
+  Header-only admission, mempool changes, and historical AssumeUTXO replay
+  do not publish the active tip. No mining capability is required.
+- New-block waits compare hashes, including the optional Core 31.1
+  `current_tip`; block waits require the target to be the current tip;
+  height waits compare the signed target with the current height. A missing
+  `current_tip` captures the starting hash once. Deadlines are absolute and
+  use milliseconds; zero/null means indefinite and negative timeouts are
+  Core `-1`. Timeout and cancellation return the current tip.
+- The owner's notification gate serializes applied-tip publication, shutdown,
+  predicate checks and parking. It holds no duplicate tip value and performs
+  no I/O. A satisfied predicate releases this gate before acquiring transition
+  exclusion and rechecks the settled tip, so an intermediate reorg prefix
+  cannot satisfy normal success as if it were the completed transition.
+  Timeout or cancellation returns the latest durable published prefix without
+  waiting for a busy transition to finish. This bounded return differs from
+  Core's final `GetTip` acquiring `cs_main`, and is an explicit deviation.
+  Transition acquisition uses bounded cancellation checks; unsatisfied predicates sleep on a
+  condition variable without periodically reading the chain.
+- Normal shutdown, recovery closure, and explicit owner closure wake waiters.
+  RPC-server-only shutdown sets the bound dispatcher's cancellation latch before
+  waking the owner, and does not stop chainstate. The listener retains its
+  existing detached connection-worker lifecycle; this change adds no joins.
+  Each binding owns its dispatcher latch and quota. Rebinding the same Context
+  creates a fresh dispatcher, while old requests retain the old cancellation
+  latch; an old server's shutdown cannot cancel or revive the new service.
+- Registry execution metadata classifies the three wait methods and
+  `scantxoutset`'s `start` action. Every `Handler::dispatch`, including direct
+  callers, batch entries and notifications, acquires its dispatcher's
+  bounded blocking quota. A bound listener permits at most `max_connections - 1`
+  such calls (zero with one worker); the total connection bound is unchanged.
+  A standalone dispatcher defaults to 16 blocking calls. Admission never
+  waits for capacity. Scan status/abort remain ordinary calls.
+- Admission exhaustion is the intentional `-1` error
+  `RPC blocking request limit reached`. HTTP requests containing a classified
+  blocking call close keep-alive after their response, including refusals, so
+  a refused call cannot retain the last ordinary worker as an idle connection.
+  Notification-only calls retain HTTP 204; mixed batches retain response order.
+  Existing `getblocktemplate` long polling is outside this admission and
+  RPC-only cancellation contract and can still occupy ordinary workers.
+- Arity errors retain Core's `-1` but return concise method usage rather than
+  its generated help body. These cancellation, overload, transport and help
+  differences are declared `Deviation`; no full compatibility promotion is made.
+- Evidence: `chainstate::tip_wait::tests`,
+  `rpc::server::tip_wait_tests`, and the live pinned-Core process comparisons
+  in `e2e/tests/rpc_tip_waits.rs` exercise publication races, reorgs, deadlines,
+  shutdown, HTTP availability, parameter errors and restored startup.
 
 ## Live gaps
 

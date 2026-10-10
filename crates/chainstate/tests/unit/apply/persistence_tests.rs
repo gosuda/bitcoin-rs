@@ -97,8 +97,25 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let next = mined_child(first.block_hash(), 2)?;
     let next_hash = Hash256::from(next.block_hash());
 
+    let observer = handles.clone();
+    let waiter = std::thread::spawn(move || {
+        use bitcoin_rs_chain::ActiveTipWait as _;
+        observer.wait_for_tip(
+            bitcoin_rs_chain::TipWaitCondition::Changed(Some(applied_hash)),
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(50)),
+            &bitcoin_rs_chain::LatchReader::fixture_never(),
+        )
+    });
     let outcome = handles.apply_block(&next, None);
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
+    let observed = waiter
+        .join()
+        .map_err(|_| std::io::Error::other("tip observer panicked"))?;
+    assert_eq!(
+        observed.map(|tip| tip.hash),
+        Some(applied_hash),
+        "failed persistence must not satisfy a new-tip wait"
+    );
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
         Some(applied_hash),

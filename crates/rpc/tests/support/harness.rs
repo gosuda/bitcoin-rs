@@ -111,6 +111,7 @@ impl ServerHarness {
             chain: ChainHandles {
                 chain_tip: chainstate.header_tip_reader(),
                 applied_tip: chainstate.applied_tip_reader(),
+                active_tip_wait: Some(chainstate.clone()),
                 progress: chainstate.chain_progress_reader(),
                 blocks: state.block_log_reader(),
                 utxo: chainstate.utxo_reader(),
