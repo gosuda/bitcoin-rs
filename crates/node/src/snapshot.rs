@@ -5,7 +5,9 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bitcoin_rs_chainstate::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate};
+use bitcoin_rs_chainstate::{
+    AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate, ChainstateRole,
+};
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_rpc::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotImport,
@@ -148,7 +150,10 @@ impl SnapshotControl {
             coins_loaded: snapshot.metadata.coins_count,
             tip_hash: snapshot.anchor.block_hash.to_string_be(),
             base_height: snapshot.anchor.height,
-            path,
+            // JSON cannot serialize arbitrary filesystem bytes. Render before
+            // committing so a valid symlink target cannot turn success into a
+            // post-commit response error.
+            path: path.to_string_lossy().into_owned(),
         };
         self.activate(
             snapshot.set,
@@ -216,12 +221,9 @@ impl SnapshotControl {
                 validated: true,
             });
         }
-        let snapshot_blockhash = match summary.status {
-            AssumeUtxoDiskStatus::Validating { base_hash, .. }
-            | AssumeUtxoDiskStatus::Finalized { base_hash, .. } => Some(base_hash.to_string_be()),
-            AssumeUtxoDiskStatus::Uninitialized | AssumeUtxoDiskStatus::Failed { .. } => None,
-        };
         let active = summary.active_chainstate;
+        let snapshot_blockhash = active_snapshot_base(active.role, &summary.status)
+            .map(bitcoin_rs_primitives::Hash256::to_string_be);
         chainstates.push(ChainstateInfo {
             blocks: active.height.unwrap_or(0),
             bestblockhash: active
@@ -239,9 +241,59 @@ impl SnapshotControl {
     }
 }
 
+// Core v31.1 keeps m_from_snapshot_blockhash after marking the snapshot
+// validated (validation.cpp:6104-6111). A failure likewise does not erase an
+// active assumed role's origin merely because the disk status is Failed.
+fn active_snapshot_base(
+    role: ChainstateRole,
+    status: &AssumeUtxoDiskStatus,
+) -> Option<bitcoin_rs_primitives::Hash256> {
+    match role {
+        ChainstateRole::AssumedActive { base_hash, .. } => Some(base_hash),
+        ChainstateRole::Ordinary => match status {
+            AssumeUtxoDiskStatus::Finalized { base_hash, .. } => Some(*base_hash),
+            _ => None,
+        },
+        ChainstateRole::Historical { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_origin_survives_failure_and_validated_provenance_survives_finalization() {
+        let base = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]);
+        let absent = bitcoin_rs_primitives::Hash256::default();
+        let assumed = ChainstateRole::AssumedActive {
+            base_height: 200,
+            base_hash: base,
+        };
+        let failed = AssumeUtxoDiskStatus::Failed {
+            base_height: 200,
+            base_hash: base,
+            expected_hash_serialized: absent,
+            actual_hash_serialized: absent,
+        };
+        assert_eq!(active_snapshot_base(assumed, &failed), Some(base));
+        let finalized = AssumeUtxoDiskStatus::Finalized {
+            base_height: 200,
+            base_hash: base,
+            validated_hash_serialized: absent,
+        };
+        assert_eq!(
+            active_snapshot_base(ChainstateRole::Ordinary, &finalized),
+            Some(base)
+        );
+        assert_eq!(
+            active_snapshot_base(
+                ChainstateRole::Ordinary,
+                &AssumeUtxoDiskStatus::Uninitialized
+            ),
+            None
+        );
+    }
 
     #[cfg(unix)]
     #[test]

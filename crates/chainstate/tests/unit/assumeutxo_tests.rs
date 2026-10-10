@@ -11,7 +11,9 @@ use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snap
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole};
+use super::{
+    AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole, known_progress,
+};
 use crate::test_fixtures::handles;
 use crate::{ApplyError, Chainstate};
 
@@ -684,5 +686,28 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
             .hash,
         before.hash
     );
+    Ok(())
+}
+
+#[test]
+fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
+    let fixture = Fixture::new()?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    assert_eq!(
+        manager.chainstates_report()?.active_verification_progress,
+        None
+    );
+    assert_eq!(known_progress(None, 0.5), None);
+    let tip = fixture
+        .active
+        .block_tree
+        .read()
+        .tip()
+        .ok_or("header tip missing")?;
+    let mut tip = (*tip).clone();
+    tip.chain_tx_count = bitcoin_rs_chain::ChainTxCount::UNKNOWN;
+    assert_eq!(known_progress(Some(&tip), 0.5), None);
+    tip.chain_tx_count = bitcoin_rs_chain::ChainTxCount::established(3);
+    assert_eq!(known_progress(Some(&tip), 0.5), Some(0.5));
     Ok(())
 }

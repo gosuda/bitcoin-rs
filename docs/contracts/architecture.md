@@ -403,12 +403,12 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   counts are owned by `crates/primitives/src/network.rs`. These anchor additions
   leave the project's broader Bitcoin Core compatibility baseline unchanged.
 - **Snapshot format and interoperability evidence**:
-  The current file activation API reads native bitcoin-rs v4 snapshots. Bitcoin
-  Core portable v2 import, `loadtxoutset`, `getchainstates`, and real-process
-  lifecycle interoperability remain tracked in
-  [#1390](https://github.com/gosuda/bitcoin-rs/issues/1390). Compiled anchor support
-  does not establish hosted snapshot availability or successful Core-to-bitcoin-rs
-  process interoperability; each requires separate evidence.
+  The embedding file activation API reads native bitcoin-rs v4 snapshots.
+  `loadtxoutset` uses the shared Core portable v2 reader and existing activation
+  owner; `getchainstates` projects that owner's lifecycle (`API-33`). Process
+  coverage uses a genuine Core-produced regtest-200 artifact. Compiled mainnet
+  anchors alone do not establish hosted artifact availability, mainnet
+  interoperability, or memory/throughput qualifications.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target
@@ -473,7 +473,15 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 - **Durable activation and recovery**:
   Immutable coin and header archives are synced before the active head commits the
   pinned base and lifecycle status. That head is the only activation authority;
-  orphan import files do not activate a snapshot. Startup admits the current schema,
+  orphan import files do not activate a snapshot. Each exclusively created
+  temporary reservation is file-locked before writing and stays locked through
+  rename and directory sync. Before publishing a recovered manager, cleanup
+  probes that lock and reclaims only exact generated reservation names in
+  compiled base directories whose native header identifies the expected archive.
+  Live writers, unknown names/formats, unidentifiable fragments, symlinks and
+  final archives are preserved. Cleanup failure retains extra files for retry;
+  it cannot reset the accepted head or truncate an operator artifact. Startup
+  admits the current schema,
   validates the root's network pin, and restores a compatible checkpoint or verifies
   the snapshot archive, then replays the certified foreground suffix to the head.
   A checkpoint remains an accelerator, including after finalized history is pruned.

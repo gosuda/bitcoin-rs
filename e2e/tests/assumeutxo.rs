@@ -245,6 +245,7 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     assert_eq!(final_view["chainstates"].as_array().unwrap().len(), 1);
     assert_eq!(final_view["chainstates"][0]["blocks"], 206);
     assert_eq!(final_view["chainstates"][0]["validated"], true);
+    assert_eq!(final_view["chainstates"][0]["snapshot_blockhash"], BASE);
     node.stop()?;
     core.stop()
 }
@@ -295,7 +296,22 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
         );
         assert_eq!(view["chainstates"][0]["blocks"], 0, "{name}: {view}");
     }
+    // The RPC argument is UTF-8, but canonicalization can resolve its symlink
+    // to a non-UTF-8 filename. Response serialization must still succeed after
+    // activation; it must not report a post-commit error.
+    #[cfg(unix)]
+    {
+        use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
+        let target =
+            snapshot.with_file_name(std::ffi::OsString::from_vec(b"core-\xff.dat".to_vec()));
+        std::fs::rename(&snapshot, &target)?;
+        symlink(&target, &snapshot)?;
+    }
     let imported = node.rpc("loadtxoutset", &json!({"path":"core200.dat"}))?;
+    assert_eq!(
+        imported["path"],
+        snapshot.canonicalize()?.to_string_lossy().as_ref()
+    );
     assert_eq!(imported["coins_loaded"], 200);
     assert!(Path::new(imported.str_field("path")?).is_absolute());
     reject(&mut node, &snapshot, -32603)?;
@@ -365,6 +381,16 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
             "pre-existing {name} must be preserved"
         );
     }
+    // Model identifiable reservations left by an interrupted writer. Their
+    // payloads come from the real node's native archive, not a lookalike codec.
+    let orphan_coins = archive.join(".coins.dat.12345.100.tmp");
+    let orphan_headers = archive.join(".headers.dat.12345.101.tmp");
+    std::fs::copy(archive.join("coins.dat"), &orphan_coins)?;
+    std::fs::copy(archive.join("headers.dat"), &orphan_headers)?;
+    // Even an exact reservation-shaped name is not removable when its content
+    // belongs to the operator's portable artifact rather than native staging.
+    let unknown_alias = archive.join(".coins.dat.12345.102.tmp");
+    std::fs::hard_link(&source, &unknown_alias)?;
     // Recover from the newly committed native archives, not a clean-shutdown
     // checkpoint that could mask an invalid archive publication.
     let datadir = node.take_datadir()?;
@@ -376,5 +402,11 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
     assert_eq!(view["chainstates"][1]["blocks"], 200);
     assert_eq!(view["chainstates"][1]["snapshot_blockhash"], BASE);
     assert_eq!(std::fs::read(&source)?, CORE_SNAPSHOT);
+    assert!(!orphan_coins.exists());
+    assert!(!orphan_headers.exists());
+    assert_eq!(std::fs::read(&unknown_alias)?, CORE_SNAPSHOT);
+    for name in ["coins.tmp", "headers.tmp"] {
+        assert_eq!(std::fs::read(archive.join(name))?, CORE_SNAPSHOT);
+    }
     node.stop()
 }

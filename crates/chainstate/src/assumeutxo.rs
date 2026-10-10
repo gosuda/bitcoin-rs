@@ -417,6 +417,13 @@ impl AssumeUtxoManager {
         manager.recover_pending().inspect_err(|_| {
             manager.active_chainstate.fail_closed_for_recovery();
         })?;
+        if let Some(data_dir) = manager.data_dir.as_deref()
+            && let Err(error) = crate::assumeutxo_snapshot::cleanup_reservations(data_dir, network)
+        {
+            // Cleanup is not an activation authority. Failure retains extra
+            // files for a later retry and never resets the accepted head.
+            tracing::warn!(%error, "snapshot reservation cleanup deferred");
+        }
         match manager.status()? {
             AssumeUtxoDiskStatus::Validating {
                 checkpoint: Some(checkpoint),
@@ -1358,7 +1365,7 @@ mod tests;
 /// Never substitute a height fraction for an unknown transaction count.
 fn known_progress(tip: Option<&TipSnapshot>, progress: f64) -> Option<f64> {
     match tip {
-        None => Some(0.0),
+        None => None,
         Some(tip) => tip.chain_tx_count.get().map(|_| progress),
     }
 }

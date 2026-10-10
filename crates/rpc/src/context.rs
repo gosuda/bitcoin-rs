@@ -199,8 +199,9 @@ pub struct SnapshotImport {
     pub tip_hash: String,
     /// Compiled base height.
     pub base_height: u32,
-    /// Absolute input path used by the node.
-    pub path: std::path::PathBuf,
+    /// UTF-8 display of the absolute input path, rendered before activation.
+    /// Non-UTF-8 filesystem bytes are replaced for JSON output only.
+    pub path: String,
 }
 
 /// Coherent lifecycle projection supplied by the chainstate owner.

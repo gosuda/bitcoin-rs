@@ -152,12 +152,12 @@ declare_rows! {
     // -- JSON-RPC: additional Core blockchain/control surfaces ------
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
-    "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Historical role precedes active. See API-33.", "0.12.0", Some(chain::getchainstates);
+    "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs.", "0.12.0", Some(chain::getchainstates);
     "getdeploymentinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists).", "n/a", None;
     "getdescriptoractivity", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No wallet/scan index to serve it.", "n/a", None;
     "getmempoolcluster", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Cluster mempool tracking not implemented.", "n/a", None;
     "importmempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool import not implemented.", "n/a", None;
-    "loadtxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Imports bounded Core v2 files against compiled network pins through node-owned fenced activation. Malformed input returns -22. See API-33. dumptxoutset export remains unimplemented.", "0.12.0", Some(chain::loadtxoutset);
+    "loadtxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Imports bounded Core v2 files against compiled network pins through node-owned fenced activation. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented.", "0.12.0", Some(chain::loadtxoutset);
     "preciousblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual block-preference surface.", "n/a", None;
     "reconsiderblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual reorg-control surface.", "n/a", None;
     "savemempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool dump/reload persistence not implemented.", "n/a", None;
