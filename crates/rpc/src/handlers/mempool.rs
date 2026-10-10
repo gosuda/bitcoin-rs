@@ -70,6 +70,18 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
     let bound = spending_prevout_arguments(params)?;
     let array = super::params_array(bound.as_ref())?;
     super::ensure_at_most_params(bound.as_ref(), 2)?;
+    // Binding fills omitted positions with null. Preserve this method's
+    // existing missing-outputs error without conflating it with an explicit
+    // null supplied by the caller. Name/collision validation has already run.
+    if params.is_object()
+        && params.get("outputs").is_none()
+        && params
+            .get("args")
+            .and_then(JsonContainerTrait::as_array)
+            .is_none_or(sonic_rs::Array::is_empty)
+    {
+        return Err(RpcError::InvalidParams("outputs is required"));
+    }
     let outputs = array
         .first()
         .ok_or(RpcError::InvalidParams("outputs is required"))?;

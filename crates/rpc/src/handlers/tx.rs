@@ -551,7 +551,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring", "iswitness"])?;
+    let bound = super::bind_named_params(params, &["hexstring"])?;
     let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
@@ -561,8 +561,7 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     )?))
 }
 
-const CREATE_TRANSACTION_ARGUMENTS: &[&str] =
-    &["inputs", "outputs", "locktime", "replaceable", "version"];
+const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
 
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;

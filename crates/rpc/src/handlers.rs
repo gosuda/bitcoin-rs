@@ -491,4 +491,60 @@ mod registry_tests {
         assert_eq!(error.code(), -8);
         assert_eq!(error.to_string(), "Unknown named parameter extra");
     }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn named_binding_preserves_method_boundaries() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!({"options": {}}),
+            json!({"options": null}),
+            json!({"mempool_only": true}),
+            json!({"return_spending_tx": false, "args": []}),
+            json!({"mempool_only": true, "args": false}),
+        ] {
+            let error = handler
+                .dispatch("gettxspendingprevout", &params)
+                .expect_err("outputs omitted");
+            assert_eq!(error.code(), -32602);
+            assert_eq!(error.to_string(), "invalid params: outputs is required");
+        }
+        for params in [
+            json!({"outputs": null, "mempool_only": true}),
+            json!({"args": [null], "return_spending_tx": false}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("gettxspendingprevout", &params)
+                    .expect_err("explicit null is a type error")
+                    .code(),
+                -3
+            );
+        }
+        let error = handler
+            .dispatch("gettxspendingprevout", &json!({"options": {}, "extra": 0}))
+            .expect_err("name validation precedes missing outputs");
+        assert_eq!(error.code(), -8);
+        assert_eq!(error.to_string(), "Unknown named parameter extra");
+        // The prerequisite must not newly recognize parameters whose semantics
+        // are implemented in the later raw-transaction/PSBT conversion slice.
+        for (method, params, name) in [
+            (
+                "createrawtransaction",
+                json!({"inputs": [], "outputs": {}, "version": 1}),
+                "version",
+            ),
+            (
+                "decoderawtransaction",
+                json!({"hexstring": "zz", "iswitness": false}),
+                "iswitness",
+            ),
+        ] {
+            let error = handler
+                .dispatch(method, &params)
+                .expect_err("unsupported name");
+            assert_eq!(error.code(), -8);
+            assert_eq!(error.to_string(), format!("Unknown named parameter {name}"));
+        }
+    }
 }

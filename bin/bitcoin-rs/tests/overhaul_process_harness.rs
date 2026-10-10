@@ -179,10 +179,7 @@ fn named_rpc_arguments_follow_core() {
             json!({"inputs": [], "outputs": {}, "extra": 1}),
         ),
         ("decoderawtransaction", json!({"hexstring": "zz"})),
-        (
-            "decoderawtransaction",
-            json!({"args": ["zz"], "iswitness": false}),
-        ),
+        ("decoderawtransaction", json!({"args": ["zz"]})),
         ("gettxspendingprevout", json!({"outputs": []})),
         (
             "gettxspendingprevout",
