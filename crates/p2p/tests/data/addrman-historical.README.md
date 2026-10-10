@@ -4,7 +4,7 @@ These are genuine files emitted through the original immutable AddressBook
 writers in isolated scratch executables. They are synthetic regression fixtures,
 not retained operator production data. The original addrman.rs/netgroup.rs files
 were compiled unchanged; only a module-local fixture entry point was appended.
-No current v6 Stored value was serialized with a historical version number.
+No current Stored value was serialized with a historical version number.
 
 | File | Original writer commit | Bytes | SHA-256 |
 | --- | --- | ---: | --- |
@@ -29,3 +29,21 @@ migration must preserve those values exactly, along with source/health/secret.
 The trailing 32 bytes are the original writer's SHA256 checksum. Migration tests
 read the files unchanged and compare preserved backup bytes, health, runtime
 attempt reset and the resulting reference/index invariants.
+
+The anchor integration adds genuine original-writer files:
+
+| File | Original writer commit | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| addrman-historical-v3-anchors.dat | 20e9064e5a41b64be44720bf1d816d8534d2d280 | 966 | 46c8b0e3de798d2e423224aa13b68a6841d4b15d23744e5ff1d59861f9530759 |
+| addrman-historical-v4-anchors.dat | fba4ddef612cca0b7764d07646f3301ea1897674 | 966 | 9ad97094335dd17c0d4e6d2293a12c74b8c2e28667a11c29d524bbb1983b4f81 |
+| addrman-core-v6-eight-refs.dat | 0597de4da9df6d20da0acf4b2c2a4ebc99a7ca3a | 344 | f0293ecbe561dadfb3780ec63fed9608ea5de13cc11565188ebe4d1182aefbce |
+
+The original v3/v4 writers learn and confirm `[2002:808:808::1]:8333`
+from `2002:101:101::1` and `8.8.4.4:8333` from `2.2.2.2`, retain the linked
+IPv4 ASMap identity, and remember both anchors at 1700000006. They also retain
+three failed DNS attempts for `9.9.9.9:8333`. The v6 producer repeats the v5
+reference sequence above. All files were saved and reopened by their original
+writer; their schema numbers were not relabelled. Compiled with Rust1.99.0;
+source addrman blob IDs are respectively `570d5d44af8089891f0a6fdceb9ac26f2e2f3b65`,
+`676273fd73a7c5daf0fef09328f44e7e7f6e89d8`, and
+`883694c2c3db06273602558959efdac83e6c5d43`.

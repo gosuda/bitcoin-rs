@@ -27,7 +27,12 @@ const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
+const MAX_COLLISIONS: usize = 10;
+const REPLACEMENT_WINDOW: u64 = 4 * 60 * 60;
+const COLLISION_TEST_WINDOW: u64 = 40 * 60;
+const MAX_ANCHORS: usize = 2;
+const ANCHOR_AGE: u64 = 7 * 24 * 60 * 60;
 // min GetChance=.01*.66^8; at zero-based proposal44 its product with1.2^44>1.
 const MAX_SELECTION_PROPOSALS: usize = 45;
 
@@ -70,6 +75,8 @@ impl Source {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Candidate {
+    #[serde(skip)]
+    creation_id: u64,
     addr: SocketAddr,
     services: u64,
     source: Source,
@@ -104,6 +111,21 @@ impl Candidate {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Anchor {
+    addr: SocketAddr,
+    confirmed_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingClaim {
+    Dial,
+    Feeler,
+    AnchorReservation(Anchor),
+    AnchorQueued(Anchor),
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -113,6 +135,8 @@ struct Stored {
     #[serde(deserialize_with = "read_records")]
     records: Vec<Candidate>,
     asmap_id: Option<[u8; 32]>,
+    #[serde(deserialize_with = "read_anchors")]
+    anchors: Vec<Anchor>,
 }
 
 struct Manager {
@@ -123,6 +147,7 @@ struct Manager {
     tried: Vec<u32>,
     rng: StdRng,
     last_good: u64,
+    next_creation_id: u64,
     #[cfg(test)]
     selection_proposals: usize,
     #[cfg(test)]
@@ -135,7 +160,8 @@ struct Manager {
     published: bool,
     gossip_cursor: usize,
     gossip_cache: Option<(Instant, Vec<(u32, bitcoin::p2p::address::Address)>)>,
-    pending: HashSet<SocketAddr>,
+    pending: HashMap<SocketAddr, PendingClaim>,
+    collisions: Vec<SocketAddr>,
 }
 
 pub(crate) struct AddressBook {
@@ -213,6 +239,7 @@ impl Manager {
                 secret,
                 records: Vec::new(),
                 asmap_id: groups.identity(),
+                anchors: Vec::new(),
             },
             groups,
             by_addr: HashMap::new(),
@@ -220,6 +247,7 @@ impl Manager {
             tried: vec![EMPTY_SLOT; TRIED_BUCKETS * BUCKET_SIZE],
             rng,
             last_good: 1,
+            next_creation_id: 0,
             #[cfg(test)]
             selection_proposals: 0,
             #[cfg(test)]
@@ -232,7 +260,8 @@ impl Manager {
             published: false,
             gossip_cursor: 0,
             gossip_cache: None,
-            pending: HashSet::new(),
+            pending: HashMap::new(),
+            collisions: Vec::new(),
         }
     }
     fn new_slot(&self, addr: SocketAddr, bucket: usize) -> usize {
@@ -266,6 +295,8 @@ impl Manager {
         );
         let addr = self.stored.records[index].addr;
         self.by_addr.remove(&addr);
+        self.collisions.retain(|candidate| *candidate != addr);
+        self.stored.anchors.retain(|anchor| anchor.addr != addr);
         self.stored.records.swap_remove(index);
         if let Some(moved) = self.stored.records.get(index) {
             let addr = moved.addr;
@@ -298,6 +329,8 @@ impl Manager {
             self.remove_identity(index);
         }
     }
+    // Core MakeTried, with the local pending-identity guard checked before any
+    // reference is changed. Indices are reloaded after ClearNew can swap_remove.
     fn promote(&mut self, addr: SocketAddr) -> bool {
         let Some(&index) = self.by_addr.get(&addr) else {
             return false;
@@ -306,17 +339,173 @@ impl Manager {
             return false;
         }
         let slot = self.tried_slot(addr);
-        if self.tried[slot] != EMPTY_SLOT {
+        let incumbent = (self.tried[slot] != EMPTY_SLOT).then(|| {
+            self.stored.records[usize::try_from(self.tried[slot]).unwrap_or_default()].addr
+        });
+        let demotion = incumbent.map(|old| {
+            let entry = &self.stored.records[self.by_addr[&old]];
+            let bucket = new_bucket(
+                &self.stored.secret,
+                old,
+                &entry.source.group(&self.groups),
+                &self.groups,
+            );
+            (old, bucket, self.new_slot(old, bucket))
+        });
+        if self.promotion_blocked(addr) {
             return false;
         }
-        let buckets = std::mem::take(&mut self.stored.records[index].new_buckets);
-        for bucket in buckets {
-            let slot = self.new_slot(addr, usize::from(bucket));
-            self.new[slot] = EMPTY_SLOT;
+        for bucket in std::mem::take(&mut self.stored.records[index].new_buckets) {
+            let new_slot = self.new_slot(addr, usize::from(bucket));
+            self.new[new_slot] = EMPTY_SLOT;
         }
+        if let Some((old, bucket, new_slot)) = demotion {
+            self.tried[slot] = EMPTY_SLOT;
+            self.stored.records[self.by_addr[&old]].tried = false;
+            self.clear_new(new_slot);
+            let old_index = self.by_addr[&old];
+            self.stored.records[old_index]
+                .new_buckets
+                .push(u16::try_from(bucket).unwrap_or_default());
+            self.new[new_slot] = u32::try_from(old_index).unwrap_or(EMPTY_SLOT);
+        }
+        let index = self.by_addr[&addr];
         self.stored.records[index].tried = true;
         self.tried[slot] = u32::try_from(index).unwrap_or(EMPTY_SLOT);
         true
+    }
+    fn promotion_blocked(&self, addr: SocketAddr) -> bool {
+        let incumbent = self.tried[self.tried_slot(addr)];
+        if incumbent == EMPTY_SLOT {
+            return false;
+        }
+        let old = &self.stored.records[usize::try_from(incumbent).unwrap_or_default()];
+        let bucket = new_bucket(
+            &self.stored.secret,
+            old.addr,
+            &old.source.group(&self.groups),
+            &self.groups,
+        );
+        let victim = self.new[self.new_slot(old.addr, bucket)];
+        if victim == EMPTY_SLOT {
+            return false;
+        }
+        let victim = &self.stored.records[usize::try_from(victim).unwrap_or_default()];
+        victim.addr != addr
+            && victim.new_buckets.len() == 1
+            && self.pending.contains_key(&victim.addr)
+    }
+    fn restore_anchors(&mut self, anchors: Vec<Anchor>, now: u64) {
+        let before = self.stored.anchors.clone();
+        for anchor in anchors {
+            if anchor.confirmed_at > now.saturating_add(FUTURE_SKEW_SECS)
+                || now.saturating_sub(anchor.confirmed_at) > ANCHOR_AGE
+                || self
+                    .by_addr
+                    .get(&anchor.addr)
+                    .is_none_or(|index| self.stored.records[*index].last_success == 0)
+            {
+                continue;
+            }
+            if let Some(existing) = self
+                .stored
+                .anchors
+                .iter_mut()
+                .find(|entry| entry.addr == anchor.addr)
+            {
+                if existing.confirmed_at < anchor.confirmed_at {
+                    *existing = anchor;
+                }
+            } else if self.stored.anchors.len() < MAX_ANCHORS {
+                self.stored.anchors.push(anchor);
+            }
+        }
+        self.stored.anchors.sort_by_key(|anchor| anchor.addr);
+        if self.stored.anchors != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+    fn good(&mut self, addr: SocketAddr, test_before_evict: bool, now: u64) -> bool {
+        self.last_good = now;
+        let Some(index) = self.by_addr.get(&addr).copied() else {
+            return false;
+        };
+        let entry = &mut self.stored.records[index];
+        let changed = entry.last_success != now || entry.failures != 0;
+        entry.last_success = now;
+        entry.last_attempt = now;
+        entry.failures = 0;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        if entry.tried {
+            return false;
+        }
+        let slot = self.tried_slot(addr);
+        if test_before_evict && self.tried[slot] != EMPTY_SLOT {
+            if self.collisions.len() < MAX_COLLISIONS && !self.collisions.contains(&addr) {
+                self.collisions.push(addr);
+                // Core's set is ordered by lifetime-stable creation ID, not
+                // Good/enqueue order or the mutable swap_remove index.
+                self.collisions.sort_by_key(|endpoint| {
+                    self.stored.records[self.by_addr[endpoint]].creation_id
+                });
+            }
+            return false;
+        }
+        let promoted = self.promote(addr);
+        if promoted {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        promoted
+    }
+    fn resolve_collisions(
+        &mut self,
+        protected: &HashSet<SocketAddr>,
+        allowed: &HashSet<SocketAddr>,
+        now: u64,
+    ) {
+        // At most ten entries; snapshot endpoint identities, never Vec indices.
+        for addr in self.collisions.clone() {
+            let Some(&index) = self.by_addr.get(&addr) else {
+                self.collisions.retain(|candidate| *candidate != addr);
+                continue;
+            };
+            if self.stored.records[index].tried {
+                self.collisions.retain(|candidate| *candidate != addr);
+                continue;
+            }
+            let slot = self.tried_slot(addr);
+            let old = self.tried[slot];
+            let replace = if old == EMPTY_SLOT {
+                true
+            } else {
+                let old = &self.stored.records[usize::try_from(old).unwrap_or_default()];
+                if now.saturating_sub(old.last_success) < REPLACEMENT_WINDOW {
+                    self.collisions.retain(|candidate| *candidate != addr);
+                    continue;
+                }
+                if protected.contains(&old.addr)
+                    || self.pending.contains_key(&old.addr)
+                    || !allowed.contains(&old.addr)
+                {
+                    continue;
+                }
+                if now.saturating_sub(old.last_attempt) < REPLACEMENT_WINDOW {
+                    now.saturating_sub(old.last_attempt) > 60
+                } else {
+                    now.saturating_sub(self.stored.records[index].last_success)
+                        > COLLISION_TEST_WINDOW
+                }
+            };
+            if replace && allowed.contains(&addr) && !self.promotion_blocked(addr) {
+                // Good(false) is part of Core's resolution, including health and
+                // global failure epoch updates, not just table movement.
+                if self.good(addr, false, now) {
+                    self.collisions.retain(|candidate| *candidate != addr);
+                }
+            }
+        }
     }
     fn learn(
         &mut self,
@@ -378,7 +567,7 @@ impl Manager {
             if old.addr == addr {
                 return false;
             }
-            let final_pending = old.new_buckets.len() == 1 && self.pending.contains(&old.addr);
+            let final_pending = old.new_buckets.len() == 1 && self.pending.contains_key(&old.addr);
             if final_pending || !(old.terrible(now) || old.new_buckets.len() > 1 && refs == 0) {
                 return false;
             }
@@ -388,6 +577,14 @@ impl Manager {
         {
             return false;
         }
+        let next_creation_id = if existing.is_none() {
+            let Some(next) = self.next_creation_id.checked_add(1) else {
+                return false;
+            };
+            next
+        } else {
+            self.next_creation_id
+        };
         self.clear_new(slot);
         let index = if let Some(index) = self.by_addr.get(&addr).copied() {
             index
@@ -397,6 +594,7 @@ impl Manager {
             }
             let index = self.stored.records.len();
             self.stored.records.push(Candidate {
+                creation_id: self.next_creation_id,
                 addr,
                 services,
                 source,
@@ -409,6 +607,7 @@ impl Manager {
                 last_count_attempt: 0,
             });
             self.by_addr.insert(addr, index);
+            self.next_creation_id = next_creation_id;
             index
         };
         self.stored.records[index]
@@ -486,7 +685,7 @@ impl Manager {
     }
 }
 
-fn canonical(addr: SocketAddr) -> SocketAddr {
+pub(crate) fn canonical(addr: SocketAddr) -> SocketAddr {
     match addr.ip() {
         IpAddr::V6(ip) => ip
             .to_ipv4_mapped()
@@ -587,7 +786,7 @@ impl AddressBook {
                     manager.stored = loaded.stored;
                     manager.published = scoped_source;
                     let rebucket =
-                        loaded.schema <= 3 || manager.stored.asmap_id != manager.groups.identity();
+                        loaded.schema <= 4 || manager.stored.asmap_id != manager.groups.identity();
                     let migrate = loaded.schema != VERSION || rebucket;
                     if migrate && manager.writable {
                         if let Err(error) =
@@ -602,6 +801,13 @@ impl AddressBook {
                     } else {
                         manager.install_indexes();
                     }
+                    // Collision state is empty on restart, so persisted record
+                    // order establishes fresh runtime IDs without a disk field.
+                    for (index, entry) in manager.stored.records.iter_mut().enumerate() {
+                        entry.creation_id = u64::try_from(index).unwrap_or(u64::MAX);
+                    }
+                    manager.next_creation_id =
+                        u64::try_from(manager.stored.records.len()).unwrap_or(u64::MAX);
                     if migrate {
                         manager.stored.version = VERSION;
                         manager.stored.asmap_id = manager.groups.identity();
@@ -681,7 +887,12 @@ impl AddressBook {
         // evaluation. Only the pure per-address policy decisions were captured.
         let groups: HashSet<_> = grouped
             .iter()
-            .chain(&manager.pending)
+            .chain(
+                manager
+                    .pending
+                    .iter()
+                    .filter_map(|(addr, claim)| (*claim != PendingClaim::Feeler).then_some(addr)),
+            )
             .map(|addr| manager.groups.group(addr.ip()))
             .collect();
         let eligible: Vec<_> = manager
@@ -691,7 +902,7 @@ impl AddressBook {
             .map(|entry| {
                 allowed.contains(&entry.addr)
                     && !connected.contains(&entry.addr)
-                    && !manager.pending.contains(&entry.addr)
+                    && !manager.pending.contains_key(&entry.addr)
                     && !groups.contains(&manager.groups.group(entry.addr.ip()))
             })
             .collect();
@@ -713,13 +924,110 @@ impl AddressBook {
         threshold == 0
     }
 
-    pub(crate) fn queued(&self, addr: SocketAddr) {
+    pub(crate) fn queued(&self, addr: SocketAddr) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.state.lock().pending.entry(canonical(addr)) {
+            Entry::Vacant(entry) => {
+                entry.insert(PendingClaim::Dial);
+                true
+            }
+            Entry::Occupied(entry) => *entry.get() == PendingClaim::Dial,
+        }
+    }
+    pub(crate) fn queued_feeler(&self, addr: SocketAddr) -> bool {
+        use std::collections::hash_map::Entry;
+        let mut manager = self.state.lock();
+        if manager
+            .pending
+            .values()
+            .any(|claim| *claim == PendingClaim::Feeler)
+        {
+            return false;
+        }
+        match manager.pending.entry(canonical(addr)) {
+            Entry::Vacant(entry) => {
+                entry.insert(PendingClaim::Feeler);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+    pub(crate) fn is_pending(&self, addr: SocketAddr) -> bool {
+        self.state.lock().pending.contains_key(&canonical(addr))
+    }
+    pub(crate) fn is_feeler(&self, addr: SocketAddr) -> bool {
+        self.state.lock().pending.get(&canonical(addr)) == Some(&PendingClaim::Feeler)
+    }
+    pub(crate) fn queue_anchor(&self, addr: SocketAddr) -> bool {
+        let mut manager = self.state.lock();
+        let Some(claim) = manager.pending.get_mut(&canonical(addr)) else {
+            return false;
+        };
+        if let PendingClaim::AnchorReservation(anchor) = claim {
+            *claim = PendingClaim::AnchorQueued(anchor.clone());
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn defer_anchor(&self, addr: SocketAddr) {
+        if let Some(claim) = self.state.lock().pending.get_mut(&canonical(addr))
+            && let PendingClaim::AnchorQueued(anchor) = claim
+        {
+            *claim = PendingClaim::AnchorReservation(anchor.clone());
+        }
+    }
+    /// At-most-once dispatch: acceptance by the outbound worker consumes the
+    /// reservation even if spawning/connect subsequently fails. Health Attempt
+    /// remains at actual TCP completion and is independent of this boundary.
+    pub(crate) fn anchor_dispatched(&self, addr: SocketAddr) -> bool {
+        if let Some(claim) = self.state.lock().pending.get_mut(&canonical(addr))
+            && matches!(claim, PendingClaim::AnchorQueued(_))
+        {
+            *claim = PendingClaim::Dial;
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn anchor_eligible(
+        &self,
+        addr: SocketAddr,
+        active: &[SocketAddr],
+        now: u64,
+    ) -> bool {
         let addr = canonical(addr);
-        self.state.lock().pending.insert(addr);
+        let manager = self.state.lock();
+        manager.by_addr.get(&addr).is_some_and(|index| {
+            let entry = &manager.stored.records[*index];
+            entry.last_success != 0
+                && now.saturating_sub(entry.last_seen) <= STALE_SECS
+                && matches!(
+                    manager.pending.get(&addr),
+                    Some(PendingClaim::AnchorReservation(_))
+                )
+                && !active.iter().any(|other| {
+                    canonical(*other) == addr
+                        || manager.groups.group(other.ip()) == manager.groups.group(addr.ip())
+                })
+        })
+    }
+    /// Queue rejection releases only the attempted purpose, never a reservation
+    /// or a probe that won concurrent admission for the same canonical endpoint.
+    pub(crate) fn reject_queued(&self, addr: SocketAddr, feeler: bool) {
+        let addr = canonical(addr);
+        let mut manager = self.state.lock();
+        let expected = if feeler {
+            PendingClaim::Feeler
+        } else {
+            PendingClaim::Dial
+        };
+        if manager.pending.get(&addr) == Some(&expected) {
+            manager.pending.remove(&addr);
+        }
     }
     pub(crate) fn unqueue(&self, addr: SocketAddr) {
-        let addr = canonical(addr);
-        self.state.lock().pending.remove(&addr);
+        self.state.lock().pending.remove(&canonical(addr));
     }
     pub(crate) fn pending_count_excluding(&self, active: &[SocketAddr]) -> usize {
         let active: HashSet<_> = active.iter().copied().map(canonical).collect();
@@ -727,7 +1035,10 @@ impl AddressBook {
             .lock()
             .pending
             .iter()
-            .filter(|addr| !active.contains(addr))
+            .filter(|(addr, claim)| {
+                matches!(claim, PendingClaim::Dial | PendingClaim::AnchorQueued(_))
+                    && !active.contains(addr)
+            })
             .count()
     }
     pub(crate) fn attempted(&self, addr: SocketAddr, count_failure: bool, now: u64) {
@@ -747,22 +1058,259 @@ impl AddressBook {
     pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
-        manager.last_good = now;
-        let Some(index) = manager.by_addr.get(&addr).copied() else {
-            return;
+        if let Some(index) = manager.by_addr.get(&addr).copied()
+            && manager.stored.records[index].services != services
+        {
+            manager.stored.records[index].services = services;
+            manager.revision = manager.revision.wrapping_add(1);
+        }
+        manager.good(addr, true, now);
+    }
+    pub(crate) fn resolve_collisions(
+        &self,
+        active: &[SocketAddr],
+        now: u64,
+        mut allowed: impl FnMut(SocketAddr) -> bool,
+    ) {
+        let addresses = {
+            let manager = self.state.lock();
+            let mut addresses = HashSet::with_capacity(MAX_COLLISIONS * 2);
+            for &addr in &manager.collisions {
+                addresses.insert(addr);
+                let incumbent = manager.tried[manager.tried_slot(addr)];
+                if incumbent != EMPTY_SLOT {
+                    addresses.insert(
+                        manager.stored.records[usize::try_from(incumbent).unwrap_or_default()].addr,
+                    );
+                }
+            }
+            addresses
         };
-        let entry = &mut manager.stored.records[index];
-        let changed =
-            entry.last_success != now || entry.failures != 0 || entry.services != services;
-        entry.last_success = now;
-        entry.last_attempt = now;
-        entry.failures = 0;
-        entry.services = services;
-        let promoted = manager.promote(addr);
-        if changed || promoted {
+        let allowed: HashSet<_> = addresses
+            .into_iter()
+            .filter(|addr| allowed(*addr))
+            .collect();
+        let protected = active.iter().copied().map(canonical).collect();
+        self.state
+            .lock()
+            .resolve_collisions(&protected, &allowed, now);
+    }
+    pub(crate) fn feeler(
+        &self,
+        active: &[SocketAddr],
+        connected: &[SocketAddr],
+        now: u64,
+        mut allowed: impl FnMut(SocketAddr) -> bool,
+    ) -> Option<SocketAddr> {
+        // Core AlreadyConnectedToAddress takes CNetAddr: TCP presence at the
+        // same canonical IP is sufficient even at a different port.
+        let connected: HashSet<_> = connected.iter().map(|addr| canonical(*addr).ip()).collect();
+        let active: HashSet<_> = active.iter().copied().map(canonical).collect();
+        let addresses: Vec<_> = {
+            let manager = self.state.lock();
+            manager
+                .stored
+                .records
+                .iter()
+                .map(|entry| entry.addr)
+                .collect()
+        }; // Release the state lock before invoking policy callbacks.
+        let allowed: HashSet<_> = addresses
+            .into_iter()
+            .filter(|addr| allowed(*addr))
+            .collect();
+        let useful_services = (bitcoin::p2p::ServiceFlags::NETWORK
+            | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED)
+            .to_u64();
+        let mut manager = self.state.lock();
+        if manager
+            .pending
+            .values()
+            .any(|claim| *claim == PendingClaim::Feeler)
+        {
+            return None;
+        }
+        if !manager.collisions.is_empty() {
+            let count = manager.collisions.len();
+            let chosen = manager.rng.gen_range(0..count);
+            let challenger = manager.collisions[chosen];
+            let slot = manager.tried_slot(challenger);
+            let incumbent = manager.tried[slot];
+            if incumbent != EMPTY_SLOT {
+                let addr =
+                    manager.stored.records[usize::try_from(incumbent).unwrap_or_default()].addr;
+                if connected.contains(&addr.ip()) {
+                    manager.good(addr, true, now);
+                } else if manager.stored.records[usize::try_from(incumbent).unwrap_or_default()]
+                    .services
+                    & useful_services
+                    != 0
+                    && allowed.contains(&addr)
+                    && !active.contains(&addr)
+                    && !manager.pending.contains_key(&addr)
+                {
+                    return Some(addr);
+                }
+            }
+        }
+        let eligible: Vec<_> = manager
+            .stored
+            .records
+            .iter()
+            .map(|entry| {
+                !entry.tried
+                    && entry.services & useful_services != 0
+                    && allowed.contains(&entry.addr)
+                    && !active.contains(&entry.addr)
+                    && !manager.pending.contains_key(&entry.addr)
+            })
+            .collect();
+        manager.select(&eligible, now)
+    }
+    pub(crate) fn remember_anchors(&self, demonstrated: &[SocketAddr], now: u64) {
+        let mut manager = self.state.lock();
+        let mut addresses: Vec<_> = demonstrated
+            .iter()
+            .copied()
+            .map(canonical)
+            .filter(|addr| {
+                manager
+                    .stored
+                    .records
+                    .iter()
+                    .any(|entry| entry.addr == *addr && entry.last_success != 0)
+            })
+            .collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        addresses.truncate(MAX_ANCHORS);
+        let anchors: Vec<_> = addresses
+            .into_iter()
+            .map(|addr| {
+                manager
+                    .stored
+                    .anchors
+                    .iter()
+                    .find(|anchor| {
+                        anchor.addr == addr && now.saturating_sub(anchor.confirmed_at) < 3600
+                    })
+                    .cloned()
+                    .unwrap_or(Anchor {
+                        addr,
+                        confirmed_at: now,
+                    })
+            })
+            .collect();
+        if anchors != manager.stored.anchors {
+            manager.stored.anchors = anchors;
             manager.revision = manager.revision.wrapping_add(1);
         }
     }
+
+    /// Consume before dialing; if publication fails, ordinary selection remains
+    /// available but no restart anchor is reused without durable consumption.
+    pub(crate) fn take_restart_anchors(&self, now: u64) -> Vec<SocketAddr> {
+        let (reserved, revision, persistent) = {
+            let mut manager = self.state.lock();
+            let anchors = std::mem::take(&mut manager.stored.anchors);
+            if anchors.is_empty() {
+                return Vec::new();
+            }
+            let mut reserved = Vec::new();
+            let mut changed = false;
+            for anchor in anchors {
+                let eligible = anchor.confirmed_at <= now.saturating_add(FUTURE_SKEW_SECS)
+                    && now.saturating_sub(anchor.confirmed_at) <= ANCHOR_AGE
+                    && manager
+                        .by_addr
+                        .get(&anchor.addr)
+                        .is_some_and(|index| manager.stored.records[*index].last_success != 0);
+                if !eligible {
+                    changed = true;
+                    continue;
+                }
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    manager.pending.entry(anchor.addr)
+                {
+                    entry.insert(PendingClaim::AnchorReservation(anchor.clone()));
+                    reserved.push(anchor);
+                    changed = true;
+                } else {
+                    // Other work owns this claim; preserve undispatched metadata.
+                    manager.stored.anchors.push(anchor);
+                }
+            }
+            if changed {
+                manager.revision = manager.revision.wrapping_add(1);
+            }
+            (reserved, manager.revision, manager.path.is_some())
+        };
+        self.save();
+        let mut manager = self.state.lock();
+        if persistent && manager.saved_revision < revision {
+            for anchor in &reserved {
+                if manager.pending.get(&anchor.addr)
+                    == Some(&PendingClaim::AnchorReservation(anchor.clone()))
+                {
+                    manager.pending.remove(&anchor.addr);
+                }
+            }
+            // Failed consumption never transfers or discards original metadata.
+            manager.restore_anchors(reserved, now);
+            return Vec::new();
+        }
+        reserved
+            .into_iter()
+            .filter_map(|anchor| {
+                (manager.pending.get(&anchor.addr)
+                    == Some(&PendingClaim::AnchorReservation(anchor.clone())))
+                .then_some(anchor.addr)
+            })
+            .collect()
+    }
+
+    /// A skipped reservation returns immediately rather than retaining group
+    /// exclusion until shutdown. An already dispatched Dial cannot be returned.
+    pub(crate) fn return_restart_anchor(&self, addr: SocketAddr, now: u64) {
+        {
+            let addr = canonical(addr);
+            let mut manager = self.state.lock();
+            let anchor = match manager.pending.get(&addr) {
+                Some(
+                    PendingClaim::AnchorReservation(anchor) | PendingClaim::AnchorQueued(anchor),
+                ) => Some(anchor.clone()),
+                _ => None,
+            };
+            if let Some(anchor) = anchor {
+                manager.pending.remove(&addr);
+                manager.restore_anchors(vec![anchor], now);
+            }
+        }
+        self.save();
+    }
+
+    /// Return only reservations that never crossed `anchor_dispatched`. The one
+    /// pending owner retains their original confirmation time until that point.
+    pub(crate) fn return_restart_anchors(&self, now: u64) {
+        {
+            let mut manager = self.state.lock();
+            let returns: Vec<_> = manager
+                .pending
+                .iter()
+                .filter_map(|(addr, claim)| match claim {
+                    PendingClaim::AnchorReservation(anchor)
+                    | PendingClaim::AnchorQueued(anchor) => Some((*addr, anchor.clone())),
+                    PendingClaim::Dial | PendingClaim::Feeler => None,
+                })
+                .collect();
+            for (addr, _) in &returns {
+                manager.pending.remove(addr);
+            }
+            manager.restore_anchors(returns.into_iter().map(|(_, anchor)| anchor).collect(), now);
+        }
+        self.save();
+    }
+
     pub(crate) fn gossip(&self, now: u64) -> Vec<(u32, bitcoin::p2p::address::Address)> {
         self.gossip_at(now, Instant::now())
     }
@@ -905,6 +1453,32 @@ fn read_records<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_seq(Records)
 }
 
+fn read_anchors<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Anchor>, D::Error> {
+    struct Anchors;
+    impl<'de> serde::de::Visitor<'de> for Anchors {
+        type Value = Vec<Anchor>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most two restart anchors")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut result = Vec::new();
+            while let Some(anchor) = sequence.next_element()? {
+                if result.len() == MAX_ANCHORS {
+                    return Err(serde::de::Error::custom("too many restart anchors"));
+                }
+                result.push(anchor);
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_seq(Anchors)
+}
+
 // The current public v1 format is read only for validated, backed-up migration.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -946,6 +1520,47 @@ struct PrefixStored {
     secret: [u8; 32],
     #[serde(deserialize_with = "read_records")]
     records: Vec<Candidate>,
+}
+
+// These separate structs admit only fields present in the published schemas.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnchoredLegacyStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    records: Vec<LegacyCandidate>,
+    asmap_id: Option<[u8; 32]>,
+    #[serde(default, deserialize_with = "read_anchors")]
+    anchors: Vec<Anchor>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupedStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    #[serde(deserialize_with = "read_records")]
+    records: Vec<Candidate>,
+    asmap_id: Option<[u8; 32]>,
+}
+fn validate_anchors(stored: &Stored) -> io::Result<()> {
+    let mut anchors = HashSet::new();
+    if stored.anchors.len() > MAX_ANCHORS {
+        return Err(invalid("too many anchors"));
+    }
+    for anchor in &stored.anchors {
+        if canonical(anchor.addr) != anchor.addr
+            || !anchors.insert(anchor.addr)
+            || !stored
+                .records
+                .iter()
+                .any(|entry| entry.addr == anchor.addr && entry.last_success != 0)
+        {
+            return Err(invalid("invalid anchor subset"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_current(
@@ -1021,7 +1636,7 @@ fn legacy_slot(secret: &[u8; 32], entry: &LegacyCandidate) -> u64 {
     }
 }
 fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
-    if !(1..=3).contains(&old.version) || old.records.len() > 4096 {
+    if !(1..=4).contains(&old.version) || old.records.len() > 4096 {
         return Err(invalid("legacy address book version/count"));
     }
     let mut addresses = HashSet::new();
@@ -1052,6 +1667,7 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
             // Core's local attempt timestamps are deliberately not restored.
             let _ = entry.last_attempt;
             Candidate {
+                creation_id: 0,
                 addr: entry.addr,
                 services: entry.services,
                 source: entry
@@ -1073,7 +1689,49 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
         secret: old.secret,
         records,
         asmap_id: None,
+        anchors: Vec::new(),
     })
+}
+// Historical shapes are decoded explicitly before conversion; current fields
+// cannot be smuggled into older formats through defaults or version relabeling.
+fn decode_legacy_book(payload: &[u8], version: u32, allow_local: bool) -> io::Result<Stored> {
+    if version == 1 {
+        let old = serde_json::from_slice(payload).map_err(io::Error::other)?;
+        convert_legacy(old, allow_local)
+    } else {
+        let (old, asmap_id, anchors) = if version == 2 {
+            let old: GroupedLegacyStored =
+                serde_json::from_slice(payload).map_err(io::Error::other)?;
+            (
+                LegacyStored {
+                    version: old.version,
+                    magic: old.magic,
+                    secret: old.secret,
+                    records: old.records,
+                },
+                old.asmap_id,
+                Vec::new(),
+            )
+        } else {
+            let old: AnchoredLegacyStored =
+                serde_json::from_slice(payload).map_err(io::Error::other)?;
+            (
+                LegacyStored {
+                    version: old.version,
+                    magic: old.magic,
+                    secret: old.secret,
+                    records: old.records,
+                },
+                old.asmap_id,
+                old.anchors,
+            )
+        };
+        let mut stored = convert_legacy(old, allow_local)?;
+        stored.asmap_id = asmap_id;
+        stored.anchors = anchors;
+        validate_anchors(&stored)?;
+        Ok(stored)
+    }
 }
 fn read_book(
     path: &Path,
@@ -1106,30 +1764,11 @@ fn read_book(
     }
     let header: Header = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
     let stored = match header.version {
-        1..=3 => {
+        1..=4 => {
             if bytes.len() > 2 * 1024 * 1024 {
                 return Err(invalid("legacy address book size"));
             }
-            if header.version == 1 {
-                let old =
-                    serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-                convert_legacy(old, allow_local)?
-            } else {
-                let old: GroupedLegacyStored =
-                    serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-                let asmap_id = old.asmap_id;
-                let mut stored = convert_legacy(
-                    LegacyStored {
-                        version: old.version,
-                        magic: old.magic,
-                        secret: old.secret,
-                        records: old.records,
-                    },
-                    allow_local,
-                )?;
-                stored.asmap_id = asmap_id;
-                stored
-            }
+            decode_legacy_book(&bytes[..payload_len], header.version, allow_local)?
         }
         5 => {
             let old: PrefixStored =
@@ -1143,8 +1782,34 @@ fn read_book(
                 secret: old.secret,
                 records: old.records,
                 asmap_id: None,
+                anchors: Vec::new(),
             };
             validate_current(&stored, allow_local, Some(&NetGroups::default()))?;
+            stored
+        }
+        6 => {
+            let old: GroupedStored =
+                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+            if old.version != 6 {
+                return Err(invalid("grouped address book version"));
+            }
+            let stored = Stored {
+                version: VERSION,
+                magic: old.magic,
+                secret: old.secret,
+                records: old.records,
+                asmap_id: old.asmap_id,
+                anchors: Vec::new(),
+            };
+            let prefix = NetGroups::default();
+            let classifier = if stored.asmap_id.is_none() {
+                Some(&prefix)
+            } else if stored.asmap_id == groups.identity() {
+                Some(groups)
+            } else {
+                None
+            };
+            validate_current(&stored, allow_local, classifier)?;
             stored
         }
         VERSION => {
@@ -1163,6 +1828,7 @@ fn read_book(
         }
         _ => return Err(invalid("unsupported address book schema")),
     };
+    validate_anchors(&stored)?;
     if magic.is_some_and(|magic| magic != stored.magic) {
         return Err(invalid("address book network"));
     }
@@ -1258,6 +1924,9 @@ impl Manager {
             self.by_addr.insert(entry.addr, index);
             self.stored.records.push(entry);
         }
+        self.stored
+            .anchors
+            .retain(|anchor| self.by_addr.contains_key(&anchor.addr));
         tracing::info!(
             before,
             retained = self.stored.records.len(),

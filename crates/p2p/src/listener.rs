@@ -95,6 +95,8 @@ pub struct ConnectionShared {
     pub banned: crate::BannedReader,
     /// Shared P2P-owned auxiliary address book.
     pub(crate) address_book: Option<Arc<crate::addrman::AddressBook>>,
+    /// A short-lived automatic handshake probe; never published as a work peer.
+    pub(crate) feeler: bool,
     /// Network kill-switch behind `setnetworkactive`.
     pub activity: Arc<crate::NetworkActivity>,
     /// Start-scoped cancellation token. Tests that never cancel pass a
@@ -167,6 +169,7 @@ impl ConnectionShared {
             peer_table,
             banned: banned.into(),
             address_book: None,
+            feeler: false,
             activity,
             session_cancel: session_cancel.into(),
             peer_ready,
@@ -699,6 +702,7 @@ fn run_outbound_connection(
         handshake_deadline,
         best_block_depth,
         shared.local_services,
+        shared.feeler,
     ) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
@@ -730,6 +734,21 @@ fn run_outbound_connection(
         counters,
     );
 
+    if shared.feeler {
+        if shared.peer_table.is_current(lease.source(addr))
+            && !lease.is_cancelled()
+            && !shared.is_session_cancelled()
+            && shared.activity.is_active()
+        {
+            if let Some(book) = &shared.address_book {
+                book.succeeded(addr, info.services, unix_time_secs());
+            }
+        }
+        shared.peer_table.remove_current(addr, &lease);
+        lease.cancel();
+        let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+        return Ok(());
+    }
     run_connected_session(&mut peer, addr, shared, lease, outbound_rx, info)
 }
 
@@ -737,8 +756,8 @@ fn run_outbound_connection(
 ///
 /// PRE: `peer` wraps a connected outbound stream, `lease` belongs to it,
 ///   and `best_block_depth` is the local tip age read for this dial.
-/// POST: `peer` is `Ready`, the post-verack messages are sent, and the
-///   remote offered the desirable services ([`has_all_desirable_service_flags`]).
+/// POST: a feeler has an accepted VERSION; an ordinary `peer` is `Ready`,
+///   post-verack messages are sent, and the remote offered desirable services ([`has_all_desirable_service_flags`]).
 /// INVARIANT: This function counts no bytes; the stream that `peer` wraps
 ///   owns byte accounting. The service check runs once the remote `version`
 ///   is decoded and before the peer can be published as usable.
@@ -750,6 +769,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     deadline: Instant,
     best_block_depth: u64,
     local_services: ServiceFlags,
+    feeler: bool,
 ) -> Result<(), crate::wire::PeerError> {
     let outbound_messages =
         crate::handshake::start(peer, nonce, start_height, lease.role(), local_services);
@@ -760,6 +780,12 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     while peer.state != crate::peer::PeerState::Ready {
         let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
         let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
+        // Feelers establish address liveness from an accepted native VERSION.
+        // They neither require ordinary services nor wait for VERACK/ready work.
+        if feeler && matches!(inbound, crate::Message::Version(_)) && peer.remote_version.is_some()
+        {
+            return Ok(());
+        }
         if peer.remote_version.as_ref().is_some_and(|version| {
             !has_all_desirable_service_flags(version.services, best_block_depth)
         }) {
@@ -3515,5 +3541,164 @@ mod address_tests {
         };
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].1.socket_addr().expect("socket"), candidate);
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod feeler_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn version_only_feeler_uses_native_acceptance_without_publishing_work() {
+        for (services, revoked) in [(0_u64, 0), (1, 0), (9, 0), (9, 1), (9, 2)] {
+            let server = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = server.local_addr().expect("address");
+            let table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                Arc::clone(&table),
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let directory = tempfile::tempdir().expect("directory");
+            let base = directory.path().join("peers.dat");
+            let path = directory.path().join("peers-f9beb4d9.dat");
+            let book =
+                crate::addrman::AddressBook::open(Some(base), shared.magic.to_bytes(), true, None);
+            book.learn_peer(
+                address.ip(),
+                &[(address, 9, unix_time_secs())],
+                unix_time_secs(),
+            );
+            shared.address_book = Some(Arc::clone(&book));
+            shared.feeler = true;
+            assert!(book.queued_feeler(address));
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&notifications);
+            shared.peer_ready = Some(Arc::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            }));
+            let magic = shared.magic;
+            let remote_table = Arc::clone(&table);
+            let remote = std::thread::spawn(move || {
+                let (stream, _) = server.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .expect("timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .expect("timeout");
+                let mut peer = Peer::new(stream, magic);
+                assert!(matches!(
+                    peer.read_message().expect("initial version").0,
+                    crate::Message::Version(_)
+                ));
+                assert!(
+                    remote_table
+                        .sessions()
+                        .iter()
+                        .all(|session| session.info.is_none())
+                );
+                if revoked == 1 {
+                    remote_table.cancel_all();
+                } else if revoked == 2 {
+                    let replacement = crate::PeerLease::new(crossbeam_channel::unbounded().0);
+                    remote_table.register(address, replacement);
+                }
+                let sent = peer.send(&crate::Message::Version(crate::handshake::version_message(
+                    123,
+                    0,
+                    crate::PeerRole::FullRelay,
+                    ServiceFlags::from(services),
+                )));
+                if revoked == 0 {
+                    sent.expect("VERSION only");
+                }
+                // No VERACK is sent; a feeler closes after native VERSION acceptance.
+                while let Ok((message, _)) = peer.read_message() {
+                    assert!(
+                        !matches!(message, crate::Message::GetAddr | crate::Message::Verack),
+                        "no ready/post-verack publication: {message:?}"
+                    );
+                }
+            });
+            spawn_outbound_connection(address, shared, crate::PeerRole::BlockRelayOnly)
+                .join()
+                .expect("thread")
+                .expect("probe");
+            remote.join().expect("remote");
+            assert!(
+                book.is_feeler(address),
+                "the service reaper owns claim release"
+            );
+            book.unqueue(address);
+            assert_eq!(notifications.load(Ordering::Relaxed), 0);
+            assert_eq!(table.sessions().len(), usize::from(revoked == 2));
+            assert!(
+                table
+                    .sessions()
+                    .iter()
+                    .all(|session| session.info.is_none() && session.demonstrated_tips.is_empty())
+            );
+            book.save();
+            let bytes = std::fs::read(path).expect("book");
+            let stored: serde_json::Value =
+                serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("JSON");
+            assert_eq!(
+                stored["records"][0]["tried"],
+                revoked == 0,
+                "services={services} revoked={revoked}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_handshake_still_requires_services_and_verack() {
+        struct Scripted(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for Scripted {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                std::io::Read::read(&mut self.0, bytes)
+            }
+        }
+        impl std::io::Write for Scripted {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for services in [1_u64, 9] {
+            let mut wire = Vec::new();
+            crate::wire::write_message(
+                &mut wire,
+                Magic::BITCOIN,
+                &crate::Message::Version(crate::handshake::version_message(
+                    123,
+                    0,
+                    crate::PeerRole::FullRelay,
+                    ServiceFlags::from(services),
+                )),
+            )
+            .expect("wire");
+            let mut peer = Peer::new(Scripted(std::io::Cursor::new(wire)), Magic::BITCOIN);
+            let lease = crate::PeerLease::new(crossbeam_channel::unbounded().0);
+            let result = run_outbound_handshake(
+                &mut peer,
+                124,
+                0,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+                0,
+                ServiceFlags::from(9),
+                false,
+            );
+            assert!(
+                result.is_err(),
+                "services={services} without VERACK must not complete"
+            );
+            assert_ne!(peer.state, crate::peer::PeerState::Ready);
+        }
     }
 }

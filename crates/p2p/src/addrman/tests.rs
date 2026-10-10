@@ -505,6 +505,7 @@ fn health_matches_71_actual_core_boundaries_and_probabilities() {
     .expect("Core health");
     for row in data["rows"].as_array().expect("rows") {
         let entry = Candidate {
+            creation_id: 0,
             addr: target(),
             services: 9,
             source: source(1),
@@ -565,7 +566,7 @@ fn new_collision_removes_only_one_reference_and_preserves_pending_identity() {
         manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
         assert_eq!(manager.new_slot(target(), 191), 191 * 64 + 59);
         assert_eq!(manager.new_slot(other, 191), 191 * 64 + 59);
-        manager.pending.insert(target());
+        manager.pending.insert(target(), PendingClaim::Dial);
         if extra_ref {
             add_ref(&mut manager, target(), &source(2), EPOCH - 999);
         }
@@ -919,6 +920,7 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
 #[test]
 fn capacity_and_file_budget_have_explicit_bounded_representations() {
     let entry = Candidate {
+        creation_id: 0,
         addr: "2fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
             .parse::<IpAddr>()
             .map(|ip| SocketAddr::new(ip, u16::MAX))
@@ -1404,3 +1406,6 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
 }
 #[path = "asmap_tests.rs"]
 mod asmap_tests;
+
+#[path = "probe_tests.rs"]
+mod probe_tests;

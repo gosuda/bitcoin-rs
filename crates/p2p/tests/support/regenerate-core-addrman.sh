@@ -18,10 +18,14 @@ for driver in core-addrman-driver core-addrman-health-driver core-addrman-ring-d
   "${CXX:-g++}" "${common[@]}" "$support_dir/$driver.cpp" "${args[@]}" -Wl,--gc-sections -o "$oracle_output/$driver"
 done
 for source in "${extra[@]}"; do args+=("$core_root/src/$source"); done
-"${CXX:-g++}" "${common[@]}" "$support_dir/core-addrman-addsingle-driver.cpp" "${args[@]}" -Wl,--gc-sections -o "$oracle_output/core-addrman-addsingle-driver"
+for driver in core-addrman-addsingle-driver core-addrman-collision-driver core-addrman-poisson-driver; do
+  "${CXX:-g++}" "${common[@]}" "$support_dir/$driver.cpp" "${args[@]}" -Wl,--gc-sections -o "$oracle_output/$driver"
+done
 "$oracle_output/core-addrman-driver" > "$oracle_output/placement.tsv"
 "$oracle_output/core-addrman-health-driver" > "$oracle_output/health.jsonl"
 "$oracle_output/core-addrman-ring-driver" > "$oracle_output/ring.tsv"
 "$oracle_output/core-addrman-addsingle-driver" > "$oracle_output/addsingle.jsonl"
+"$oracle_output/core-addrman-collision-driver" > "$oracle_output/collisions.jsonl"
+"$oracle_output/core-addrman-poisson-driver" > "$oracle_output/poisson.jsonl"
 "$oracle_output/core-addrman-asmap-driver" "$core_root/src/test/data/asmap.raw" "$support_dir/../data/asmap-core-v31.1.raw" "$support_dir/../data/asmap-linked-ipv4-core-v31.1.raw" "$support_dir/../data/asmap-source-quota-core-v31.1.raw" > "$oracle_output/asmap.tsv"
 sha256sum "$oracle_output"/core-addrman*-driver "$oracle_output/src/bitcoin-build-config.h"
