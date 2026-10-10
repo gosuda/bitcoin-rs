@@ -17,6 +17,9 @@
 #[path = "support/reference_set.rs"]
 mod reference_set;
 
+#[path = "support/psbt_codec_cases.rs"]
+mod psbt_codec_cases;
+
 #[path = "support/script_decode_cases.rs"]
 mod script_decode_cases;
 

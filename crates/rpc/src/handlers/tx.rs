@@ -800,11 +800,8 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "psbt is required")?;
     let extract = optional_bool(params, 1, true)?;
-    let decoded =
-        crate::base64::decode(raw).map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?;
-    let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&decoded) else {
-        return Err(RpcError::InvalidParams("invalid base64 PSBT"));
-    };
+    let mut psbt =
+        crate::psbt::decode(raw).map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
     // The finalizer mutates every input it can satisfy and reports the rest.
     // Incomplete inputs are part of the RPC result, not an RPC-level failure.
@@ -823,7 +820,7 @@ pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value,
             complete: true,
         })
     } else {
-        let serialized = crate::base64::encode(&psbt.serialize());
+        let serialized = crate::psbt::encode(&psbt)?;
         typed_to_sonic(&v31::FinalizePsbt {
             psbt: Some(serialized),
             hex: None,
@@ -850,28 +847,35 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
             "each psbt must be a string".to_owned(),
         ));
     };
-    let mut psbt = bitcoin::psbt::Psbt::deserialize(
-        &crate::base64::decode(first_str)
-            .map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?,
-    )
-    .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+    let mut budget = crate::psbt::PsbtBudget::default();
+    budget
+        .add_encoded(first_str)
+        .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
+    let mut psbt = crate::psbt::decode(first_str)
+        .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
 
+    budget
+        .add_decoded(&psbt)
+        .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
     for value in iter {
         let Some(s) = value.as_str() else {
             return Err(RpcError::InvalidType(
                 "each psbt must be a string".to_owned(),
             ));
         };
-        let other = bitcoin::psbt::Psbt::deserialize(
-            &crate::base64::decode(s)
-                .map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?,
-        )
-        .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+        budget
+            .add_encoded(s)
+            .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
+        let other =
+            crate::psbt::decode(s).map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+        budget
+            .add_decoded(&other)
+            .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
         psbt.combine(other)
             .map_err(|err| RpcError::Internal(format!("combine failed: {err}")))?;
     }
 
-    typed_to_sonic(&v31::CombinePsbt(crate::base64::encode(&psbt.serialize())))
+    typed_to_sonic(&v31::CombinePsbt(crate::psbt::encode(&psbt)?))
 }
 
 #[cfg(test)]

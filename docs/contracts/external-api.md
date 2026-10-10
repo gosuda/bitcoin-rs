@@ -83,6 +83,35 @@
   invalid encodings, wrappers, descriptor checksums, parameters, network
   addresses, and shared RPC/REST/UTXO projections.
 
+- PSBT reads and output serialization share `crates/rpc/src/psbt.rs`, using
+  the library codec with complete-consumption and non-witness UTXO hash/index
+  postconditions. Core's signed -1 witness-UTXO sentinel becomes absent;
+  negative amounts inside non-witness transactions are retained. Encoding
+  strips witness bytes from a non-witness UTXO transaction and gates known
+  nonfinal input metadata only when final scriptSig/witness is nonempty,
+  matching Core serialization. An encoding copy preserves parsed/caller
+  metadata for decode, analyze and join. Already
+  decoded CompactSize types/subtypes and BIP373 fields receive Core checks.
+- PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
+  maps to 10,000, and retained map entries to 100,000. Creators can check
+  counts before map allocation. Serialized bytes are checked before library
+  input decoding; structural checks occur after that decode and do not
+  claim to prevent its intermediate allocations. Combine checks aggregate
+  source bytes before each decode and counts before each merge. The output
+  writer bounds accumulated bytes; the library still materializes individual
+  maps, bounded for combine by the aggregate admitted source bytes. Encoded
+  output is re-read through the same library before returning, including its
+  4,000,000-byte global-map limit; pure creators therefore cannot emit a PSBT
+  the shared decoder cannot read.
+- `combinepsbt` and `finalizepsbt` retain their existing malformed-input
+  `-32602` boundary instead of Core's `-22`. Their stricter library field
+  validation/finalization and the admission limits remain declared deviations.
+  The typed library canonically orders TapTree sibling branches rather than
+  retaining their original byte/JSON order. The exact `core-valid-18` fixture
+  and independent Core descriptor derivation verify the same commitment;
+  no raw-tree sidecar is kept. No wallet, signing authority, or parallel PSBT
+  parser is introduced.
+
 ### `API-03`: REST dialect
 
 
