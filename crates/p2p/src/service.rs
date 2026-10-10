@@ -466,7 +466,7 @@ impl P2pService {
                     && !shared.session_cancel.load()
                     && !process_shutdown.is_triggered()
                 {
-                    reap_finished_outbound_connections(&mut active, &mut handles);
+                    reap_finished_outbound_connections(&mut active, &mut handles, &address_book);
                     let now = Instant::now();
                     if now >= next_extra_peer_check {
                         next_extra_peer_check = now + EXTRA_PEER_CHECK_INTERVAL;
@@ -498,7 +498,6 @@ impl P2pService {
                             break;
                         }
                         parked.pop_front();
-                        address_book.unqueue(dial.addr);
                         spawn_outbound_dial(
                             &dial,
                             &shared,
@@ -531,7 +530,6 @@ impl P2pService {
                         }
                         continue;
                     }
-                    address_book.unqueue(dial.addr);
                     spawn_outbound_dial(
                         &dial,
                         &shared,
@@ -543,8 +541,14 @@ impl P2pService {
                         extra_dial,
                     );
                 }
-                for (_, handle) in handles {
+                for dial in parked {
+                    if !dial.manual { address_book.unqueue(dial.addr); }
+                }
+                for (addr, handle) in handles {
                     let _ = handle.join();
+                    if active.get(&addr).is_some_and(|dial| !dial.manual) {
+                        address_book.unqueue(addr);
+                    }
                 }
             })
     }
@@ -848,6 +852,7 @@ fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: boo
 fn reap_finished_outbound_connections(
     active: &mut HashMap<SocketAddr, ActiveOutbound>,
     handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
+    book: &crate::addrman::AddressBook,
 ) {
     let mut index = 0;
     while index < handles.len() {
@@ -856,7 +861,9 @@ fn reap_finished_outbound_connections(
             continue;
         }
         let (addr, handle) = handles.swap_remove(index);
-        active.remove(&addr);
+        if active.remove(&addr).is_some_and(|dial| !dial.manual) {
+            book.unqueue(addr);
+        }
         match handle.join() {
             Ok(Ok(())) => tracing::debug!(addr = %addr, "p2p outbound connection exited cleanly"),
             Ok(Err(error)) => {
@@ -920,21 +927,6 @@ fn run_fixed_peer_bootstrap(
     }
 }
 
-/// Live automatic outbound sessions exclude manual and cancelled leases.
-/// Disabling and re-enabling the network cancels leases without removing
-/// entries, so cancelled leases must not hide the automatic refill deficit.
-fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
-    peer_table
-        .sessions()
-        .iter()
-        .filter(|session| {
-            !session.lease.is_inbound()
-                && !session.lease.is_cancelled()
-                && !session.lease.is_manual()
-        })
-        .count()
-}
-
 /// Chooses the role of one dial, pinned or automatic.
 ///
 /// PRE: `dial` is a dequeued outbound request; the remaining arguments are
@@ -980,6 +972,14 @@ fn spawn_outbound_dial(
     extra_dial: bool,
 ) {
     if active.contains_key(&dial.addr) || peer_table.is_connected(dial.addr) {
+        // A manual request cannot release a queued automatic request's claim.
+        // A duplicate automatic request also cannot release a running automatic
+        // thread's ownership; otherwise the next maintenance tick can reselect it.
+        if !dial.manual && active.get(&dial.addr).is_none_or(|running| running.manual) {
+            if let Some(book) = &shared.address_book {
+                book.unqueue(dial.addr);
+            }
+        }
         tracing::debug!(
             addr = %dial.addr,
             "p2p outbound request skipped: already active"
@@ -1218,7 +1218,11 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
     let mut next_dns = 0;
     while !maintenance.shutdown.load(Ordering::Acquire) {
-        let now = crate::addrman::now();
+        let tick_time = SystemTime::now();
+        let now = tick_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let ready: Vec<_> = maintenance
             .peer_table
             .sessions()
@@ -1245,38 +1249,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                     }
                 }
             }
-            let extra = usize::from(
-                maintenance
-                    .block_sync
-                    .as_ref()
-                    .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
-            );
-            let mut active: Vec<_> = maintenance
-                .peer_table
-                .sessions()
-                .into_iter()
-                .filter(|session| !session.lease.is_cancelled() && !session.lease.is_inbound())
-                .map(|session| session.addr)
-                .collect();
-            let needed = (maintenance.target + extra)
-                .saturating_sub(live_outbound_count(&maintenance.peer_table));
-            for _ in 0..needed {
-                let Some(addr) = maintenance.address_book.select(&active, now, |addr| {
-                    !maintenance.banned.is_banned(addr.ip(), SystemTime::now())
-                }) else {
-                    break;
-                };
-                maintenance.address_book.queued(addr);
-                if maintenance
-                    .outbound_tx
-                    .try_send(OutboundDial::auto(addr))
-                    .is_err()
-                {
-                    maintenance.address_book.unqueue(addr);
-                    break;
-                }
-                active.push(addr);
-            }
+            queue_address_candidates(maintenance, now, tick_time);
         }
         maintenance.address_book.save();
         if wait_for_shutdown(&maintenance.shutdown, Duration::from_secs(1)) {
@@ -1284,6 +1257,57 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
         }
     }
     maintenance.address_book.save();
+}
+
+/// Fill the automatic deficit once. Address-book claims cover queued, parked,
+/// connecting and live automatic threads; live sessions are counted only once.
+fn queue_address_candidates(maintenance: &AddressMaintenance, now: u64, tick_time: SystemTime) {
+    let extra = usize::from(
+        maintenance
+            .block_sync
+            .as_ref()
+            .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
+    );
+    let sessions = maintenance.peer_table.sessions();
+    let mut active: Vec<_> = sessions
+        .iter()
+        .filter(|session| !session.lease.is_cancelled() && !session.lease.is_inbound())
+        .map(|session| session.addr)
+        .collect();
+    let automatic: Vec<_> = sessions
+        .iter()
+        .filter(|session| {
+            !session.lease.is_cancelled()
+                && !session.lease.is_inbound()
+                && !session.lease.is_manual()
+        })
+        .map(|session| session.addr)
+        .collect();
+    let occupied = automatic.len() + maintenance.address_book.pending_count_excluding(&automatic);
+    let needed = (maintenance.target + extra).saturating_sub(occupied);
+    // Snapshot the ban table before taking the address-book lock. All candidates
+    // in this tick see the same expiry time and no nested ban lock per record.
+    let banned = maintenance.banned.read().clone();
+    for _ in 0..needed {
+        if maintenance.shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let Some(addr) = maintenance.address_book.select(&active, now, |addr| {
+            !crate::subnet::is_banned(&banned, addr.ip(), tick_time)
+        }) else {
+            break;
+        };
+        maintenance.address_book.queued(addr);
+        if maintenance
+            .outbound_tx
+            .try_send(OutboundDial::auto(addr))
+            .is_err()
+        {
+            maintenance.address_book.unqueue(addr);
+            break;
+        }
+        active.push(addr);
+    }
 }
 
 #[cfg(test)]
@@ -1778,23 +1802,6 @@ mod tests {
         assert!(service.outbound_rx.lock().try_recv().is_err());
     }
     #[test]
-    fn live_outbound_count_excludes_manual_and_cancelled_leases() {
-        let table = crate::PeerTable::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new(tx);
-        table.register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)), lease.clone());
-        let (manual_tx, _manual_rx) = crossbeam_channel::unbounded();
-        table.register(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 8334)),
-            crate::PeerLease::new_manual(manual_tx, crate::PeerRole::FullRelay),
-        );
-        assert_eq!(live_outbound_count(&table), 1);
-        lease.cancel();
-        assert_eq!(table.sessions().len(), 2);
-        assert_eq!(live_outbound_count(&table), 0);
-    }
-
-    #[test]
     fn parked_overflow_releases_the_address_for_another_selection() {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
         let book = crate::addrman::AddressBook::open(None, [1; 4], true);
@@ -1808,5 +1815,234 @@ mod tests {
             &book
         ));
         assert_eq!(book.select(&[], 10_000, |_| true), Some(address));
+    }
+    fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        let book = crate::addrman::AddressBook::open(None, [1; 4], false);
+        for n in 1..100 {
+            book.learn_dns("seed", &[SocketAddr::from(([8, n, 1, 1], 8333))], 10_000);
+        }
+        (
+            AddressMaintenance {
+                shutdown: Arc::new(AtomicBool::new(false)),
+                network_active: Arc::new(AtomicBool::new(true)),
+                peer_table: Arc::new(crate::PeerTable::new()),
+                outbound_tx: tx,
+                port: 8333,
+                seeds: Vec::new(),
+                target,
+                block_sync: None,
+                address_book: book,
+                banned: BannedReader::fixture_empty(),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
+        let (mut maintenance, rx) = maintenance_fixture(3);
+        let tick = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        queue_address_candidates(&maintenance, 10_000, tick);
+        assert_eq!(rx.len(), 3);
+        for _ in 0..4 {
+            queue_address_candidates(&maintenance, 10_000, tick);
+        }
+        assert_eq!(
+            rx.len(),
+            3,
+            "ticks cannot keep filling a pending dial pipeline"
+        );
+        let parked = rx.try_recv().expect("queued");
+        queue_address_candidates(&maintenance, 10_000, tick);
+        assert_eq!(rx.len(), 2, "parking keeps the claim occupied");
+        maintenance.address_book.attempted(parked.addr, 10_001);
+        queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100));
+        assert_eq!(
+            rx.len(),
+            2,
+            "a slow connect keeps capacity occupied beyond retry backoff"
+        );
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        maintenance.peer_table.register(parked.addr, lease.clone());
+        maintenance.address_book.succeeded(parked.addr, 9, 10_100);
+        maintenance.target = 4;
+        queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100));
+        assert_eq!(rx.len(), 3, "the live session and its claim count once");
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        maintenance.peer_table.register(
+            SocketAddr::from(([9, 9, 1, 1], 8333)),
+            crate::PeerLease::new_manual(tx, crate::PeerRole::FullRelay),
+        );
+        maintenance.target = 5;
+        queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100));
+        assert_eq!(
+            rx.len(),
+            4,
+            "manual sessions do not consume automatic slots"
+        );
+        lease.cancel();
+        maintenance.address_book.unqueue(parked.addr);
+        queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100));
+        assert_eq!(
+            rx.len(),
+            5,
+            "finished cancelled automatic claims release their slot"
+        );
+    }
+
+    #[test]
+    fn selection_uses_one_ban_snapshot_at_the_tick_time() {
+        let (maintenance, rx) = maintenance_fixture(1);
+        let until = SystemTime::UNIX_EPOCH + Duration::from_secs(10_001);
+        maintenance.banned.inner.write().push(crate::BannedSubnet {
+            subnet: "8.0.0.0/8".parse().expect("subnet"),
+            banned_until: Some(until),
+            ban_created: SystemTime::UNIX_EPOCH,
+            reason: String::new(),
+        });
+        queue_address_candidates(&maintenance, 10_000, until - Duration::from_secs(1));
+        assert_eq!(
+            rx.len(),
+            0,
+            "the entire banned subnet is excluded before expiry"
+        );
+        queue_address_candidates(&maintenance, 10_001, until);
+        assert_eq!(
+            rx.len(),
+            1,
+            "expiry uses the supplied tick, not a later wall clock read"
+        );
+    }
+
+    #[test]
+    fn shutdown_releases_parked_automatic_claims_before_restart() {
+        let service = P2pService::new(
+            P2pServiceConfig {
+                outbound_full_relay_slots: 0,
+                outbound_block_relay_slots: 0,
+                allow_local_addresses: true,
+                dns_seeds_enabled: false,
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let now = crate::addrman::now();
+        service.address_book.learn_dns("seed", &[address], now);
+        service.address_book.queued(address);
+        service
+            .outbound_tx
+            .try_send(OutboundDial::auto(address))
+            .expect("queue");
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("start");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if service
+                .outbound_rx
+                .try_lock()
+                .is_some_and(|rx| rx.is_empty())
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            service.outbound_rx.lock().is_empty(),
+            "worker must have parked the request"
+        );
+        assert_eq!(service.address_book.pending_count_excluding(&[]), 1);
+        service.shutdown();
+        service.join().expect("join");
+        assert_eq!(service.address_book.pending_count_excluding(&[]), 0);
+        assert_eq!(
+            service.address_book.select(&[], now, |_| true),
+            Some(address)
+        );
+        service.set_network_active(true);
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("restart");
+        service.shutdown();
+        service.join().expect("restarted join");
+    }
+
+    #[test]
+    fn manual_dial_cannot_release_an_automatic_claim_and_reaper_releases_only_its_owner() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers, _) = crossbeam_channel::bounded(1);
+        let (blocks, _) = crossbeam_channel::bounded(1);
+        let mut shared = crate::listener::ConnectionShared::new(
+            table.clone(),
+            BannedReader::fixture_empty(),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::new(
+                AtomicBool::new(true),
+            ))),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Magic::REGTEST,
+            headers,
+            blocks,
+            None,
+            None,
+            crate::listener::ListenerExtras::default(),
+        );
+        let book = crate::addrman::AddressBook::open(None, [1; 4], true);
+        shared.address_book = Some(book.clone());
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        book.queued(address);
+        let mut active = HashMap::from([(
+            address,
+            ActiveOutbound {
+                role: crate::PeerRole::FullRelay,
+                manual: true,
+            },
+        )]);
+        let mut handles = Vec::new();
+        spawn_outbound_dial(
+            &OutboundDial::pinned(address),
+            &shared,
+            &table,
+            &mut active,
+            &mut handles,
+            1,
+            0,
+            false,
+        );
+        assert_eq!(
+            book.pending_count_excluding(&[]),
+            1,
+            "manual duplicate must not clear the automatic owner"
+        );
+        for manual in [true, false] {
+            active.insert(
+                address,
+                ActiveOutbound {
+                    role: crate::PeerRole::FullRelay,
+                    manual,
+                },
+            );
+            handles.push((address, thread::spawn(|| Ok(()))));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !handles.is_empty() && Instant::now() < deadline {
+                reap_finished_outbound_connections(&mut active, &mut handles, &book);
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(handles.len(), 0);
+            assert_eq!(book.pending_count_excluding(&[]), usize::from(manual));
+        }
     }
 }

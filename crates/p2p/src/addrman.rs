@@ -57,6 +57,7 @@ struct Manager {
     revision: u64,
     saved_revision: u64,
     cursor: u64,
+    gossip_cursor: usize,
     pending: HashSet<SocketAddr>,
 }
 
@@ -189,12 +190,15 @@ impl Manager {
             .iter_mut()
             .find(|entry| entry.addr == addr)
         {
+            let before = (existing.last_seen, existing.services);
             existing.last_seen = existing.last_seen.max(seen);
             // Hearsay must not rewrite a proven peer's services.
             if !existing.tried {
                 existing.services |= services;
             }
-            self.revision = self.revision.wrapping_add(1);
+            if (existing.last_seen, existing.services) != before {
+                self.revision = self.revision.wrapping_add(1);
+            }
             return false;
         }
         if self
@@ -260,6 +264,7 @@ impl AddressBook {
             revision: 0,
             saved_revision: 0,
             cursor: 0,
+            gossip_cursor: 0,
             pending: HashSet::new(),
         };
         if let Some(path) = &manager.path {
@@ -328,8 +333,9 @@ impl AddressBook {
         }
     }
 
-    // Selection claims pending ownership only after successful enqueue, in the same
-    // short state critical section. No callback performs I/O or locks PeerTable.
+    // The maintenance worker selects, claims, then enqueues each automatic dial.
+    // A failed enqueue releases the claim; the drain retains it through the
+    // connection thread's lifetime. Callbacks must not do I/O or acquire locks.
     pub(crate) fn select(
         &self,
         active: &[SocketAddr],
@@ -339,7 +345,11 @@ impl AddressBook {
         let mut manager = self.state.lock();
         manager.cursor = manager.cursor.wrapping_add(1);
         let prefer_new = manager.cursor.is_multiple_of(4);
-        let groups: HashSet<_> = active.iter().map(|addr| prefix_group(addr.ip())).collect();
+        let groups: HashSet<_> = active
+            .iter()
+            .chain(&manager.pending)
+            .map(|addr| prefix_group(addr.ip()))
+            .collect();
         let cursor = manager.cursor;
         manager
             .stored
@@ -374,9 +384,19 @@ impl AddressBook {
     pub(crate) fn unqueue(&self, addr: SocketAddr) {
         self.state.lock().pending.remove(&addr);
     }
+    /// Outstanding automatic claims not already counted as live sessions.
+    pub(crate) fn pending_count_excluding(&self, active: &[SocketAddr]) -> usize {
+        self.state
+            .lock()
+            .pending
+            .iter()
+            .filter(|addr| !active.contains(addr))
+            .count()
+    }
+
     pub(crate) fn attempted(&self, addr: SocketAddr, now: u64) {
         let mut manager = self.state.lock();
-        manager.pending.remove(&addr);
+        manager.pending.insert(addr);
         if let Some(entry) = manager
             .stored
             .records
@@ -417,23 +437,32 @@ impl AddressBook {
     }
 
     pub(crate) fn gossip(&self, now: u64) -> Vec<(u32, bitcoin::p2p::address::Address)> {
-        let manager = self.state.lock();
-        manager
-            .stored
-            .records
-            .iter()
-            .filter(|entry| now.saturating_sub(entry.last_seen) <= STALE_SECS)
-            .take(MAX_GOSSIP)
-            .map(|entry| {
-                (
-                    u32::try_from(entry.last_seen).unwrap_or(u32::MAX),
-                    bitcoin::p2p::address::Address::new(
-                        &entry.addr,
-                        bitcoin::p2p::ServiceFlags::from(entry.services),
-                    ),
-                )
-            })
-            .collect()
+        let mut manager = self.state.lock();
+        let len = manager.stored.records.len();
+        if len == 0 {
+            return Vec::new();
+        }
+        let start = manager.gossip_cursor % len;
+        let mut gossip = Vec::with_capacity(MAX_GOSSIP.min(len));
+        for offset in 0..len {
+            let index = (start + offset) % len;
+            manager.gossip_cursor = (index + 1) % len;
+            let entry = &manager.stored.records[index];
+            if now.saturating_sub(entry.last_seen) > STALE_SECS {
+                continue;
+            }
+            gossip.push((
+                u32::try_from(entry.last_seen).unwrap_or(u32::MAX),
+                bitcoin::p2p::address::Address::new(
+                    &entry.addr,
+                    bitcoin::p2p::ServiceFlags::from(entry.services),
+                ),
+            ));
+            if gossip.len() == MAX_GOSSIP {
+                break;
+            }
+        }
+        gossip
     }
 
     pub(crate) fn save(&self) {
@@ -451,7 +480,7 @@ impl AddressBook {
         match publish_book(&path, &stored) {
             Ok(()) => self.state.lock().saved_revision = revision,
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "address book save failed; keeping previous file and retrying later");
+                tracing::warn!(path = %path.display(), %error, "address book publication not confirmed durable; retaining dirty state for retry");
             }
         }
     }
@@ -516,6 +545,7 @@ fn read_book(
         revision: 0,
         saved_revision: 0,
         cursor: 0,
+        gossip_cursor: 0,
         pending: HashSet::new(),
     };
     let mut slots = HashSet::new();
@@ -726,7 +756,14 @@ mod tests {
     #[test]
     fn a_long_lived_ready_connection_keeps_its_candidate_while_offline_peers_expire() {
         let book = book();
-        book.learn_dns("seed", &[addr(1), addr(2)], 10_000);
+        book.learn_dns("seed", &[addr(1)], 10_000);
+        for candidate in (2..=255).map(addr) {
+            book.learn_dns("seed", &[candidate], 10_000);
+            if book.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(book.len(), 2, "fixture needs a distinct offline candidate");
         book.succeeded(addr(1), 9, 10_001);
         let later = 10_002 + STALE_SECS;
         book.refresh_connected(&[addr(1)], later);
@@ -735,5 +772,102 @@ mod tests {
         assert_eq!(manager.stored.records.len(), 1);
         assert_eq!(manager.stored.records[0].addr, addr(1));
         assert!(manager.stored.records[0].tried);
+    }
+    #[test]
+    fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
+        let dir = tempfile::tempdir().expect("dir");
+        let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false);
+        book.learn_peer(addr(2).ip(), &[(addr(1), 1, 10_000)], 10_000);
+        book.save();
+        let clean = book.state.lock().saved_revision;
+        book.learn_peer(addr(3).ip(), &[(addr(1), 1, 9_999); 32], 10_000);
+        assert_eq!(
+            book.state.lock().revision,
+            clean,
+            "unchanged duplicate reports cannot schedule disk writes"
+        );
+        book.learn_peer(addr(2).ip(), &[(addr(1), 8, 10_000)], 10_000);
+        assert_ne!(
+            book.state.lock().revision,
+            clean,
+            "new service evidence is persisted"
+        );
+        book.succeeded(addr(1), 9, 10_001);
+        book.save();
+        let clean = book.state.lock().saved_revision;
+        book.learn_peer(addr(2).ip(), &[(addr(1), 64, 10_001)], 10_001);
+        assert_eq!(
+            book.state.lock().revision,
+            clean,
+            "hearsay cannot replace proven services"
+        );
+        book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_002)], 10_002);
+        assert_ne!(
+            book.state.lock().revision,
+            clean,
+            "new last-seen evidence is persisted"
+        );
+    }
+
+    #[test]
+    fn bounded_gossip_rotates_over_every_fresh_record_without_dirtying_the_book() {
+        let book = book();
+        for n in 1..200 {
+            book.learn_dns("seed", &[addr(n)], 10_000);
+        }
+        assert_eq!(book.len(), 64, "fixture has two full response batches");
+        let before = book.state.lock().revision;
+        let first = book.gossip(10_000);
+        let second = book.gossip(10_000);
+        assert_eq!(first.len(), 32);
+        assert_eq!(second.len(), 32);
+        let addresses: HashSet<_> = first
+            .iter()
+            .chain(&second)
+            .map(|(_, address)| address.socket_addr().expect("IP address"))
+            .collect();
+        assert_eq!(
+            addresses.len(),
+            64,
+            "later retained discoveries must reach getaddr peers"
+        );
+        assert_eq!(
+            book.state.lock().revision,
+            before,
+            "response rotation is not durable state"
+        );
+        assert_eq!(book.gossip(10_001 + STALE_SECS), []);
+    }
+
+    #[test]
+    fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
+        let book = book();
+        book.learn_dns("seed", &[addr(1)], 10_000);
+        let other = SocketAddr::new(addr(1).ip(), 18333);
+        // A vacant different new slot is needed for both same-group records.
+        let candidate = (1..65535)
+            .map(|port| SocketAddr::new(other.ip(), port))
+            .find(|&candidate| {
+                if candidate == addr(1) {
+                    return false;
+                }
+                book.learn_dns("seed", &[candidate], 10_000);
+                book.len() == 2
+            })
+            .expect("two same-group endpoints");
+        book.queued(addr(1));
+        book.attempted(addr(1), 10_001);
+        assert_eq!(book.pending_count_excluding(&[]), 1);
+        assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
+        assert_eq!(
+            book.select(&[], 10_100, |_| true),
+            None,
+            "in-flight groups stay exclusive beyond retry time"
+        );
+        book.unqueue(addr(1));
+        assert!(
+            book.select(&[], 10_100, |_| true)
+                .is_some_and(|a| a == addr(1) || a == candidate)
+        );
     }
 }

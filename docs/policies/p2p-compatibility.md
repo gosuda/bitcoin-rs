@@ -171,13 +171,15 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 4. **Address management**: automatic outbound selection uses one persistent
    P2P-owned address book (`addrman.rs`, `service.rs`). DNS seeds are bootstrap
    input; retained candidates are selected even with DNS disabled. Successful
-   automatic outbound handshakes promote new candidates to tried slots. The
+   automatic outbound handshakes promote new candidates only when their target
+   tried slot is vacant; a collision retains the candidate in the new set. The
    book has 3,072 new and 1,024 tried keyed slots and retains at most 64 entries
    from a source group. Selection avoids active endpoint/network-group reuse,
-   alternates new/tried preference, and backs off failed attempts. Prefix
+   prefers tried candidates for three selections and new candidates every fourth,
+   and backs off failed attempts. Prefix
    grouping is IPv4 /16 and IPv6 /32 (IPv4-mapped IPv6 is canonicalized).
    Full-relay peers may contribute at most 32 addresses initially, replenished
-   one per 10 seconds; `getaddr` returns at most 32 retained IP addresses once
+   one per 10 seconds; `getaddr` rotates through at most 32 fresh retained IP addresses once
    per connection. `addrv2` non-IP families are ignored because no corresponding
    transports exist. Block-relay-only peers neither learn nor serve addresses.
    The auxiliary, versioned, checksummed `peers.dat` is atomically published;
