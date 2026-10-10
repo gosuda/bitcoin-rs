@@ -753,16 +753,19 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
 
-    let legacy_frames = collect_frames(
-        &harness.bystander.dialer,
-        harness.magic,
-        Instant::now() + ABSENCE_WINDOW,
-    )?;
-    let witness_frames = collect_frames(
-        &witness_peer.dialer,
-        harness.magic,
-        Instant::now() + ABSENCE_WINDOW,
-    )?;
+    let until = Instant::now() + ABSENCE_WINDOW;
+    let (legacy_frames, witness_frames) = std::thread::scope(|s| {
+        let h1 = s.spawn(|| collect_frames(&harness.bystander.dialer, harness.magic, until));
+        let h2 = s.spawn(|| collect_frames(&witness_peer.dialer, harness.magic, until));
+        let legacy = h1
+            .join()
+            .map_err(|_| anyhow!("bystander collector panicked"))?;
+        let witness = h2
+            .join()
+            .map_err(|_| anyhow!("witness collector panicked"))?;
+        Ok::<_, anyhow::Error>((legacy?, witness?))
+    })?;
+
     let inventories = |frames: &[Message]| -> Vec<Inventory> {
         frames
             .iter()

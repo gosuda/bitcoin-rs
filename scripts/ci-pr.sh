@@ -85,6 +85,8 @@ test_crates_profiles() {
   profile "test: bitcoin-rs-chainstate (native,fjall)" \
     cargo_test -p bitcoin-rs-chainstate \
       --no-default-features --features fjall
+  profile "test: bitcoin-rs-p2p" \
+    cargo_test -p bitcoin-rs-p2p
   profile "test: bitcoin-rs-node (fjall,zmq)" \
     cargo_test -p bitcoin-rs-node \
       --no-default-features --features fjall,zmq
@@ -107,6 +109,7 @@ test_workspace_profiles() {
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
+      --exclude bitcoin-rs-p2p \
       --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc
   # The RPC package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test

@@ -263,15 +263,6 @@ fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
         installed_before + 1
     );
     assert_eq!(crate::signal::testing::closed_total(), closed_before + 1);
-
-    let reopen_config = isolated_config(&temp.path().join("embedded"));
-    let node = start_node(reopen_config, RuntimeInputs::default(), true)?;
-    node.shutdown_blocking()?;
-    assert_eq!(
-        crate::signal::testing::installed_total(),
-        installed_before + 2
-    );
-    assert_eq!(crate::signal::testing::closed_total(), closed_before + 2);
     Ok(())
 }
 

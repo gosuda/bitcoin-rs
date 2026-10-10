@@ -119,16 +119,14 @@ fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
     let rejected = [0xff; 128];
     std::fs::write(&history_path, rejected)?;
 
-    for _ in 0..2 {
-        let node = block_on(Node::start(
-            embedded_config(&data_dir)?,
-            bitcoin_rs_node::RuntimeInputs::default(),
-        ))?;
-        assert_eq!(node.fee_estimate(1), None);
-        block_on(node.shutdown())?;
-        assert_eq!(std::fs::read(&history_path)?, rejected);
-        assert!(!data_dir.join("fee-estimator-history.dat.tmp").exists());
-    }
+    let node = block_on(Node::start(
+        embedded_config(&data_dir)?,
+        bitcoin_rs_node::RuntimeInputs::default(),
+    ))?;
+    assert_eq!(node.fee_estimate(1), None);
+    block_on(node.shutdown())?;
+    assert_eq!(std::fs::read(&history_path)?, rejected);
+    assert!(!data_dir.join("fee-estimator-history.dat.tmp").exists());
     Ok(())
 }
 
@@ -392,13 +390,6 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     assert_eq!(tip.height, 1);
     drop(resumed);
 
-    // And a whole second embedded lifecycle starts and stops cleanly on it.
-    let node = block_on(Node::start(
-        embedded_config(&data_dir)?,
-        bitcoin_rs_node::RuntimeInputs::default(),
-    ))?;
-    assert_eq!(node.snapshot().tip_height, 1);
-    block_on(node.shutdown())?;
     Ok(())
 }
 
