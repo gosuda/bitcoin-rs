@@ -393,6 +393,22 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   header must already exist at the pinned height. Coin statistics are rebuilt from
   the imported coins, and the resolved header supplies chainwork. Installation and
   role changes serialize with chain transitions; failed validation publishes nothing.
+- **Compiled mainnet anchors and provenance**:
+  `Network::Mainnet.assume_utxo_data()` supports heights 840,000, 880,000, 910,000,
+  935,000, and 965,000, retaining the earlier anchors. The first four entries match
+  [Bitcoin Core v31.1 chain parameters at `9be056a8a72b624dae9623b2f7bded92c2a21c91`](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/kernel/chainparams.cpp);
+  the 965,000 entry comes from
+  [Bitcoin Core v32.0rc1 at `d0231bb01d83178224bf7b198ba04f78cc2c89ef`](https://github.com/bitcoin/bitcoin/blob/d0231bb01d83178224bf7b198ba04f78cc2c89ef/src/kernel/chainparams.cpp).
+  The block hashes, `hash_serialized_3` commitments, and cumulative transaction
+  counts are owned by `crates/primitives/src/network.rs`. These anchor additions
+  leave the project's broader Bitcoin Core compatibility baseline unchanged.
+- **Snapshot format and interoperability evidence**:
+  The current file activation API reads native bitcoin-rs v4 snapshots. Bitcoin
+  Core portable v2 import, `loadtxoutset`, `getchainstates`, and real-process
+  lifecycle interoperability remain tracked in
+  [#1390](https://github.com/gosuda/bitcoin-rs/issues/1390). Compiled anchor support
+  does not establish hosted snapshot availability or successful Core-to-bitcoin-rs
+  process interoperability; each requires separate evidence.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target

@@ -638,7 +638,10 @@ const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
     Hash256::from_le_bytes(&out)
 }
 
-const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 2] = [
+// Bitcoin Core src/kernel/chainparams.cpp:
+// v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
+// v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
+const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
     AssumeUtxoData {
         height: 840_000,
         block_hash: decode_compiled_hash_be(
@@ -658,6 +661,36 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 2] = [
             "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9",
         ),
         chain_tx_count: 1_145_604_538,
+    },
+    AssumeUtxoData {
+        height: 910_000,
+        block_hash: decode_compiled_hash_be(
+            "0000000000000000000108970acb9522ffd516eae17acddcb1bd16469194a821",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "4daf8a17b4902498c5787966a2b51c613acdab5df5db73f196fa59a4da2f1568",
+        ),
+        chain_tx_count: 1_226_586_151,
+    },
+    AssumeUtxoData {
+        height: 935_000,
+        block_hash: decode_compiled_hash_be(
+            "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "e4b90ef9eae834f56c4b64d2d50143cee10ad87994c614d7d04125e2a6025050",
+        ),
+        chain_tx_count: 1_305_397_408,
+    },
+    AssumeUtxoData {
+        height: 965_000,
+        block_hash: decode_compiled_hash_be(
+            "00000000000000000001595977e6000ce56129f5c9b4073e31ccc30b90b97da9",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "4a8d794337118c0c615b574f817c7306c687584a537184b8d233df42bf477ec2",
+        ),
+        chain_tx_count: 1_429_611_231,
     },
 ];
 
@@ -880,37 +913,81 @@ mod tests {
     }
 
     #[test]
+    fn mainnet_assume_utxo_data_matches_pinned_core() -> Result<(), crate::HashError> {
+        // Independent literals from Bitcoin Core src/kernel/chainparams.cpp:
+        // v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
+        // v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
+        let expected_mainnet = [
+            (
+                840_000,
+                "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+                "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96",
+                991_032_194,
+            ),
+            (
+                880_000,
+                "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880",
+                "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9",
+                1_145_604_538,
+            ),
+            (
+                910_000,
+                "0000000000000000000108970acb9522ffd516eae17acddcb1bd16469194a821",
+                "4daf8a17b4902498c5787966a2b51c613acdab5df5db73f196fa59a4da2f1568",
+                1_226_586_151,
+            ),
+            (
+                935_000,
+                "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+                "e4b90ef9eae834f56c4b64d2d50143cee10ad87994c614d7d04125e2a6025050",
+                1_305_397_408,
+            ),
+            (
+                965_000,
+                "00000000000000000001595977e6000ce56129f5c9b4073e31ccc30b90b97da9",
+                "4a8d794337118c0c615b574f817c7306c687584a537184b8d233df42bf477ec2",
+                1_429_611_231,
+            ),
+        ];
+        assert_eq!(
+            Network::Mainnet
+                .assume_utxo_data()
+                .iter()
+                .map(|data| data.height)
+                .collect::<Vec<_>>(),
+            expected_mainnet.map(|(height, _, _, _)| height)
+        );
+        for (height, block_hash, commitment, chain_tx_count) in expected_mainnet {
+            let Some(data) = Network::Mainnet.assume_utxo_for_height(height) else {
+                panic!("mainnet AssumeUTXO base {height} missing");
+            };
+            let expected_hash = Hash256::from_str_be(block_hash)?;
+            assert_eq!(data.height, height);
+            assert_eq!(data.block_hash.to_string(), block_hash);
+            assert_eq!(data.hash_serialized.to_string(), commitment);
+            assert_eq!(data.chain_tx_count, chain_tx_count);
+            assert_eq!(
+                Network::Mainnet.assume_utxo_for_hash(expected_hash),
+                Some(data)
+            );
+            for network in NETWORKS
+                .into_iter()
+                .filter(|network| *network != Network::Mainnet)
+            {
+                assert_eq!(network.assume_utxo_for_height(height), None, "{network:?}");
+                assert_eq!(
+                    network.assume_utxo_for_hash(expected_hash),
+                    None,
+                    "{network:?}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn assume_utxo_data_round_trips_expected_values() {
-        let Some(mainnet_840k) = Network::Mainnet.assume_utxo_for_height(840_000) else {
-            panic!("840k missing");
-        };
-        assert_eq!(
-            mainnet_840k.block_hash.to_string(),
-            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
-        );
-        assert_eq!(
-            mainnet_840k.hash_serialized.to_string(),
-            "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96"
-        );
-        assert_eq!(mainnet_840k.chain_tx_count, 991_032_194);
-        assert_eq!(
-            Network::Mainnet.assume_utxo_for_hash(mainnet_840k.block_hash),
-            Some(mainnet_840k)
-        );
-
-        let Some(mainnet_880k) = Network::Mainnet.assume_utxo_for_height(880_000) else {
-            panic!("880k missing");
-        };
-        assert_eq!(
-            mainnet_880k.block_hash.to_string(),
-            "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880"
-        );
-        assert_eq!(
-            mainnet_880k.hash_serialized.to_string(),
-            "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9"
-        );
-        assert_eq!(mainnet_880k.chain_tx_count, 1_145_604_538);
-
         let Some(testnet4_90k) = Network::Testnet4.assume_utxo_for_height(90_000) else {
             panic!("90k missing");
         };
@@ -953,6 +1030,36 @@ mod tests {
         assert_eq!(Network::Testnet3.assume_utxo_data(), &[]);
         assert_eq!(Network::Signet.assume_utxo_data(), &[]);
         assert_eq!(Network::Mainnet.assume_utxo_for_height(12345), None);
+    }
+
+    #[test]
+    fn assume_utxo_lookups_reject_unpinned_bases() {
+        for height in [
+            0,
+            839_999,
+            840_001,
+            879_999,
+            880_001,
+            909_999,
+            910_001,
+            934_999,
+            935_001,
+            964_999,
+            965_001,
+            u32::MAX,
+        ] {
+            assert_eq!(
+                Network::Mainnet.assume_utxo_for_height(height),
+                None,
+                "{height}"
+            );
+        }
+        for block_hash in [
+            Hash256::from_le_bytes(&[0; 32]),
+            Network::Mainnet.genesis_block_hash(),
+        ] {
+            assert_eq!(Network::Mainnet.assume_utxo_for_hash(block_hash), None);
+        }
     }
 }
 
