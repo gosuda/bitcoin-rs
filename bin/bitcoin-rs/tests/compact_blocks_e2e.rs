@@ -169,6 +169,13 @@ fn block_at_depth(chain: &[Block], tip_height: u32, depth: u32) -> &Block {
 }
 
 fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Error> {
+    synced_peer_with_len(name, CHAIN_LEN)
+}
+
+fn synced_peer_with_len(
+    name: &str,
+    chain_len: u32,
+) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = CompactPeer::connect(&node, name, 2)?;
     if !wait_for(Duration::from_secs(10), &mut || {
@@ -182,7 +189,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Err
             "node never reported the inbound peer".to_owned(),
         ));
     }
-    let chain = build_chain(&genesis_block(), CHAIN_LEN, 0xB1, 1);
+    let chain = build_chain(&genesis_block(), chain_len, 0xB1, 1);
     peer.offer_chain(&chain);
     let tip = chain.last().expect("chain has blocks");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -196,7 +203,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Err
     )?;
     let end = Instant::now() + Duration::from_mins(1);
     while Instant::now() < end {
-        if block_count(&mut node)? == u64::from(CHAIN_LEN)
+        if block_count(&mut node)? == u64::from(chain_len)
             && best_hash(&mut node)? == tip.block_hash().to_string()
         {
             return Ok((node, peer, chain));
@@ -204,7 +211,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Err
         peer.pump_serving(Duration::from_millis(400));
     }
     Err(Error::Protocol(format!(
-        "applied tip never reached h{CHAIN_LEN}; count={}",
+        "applied tip never reached h{chain_len}; count={}",
         block_count(&mut node)?
     )))
 }
@@ -468,5 +475,133 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     Err(Error::Protocol(format!(
         "the real body never applied: tip is {}",
         block_count(&mut node)?
+    )))
+}
+
+/// Hold a compact-block reconstruction across a real chain switch. Core v31.1
+/// GETBLOCKTXN resolves stored bodies by hash even after they leave the chain
+/// (9be056a8a72b624dae9623b2f7bded92c2a21c91, net_processing.cpp:4333-4391).
+#[test]
+fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error> {
+    let (mut node, mut peer, common) = synced_peer_with_len("stale-race", 100)?;
+    let parent = common.last().expect("common tip");
+    let mut stale = segwit_coinbase_block(parent, 101, 0xD1);
+    // Include a non-coinbase transaction, forcing an actual missing short-ID
+    // slot after the compact response's sole coinbase prefill.
+    stale.txdata[0].input[0].witness.clear();
+    stale.txdata[0].output.truncate(1);
+    let funding = &common[0].txdata[0];
+    stale.txdata.push(bitcoin_rs_e2e::helpers::spend_anyone(
+        bitcoin::OutPoint::new(funding.compute_txid(), 0),
+        &funding.output[0],
+        1_000,
+    ));
+    stale.header.merkle_root = stale.compute_merkle_root().expect("nonempty block");
+    bitcoin_rs_e2e::helpers::grind_pow(&mut stale.header)?;
+    peer.offer_chain(std::slice::from_ref(&stale));
+    peer.wire.send(
+        NetworkMessage::Headers(vec![stale.header]),
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    wait_for_peer_tip(&mut node, &mut peer, &stale)?;
+
+    peer.wire.send(
+        NetworkMessage::GetData(vec![Inventory::CompactBlock(stale.block_hash())]),
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    let Some(NetworkMessage::CmpctBlock(compact)) =
+        peer.await_reply(Duration::from_secs(10), &|m| {
+            matches!(
+                m,
+                NetworkMessage::CmpctBlock(_) | NetworkMessage::NotFound(_)
+            )
+        })
+    else {
+        return Err(Error::Assertion(
+            "expected compact stale candidate before reorg".into(),
+        ));
+    };
+    assert_eq!(compact.compact_block.header, stale.header);
+    assert_eq!(compact.compact_block.short_ids.len(), 1);
+    assert_eq!(compact.compact_block.prefilled_txs.len(), 1);
+    assert_eq!(compact.compact_block.prefilled_txs[0].idx, 0);
+
+    // The peer holds the prefill while a different, longer branch wins.
+    let branch = build_chain(parent, 2, 0xE1, 101);
+    peer.headers = common.iter().map(|b| b.header).collect();
+    peer.offer_chain(&branch);
+    peer.wire.send(
+        NetworkMessage::Headers(branch.iter().map(|b| b.header).collect()),
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    wait_for_peer_tip(&mut node, &mut peer, branch.last().expect("winner"))?;
+    peer.wire
+        .log("assert", "reorg committed before stale getblocktxn");
+
+    peer.wire.send(
+        NetworkMessage::GetBlockTxn(GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash: stale.block_hash(),
+                indexes: vec![1],
+            },
+        }),
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    let Some(NetworkMessage::BlockTxn(reply)) = peer.await_reply(Duration::from_secs(10), &|m| {
+        matches!(
+            m,
+            NetworkMessage::BlockTxn(_) | NetworkMessage::Block(_) | NetworkMessage::NotFound(_)
+        )
+    }) else {
+        return Err(Error::Assertion(
+            "stored stale block must answer getblocktxn after reorg".into(),
+        ));
+    };
+    assert_eq!(reply.transactions.block_hash, stale.block_hash());
+    let mut reconstructed = Block {
+        header: compact.compact_block.header,
+        txdata: vec![compact.compact_block.prefilled_txs[0].tx.clone()],
+    };
+    reconstructed.txdata.extend(reply.transactions.transactions);
+    assert_eq!(reconstructed, stale);
+    assert!(reconstructed.check_merkle_root());
+
+    peer.wire.send(
+        NetworkMessage::GetData(vec![
+            Inventory::WitnessBlock(stale.block_hash()),
+            Inventory::WitnessBlock(branch[0].block_hash()),
+        ]),
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    for expected in [&stale, &branch[0]] {
+        let Some(NetworkMessage::Block(body)) = peer.await_reply(Duration::from_secs(10), &|m| {
+            matches!(m, NetworkMessage::Block(_) | NetworkMessage::NotFound(_))
+        }) else {
+            return Err(Error::Assertion(
+                "both stored bodies at height 101 must be served".into(),
+            ));
+        };
+        assert_eq!(&body, expected);
+    }
+    eprintln!("[E2E] stale compact reconstruction and both height-101 bodies verified after reorg");
+    node.stop()
+}
+
+fn wait_for_peer_tip(
+    node: &mut ProcessNode,
+    peer: &mut CompactPeer,
+    expected: &Block,
+) -> Result<(), Error> {
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        if best_hash(node)? == expected.block_hash().to_string() {
+            return Ok(());
+        }
+        peer.pump_serving(Duration::from_millis(100));
+    }
+    Err(Error::Assertion(format!(
+        "expected tip {}, got {}",
+        expected.block_hash(),
+        best_hash(node)?
     )))
 }

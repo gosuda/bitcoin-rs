@@ -184,12 +184,13 @@ impl ChainQuery for FakeChain {
                 continue;
             };
             let native = native_bh(&hash);
-            let active = self.active_height(&native).is_some();
             let known = self
                 .bodies
                 .get(&native)
                 .is_some_and(|block| block.block_hash() == native);
-            if active && known {
+            // This fixture supplies only validated, recent bodies. Production
+            // stale eligibility is exercised by ActiveChainQuery tests.
+            if known {
                 if !headroom() {
                     outcome.halted = true;
                     return Ok(outcome);
@@ -1050,17 +1051,17 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
         ]),
         Some(&state),
     )?;
-    match response.as_slice() {
-        [Message::BlockPayload(payload), Message::NotFound(items)] => {
-            let block = deserialize::<Block>(payload)?;
-            assert_eq!(block.block_hash(), branch_b[0].compute_hash());
-            assert_eq!(
-                items,
-                &vec![Inventory::Block(btc_bh(branch_a[0].compute_hash()))]
-            );
-        }
-        other => return Err(format!("unexpected post-reorg relay response {other:?}").into()),
-    }
+    let [Message::BlockPayload(stale), Message::BlockPayload(winner)] = response.as_slice() else {
+        return Err(format!("unexpected post-reorg relay response {response:?}").into());
+    };
+    assert_eq!(
+        deserialize::<Block>(stale)?.block_hash(),
+        branch_a[0].compute_hash()
+    );
+    assert_eq!(
+        deserialize::<Block>(winner)?.block_hash(),
+        branch_b[0].compute_hash()
+    );
     Ok(())
 }
 
