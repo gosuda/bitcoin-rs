@@ -38,6 +38,13 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     (applied.load_full(), tree.clone().read().len())
 }
 
+pub fn observe_undo(state: &Chainstate) {
+    if let Some(tip) = state.applied_tip_snapshot() {
+        let reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource = state;
+        let _ = reader.block_spends(tip.hash, tip.hash);
+    }
+}
+
 pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
     let _ = chain.block_tree().tip();
     let _ = chain.chain_tip();
@@ -181,6 +188,11 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
             member,
         )?;
     }
+    consumer.deny(
+        &format!("{READ_CONTROL}\npub fn denied(reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource, state: &Chainstate) {{ if let Some(tip) = state.applied_tip_snapshot() {{ let _ = reader.persist_undo(tip.height, tip.hash, b\"\"); }} }}"),
+        &["E0599"],
+        "persist_undo",
+    )?;
     // A private field may also be removed: both outcomes seal the capability.
     for (receiver, member) in [
         ("tip: &TipReader", "tip.inner"),
@@ -189,6 +201,8 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         ("state: &Chainstate", "state.applied_tip"),
         ("state: &Chainstate", "state.block_tree"),
         ("state: &Chainstate", "state.chain_transition"),
+        ("state: &Chainstate", "state.undo_store"),
+        ("state: &Chainstate", "state.history"),
     ] {
         let field = member.rsplit('.').next().unwrap_or(member);
         consumer.deny(
@@ -223,7 +237,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "read_block_tree",
         "transition_barrier",
         // Retained-history authority lives in storage/pruning; chainstate
-        // keeps only `MandatoryRetention` and must not broker the registry.
+        // keeps acquisition roles and must not broker the registry.
         "retention_handle",
         // The transition domain is minted by composition and split into roles;
         // chainstate holds one role and must not republish a fence.

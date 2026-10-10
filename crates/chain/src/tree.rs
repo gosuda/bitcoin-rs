@@ -400,38 +400,55 @@ impl BlockTree {
     /// `None` instead of hanging.
     #[must_use]
     pub fn node_at_height_from(&self, start_id: NodeId, target_height: u32) -> Option<NodeId> {
+        let mut remaining = usize::MAX;
+        self.node_at_height_from_bounded(start_id, target_height, &mut remaining)
+            .ok()
+            .flatten()
+    }
+
+    /// Uses the existing height index and bounds fallback parent hops.
+    ///
+    /// The caller owns `remaining`; several ancestry checks can share one
+    /// request budget. Rejoining a trusted indexed prefix ends the walk.
+    pub fn node_at_height_from_bounded(
+        &self,
+        start_id: NodeId,
+        target_height: u32,
+        remaining: &mut usize,
+    ) -> Result<Option<NodeId>, crate::AncestryBudgetExceeded> {
         let Ok(start_node) = self.node(start_id) else {
-            return None;
+            return Ok(None);
         };
         if target_height > start_node.height {
-            return None;
+            return Ok(None);
         }
-        if self.active_by_height.is_trusted()
-            && self.active_by_height.get(start_node.height) == Some(start_id)
-        {
-            return self.active_by_height.get(target_height);
-        }
-        if target_height == start_node.height {
-            return Some(start_id);
-        }
-
         let mut cursor = start_id;
         let mut prev_height = start_node.height;
         loop {
             let Ok(node) = self.node(cursor) else {
-                return None;
+                return Ok(None);
             };
             if cursor != start_id && node.height >= prev_height {
-                return None;
-            }
-            if node.height == target_height {
-                return Some(cursor);
+                return Ok(None);
             }
             if node.height < target_height {
-                return None;
+                return Ok(None);
+            }
+            if self.active_by_height.is_trusted()
+                && self.active_by_height.get(node.height) == Some(cursor)
+            {
+                return Ok(self.active_by_height.get(target_height));
+            }
+            if node.height == target_height {
+                return Ok(Some(cursor));
             }
             prev_height = node.height;
-            let parent = node.parent?;
+            let Some(parent) = node.parent else {
+                return Ok(None);
+            };
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or(crate::AncestryBudgetExceeded)?;
             cursor = parent;
         }
     }
@@ -1003,6 +1020,44 @@ mod tests {
             Some(main_ids[19])
         );
         assert_ne!(tree.node_at_height_from(main_ids[30], 19), Some(side_id));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_ancestry_rejects_side_parent_gap_before_index_shortcut()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(5)?;
+        let side = extend_branch(&mut tree, main[0], 11..=13)?;
+        let tip = *side.last().ok_or("no side tip")?;
+        tree.node_mut(tip)?.parent = Some(main[0]);
+        assert!(tree.active_by_height.is_trusted());
+        assert_eq!(tree.node_at_height_from(tip, 1), None);
+        assert_eq!(tree.node_at_height_from_bounded(tip, 1, &mut 8)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_ancestry_counts_only_unindexed_parent_hops() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut tree, main) = linear_chain(10_000)?;
+        let side = extend_branch(&mut tree, main[4000], 20_000..=24_095)?;
+        let tip = *side.last().ok_or("no side tip")?;
+        let mut short = 4095;
+        assert_eq!(
+            tree.node_at_height_from_bounded(tip, 0, &mut short),
+            Err(crate::AncestryBudgetExceeded)
+        );
+        assert_eq!(short, 0);
+        let mut exact = 4096;
+        assert_eq!(
+            tree.node_at_height_from_bounded(tip, 0, &mut exact)?,
+            Some(main[0])
+        );
+        assert_eq!(exact, 0, "the indexed prefix requires no parent walk");
+        assert_eq!(
+            tree.node_at_height_from_bounded(main[10_000], 0, &mut exact)?,
+            Some(main[0])
+        );
         Ok(())
     }
 

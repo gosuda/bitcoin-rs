@@ -27,7 +27,7 @@ The gateway registers these Core REST prefixes:
 | `/rest/getutxos[/checkmempool]/{txid}-{vout}...` | JSON, hex, binary | URI-form UTXO lookup; at most 15 outpoints |
 | `/rest/deploymentinfo[/{hash}]` | JSON | Deployment state |
 | `/rest/blockhashbyheight/{height}` | JSON, hex, binary | Block hash by height |
-| `/rest/spenttxouts/{hash}` | JSON, hex, binary | Explicitly unavailable: no undo data |
+| `/rest/spenttxouts/{hash}` | JSON, hex, binary | Retained, certified spent outputs; unavailable/pruned data is explicit |
 
 ## Coherent views
 
@@ -51,15 +51,23 @@ index rows from another.
   when that capability is not `Ready` at the requested tip. Unavailable is not
   empty: a lagging, rebuilding, or disabled index never produces an empty
   successful body. A well-formed identifier the node has never seen returns
-  HTTP 404 as in Core. A route the manifest declares unavailable
-  (`/rest/spenttxouts`) answers with its declared unavailable response, never
-  an empty success.
+  HTTP 404 as in Core. Spent outputs use the chainstate-owned bounded undo query: uncertified or
+  pruned undo returns 404, transient retained-body absence returns 503, and
+  expected corrupt undo never returns fabricated rows.
 
-Full-block `/rest/block` and `/rest/blockpart` requests share a budget of two
-concurrent materializations. When it is full, the gateway returns HTTP 503;
+Full-block `/rest/block`, `/rest/blockpart`, `/rest/spenttxouts`, and detailed
+`getblock` requests share a budget of two concurrent materializations. When it is full, the gateway returns HTTP 503;
 retry the request after a short delay. Request bodies, header counts, and
 response assembly are bounded so a public read cannot consume the validation
 CPU and memory budget.
+
+Spent-output reads retain the existing durable-head and pruning authorities.
+The native undo codec is unchanged. Input order is reconstructed from the
+verified body and net undo, including same-block spends and BIP30 restores.
+The read is rechecked after I/O against its full receipt and retention lease.
+The [external API contract](contracts/external-api.md#retained-block-inputs)
+records the native stale-history limitation, query budgets, and backend
+owned-copy bounds. `/rest/block` itself still omits undo fees/prevouts.
 
 Header `count` defaults to 5 and must be in the inclusive range 1–2000.
 Out-of-range, negative, non-numeric, and overflowing values return HTTP 400

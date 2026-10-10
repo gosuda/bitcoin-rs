@@ -149,6 +149,19 @@ impl RocksDbStore {
 }
 
 impl KvStore for RocksDbStore {
+    fn get_bounded(
+        &self,
+        cf: ColumnFamily,
+        key: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        self.db
+            .get_pinned_cf(self.cf_handle(cf)?, key)
+            .map_err(StorageError::backend)?
+            .map(|value| crate::error::copy_bounded(&value, max_bytes))
+            .transpose()
+    }
+
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.db
             .get_cf(self.cf_handle(cf)?, key)

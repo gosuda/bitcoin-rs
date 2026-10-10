@@ -35,26 +35,26 @@ const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 /// `Node::broadcast` also selects it; Esplora owns its request cap separately.
 pub const DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
-/// Full-block REST responses materialize the block and a response buffer.
+/// Block and undo responses materialize a body and its projection.
 /// Bound concurrent materializations independently of socket connections.
-const MAX_CONCURRENT_REST_BLOCK_RENDERS: usize = 2;
+const MAX_CONCURRENT_BLOCK_RENDERS: usize = 2;
 
 #[derive(Debug)]
-struct RestRenderBudget {
+struct BlockRenderBudget {
     in_flight: AtomicUsize,
 }
 
-impl RestRenderBudget {
+impl BlockRenderBudget {
     const fn new() -> Self {
         Self {
             in_flight: AtomicUsize::new(0),
         }
     }
 
-    fn try_acquire(self: &Arc<Self>) -> Option<RestRenderPermit> {
+    fn try_acquire(self: &Arc<Self>) -> Option<BlockRenderPermit> {
         let mut in_flight = self.in_flight.load(Ordering::Acquire);
         loop {
-            if in_flight >= MAX_CONCURRENT_REST_BLOCK_RENDERS {
+            if in_flight >= MAX_CONCURRENT_BLOCK_RENDERS {
                 return None;
             }
             match self.in_flight.compare_exchange_weak(
@@ -64,7 +64,7 @@ impl RestRenderBudget {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    return Some(RestRenderPermit {
+                    return Some(BlockRenderPermit {
                         budget: Arc::clone(self),
                     });
                 }
@@ -74,14 +74,14 @@ impl RestRenderBudget {
     }
 }
 
-pub(crate) struct RestRenderPermit {
-    budget: Arc<RestRenderBudget>,
+pub(crate) struct BlockRenderPermit {
+    budget: Arc<BlockRenderBudget>,
 }
 
-impl Drop for RestRenderPermit {
+impl Drop for BlockRenderPermit {
     fn drop(&mut self) {
         let previous = self.budget.in_flight.fetch_sub(1, Ordering::Release);
-        debug_assert!(previous > 0, "REST render permit count underflowed");
+        debug_assert!(previous > 0, "block render permit count underflowed");
     }
 }
 
@@ -254,6 +254,8 @@ pub struct ChainHandles {
     pub chain_transition: bitcoin_rs_chain::StableRead,
     /// Durable block-body reader for metadata-only block records.
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
+    /// Read-only certified block inputs; mutation remains with chainstate.
+    pub block_undo_source: Option<Arc<dyn bitcoin_rs_utxo::contract::BlockUndoSource>>,
     /// Optional storage pruning mutator.
     pub prune_service: Option<Arc<dyn PruneService>>,
     /// Optional node-owned chain mutation service.
@@ -423,8 +425,8 @@ pub struct Context {
     /// two servers in one process report their own epochs; `None` (never
     /// bound, e.g. unit tests) makes `uptime` measure from its first call.
     server_bound_at: Mutex<Option<Instant>>,
-    /// Limits concurrent full-block REST response materializations.
-    rest_render_budget: Arc<RestRenderBudget>,
+    /// Limits concurrent full-block and spent-output response materializations.
+    block_render_budget: Arc<BlockRenderBudget>,
 }
 
 impl fmt::Debug for Context {
@@ -491,6 +493,7 @@ impl ChainHandles {
             chain_network: Network::Mainnet,
             chain_transition,
             block_body_source: None,
+            block_undo_source: None,
             prune_service: None,
             chain_control: None,
             rollback_warnings: None,
@@ -610,7 +613,7 @@ impl Context {
             zmq_publisher,
             debug_log_path,
             server_bound_at: Mutex::new(None),
-            rest_render_budget: Arc::new(RestRenderBudget::new()),
+            block_render_budget: Arc::new(BlockRenderBudget::new()),
         }
     }
 
@@ -674,9 +677,9 @@ impl Context {
         self
     }
 
-    /// Acquires a bounded full-block REST render slot, if one is available.
-    pub(crate) fn try_acquire_rest_render(&self) -> Option<RestRenderPermit> {
-        self.rest_render_budget.try_acquire()
+    /// Acquires a bounded full-block render slot, if one is available.
+    pub(crate) fn try_acquire_block_render(&self) -> Option<BlockRenderPermit> {
+        self.block_render_budget.try_acquire()
     }
 
     /// Returns active ZMQ notification metadata from the live publisher.
@@ -826,7 +829,7 @@ impl ChainHandles {
         self.active_hash_in_view(&self.applied_view(), height)
     }
 
-    fn header_record(&self, hash: Hash256) -> Option<BlockRecord> {
+    pub(crate) fn header_record(&self, hash: Hash256) -> Option<BlockRecord> {
         let tree = self.block_tree.read();
         let node = tree.node_by_hash(hash)?;
         Some(BlockRecord {
@@ -1580,13 +1583,13 @@ mod tests {
     }
 
     #[test]
-    fn rest_render_budget_releases_dropped_permits() {
+    fn block_render_budget_releases_dropped_permits() {
         let ctx = Context::new();
-        let first = ctx.try_acquire_rest_render().expect("first permit");
-        let second = ctx.try_acquire_rest_render().expect("second permit");
-        assert!(ctx.try_acquire_rest_render().is_none());
+        let first = ctx.try_acquire_block_render().expect("first permit");
+        let second = ctx.try_acquire_block_render().expect("second permit");
+        assert!(ctx.try_acquire_block_render().is_none());
         drop(first);
-        assert!(ctx.try_acquire_rest_render().is_some());
+        assert!(ctx.try_acquire_block_render().is_some());
         drop(second);
     }
 
@@ -2009,6 +2012,7 @@ mod tests {
                 block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
                 chain_network: Network::Mainnet,
                 block_body_source: None,
+                block_undo_source: None,
                 closed_for_recovery: LatchReader::new(Arc::new(
                     core::sync::atomic::AtomicBool::new(false),
                 )),

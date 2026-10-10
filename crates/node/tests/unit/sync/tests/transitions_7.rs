@@ -254,6 +254,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     }
     // A durable body store lets the reorg revisit the disconnected package
     // body for re-admission; connect persists each applied body into it.
+    let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
         bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
             network: Network::Regtest,
@@ -277,7 +278,11 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,
-            retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
+            retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+                retention,
+                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
+            ),
             role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
     handles.apply_block(&genesis, None)?;

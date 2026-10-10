@@ -32,6 +32,18 @@ pub trait UndoStore: Send + Sync {
     /// Reads the undo record for one block, if present.
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError>;
 
+    /// Reads undo only when its borrowed/pinned value fits the owned-copy bound.
+    /// Engine-internal allocation is outside this bound; unsupported stores
+    /// refuse rather than falling back to the unbounded consensus read.
+    fn load_undo_bounded(
+        &self,
+        _height: u32,
+        _hash: Hash256,
+        _max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        Err(crate::BoundedReadError::Unsupported)
+    }
+
     /// Records that a disconnect is about to mutate state, durably.
     ///
     /// Armed BEFORE the first mutation, not after a failure. A marker written
@@ -170,6 +182,19 @@ impl InMemoryUndoStore {
 }
 
 impl UndoStore for InMemoryUndoStore {
+    fn load_undo_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        self.records
+            .read()
+            .get(&(height, hash))
+            .map(|value| crate::error::copy_bounded(value, max_bytes))
+            .transpose()
+    }
+
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         self.records.write().insert((height, hash), record.to_vec());
         Ok(())
@@ -235,6 +260,19 @@ impl<S: KvStore> KvUndoStore<S> {
 }
 
 impl<S: KvStore> UndoStore for KvUndoStore<S> {
+    fn load_undo_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        self.store.get_bounded(
+            ColumnFamily::UndoData,
+            &block_undo_key(height, hash),
+            max_bytes,
+        )
+    }
+
     /// Deferred, matching the rest of the apply path.
     ///
     /// `put` is what this used to call, and on redb `put` commits an

@@ -58,6 +58,11 @@ pub use transition::{
 pub use tree::BlockTree;
 pub use view::{BlockTreeReader, LatchReader, TipReader};
 
+/// A caller-owned bound on fallback ancestor parent hops was exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("block ancestry read budget exhausted")]
+pub struct AncestryBudgetExceeded;
+
 /// Errors returned by header sync, block-tree, and reorg planning operations.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChainError {
