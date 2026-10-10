@@ -60,7 +60,7 @@ const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a socket is drained while asserting a message never arrives.
 const ABSENCE_WINDOW: Duration = Duration::from_millis(700);
 /// Upper bound for admission and relay to become observable.
-const OBSERVE_TIMEOUT: Duration = Duration::from_secs(10);
+const OBSERVE_TIMEOUT: Duration = Duration::from_secs(35);
 /// Slice between deadline checks in the frame collectors.
 const COLLECT_SLICE: Duration = Duration::from_millis(200);
 
@@ -550,6 +550,22 @@ fn wait_for_tx_getdata(
     }
 }
 
+fn collect_until_inv(dialer: &TcpStream, magic: Magic) -> anyhow::Result<Vec<Message>> {
+    let deadline = Instant::now() + OBSERVE_TIMEOUT;
+    loop {
+        let frames = collect_frames(dialer, magic, deadline.min(Instant::now() + COLLECT_SLICE))?;
+        if frames
+            .iter()
+            .any(|message| matches!(message, Message::Inv(_)))
+        {
+            return Ok(frames);
+        }
+        if Instant::now() >= deadline {
+            bail!("delayed transaction inventory did not arrive");
+        }
+    }
+}
+
 /// Polls `predicate` until it holds or `timeout` elapses.
 fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> anyhow::Result<()> {
     let deadline = Instant::now() + timeout;
@@ -580,6 +596,7 @@ struct Harness {
     bystander: LoopbackPeer,
     ingress: Option<std::thread::JoinHandle<()>>,
     relay: Option<std::thread::JoinHandle<()>>,
+    relay_queue: TxRelayQueue,
     /// Dropped after state releases its storage handles.
     _dir: tempfile::TempDir,
 }
@@ -633,6 +650,7 @@ impl Harness {
             bystander,
             ingress: None,
             relay: None,
+            relay_queue: relay.clone(),
             _dir: dir,
         };
         // Register each handle as soon as its spawn succeeds so later setup
@@ -764,18 +782,8 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
 
-    let until = Instant::now() + ABSENCE_WINDOW;
-    let (legacy_frames, witness_frames) = std::thread::scope(|s| {
-        let h1 = s.spawn(|| collect_frames(&harness.bystander.dialer, harness.magic, until));
-        let h2 = s.spawn(|| collect_frames(&witness_peer.dialer, harness.magic, until));
-        let legacy = h1
-            .join()
-            .map_err(|_| anyhow!("bystander collector panicked"))?;
-        let witness = h2
-            .join()
-            .map_err(|_| anyhow!("witness collector panicked"))?;
-        Ok::<_, anyhow::Error>((legacy?, witness?))
-    })?;
+    let legacy_frames = collect_until_inv(&harness.bystander.dialer, harness.magic)?;
+    let witness_frames = collect_until_inv(&witness_peer.dialer, harness.magic)?;
 
     let inventories = |frames: &[Message]| -> Vec<Inventory> {
         frames
@@ -939,6 +947,11 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
         "recent-rejects must suppress the follow-up getdata"
     );
 
+    assert_eq!(
+        harness.relay_queue.enqueued(),
+        0,
+        "rejected admission never queues delayed relay"
+    );
     Ok(())
 }
 

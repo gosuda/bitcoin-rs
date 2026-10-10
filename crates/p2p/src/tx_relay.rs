@@ -12,20 +12,16 @@
 //! [`TxRelayQueue::announce`] without blocking — relay is best-effort and
 //! must never stall mempool admission.
 //!
-//! [`RelaySink`] is the consumer seam: [`PeerRelaySink`] iterates the live
-//! peer table from [`crate::PeerTable`] and sends one
-//! `inv` per non-excluded peer. A test fake records announcements without a
-//! real connection, so the exclude/saturation logic is unit-testable without
-//! a running node.
+//! [`PeerRelaySink`] queues identities and admission epochs in the shared
+//! transaction-policy owner. Its timer drains fee-filtered, dependency-ordered
+//! batches after randomized per-connection deadlines; known inventory and
+//! source exclusion prevent repeats. A delayed item is checked against the
+//! gateway again before enqueueing the wire message. A later removal can
+//! still race the peer's eventual `getdata`, which then answers `notfound`.
 //!
-//! [`spawn_tx_relay_worker`] drains the queue on a dedicated thread; tests
-//! call `drain_relay_queue` synchronously for deterministic fixtures. Both
-//! paths re-check the shared mempool at send time and announce only
-//! transactions still resident there with the queued wtxid. The gate
-//! narrows the stale-announcement window without closing it: a request is
-//! dropped when its transaction (or its witness) had already left the pool
-//! at send time, while a removal landing between the send and the peer's
-//! later `getdata` can still answer `notfound`.
+//! [`spawn_tx_relay_worker`] drives both request deadlines and relay timers.
+//! Admission callbacks only write the bounded producer queue and never wait
+//! for a peer or a timer.
 //!
 //! # Queue saturation
 //!
@@ -48,7 +44,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use crate::Message;
+#[cfg(test)]
+use crate::{Message, PeerLease};
 use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
@@ -199,16 +196,19 @@ impl MempoolObserver for LocalTxRelayObserver {
     }
 }
 
-/// Per-announce relay outcome reported by a [`RelaySink`].
+/// Synchronous announcement admission reported by a [`RelaySink`].
+///
+/// Deferred inventory delivery occurs during `poll`; its send failures cannot
+/// be reported in an earlier admission result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RelayOutcome {
     /// Handshake-complete peers considered for the announcement.
     pub attempted: usize,
     /// Peers skipped because they were the source of the transaction.
     pub excluded: usize,
-    /// Peers whose outbound queue was saturated or already disconnected; the
-    /// existing p2p policy disconnects such peers rather than dropping the
-    /// message silently.
+    /// Peers whose pending announcement queue could not accept this identity
+    /// because its per-peer or global budget was saturated. This counts queue
+    /// admission failures; later transport failures are logged when polled.
     pub saturated: usize,
 }
 
@@ -217,9 +217,15 @@ pub trait RelaySink: Send + Sync {
     /// Advances time-based transaction download policy.
     fn poll(&self, _gateway: &MempoolGateway) {}
 
-    /// Announces `txid` as a transaction `inv` to every connected peer except
-    /// the one identified by `exclude` (if any).
-    fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome;
+    /// Queues an accepted identity and admission epoch, excluding its source.
+    /// The production sink emits inventory on its next eligible timer tick.
+    fn announce_inv(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        exclude: Option<u64>,
+        sequence: u64,
+    ) -> RelayOutcome;
 }
 
 /// Production [`RelaySink`] over the shared peer table.
@@ -233,52 +239,62 @@ pub trait RelaySink: Send + Sync {
 /// full-relay peers (`net_processing.cpp:5186-5260`).
 pub struct PeerRelaySink {
     peers: Arc<crate::PeerTable>,
+    ibd: Option<(
+        Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        bitcoin_rs_primitives::Network,
+    )>,
 }
 
 impl PeerRelaySink {
     /// Wraps the shared peer table.
     #[must_use]
     pub fn new(peers: Arc<crate::PeerTable>) -> Self {
-        Self { peers }
+        Self { peers, ibd: None }
+    }
+
+    /// Shares the node's existing IBD decision for outgoing fee filters.
+    #[must_use]
+    pub fn with_ibd(
+        mut self,
+        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        network: bitcoin_rs_primitives::Network,
+    ) -> Self {
+        self.ibd = Some((ibd, network));
+        self
     }
 }
 
 impl RelaySink for PeerRelaySink {
     fn poll(&self, gateway: &MempoolGateway) {
-        self.peers.poll_transaction_requests(gateway);
+        use bitcoin::secp256k1::rand::SeedableRng as _;
+        let ibd = self.ibd.as_ref().is_some_and(|(latch, network)| {
+            latch.is_active(bitcoin_rs_primitives::unix_time_secs(), *network)
+        });
+        if !ibd {
+            self.peers.poll_transaction_requests(gateway);
+        }
+        let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
+        self.peers
+            .poll_transaction_relay(gateway, std::time::Instant::now(), ibd, &mut rng);
     }
 
-    fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome {
-        use bitcoin::p2p::message_blockdata::Inventory;
-
-        self.peers.forget_known_transaction(txid, wtxid);
-        let mut outcome = RelayOutcome::default();
-        self.peers.for_each_ready_lease(|addr, lease, info| {
-            if !lease.role().relays_transactions() {
-                return;
-            }
-            outcome.attempted += 1;
-            if exclude.is_some_and(|id| lease.node_id() == id) {
-                outcome.excluded += 1;
-                return;
-            }
-            let inv = if info.wtxid_relay {
-                Inventory::WTx(bitcoin::hashes::Hash::from_byte_array(*wtxid.as_bytes()))
-            } else {
-                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(*txid.as_bytes()))
-            };
-            if let Err(error) = lease.send(Message::Inv(vec![inv])) {
-                // Saturation or a cancelled/disconnected lease: the existing
-                // p2p policy disconnects this peer (PeerLease::send cancels the
-                // lease on Full/Disconnected).
-                tracing::debug!(
-                    peer_addr = %addr,
-                    %error,
-                    "relay tx inv saturated/disconnected peer; p2p will disconnect"
-                );
-                outcome.saturated += 1;
-            }
-        });
+    fn announce_inv(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        exclude: Option<u64>,
+        sequence: u64,
+    ) -> RelayOutcome {
+        use bitcoin::secp256k1::rand::SeedableRng as _;
+        let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
+        let outcome = self.peers.queue_transaction_relay(
+            RelayRequest::new(txid, wtxid, exclude, sequence),
+            std::time::Instant::now(),
+            &mut rng,
+        );
+        if outcome.saturated > 0 {
+            tracing::debug!(%txid, peers = outcome.saturated, "transaction relay pending budget full");
+        }
         outcome
     }
 }
@@ -326,7 +342,12 @@ pub(crate) fn drain_relay_queue(
     let mut processed = 0;
     while let Ok(request) = rx.try_recv() {
         if transaction_is_live(gateway, &request) {
-            sink.announce_inv(request.txid, request.wtxid, request.source);
+            sink.announce_inv(
+                request.txid,
+                request.wtxid,
+                request.source,
+                request.sequence,
+            );
         }
         processed += 1;
     }
@@ -372,7 +393,12 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
                             break;
                         };
                         if transaction_is_live(&gateway, &request) {
-                            sink.announce_inv(request.txid, request.wtxid, request.source);
+                            sink.announce_inv(
+                                request.txid,
+                                request.wtxid,
+                                request.source,
+                                request.sequence,
+                            );
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -386,7 +412,6 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::PeerLease;
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_primitives::Hash256;
     use crossbeam_channel::bounded;
@@ -426,7 +451,13 @@ mod tests {
     }
 
     impl RelaySink for FakeSink {
-        fn announce_inv(&self, txid: Txid, _wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome {
+        fn announce_inv(
+            &self,
+            txid: Txid,
+            _wtxid: Wtxid,
+            exclude: Option<u64>,
+            _sequence: u64,
+        ) -> RelayOutcome {
             let mut peers = self.peers.lock();
             let mut outcome = RelayOutcome::default();
             for peer in peers.iter_mut() {
@@ -454,29 +485,6 @@ mod tests {
 
     fn dummy_wtxid(byte: u8) -> Wtxid {
         Wtxid::from(Hash256::from_le_bytes(&[byte; 32]))
-    }
-
-    fn publish_peer(
-        peers: &crate::PeerTable,
-        addr: SocketAddr,
-        lease: &PeerLease,
-        wtxid_relay: bool,
-    ) {
-        let mut info = crate::PeerInfo::inbound_from_version(
-            addr,
-            addr,
-            &crate::handshake::version_message(
-                1,
-                0,
-                crate::peer_info::PeerRole::FullRelay,
-                bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-            ),
-            0,
-            0,
-            Arc::new(crate::PeerCounters::default()),
-        );
-        info.wtxid_relay = wtxid_relay;
-        assert!(peers.publish_info(addr, lease, info));
     }
 
     /// Allocates a fresh process-unique node id via a throwaway lease.
@@ -507,7 +515,7 @@ mod tests {
         let sink = FakeSink::new(peers);
         let txid = dummy_txid(0xA1);
 
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(ids[1]));
+        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(ids[1]), 0);
 
         assert_eq!(outcome.attempted, 3);
         assert_eq!(outcome.excluded, 1);
@@ -527,7 +535,7 @@ mod tests {
         let sink = FakeSink::new(peers);
         let txid = dummy_txid(0xB2);
 
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), None);
+        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), None, 0);
 
         assert_eq!(outcome.attempted, 3);
         assert_eq!(outcome.excluded, 0);
@@ -543,7 +551,7 @@ mod tests {
         let sink = FakeSink::new(peers);
         let txid = dummy_txid(0xC3);
 
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(stale_source));
+        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(stale_source), 0);
 
         assert_eq!(outcome.attempted, 2);
         assert_eq!(outcome.excluded, 0, "stale source id no longer connected");
@@ -558,7 +566,7 @@ mod tests {
         let sink = FakeSink::new(peers);
         let replacement = dummy_txid(0xD4);
 
-        let outcome = sink.announce_inv(replacement, dummy_wtxid(0xF0), Some(ids[2]));
+        let outcome = sink.announce_inv(replacement, dummy_wtxid(0xF0), Some(ids[2]), 0);
 
         assert_eq!(outcome.attempted, 3);
         assert_eq!(outcome.excluded, 1);
@@ -751,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn per_peer_saturation_counts_saturated_not_dropped() {
+    fn per_peer_pending_capacity_reports_saturation() {
         let id_a = fresh_node_id();
         let id_b = fresh_node_id();
         let sink = FakeSink::new(vec![
@@ -764,195 +772,17 @@ mod tests {
                 capacity: 64,
             },
         ]);
-        let outcome = sink.announce_inv(dummy_txid(0xE5), dummy_wtxid(0xE5), None);
+        let outcome = sink.announce_inv(dummy_txid(0xE5), dummy_wtxid(0xE5), None, 0);
 
         assert_eq!(outcome.attempted, 2);
         assert_eq!(outcome.saturated, 1);
         assert_eq!(outcome.excluded, 0);
         let locked = sink.peers.lock();
-        assert_eq!(locked[0].capacity, 0, "saturated peer capacity unchanged");
+        assert_eq!(
+            locked[0].capacity, 0,
+            "full pending queue capacity unchanged"
+        );
         assert_eq!(locked[1].capacity, 63);
-    }
-
-    #[test]
-    fn peer_relay_sink_excludes_source_by_node_id() {
-        use bitcoin::hashes::Hash as _;
-        use bitcoin::p2p::message_blockdata::Inventory;
-
-        let addr_a: SocketAddr = "127.0.0.1:1".parse().expect("valid addr");
-        let addr_b: SocketAddr = "127.0.0.1:2".parse().expect("valid addr");
-        let (tx_a, rx_a) = bounded::<Message>(8);
-        let (tx_b, rx_b) = bounded::<Message>(8);
-        let lease_a = PeerLease::new(tx_a);
-        let lease_b = PeerLease::new(tx_b);
-        let source_id = lease_a.node_id();
-
-        let peers = Arc::new(crate::PeerTable::new());
-        peers.register(addr_a, lease_a.clone());
-        peers.register(addr_b, lease_b.clone());
-        publish_peer(&peers, addr_a, &lease_a, false);
-        publish_peer(&peers, addr_b, &lease_b, false);
-        let sink = PeerRelaySink::new(peers);
-
-        let txid = dummy_txid(0xF6);
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(source_id));
-
-        assert_eq!(outcome.attempted, 2);
-        assert_eq!(outcome.excluded, 1);
-        assert_eq!(outcome.saturated, 0);
-
-        assert!(
-            rx_a.try_recv().is_err(),
-            "source peer must not be announced to"
-        );
-        let msg_b = rx_b.try_recv().expect("non-source peer receives inv");
-        match msg_b {
-            Message::Inv(items) => {
-                assert_eq!(items.len(), 1, "one inventory vector per announce");
-                match items[0] {
-                    Inventory::Transaction(hash) => {
-                        assert_eq!(hash.as_byte_array(), txid.as_bytes());
-                    }
-                    _ => panic!("expected a Transaction inventory vector"),
-                }
-            }
-            other => panic!("expected Inv, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn peer_relay_sink_skips_block_relay_connections() {
-        let addr_full: SocketAddr = "127.0.0.1:3".parse().expect("valid addr");
-        let addr_block: SocketAddr = "127.0.0.1:4".parse().expect("valid addr");
-        let (tx_full, rx_full) = bounded::<Message>(8);
-        let (tx_block, rx_block) = bounded::<Message>(8);
-        let lease_full = PeerLease::new(tx_full);
-        let lease_block = PeerLease::new_block_relay(tx_block);
-
-        let peers = Arc::new(crate::PeerTable::new());
-        peers.register(addr_full, lease_full.clone());
-        peers.register(addr_block, lease_block.clone());
-        publish_peer(&peers, addr_full, &lease_full, false);
-        publish_peer(&peers, addr_block, &lease_block, false);
-
-        let outcome =
-            PeerRelaySink::new(peers).announce_inv(dummy_txid(0xF7), dummy_wtxid(0xF0), None);
-
-        assert_eq!(
-            outcome.attempted, 1,
-            "only the full-relay connection is a target"
-        );
-        assert!(
-            rx_full.try_recv().is_ok(),
-            "the full-relay connection is announced to"
-        );
-        assert!(
-            rx_block.try_recv().is_err(),
-            "a block-relay-only connection receives no transaction inv"
-        );
-    }
-
-    #[test]
-    fn relay_waits_for_handshake_and_selects_the_peers_inventory_type() {
-        use bitcoin::hashes::Hash as _;
-        use bitcoin::p2p::message_blockdata::Inventory;
-
-        let peers = Arc::new(crate::PeerTable::new());
-        let mut connections = Vec::new();
-        for port in 1..=4 {
-            let addr = SocketAddr::from(([127, 0, 0, 1], port));
-            let (sender, receiver) = bounded(4);
-            let lease = PeerLease::new(sender);
-            peers.register(addr, lease.clone());
-            if port != 4 {
-                publish_peer(&peers, addr, &lease, port != 2);
-            }
-            connections.push((addr, lease, receiver));
-        }
-        let txid = dummy_txid(1);
-        let wtxid = dummy_wtxid(2);
-        let source = connections[0].1.node_id();
-        let sink = PeerRelaySink::new(Arc::clone(&peers));
-        let outcome = sink.announce_inv(txid, wtxid, Some(source));
-        assert_eq!((outcome.attempted, outcome.excluded), (3, 1));
-        assert!(connections[0].2.try_recv().is_err());
-        assert_eq!(
-            connections[1].2.try_recv().expect("legacy announcement"),
-            Message::Inv(vec![Inventory::Transaction(
-                bitcoin::Txid::from_byte_array(*txid.as_bytes())
-            ),])
-        );
-        let witness_inv = Message::Inv(vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
-            *wtxid.as_bytes(),
-        ))]);
-        assert_eq!(
-            connections[2].2.try_recv().expect("BIP339 announcement"),
-            witness_inv
-        );
-        assert!(
-            connections[3].2.try_recv().is_err(),
-            "no legacy packet may wait through negotiation"
-        );
-
-        publish_peer(&peers, connections[3].0, &connections[3].1, true);
-        sink.announce_inv(txid, wtxid, Some(source));
-        assert_eq!(
-            connections[3]
-                .2
-                .try_recv()
-                .expect("newly ready BIP339 peer"),
-            witness_inv
-        );
-
-        let (sender, receiver) = bounded(2);
-        let replacement = PeerLease::new(sender);
-        peers.register(connections[0].0, replacement.clone());
-        sink.announce_inv(txid, wtxid, Some(source));
-        assert!(receiver.try_recv().is_err());
-        publish_peer(&peers, connections[0].0, &replacement, false);
-        sink.announce_inv(txid, wtxid, Some(source));
-        assert_eq!(
-            receiver
-                .try_recv()
-                .expect("replacement legacy announcement"),
-            Message::Inv(vec![Inventory::Transaction(
-                bitcoin::Txid::from_byte_array(*txid.as_bytes())
-            ),])
-        );
-    }
-
-    #[test]
-    fn peer_relay_reaches_replacement_and_cancels_only_saturated_peer() {
-        let peers = Arc::new(crate::PeerTable::new());
-        let source_addr = SocketAddr::from(([127, 0, 0, 1], 8333));
-        let saturated_addr = SocketAddr::from(([127, 0, 0, 1], 8334));
-        let (old_sender, old_receiver) = bounded(1);
-        let old = PeerLease::new(old_sender);
-        let stale_source_id = old.node_id();
-        peers.register(source_addr, old);
-        let (current_sender, current_receiver) = bounded(1);
-        let current = PeerLease::new(current_sender);
-        peers.register(source_addr, current.clone());
-        publish_peer(&peers, source_addr, &current, false);
-        let (saturated_sender, _saturated_receiver) = bounded(1);
-        let saturated = PeerLease::new(saturated_sender);
-        assert!(saturated.send(Message::Ping(1)).is_ok());
-        peers.register(saturated_addr, saturated.clone());
-        publish_peer(&peers, saturated_addr, &saturated, true);
-
-        let outcome = PeerRelaySink::new(peers).announce_inv(
-            dummy_txid(1),
-            dummy_wtxid(1),
-            Some(stale_source_id),
-        );
-
-        assert_eq!(outcome.attempted, 2);
-        assert_eq!(outcome.excluded, 0);
-        assert_eq!(outcome.saturated, 1);
-        assert!(old_receiver.try_recv().is_err());
-        assert!(matches!(current_receiver.try_recv(), Ok(Message::Inv(_))));
-        assert!(!current.is_cancelled());
-        assert!(saturated.is_cancelled());
     }
 
     #[test]

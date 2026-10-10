@@ -6,6 +6,8 @@
 //! a body supplies the mapping. Identical bytes share request ownership only;
 //! gateway knowledge and rejection remain scoped by inventory kind.
 
+mod relay;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -104,6 +106,7 @@ pub(crate) struct TxPolicy {
     /// References to exactly the non-preferred candidates that are not owners.
     /// Requests and candidate vectors remain the sole announcement authority.
     evictable: BTreeSet<EvictionKey>,
+    relay: HashMap<PeerSource, relay::RelayPeer>,
 }
 
 impl TxPolicy {

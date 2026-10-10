@@ -222,8 +222,8 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
                 .collect(),
             // Only full-relay connections carry the transaction relay
             // stream; block-relay-only and inbound-nonrelay leases do not.
-            relay_transactions: session.lease.is_inbound()
-                || session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
+            relay_transactions: peer.relay_transactions
+                && session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
             last_send: i64::try_from(peer.counters.last_send()).unwrap_or(i64::MAX),
             last_received: i64::try_from(peer.counters.last_recv()).unwrap_or(i64::MAX),
             last_transaction: 0,
@@ -267,7 +267,11 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             } else {
                 Vec::new()
             },
-            minimum_fee_filter: 0.0,
+            minimum_fee_filter: crate::compat::convert::sat_to_btc(
+                ctx.network
+                    .peer_table
+                    .transaction_fee_filter(session.lease.source(session.addr)),
+            ),
             bytes_sent_per_message: std::collections::BTreeMap::new(),
             bytes_received_per_message: std::collections::BTreeMap::new(),
             inv_to_send: 0,
@@ -753,6 +757,7 @@ mod addnode_validation_tests {
         let ctx = Context::new();
         let info = PeerInfo {
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             addr,
@@ -1096,6 +1101,7 @@ mod peer_counter_tests {
         };
         PeerInfo {
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             addr: parse(addr),
@@ -1472,6 +1478,7 @@ mod getnodeaddresses_tests {
         let parsed: SocketAddr = addr.parse().expect("addr");
         PeerInfo {
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             addr: parsed,

@@ -50,6 +50,7 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
 fn info(addr: SocketAddr) -> PeerInfo {
     PeerInfo {
         wtxid_relay: false,
+        relay_transactions: true,
         compact_block_relay: false,
         addr,
         send_headers: false,

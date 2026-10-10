@@ -629,6 +629,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
     let peer_table = Arc::new(PeerTable::new());
     let info = PeerInfo {
         wtxid_relay: false,
+        relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),

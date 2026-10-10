@@ -167,7 +167,7 @@ impl RbfError {
 
 /// Core `CFeeRate::GetFee`: truncate the product, but charge at least one
 /// satoshi for nonempty relay at a positive rate. No saturated fee can pass.
-pub(crate) fn required_fee(rate: u64, vsize: u32) -> Result<i128, RbfError> {
+pub fn required_fee(rate: u64, vsize: u32) -> Result<i128, RbfError> {
     let fee = u128::from(rate)
         .checked_mul(u128::from(vsize))
         .ok_or(RbfError::ArithmeticOverflow)?
