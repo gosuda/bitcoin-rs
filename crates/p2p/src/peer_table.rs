@@ -456,16 +456,6 @@ impl PeerTable {
         }
     }
 
-    /// Reports whether the live published connection at `addr` requested
-    /// BIP130 `sendheaders`.
-    #[must_use]
-    pub fn send_headers_of(&self, addr: SocketAddr) -> bool {
-        let entries = self.entries.read();
-        entries
-            .get(&addr)
-            .is_some_and(|entry| entry.info.as_ref().is_some_and(|info| info.send_headers))
-    }
-
     /// Removes and cancels the connection `lease` refers to. Returns `false`
     /// when a different connection is live at `addr`, leaving it untouched.
     pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {

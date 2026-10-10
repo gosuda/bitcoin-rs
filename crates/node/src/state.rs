@@ -124,8 +124,6 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     /// `AssumeUTXO` coordinator managing chainstate roles.
     assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
-    /// Bounded block announcement queue for outbound propagation.
-    block_announce_queue: bitcoin_rs_p2p::BlockAnnounceQueue,
     block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
 }
 
@@ -296,12 +294,6 @@ impl NodeState {
     #[must_use]
     pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
         self.inbound_tx_rx.lock().take()
-    }
-
-    /// Returns the block announcement queue handle.
-    #[must_use]
-    pub fn block_announce_queue(&self) -> &bitcoin_rs_p2p::BlockAnnounceQueue {
-        &self.block_announce_queue
     }
 
     /// Takes the block announcement receiver for worker execution.

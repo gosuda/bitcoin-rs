@@ -21,14 +21,13 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin_rs_primitives::{BlockHash, Hash256};
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use crate::PeerTable;
@@ -61,8 +60,6 @@ pub struct BlockAnnounceConfig {
 #[derive(Clone)]
 pub struct BlockAnnounceQueue {
     sender: Sender<()>,
-    enqueued: Arc<AtomicU64>,
-    coalesced: Arc<AtomicU64>,
 }
 
 /// Receiving end of the committed-tip wake queue.
@@ -76,11 +73,7 @@ impl BlockAnnounceQueue {
     #[must_use]
     pub fn new() -> (Self, BlockAnnounceReceiver) {
         let (sender, receiver) = crossbeam_channel::bounded(1);
-        let queue = Self {
-            sender,
-            enqueued: Arc::new(AtomicU64::new(0)),
-            coalesced: Arc::new(AtomicU64::new(0)),
-        };
+        let queue = Self { sender };
         let rx = BlockAnnounceReceiver { receiver };
         (queue, rx)
     }
@@ -88,29 +81,7 @@ impl BlockAnnounceQueue {
     /// Wakes the P2P consumer after a committed chain change. Never blocks
     /// chainstate; a full slot already guarantees a future reread.
     pub fn wake(&self) -> bool {
-        match self.sender.try_send(()) {
-            Ok(()) => {
-                self.enqueued.fetch_add(1, Ordering::Relaxed);
-                true
-            }
-            Err(TrySendError::Full(())) => {
-                self.coalesced.fetch_add(1, Ordering::Relaxed);
-                false
-            }
-            Err(TrySendError::Disconnected(())) => false,
-        }
-    }
-
-    /// Total announcements enqueued.
-    #[must_use]
-    pub fn enqueued(&self) -> u64 {
-        self.enqueued.load(Ordering::Relaxed)
-    }
-
-    /// Total wakes coalesced into an already-pending token.
-    #[must_use]
-    pub fn coalesced(&self) -> u64 {
-        self.coalesced.load(Ordering::Relaxed)
+        self.sender.try_send(()).is_ok()
     }
 }
 
@@ -200,18 +171,8 @@ impl BlockAnnouncer {
         })
     }
 
-    /// Reports whether we have requested high-bandwidth compact blocks from `addr`.
-    #[must_use]
-    pub fn is_high_bandwidth_requested(&self, addr: &SocketAddr) -> bool {
-        let Some(source) = self.peers.lease(*addr).map(|lease| lease.source(*addr)) else {
-            return false;
-        };
-        let state = self.state.lock();
-        state.high_bandwidth_requested_peers.contains(&source)
-    }
-
     /// Returns the current list of peers we requested high-bandwidth compact blocks from.
-    #[must_use]
+    #[cfg(test)]
     pub fn high_bandwidth_requested_peers(&self) -> Vec<SocketAddr> {
         let state = self.state.lock();
         state
@@ -222,23 +183,12 @@ impl BlockAnnouncer {
     }
 
     /// Returns the best block known for `addr`.
-    #[must_use]
+    #[cfg(test)]
     pub fn peer_known_block(&self, addr: SocketAddr) -> Option<Hash256> {
         let source = self.peers.lease(addr)?.source(addr);
         self.peers
             .announcement_state(source)
             .and_then(|state| state.last_announced_block)
-    }
-
-    /// Returns whether the peer requested high-bandwidth compact block announcements.
-    #[must_use]
-    pub fn peer_wants_high_bandwidth(&self, addr: SocketAddr) -> bool {
-        let Some(source) = self.peers.lease(addr).map(|lease| lease.source(addr)) else {
-            return false;
-        };
-        self.peers
-            .announcement_state(source)
-            .is_some_and(|state| state.compact_high_bandwidth == Some(true))
     }
 
     /// Called when a peer handshake completes.
@@ -556,7 +506,7 @@ mod tests {
     };
     use bitcoin_rs_primitives::{CompactTarget, Header, Network};
     use parking_lot::RwLock;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     struct MockAnnounceChain {
         headers: Vec<Header>,
@@ -965,8 +915,6 @@ mod tests {
         assert!(queue.wake());
         assert!(!queue.wake(), "a pending wake must coalesce saturation");
         assert!(!queue.wake(), "all later commits share the pending wake");
-        assert_eq!(queue.enqueued(), 1);
-        assert_eq!(queue.coalesced(), 2);
 
         let addr = test_addr(1008);
         let (_lease, peer_rx) = setup_peer(&table, &announcer, addr, true);

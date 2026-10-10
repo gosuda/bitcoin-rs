@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import socket
 import struct
@@ -14,8 +15,17 @@ import urllib.request
 
 
 MAGIC = b"\xfa\xbf\xb5\xda"
-TIMEOUT = float(os.environ.get("ANNOUNCEMENT_TIMEOUT_SECONDS", "60"))
-OBSERVATION_WINDOW = float(os.environ.get("ANNOUNCEMENT_OBSERVATION_SECONDS", "1"))
+
+
+def _env_seconds(name: str, default: str) -> float:
+    value = float(os.environ.get(name, default))
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return value
+
+
+TIMEOUT = _env_seconds("ANNOUNCEMENT_TIMEOUT_SECONDS", "60")
+OBSERVATION_WINDOW = _env_seconds("ANNOUNCEMENT_OBSERVATION_SECONDS", "1")
 
 
 def sha256d(data: bytes) -> bytes:

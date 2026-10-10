@@ -359,7 +359,7 @@ impl NodeState {
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
         )
-        .with_block_announcer(Some(block_announce_queue.clone()));
+        .with_block_announcer(Some(block_announce_queue));
         chainstate.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo
@@ -458,7 +458,6 @@ impl NodeState {
             sync,
             recovery_reporter,
             assumeutxo,
-            block_announce_queue,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
         })
     }

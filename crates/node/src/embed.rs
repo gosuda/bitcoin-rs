@@ -176,12 +176,6 @@ impl Node {
             .estimate_fee_rate(confirmation_target_blocks)
     }
 
-    /// Returns a reference to the block announcement queue.
-    #[must_use]
-    pub fn block_announce_queue(&self) -> &bitcoin_rs_p2p::BlockAnnounceQueue {
-        self.state.block_announce_queue()
-    }
-
     /// Admits a transaction through the mempool gateway's local submission,
     /// the operation RPC `sendrawtransaction` and Esplora broadcasts also call.
     ///
