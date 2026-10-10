@@ -47,6 +47,12 @@
   (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
   (not connected), `-10` (initial download), `-22` (deserialization),
   and `-25` plus `-26` (submission).
+- `createrawtransaction` currently consumes only `inputs`, `outputs`,
+  `locktime` and `replaceable`: transaction version stays 2 and replaceable
+  defaults to false. A named `version` is unknown (`-8`); a supplied fifth
+  positional or `args`-prefix entry, including null, is refused (`-32602`).
+  Duplicate, collision and unknown-name validation precedes this method-owned
+  arity check. The registry declares this transaction-creation deviation.
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision.
 - The node ships no wallet and holds no private key material. Methods
@@ -542,12 +548,13 @@ owned by [wallet-facing.md](wallet-facing.md).
 - Empty output lists, strict object keys, txid syntax, and signed 32-bit
   nonnegative vout validation follow the pinned reference. After successful
   named-argument binding, missing outputs and excess positional arguments
-  retain local JSON-RPC `-32602` shape errors instead of Core's `-1` help
-  text. Duplicate/unknown names, option conflicts and positional/named
-  collisions retain Core's earlier `-8` errors, including an overlong `args`
-  prefix. An omitted outputs hole retains the local missing-outputs error;
-  explicitly supplied null remains a type error. The registry declares these
-  method-validation deviations.
+  retain local JSON-RPC `-32602` shape errors. Core returns `-1` help for no
+  arguments or excess arity, but returns a `-3` null type error when named
+  options create an omitted outputs hole. Native keeps its missing-outputs
+  error for that hole; explicitly supplied null matches Core's `-3` type error.
+  Duplicate/unknown names, option conflicts and positional/named collisions
+  retain Core's earlier `-8` errors, including an overlong `args` prefix. The
+  registry declares these method-validation deviations.
 - The HTTP request-body limit bounds externally supplied queries; this
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.

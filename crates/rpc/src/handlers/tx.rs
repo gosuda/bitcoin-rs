@@ -566,6 +566,7 @@ const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime",
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
     let params = bound.as_ref();
+    super::ensure_at_most_params(params, CREATE_TRANSACTION_ARGUMENTS.len())?;
     let array = params_array(params)?;
     let inputs = array
         .first()
