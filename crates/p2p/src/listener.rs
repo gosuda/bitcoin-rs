@@ -413,25 +413,32 @@ impl ConnectionShared {
 
     /// Forwards a decoded transaction into the node's ingress channel.
     fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
-        let Some(inbound_tx) = self.inbound_tx.as_ref() else {
-            return;
-        };
-        if self.is_session_cancelled() {
-            return;
-        }
-        match inbound_tx.try_send(crate::InboundTx::new(tx, source)) {
-            Ok(()) => {}
-            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                tracing::debug!(
-                    peer_addr = %source.addr,
-                    "p2p inbound tx channel full; dropping body"
-                );
+        let inbound = crate::InboundTx::new(tx, source);
+        let dropped = if let Some(channel) = &self.inbound_tx {
+            if self.is_session_cancelled() {
+                Some(inbound)
+            } else {
+                match channel.try_send(inbound) {
+                    Ok(()) => None,
+                    Err(
+                        crossbeam_channel::TrySendError::Full(inbound)
+                        | crossbeam_channel::TrySendError::Disconnected(inbound),
+                    ) => Some(inbound),
+                }
             }
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                tracing::warn!(
-                    peer_addr = %source.addr,
-                    "p2p inbound tx channel disconnected"
-                );
+        } else {
+            Some(inbound)
+        };
+        if let Some(inbound) = dropped {
+            tracing::debug!(peer_addr = %source.addr, "p2p transaction ingress unavailable; dropping body");
+            self.peer_table.transaction_response_completed(
+                source,
+                inbound.tx.txid(),
+                inbound.tx.wtxid(),
+            );
+            if let Some(inventory) = &self.tx_inventory {
+                self.peer_table
+                    .poll_transaction_requests(inventory.as_ref());
             }
         }
     }
@@ -1106,6 +1113,11 @@ fn run_connected_session(
         shared.note_misbehavior(peer_addr, &lease, error);
     }
     shared.peer_table.remove_current(peer_addr, &lease);
+    if let Some(inventory) = &shared.tx_inventory {
+        shared
+            .peer_table
+            .poll_transaction_requests(inventory.as_ref());
+    }
     if let Some(announcer) = &shared.block_announcer {
         announcer.on_peer_disconnected(source);
     }
@@ -1485,6 +1497,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             })
                     },
                     &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
+                    &mut |items| {
+                        shared
+                            .peer_table
+                            .announce_transactions(lease.source(peer_addr), &items);
+                    },
                 );
                 if let Err(error) = dispatched {
                     if lease.ignores_protocol_error(&error) {
@@ -1492,6 +1509,19 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         continue;
                     }
                     return Err(error);
+                }
+                if tx_relay_open() {
+                    if let Some(inventory) = &shared.tx_inventory {
+                        if let crate::Message::NotFound(items) = &message {
+                            shared
+                                .peer_table
+                                .transaction_not_found(lease.source(peer_addr), items);
+                        }
+                        shared
+                            .peer_table
+                            .poll_transaction_requests(inventory.as_ref());
+                    }
+
                 }
                 match message {
                     crate::Message::Addr(addresses) => {

@@ -141,6 +141,7 @@ fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
 pub struct PeerTable {
     entries: RwLock<TableView>,
     next_useful_block_sequence: AtomicU64,
+    pub(crate) tx_policy: parking_lot::Mutex<crate::tx_policy::TxPolicy>,
 }
 
 impl PeerTable {

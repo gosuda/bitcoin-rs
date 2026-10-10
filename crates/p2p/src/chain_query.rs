@@ -1437,6 +1437,7 @@ mod tests {
                         &|| true,
                         &mut |_| panic!("sendcmpct does not emit a response"),
                         &mut |_| {},
+                        &mut |_| {},
                     )?;
                     if version == crate::peer::COMPACT_BLOCK_VERSION {
                         negotiated = Some(version);
@@ -1525,6 +1526,7 @@ mod tests {
                     &|| true,
                     &mut |_| panic!("sendcmpct does not emit a response"),
                     &mut |_| {},
+                    &mut |_| {},
                 )?;
             }
             for (requested_hash, indexes, invalid) in [
@@ -1554,6 +1556,7 @@ mod tests {
                     &|| true,
                     &|| true,
                     &mut |_| panic!("missing or invalid request cannot emit transactions"),
+                    &mut |_| {},
                     &mut |_| {},
                 );
                 if let Some(expected) = expected {
@@ -1613,6 +1616,7 @@ mod tests {
                 crate::wire::write_message(&mut wire, bitcoin::p2p::Magic::REGTEST, &response)?;
                 Ok(())
             },
+            &mut |_| {},
             &mut |_| {},
         )?;
         Ok(bitcoin::consensus::deserialize(&wire)?)

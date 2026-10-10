@@ -103,7 +103,13 @@ impl TxIngressConsumer {
             bitcoin_rs_primitives::unix_time_secs(),
             &self.chain_view(),
         );
+        // The gateway has classified this body. Release its announcement and
+        // request slot before a Held outcome queues missing parent requests.
+        self.peer_table
+            .transaction_response_completed(inbound.source, txid, wtxid);
         self.dispatch_outcome(txid, wtxid, source, outcome);
+        self.peer_table
+            .poll_transaction_requests(self.mempool_gateway.as_ref());
     }
 
     fn process_retries(&self) -> bool {
@@ -153,7 +159,10 @@ impl TxIngressConsumer {
             Ok(SubmitOutcome::Held { missing_parents }) => {
                 bitcoin_rs_p2p::request_missing_parents(&self.peer_table, source, &missing_parents);
             }
-            Ok(SubmitOutcome::AlreadyKnown | SubmitOutcome::AlreadyConfirmed) => {}
+            Ok(SubmitOutcome::AlreadyConfirmed) => {
+                self.peer_table.forget_known_transaction(txid, wtxid);
+            }
+            Ok(SubmitOutcome::AlreadyKnown) => {}
             Err(error) => tracing::debug!(%txid, ?error, "peer transaction not admitted"),
         }
     }
