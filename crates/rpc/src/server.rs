@@ -51,7 +51,13 @@ impl RpcServer {
         rest_enabled: bool,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
+        // A binding owns its dispatcher cancellation latch. Rebinding the
+        // same Context must not reset a latch retained by old requests.
+        let context = Arc::clone(handler.context());
+        drop(handler);
+        let handler = Arc::new(Handler::new(context));
         handler.context().mark_server_bound();
+        handler.configure_blocking_admission(max_connections);
         Ok(Self {
             listener,
             auth,
@@ -78,6 +84,9 @@ impl RpcServer {
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> io::Result<()> {
         let shutdown = shutdown.into();
+        let _stop = RpcStop(Arc::clone(&self.handler));
+        self.handler
+            .configure_blocking_admission(self.max_connections);
         self.listener.set_nonblocking(true)?;
         let active = Arc::new(Mutex::new(0_usize));
         while !shutdown.is_triggered() {
@@ -94,6 +103,8 @@ impl RpcServer {
                 Err(error) => return Err(error),
             }
         }
+        // Drop cancels the new blocking RPC capabilities even when only this
+        // server stops; the chainstate and its process latch may remain live.
         Ok(())
     }
 
@@ -120,21 +131,38 @@ impl RpcServer {
             return Ok(());
         }
 
+        let permit = ConnectionPermit(Arc::clone(active));
         let auth = Arc::clone(&self.auth);
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
-        let active = Arc::clone(active);
         let idle_timeout = self.idle_timeout;
-        thread::spawn(move || {
-            if let Err(error) =
-                serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
-            {
-                debug!(%error, "rpc connection closed with error");
-            }
-            let mut count = active.lock();
-            *count = count.saturating_sub(1);
-        });
+        thread::Builder::new()
+            .name("rpc-connection".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                if let Err(error) =
+                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
+                {
+                    debug!(%error, "rpc connection closed with error");
+                }
+            })?;
         Ok(())
+    }
+}
+
+struct ConnectionPermit(Arc<Mutex<usize>>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        *self.0.lock() -= 1;
+    }
+}
+
+struct RpcStop(Arc<Handler>);
+
+impl Drop for RpcStop {
+    fn drop(&mut self) {
+        self.0.stop();
     }
 }
 
@@ -149,6 +177,9 @@ fn serve_connection(
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
     loop {
+        if handler.is_stopping() {
+            return Ok(());
+        }
         let request = match read_request(&mut reader) {
             Ok(Some(request)) => request,
             Ok(None) => return Ok(()),
@@ -160,6 +191,9 @@ fn serve_connection(
                 return Err(error);
             }
         };
+        if handler.is_stopping() {
+            return Ok(());
+        }
         let keep_alive = request.keep_alive;
         if dispatch_http_request(reader.get_mut(), &request, auth, handler, rest_enabled)? {
             return Ok(());
@@ -216,10 +250,14 @@ fn dispatch_http_request(
                 return Ok(true);
             }
             let response = handle_json(handler, &request.body);
+            let keep_alive = keep_alive && !response.close;
             if let Some(body) = response.body.as_ref() {
                 write_json(stream, response.status, response.reason, body, keep_alive)?;
             } else {
                 write_status(stream, 204, "No Content", b"", keep_alive)?;
+            }
+            if response.close {
+                return Ok(true);
             }
         }
     }
@@ -369,6 +407,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
 }
 
 struct JsonResponse {
+    close: bool,
     status: u16,
     reason: &'static str,
     body: Option<Value>,
@@ -463,6 +502,18 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
         }
     };
 
+    let close = request.as_array().map_or_else(
+        || crate::registry::blocking_request(&request),
+        |requests| requests.iter().any(crate::registry::blocking_request),
+    );
+    let mut response = handle_decoded_json(handler, &request);
+    // A rejected long call must not retain the reserved ordinary slot through
+    // keep-alive. Batch/notification classification uses the same registry.
+    response.close = close;
+    response
+}
+
+fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
     if let Some(requests) = request.as_array() {
         if requests.is_empty() {
             return legacy_error_response(
@@ -483,16 +534,18 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
             return no_content_response();
         }
         return JsonResponse {
+            close: false,
             status,
             reason: reason_for_status(status),
             body: Some(json!(responses)),
         };
     }
 
-    let response = handle_single_json(handler, &request);
+    let response = handle_single_json(handler, request);
     let status = response.http_status();
     match response {
         CallResponse::Reply { body, .. } => JsonResponse {
+            close: false,
             status,
             reason: reason_for_status(status),
             body: Some(body),
@@ -523,6 +576,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
 fn legacy_error_response(error: &RpcError, id: &Value) -> JsonResponse {
     let version = JsonRpcVersion::Legacy;
     JsonResponse {
+        close: false,
         status: version.error_status(),
         reason: reason_for_status(version.error_status()),
         body: Some(version.error_response(error, id)),
@@ -539,6 +593,7 @@ const fn reason_for_status(status: u16) -> &'static str {
 
 const fn no_content_response() -> JsonResponse {
     JsonResponse {
+        close: false,
         status: 204,
         reason: "No Content",
         body: None,
@@ -1193,3 +1248,7 @@ mod tests {
         assert!(rows[1].get("error").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "server_tip_wait_tests.rs"]
+mod tip_wait_tests;

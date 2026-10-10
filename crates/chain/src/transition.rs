@@ -46,6 +46,17 @@ pub struct TransitionAuthority {
 }
 
 impl TransitionAuthority {
+    /// Attempts exclusion for a bounded interval, allowing observers to check
+    /// cancellation while a long transition is still running.
+    pub fn try_lock_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<TransitionAuthorityGuard<'_>> {
+        self.inner
+            .try_lock_for(timeout)
+            .map(|guard| TransitionAuthorityGuard { _guard: guard })
+    }
+
     /// Excludes every stable read on this domain until the guard is dropped.
     pub fn lock(&self) -> TransitionAuthorityGuard<'_> {
         TransitionAuthorityGuard {

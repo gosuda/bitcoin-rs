@@ -17,13 +17,63 @@ use crate::manifest::{CORE_VERSION, Entry, NO_WALLET, Status, SurfaceKind};
 /// Signature of one dispatch arm.
 type HandlerFn = fn(&Arc<Context>, &Value) -> Result<Value, RpcError>;
 
+#[derive(Clone, Copy)]
+pub(crate) enum Dispatch {
+    Immediate(HandlerFn),
+    Cancellable(
+        fn(&Arc<Context>, &Value, &bitcoin_rs_chain::LatchReader) -> Result<Value, RpcError>,
+    ),
+}
+
 /// One unified registry row: compat metadata plus the dispatch arm.
 ///
 /// `handler` is `None` for surfaces not dispatched through this table
 /// (REST, ZMQ, `Unimplemented`, `pending`).
 pub(crate) struct Row {
     pub entry: Entry,
-    pub handler: Option<HandlerFn>,
+    pub handler: Option<Dispatch>,
+    pub execution: Execution,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) enum Execution {
+    #[default]
+    Immediate,
+    Blocking,
+    Scan,
+}
+
+impl Execution {
+    pub(crate) fn is_blocking(self, params: &Value) -> bool {
+        use sonic_rs::JsonValueTrait as _;
+        match self {
+            Self::Immediate => false,
+            Self::Blocking => true,
+            Self::Scan => {
+                params
+                    .get(0)
+                    .or_else(|| params.get("action"))
+                    .or_else(|| params.get("args").and_then(|args| args.get(0)))
+                    .and_then(Value::as_str)
+                    == Some("start")
+            }
+        }
+    }
+}
+
+pub(crate) fn blocking_request(request: &Value) -> bool {
+    use sonic_rs::JsonValueTrait as _;
+    let Some(method) = request.get("method").and_then(Value::as_str) else {
+        return false;
+    };
+    REGISTRY
+        .iter()
+        .find(|row| row.entry.name == method)
+        .is_some_and(|row| {
+            let absent = Value::new_null();
+            row.execution
+                .is_blocking(request.get("params").unwrap_or(&absent))
+        })
 }
 
 /// Handler for `getzmqnotifications`, compiled only under the `zmq` feature.
@@ -36,6 +86,14 @@ const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = None;
 /// Declares both [`REGISTRY`] and [`MANIFEST`] from one set of row literals
 /// so a method is declared and bound in a single source location.
 macro_rules! declare_rows {
+    (@execution) => { Execution::Immediate };
+    (@execution $execution:ident) => { Execution::$execution };
+    (@handler $handler:expr, Blocking) => {
+        match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
+    };
+    (@handler $handler:expr $(, $execution:ident)?) => {
+        match $handler { Some(handler) => Some(Dispatch::Immediate(handler)), None => None }
+    };
     (
         $(
             $name:literal,
@@ -45,7 +103,7 @@ macro_rules! declare_rows {
             $core_version:expr,
             $notes:expr,
             $since:literal,
-            $handler:expr;
+            $handler:expr $(, $execution:ident)?;
         )*
     ) => {
         pub(crate) const REGISTRY: &[Row] = &[
@@ -59,7 +117,8 @@ macro_rules! declare_rows {
                     notes: $notes,
                     since: $since,
                 },
-                handler: $handler,
+                handler: declare_rows!(@handler $handler $(, $execution)?),
+                execution: declare_rows!(@execution $($execution)?),
             }),*
         ];
 
@@ -97,7 +156,7 @@ declare_rows! {
     "getindexinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getindexinfo);
     "pruneblockchain", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::pruneblockchain);
     "invalidateblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::invalidateblock);
-    "scantxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null.", "0.4.0", Some(chain::scantxoutset);
+    "scantxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null.", "0.4.0", Some(chain::scantxoutset), Scan;
     "getrawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::getrawtransaction);
     "gettxout", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout);
     "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof);
@@ -163,9 +222,9 @@ declare_rows! {
     "reconsiderblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual reorg-control surface.", "n/a", None;
     "savemempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool dump/reload persistence not implemented.", "n/a", None;
     "scanblocks", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No BIP157/158 filter index to scan.", "n/a", None;
-    "waitforblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No long-poll wait surface.", "n/a", None;
-    "waitforblockheight", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No long-poll wait surface.", "n/a", None;
-    "waitfornewblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No long-poll wait surface.", "n/a", None;
+    "waitforblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblock), Blocking;
+    "waitforblockheight", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblockheight), Blocking;
+    "waitfornewblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-33-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitfornewblock), Blocking;
     "help", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No per-method help text renderer.", "n/a", None;
     "logging", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Log-category controls not exposed over RPC.", "n/a", None;
     "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;

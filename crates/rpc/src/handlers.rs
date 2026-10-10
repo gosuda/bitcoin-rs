@@ -14,6 +14,7 @@ pub(crate) mod mining;
 pub(crate) mod network;
 pub(crate) mod tx;
 pub(crate) mod util;
+pub(crate) mod wait;
 
 /// Enumerates the live registry names in table order.
 ///
@@ -32,13 +33,45 @@ pub fn live_registry() -> impl Iterator<Item = &'static str> {
 #[derive(Debug)]
 pub struct Handler {
     ctx: Arc<Context>,
+    stop: Arc<core::sync::atomic::AtomicBool>,
+    blocking_requests: parking_lot::Mutex<(usize, usize)>,
 }
 
 impl Handler {
     /// Builds a dispatcher over `ctx`.
     #[must_use]
-    pub const fn new(ctx: Arc<Context>) -> Self {
-        Self { ctx }
+    pub fn new(ctx: Arc<Context>) -> Self {
+        Self {
+            ctx,
+            stop: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            blocking_requests: parking_lot::Mutex::new((0, 16)),
+        }
+    }
+
+    pub(crate) fn configure_blocking_admission(&self, max_connections: usize) {
+        self.blocking_requests.lock().1 = max_connections.saturating_sub(1);
+    }
+
+    pub(crate) fn reserve_blocking_request(&self) -> Result<BlockingRequest<'_>, RpcError> {
+        let mut budget = self.blocking_requests.lock();
+        if budget.0 >= budget.1 {
+            return Err(RpcError::Misc(
+                "RPC blocking request limit reached".to_owned(),
+            ));
+        }
+        budget.0 += 1;
+        Ok(BlockingRequest(self))
+    }
+
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.stop.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stop.store(true, core::sync::atomic::Ordering::Release);
+        if let Some(owner) = &self.ctx.chain.active_tip_wait {
+            owner.wake_waiters();
+        }
     }
 
     /// Returns the shared context used by the handlers.
@@ -61,14 +94,33 @@ impl Handler {
     /// INVARIANT: a method that answers is a manifest row, and a manifest
     ///   row with an arm never returns method-not-found.
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        let Some(handler) = crate::registry::REGISTRY
+        let row = crate::registry::REGISTRY
             .iter()
-            .find(|row| row.entry.name == method)
-            .and_then(|row| row.handler)
+            .find(|row| row.entry.name == method);
+        let Some((row, handler)) = row.and_then(|row| row.handler.map(|handler| (row, handler)))
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
-        handler(&self.ctx, params)
+        let _blocking = row
+            .execution
+            .is_blocking(params)
+            .then(|| self.reserve_blocking_request())
+            .transpose()?;
+        let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
+        match handler {
+            crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
+            crate::registry::Dispatch::Cancellable(handler) => {
+                handler(&self.ctx, params, &cancellation)
+            }
+        }
+    }
+}
+
+pub(crate) struct BlockingRequest<'a>(&'a Handler);
+
+impl Drop for BlockingRequest<'_> {
+    fn drop(&mut self) {
+        self.0.blocking_requests.lock().0 -= 1;
     }
 }
 

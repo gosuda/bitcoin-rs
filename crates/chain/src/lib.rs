@@ -25,6 +25,8 @@ pub mod regtest_fixture;
 mod reorg;
 /// Best-tip snapshot type.
 mod tip;
+/// Read-only active-tip notification contract.
+mod tip_wait;
 /// One transition domain split into mutation and stable-read roles.
 mod transition;
 /// In-memory block tree.
@@ -52,6 +54,7 @@ pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
 pub use tip::TipSnapshot;
+pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,
 };

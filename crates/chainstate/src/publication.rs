@@ -11,7 +11,11 @@ pub(super) fn publish_applied(
     tip: &TipSnapshot,
     kind: crate::events::HintKind,
 ) {
-    handles.applied_tip.store(Some(Arc::new(tip.clone())));
+    {
+        let _gate = handles.tip_notification.gate.lock();
+        handles.applied_tip.store(Some(Arc::new(tip.clone())));
+        handles.tip_notification.changed.notify_all();
+    }
     handles.chain_events.record(kind, tip.height, tip.hash);
 }
 

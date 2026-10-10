@@ -1,5 +1,8 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+use bitcoin_rs_chain::ActiveTipWait as _;
 
 use bitcoin_rs_chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
@@ -97,8 +100,43 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let next = mined_child(first.block_hash(), 2)?;
     let next_hash = Hash256::from(next.block_hash());
 
+    let observer = handles.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&stop));
+    let (answer_tx, answer_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        answer_tx.send(observer.wait_for_tip(
+            bitcoin_rs_chain::TipWaitCondition::Changed(Some(applied_hash)),
+            None,
+            &cancellation,
+        ))
+    });
+    // Existing private Condvar observation proves the predicate checked the
+    // starting tip and parked before the failed transition. There is no RPC
+    // deadline that could let this waiter complete before apply_block runs.
+    let registration_deadline = Instant::now() + Duration::from_secs(2);
+    while handles.tip_notification.changed.notify_all() == 0 {
+        assert!(Instant::now() < registration_deadline, "waiter must park");
+        std::thread::yield_now();
+    }
     let outcome = handles.apply_block(&next, None);
+    let pending = answer_rx.recv_timeout(Duration::from_millis(30));
+    let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
+    stop.store(true, Ordering::Release);
+    handles.wake_waiters();
+    let observed = match pending {
+        Ok(answer) => answer,
+        Err(_) => answer_rx.recv_timeout(Duration::from_secs(2))?,
+    };
+    waiter
+        .join()
+        .map_err(|_| std::io::Error::other("tip observer panicked"))??;
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
+    assert!(
+        remained_pending,
+        "failed persistence must leave the waiter pending"
+    );
+    assert_eq!(observed.map(|tip| tip.hash), Some(applied_hash));
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
         Some(applied_hash),

@@ -2,13 +2,11 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{ChainWork, NodeStatus};
 use bitcoin_rs_primitives::{AssumeUtxoData, Block, Hash256, Network};
 use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole};

@@ -225,6 +225,8 @@ pub struct ChainHandles {
     pub chain_tip: TipReader,
     /// Best fully-applied block tip. Read-only: only Chainstate publishes.
     pub applied_tip: TipReader,
+    /// Authoritative applied-tip observation, implemented by Chainstate.
+    pub active_tip_wait: Option<Arc<dyn bitcoin_rs_chain::ActiveTipWait>>,
     /// Chainstate-owned synchronization progress, including the
     /// process-wide initial-block-download latch shared with P2P so both
     /// surfaces answer identically.
@@ -480,6 +482,7 @@ impl ChainHandles {
         Self {
             chain_tip,
             applied_tip,
+            active_tip_wait: None,
             progress,
             closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
                 false,
@@ -1442,6 +1445,7 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: TipReader::new(Arc::clone(&chain_tip)),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
+                active_tip_wait: None,
                 progress,
                 blocks: BlockLogReader::fixture_empty(),
                 utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)),
@@ -1989,6 +1993,7 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: chain_tip.clone(),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
+                active_tip_wait: None,
                 chain_transition: bitcoin_rs_chain::TransitionDomain::new().stable_read(),
                 progress: bitcoin_rs_chain::ChainProgressReader::new(
                     chain_tip,

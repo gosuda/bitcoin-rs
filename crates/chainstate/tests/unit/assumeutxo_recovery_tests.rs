@@ -1,9 +1,11 @@
 //! RCV-02/04 and ARCH-07b: root-selected snapshot recovery with real storage.
 use super::*;
 use crate::assumeutxo::{DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL, HistoricalAdvance};
+use arc_swap::ArcSwapOption;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
 use bitcoin_rs_storage::{FjallStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore};
+use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
 
