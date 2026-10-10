@@ -1274,3 +1274,125 @@ fn table_choice_is_half_even_when_new_health_is_bad_and_selection_work_is_bounde
         "recovery has no hard failure delay"
     );
 }
+
+fn core_mapped_alias() -> SocketAddr {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
+            .expect("actual Core identity vectors");
+    let rows = data["rows"].as_array().expect("rows");
+    let row = |address: &str| {
+        rows.iter()
+            .find(|row| {
+                row["key_label"] == "hash-int32-1"
+                    && row["address"] == address
+                    && row["port"] == 8333
+                    && row["source"] == "1.1.1.1"
+            })
+            .expect("Core identity row")
+    };
+    assert_eq!(
+        row("8.8.8.8")["endpoint_key_hex"],
+        row("::ffff:8.8.8.8")["endpoint_key_hex"]
+    );
+    let alias: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("mapped endpoint");
+    assert_eq!(endpoint_key(alias), endpoint_key(target()));
+    alias
+}
+
+#[test]
+fn mapped_alias_manual_health_and_refresh_use_the_known_core_identity() {
+    let alias = core_mapped_alias();
+    let book = oracle_book();
+    book.learn_dns("seed", &[target()], EPOCH - 2000);
+    book.state.lock().stored.records[0].failures = 2;
+    book.attempted(alias, false, EPOCH);
+    {
+        let manager = book.state.lock();
+        let entry = &manager.stored.records[0];
+        assert_eq!(
+            entry.last_attempt, EPOCH,
+            "manual alias must stamp the known peer"
+        );
+        assert_eq!(entry.failures, 2);
+        assert!(manager.pending.is_empty());
+    }
+    book.succeeded(alias, 73, EPOCH + 1);
+    {
+        let manager = book.state.lock();
+        assert_eq!(manager.stored.records.len(), 1);
+        let entry = &manager.stored.records[0];
+        assert!(entry.tried);
+        assert_eq!(
+            (
+                entry.last_success,
+                entry.last_attempt,
+                entry.failures,
+                entry.services
+            ),
+            (EPOCH + 1, EPOCH + 1, 0, 73)
+        );
+        assert_eq!(
+            entry.last_seen,
+            EPOCH - 2000,
+            "Good retains advertised time"
+        );
+        assert!(manager.pending.is_empty());
+        assert_indexes(&manager);
+    }
+    book.refresh_connected(&[alias], EPOCH + 2);
+    assert_eq!(book.state.lock().stored.records[0].last_seen, EPOCH + 2);
+}
+
+#[test]
+fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
+    let alias = core_mapped_alias();
+    let book = oracle_book();
+    book.learn_dns("seed", &[target()], EPOCH);
+    book.queued(target());
+    book.queued(alias);
+    assert_eq!(book.pending_count_excluding(&[]), 1);
+    assert_eq!(book.pending_count_excluding(&[alias]), 0);
+    assert_eq!(book.pending_count_excluding(&[target()]), 0);
+    assert_eq!(book.select(&[], &[], EPOCH, |_| true), None);
+    book.attempted(alias, false, EPOCH);
+    book.succeeded(alias, 9, EPOCH + 1);
+    assert_eq!(
+        book.pending_count_excluding(&[]),
+        1,
+        "manual health does not transfer or duplicate a claim"
+    );
+    book.unqueue(alias);
+    assert_eq!(book.pending_count_excluding(&[]), 0);
+    book.queued(alias);
+    book.unqueue(target());
+    assert_eq!(book.pending_count_excluding(&[]), 0);
+    assert_eq!(book.select(&[], &[], EPOCH + 2, |_| true), Some(target()));
+}
+
+#[test]
+fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
+    let alias = core_mapped_alias();
+    let book = oracle_book();
+    book.learn_dns("seed", &[target()], EPOCH);
+    assert_eq!(book.select(&[alias], &[], EPOCH, |_| true), None);
+    let different_port = SocketAddr::new(alias.ip(), 8334);
+    assert_eq!(
+        book.select(&[different_port], &[], EPOCH, |_| true),
+        Some(target()),
+        "inbound exclusion remains exact endpoint only"
+    );
+    assert_eq!(
+        book.select(&[], &[different_port], EPOCH, |_| true),
+        None,
+        "outbound diversity still excludes the group"
+    );
+    let linked: SocketAddr = "[2002:0808:0808::1]:8333"
+        .parse()
+        .expect("different IPv6 transport endpoint");
+    assert_ne!(endpoint_key(linked), endpoint_key(target()));
+    assert_eq!(
+        book.select(&[linked], &[], EPOCH, |_| true),
+        Some(target()),
+        "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
+    );
+}

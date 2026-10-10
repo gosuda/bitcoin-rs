@@ -170,7 +170,10 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: one P2P-owned `AddressBook` retains canonical
    endpoints, their original source and health, and up to eight distinct New
-   bucket references. Lookup tables are derived indexes, not another persisted
+   bucket references. IPv4-mapped IPv6 aliases are canonicalized at every book
+   endpoint boundary, including attempt/success, refresh, connected exclusion,
+   and pending claim/release/counting. Other linked IPv6 forms retain their
+   distinct endpoint identity; only their netgroup classification links IPv4. Lookup tables are derived indexes, not another persisted
    peer store. Placement follows Core 31.1 `GetNewBucket`, `GetTriedBucket` and
    `GetBucketPosition`: SHA256d with the persisted 256-bit secret, Core vector
    framing, endpoint wire bytes, and separate New/Tried position domains. There

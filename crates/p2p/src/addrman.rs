@@ -591,7 +591,8 @@ impl AddressBook {
         let mut manager = self.state.lock();
         let mut changed = false;
         for addr in active {
-            if let Some(index) = manager.by_addr.get(addr).copied() {
+            let addr = canonical(*addr);
+            if let Some(index) = manager.by_addr.get(&addr).copied() {
                 let entry = &mut manager.stored.records[index];
                 if now.saturating_sub(entry.last_seen) > 20 * 60 {
                     entry.last_seen = now;
@@ -633,6 +634,7 @@ impl AddressBook {
         now: u64,
         mut allowed: impl FnMut(SocketAddr) -> bool,
     ) -> Option<SocketAddr> {
+        let connected: HashSet<_> = connected.iter().copied().map(canonical).collect();
         let addresses: Vec<_> = {
             let manager = self.state.lock();
             manager
@@ -668,12 +670,15 @@ impl AddressBook {
         manager.select(&eligible, now)
     }
     pub(crate) fn queued(&self, addr: SocketAddr) {
+        let addr = canonical(addr);
         self.state.lock().pending.insert(addr);
     }
     pub(crate) fn unqueue(&self, addr: SocketAddr) {
+        let addr = canonical(addr);
         self.state.lock().pending.remove(&addr);
     }
     pub(crate) fn pending_count_excluding(&self, active: &[SocketAddr]) -> usize {
+        let active: HashSet<_> = active.iter().copied().map(canonical).collect();
         self.state
             .lock()
             .pending
@@ -682,6 +687,7 @@ impl AddressBook {
             .count()
     }
     pub(crate) fn attempted(&self, addr: SocketAddr, count_failure: bool, now: u64) {
+        let addr = canonical(addr);
         let mut manager = self.state.lock();
         let last_good = manager.last_good;
         if let Some(index) = manager.by_addr.get(&addr).copied() {
@@ -695,6 +701,7 @@ impl AddressBook {
         }
     }
     pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
+        let addr = canonical(addr);
         let mut manager = self.state.lock();
         manager.last_good = now;
         let Some(index) = manager.by_addr.get(&addr).copied() else {
