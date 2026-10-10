@@ -1219,6 +1219,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let mut next_dns = 0;
     while !maintenance.shutdown.load(Ordering::Acquire) {
         let now = crate::addrman::now();
+        maintenance.address_book.expire(now);
         if maintenance.network_active.load(Ordering::Acquire) {
             // DNS is only an input when the book lacks candidates. Disabling DNS
             // never disables selection from retained peer knowledge.

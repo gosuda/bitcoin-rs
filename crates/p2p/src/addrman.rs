@@ -138,6 +138,16 @@ fn prefix_group(ip: IpAddr) -> u64 {
 }
 
 impl Manager {
+    fn expire(&mut self, now: u64) {
+        let before = self.stored.records.len();
+        self.stored.records.retain(|entry| {
+            now.saturating_sub(entry.last_seen) <= STALE_SECS || self.pending.contains(&entry.addr)
+        });
+        if before != self.stored.records.len() {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     fn slot(&self, candidate: &Candidate, tried: bool) -> u64 {
         let mut hash = Sha256::new();
         hash.update(self.stored.secret);
@@ -165,6 +175,7 @@ impl Manager {
         seen: u64,
         now: u64,
     ) -> bool {
+        self.expire(now);
         let addr = canonical(addr);
         if !routable(addr, self.allow_local)
             || seen > now.saturating_add(600)
@@ -265,6 +276,10 @@ impl AddressBook {
             state: Mutex::new(manager),
             publication: Mutex::new(()),
         })
+    }
+
+    pub(crate) fn expire(&self, now: u64) {
+        self.state.lock().expire(now);
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -668,5 +683,30 @@ mod tests {
             fs::read(&temp).expect("read"),
             b"operator-owned stale temporary file"
         );
+    }
+    #[test]
+    fn a_populated_stale_book_can_bootstrap_and_reuse_source_quota_after_restart() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("peers.dat");
+        let book = AddressBook::open(Some(path.clone()), [1; 4], false);
+        for n in 1..200 {
+            book.learn_dns("seed", &[addr(n)], 10_000);
+        }
+        assert_eq!(book.len(), MAX_SOURCE_GROUP);
+        book.save();
+        let restored = AddressBook::open(Some(path), [1; 4], false);
+        restored.expire(10_001 + STALE_SECS);
+        assert_eq!(
+            restored.len(),
+            0,
+            "stale records cannot suppress DNS replenishment"
+        );
+        restored.learn_dns("seed", &[addr(201)], 10_001 + STALE_SECS);
+        assert_eq!(
+            restored.select(&[], 10_001 + STALE_SECS, |_| true),
+            Some(addr(201))
+        );
+        book.learn_dns("seed", &[addr(202)], 10_001 + STALE_SECS);
+        assert_eq!(book.len(), 1, "learn also releases a stale source quota");
     }
 }
