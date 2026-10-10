@@ -3406,8 +3406,15 @@ mod tests {
         maintenance.address_book = Arc::clone(&book);
         let anchor: SocketAddr = "8.8.0.1:8333".parse().expect("anchor");
         let same_as: SocketAddr = "9.9.0.1:8333".parse().expect("same ASN");
-        book.learn_dns("seed", &[anchor, same_as], 10_000);
+        book.learn_dns("seed", &[anchor], 10_000);
         book.succeeded(anchor, 9, 10_000);
+        // Promotion frees New before learning the same-AS peer: two fresh
+        // entries may otherwise collide in the keyed slot and drop that peer.
+        book.learn_dns("seed", &[same_as], 10_000);
+        assert_eq!(
+            book.select(&[], &[], 10_000, u64::MAX, |addr| addr == same_as),
+            Some(same_as)
+        );
         book.remember_anchors(&[anchor], 10_000);
         let mut anchors = book.take_restart_anchors(10_001).into();
         assert_eq!(
