@@ -77,16 +77,26 @@ fn scenario(kind: Kind) -> Result<()> {
             ));
         }
     }
-    assert!(
-        !seen(&peers[0], &low_id),
-        "below-filter transaction was announced"
-    );
-    assert_eq!(
-        node.rpc("getmempoolinfo", &json!([]))?["size"],
-        2,
-        "peer filters must not alter admission"
-    );
+    // Keep observing after successful deliveries through another complete
+    // native relay window (30-second ceiling plus polling allowance). Core uses
+    // an uncapped exponential clock; this is a finite observation there too,
+    // not a claim that Core has the same deadline or cannot relay later.
+    let observation_deadline = Instant::now() + Duration::from_secs(31);
+    loop {
+        assert!(
+            !seen(&peers[0], &low_id),
+            "below-filter transaction was announced"
+        );
+        if Instant::now() >= observation_deadline {
+            break;
+        }
+        for peer in &mut peers {
+            peer.pump(Duration::from_millis(20), &mut |_, _| {});
+            assert!(!peer.dropped, "relay observation peer disconnected");
+        }
+    }
     let info = node.rpc("getmempoolinfo", &json!([]))?;
+    assert_eq!(info["size"], 2, "peer filters must not alter admission");
     let minimum = bitcoin::Amount::from_btc(
         info["minrelaytxfee"]
             .as_f64()
