@@ -43,6 +43,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
 | `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers. |
+| `joinpsbts` | 0.12.0 | Core join semantics and paired shuffles, bounded to 256 sources, 16 MiB encoded input/output, 10000 aggregate inputs/outputs and 100000 map pairs. Shares the strict PSBT codec and its declared admission restrictions. |
 
 ### Implemented (unverified)
 
@@ -133,7 +134,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `descriptorprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
 | `fundrawtransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
 | `getprivatebroadcastinfo` | n/a | Private-broadcast store not implemented. |
-| `joinpsbts` | n/a | PSBT merge not implemented (combine/finalize only). |
 | `signrawtransactionwithkey` | n/a | Signing requires key material this process never holds. |
 | `submitpackage` | n/a | Aggregate CPFP and package RBF submission are intentionally unsupported; multi-row testmempoolaccept implements Core PackageTestAccept. See docs/policies/mempool-policy.md. |
 | `utxoupdatepsbt` | n/a | PSBT update from the UTXO set not implemented. |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 22, Implemented (unverified) 59, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 23, Implemented (unverified) 59, Extension 2, Disabled 0, Unimplemented 91 - total 175.
