@@ -122,6 +122,31 @@
   single typed representation on decode and an encoding copy. No wallet, signing authority, or parallel PSBT
   parser is introduced.
 
+- `joinpsbts` joins distinct unsigned transactions through the shared strict
+  PSBT codec. It requires two to 256 sources and admits at most 16 MiB of
+  aggregate encoded source bytes, 10,000 combined inputs/outputs and 100,000
+  retained map entries before result assembly. The shared encoder enforces
+  the same output ceilings. Limit failures are -8 and are declared deviations.
+- Join duplicate identity follows Core's complete unsigned `CTxIn`: prevout
+  and sequence, since scriptSig/witness are empty. A repeated prevout with
+  a different sequence is retained; identical inputs are refused even within
+  one source. Transaction version is the unsigned 32-bit maximum, floored at
+  one; locktime is the unsigned minimum.
+- Inputs and outputs are shuffled independently with each metadata map still
+  attached to its transaction entry. Core 31.1 clears ECDSA partial signatures,
+  final scriptSig and final script witness but retains Taproot signature
+  metadata subject to the shared codec's declared typed-signature restrictions,
+  including refusal of an explicit DEFAULT suffix rather than changing supplied
+  signature bytes. No signing is performed.
+  It also preserves Core's omission of global xpub/proprietary fields and
+  first-source precedence for conflicting global unknown keys. Per-input and
+  per-output proprietary/unknown metadata remain attached.
+- Join evidence belongs to `handlers::psbt_join::tests` and
+  `bin/bitcoin-rs/tests/psbt_join_process.rs`. The process comparisons let the
+  pinned Core parser decode both results and normalize only shuffle-dependent
+  transaction IDs, output positions and paired entry order. Metadata and
+  scalar fields remain compared; repeated calls exercise independent shuffles.
+
 ### `API-03`: REST dialect
 
 

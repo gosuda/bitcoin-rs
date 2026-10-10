@@ -11,7 +11,7 @@ use sonic_rs::Value;
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{chain, mempool, mining, network, tx, util};
+use crate::handlers::{chain, mempool, mining, network, psbt_join, tx, util};
 use crate::manifest::{CORE_VERSION, Entry, NO_WALLET, Status, SurfaceKind};
 
 /// Signature of one dispatch arm.
@@ -182,7 +182,7 @@ declare_rows! {
     "descriptorprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "fundrawtransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "getprivatebroadcastinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
-    "joinpsbts", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT merge not implemented (combine/finalize only).", "n/a", None;
+    "joinpsbts", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core join semantics and paired shuffles, bounded to 256 sources, 16 MiB encoded input/output, 10000 aggregate inputs/outputs and 100000 map pairs. Shares the strict PSBT codec and its declared admission restrictions.", "0.12.0", Some(psbt_join::joinpsbts);
     "signrawtransactionwithkey", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Signing requires key material this process never holds.", "n/a", None;
     "submitpackage", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Aggregate CPFP and package RBF submission are intentionally unsupported; multi-row testmempoolaccept implements Core PackageTestAccept. See docs/policies/mempool-policy.md.", "n/a", None;
     "utxoupdatepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT update from the UTXO set not implemented.", "n/a", None;
