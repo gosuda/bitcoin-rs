@@ -554,11 +554,15 @@ fn verify_script(
             if !script_sig.is_empty() {
                 return Err(invalid(ScriptErrCode::WitnessMalleated));
             }
-            if version == 1 && program.len() == 32 && flags.contains(VerifyFlags::TAPROOT) {
+            if version == 1 && program.len() == 32 {
                 // Bare Taproot follows the same scriptSig evaluation and
                 // witness-malleation checks as every native witness program.
                 // Wrapped v1 programs below retain their upgradeable meaning.
-                verify_taproot(program, witness, flags, checker)?;
+                // Core recognizes native v1/32 before its activation check;
+                // DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM does not apply here.
+                if flags.contains(VerifyFlags::TAPROOT) {
+                    verify_taproot(program, witness, flags, checker)?;
+                }
                 stack.clear();
                 stack
                     .push(ScriptItem::Num(1))
@@ -633,9 +637,8 @@ fn verify_witness_program(
     stack: &mut Stack,
 ) -> Result<(), ScriptError> {
     if version != 0 {
-        // Bare Taproot arrives here without TAPROOT; wrapped v1 and unknown
-        // versions stay spendable by consensus so future soft forks can define
-        // them. Policy discourages relaying these upgradeable programs.
+        // Wrapped v1 and unknown versions stay spendable by consensus so
+        // future soft forks can define them; policy discourages relaying them.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableWitnessProgram));
         }
@@ -822,6 +825,12 @@ fn verify_taproot_scriptpath(
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableTaprootVersion));
         }
+        return Ok(());
+    }
+
+    // Core's ExecuteWitnessScript checks OP_SUCCESS before initial stack
+    // limits, and success bypasses evaluation and the final stack checks.
+    if eval::tapscript_op_success(&script, flags)? {
         return Ok(());
     }
 

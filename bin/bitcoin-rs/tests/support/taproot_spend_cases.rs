@@ -8,6 +8,27 @@ use serde_json::json;
 
 #[test]
 fn native_taproot_spend_rules_match_pinned_core() {
+    compare_cases(
+        &fixture::funding_script(),
+        fixture::cases,
+        "taproot-spend-rules.json",
+    );
+}
+
+#[test]
+fn native_taproot_op_success_matches_pinned_core() {
+    compare_cases(
+        &fixture::success_funding_script(),
+        fixture::success_cases,
+        "taproot-op-success.json",
+    );
+}
+
+fn compare_cases(
+    script: &bitcoin::Script,
+    cases: fn(bitcoin::OutPoint, &bitcoin::TxOut) -> Vec<fixture::Case>,
+    artifact: &str,
+) {
     let mut core = super::start(Kind::Core);
     let mut node = bitcoin_rs_e2e::ProcessNode::spawn_with(
         Kind::BitcoinRs,
@@ -18,9 +39,8 @@ fn native_taproot_spend_rules_match_pinned_core() {
         },
     )
     .expect("native daemon");
-    let script = fixture::funding_script();
     let address =
-        bitcoin::Address::from_script(&script, bitcoin::Network::Regtest).expect("Taproot address");
+        bitcoin::Address::from_script(script, bitcoin::Network::Regtest).expect("Taproot address");
     let hashes = core
         .rpc("generatetoaddress", &json!([101, address.to_string()]))
         .expect("isolated coinbase funding");
@@ -41,11 +61,11 @@ fn native_taproot_spend_rules_match_pinned_core() {
         deserialize_hex(raw.as_str().expect("hex")).expect("reference decode");
     let coinbase = &block.txdata[0];
     let prevout = coinbase.output[0].clone();
-    assert_eq!(prevout.script_pubkey, script);
+    assert_eq!(prevout.script_pubkey.as_script(), script);
     let outpoint = bitcoin::OutPoint::new(coinbase.compute_txid(), 0);
     let mut differences = Vec::new();
     let mut evidence = Vec::new();
-    for case in fixture::cases(outpoint, &prevout) {
+    for case in cases(outpoint, &prevout) {
         let params = json!(["raw(51)", [serialize_hex(&case.tx)], false]);
         // Proposal validation accepts consensus-valid annexes without conflating
         // Core's mempool policy restrictions with its script verifier.
@@ -76,7 +96,7 @@ fn native_taproot_spend_rules_match_pinned_core() {
         json!(101)
     );
     std::fs::write(
-        node.evidence.join("taproot-spend-rules.json"),
+        node.evidence.join(artifact),
         serde_json::to_vec_pretty(&evidence).expect("evidence JSON"),
     )
     .expect("evidence");

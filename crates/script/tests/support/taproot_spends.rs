@@ -152,3 +152,86 @@ fn add_script_sig_cases(cases: &mut Vec<Case>, mut tx: Transaction, path: &str, 
         });
     }
 }
+
+fn success_tree() -> (TaprootSpendInfo, Vec<ScriptBuf>) {
+    let secp = Secp256k1::new();
+    let key = tree().0;
+    let mut large_push = vec![0x4d, 0x09, 0x02];
+    large_push.extend([0; 521]);
+    large_push.push(0x50);
+    let scripts = vec![
+        vec![0x50],
+        vec![0x6a, 0x50],
+        vec![0x50, 0x4c],
+        vec![0x4c, 0x50],
+        vec![0x01, 0x50, 0x75, 0x00],
+        vec![0x51],
+        large_push,
+        vec![0x4c],
+    ]
+    .into_iter()
+    .map(ScriptBuf::from_bytes)
+    .collect::<Vec<_>>();
+    let mut builder = TaprootBuilder::new();
+    for script in &scripts {
+        builder = builder
+            .add_leaf(3, script.clone())
+            .expect("balanced eight-leaf tree");
+    }
+    (
+        builder
+            .finalize(&secp, key.x_only_public_key().0)
+            .expect("complete tree"),
+        scripts,
+    )
+}
+
+pub(crate) fn success_funding_script() -> ScriptBuf {
+    ScriptBuf::new_p2tr_tweaked(success_tree().0.output_key())
+}
+
+pub(crate) fn success_cases(outpoint: OutPoint, prevout: &TxOut) -> Vec<Case> {
+    let (tree, scripts) = success_tree();
+    let mut cases = Vec::new();
+    for annex in [false, true] {
+        for (name, leaf, stack, accepted) in [
+            ("success-empty", 0, vec![], true),
+            ("success-false", 0, vec![vec![]], true),
+            ("success-dirty", 0, vec![vec![1], vec![1]], true),
+            ("success-large-element", 0, vec![vec![0; 521]], true),
+            ("success-large-stack", 0, vec![vec![]; 1001], true),
+            ("success-after-return", 1, vec![], true),
+            ("success-before-malformed", 2, vec![], true),
+            ("malformed-before-success-byte", 3, vec![], false),
+            ("pushed-success-byte", 4, vec![], false),
+            ("ordinary-large-element", 5, vec![vec![0; 521]], false),
+            ("ordinary-large-stack", 5, vec![vec![]; 1001], false),
+            ("success-after-large-push", 6, vec![], true),
+            ("malformed-no-success", 7, vec![], false),
+            ("success-bad-control", 0, vec![], false),
+        ] {
+            let script = &scripts[leaf];
+            let mut control = tree
+                .control_block(&(script.clone(), LeafVersion::TapScript))
+                .expect("known leaf")
+                .serialize();
+            if name == "success-bad-control" {
+                control[1] ^= 1;
+            }
+            let mut witness = stack;
+            witness.push(script.to_bytes());
+            witness.push(control);
+            if annex {
+                witness.push(vec![0x50, 0xab]);
+            }
+            let mut tx = template(outpoint, prevout);
+            tx.input[0].witness = Witness::from_slice(&witness);
+            cases.push(Case {
+                name: format!("{name}{}", if annex { "-annex" } else { "" }),
+                tx,
+                accepted,
+            });
+        }
+    }
+    cases
+}

@@ -123,6 +123,15 @@ fn inactive_taproot_and_wrapped_v1_keep_their_witness_rules() {
     let mut tx = fixture::cases(outpoint(), &prevout).remove(0).tx;
     tx.input[0].witness = bitcoin::Witness::from_slice(&[vec![0_u8]]);
     assert_eq!(prepared(&tx, &prevout, VerifyFlags::WITNESS), Ok(true));
+    assert_eq!(
+        prepared(
+            &tx,
+            &prevout,
+            VerifyFlags::WITNESS.union(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM)
+        ),
+        Ok(true),
+        "recognized native Taproot is inactive, not an unknown witness program"
+    );
     // No witness rules are active; neither annex nor Schnorr encoding is consulted.
     tx.input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x00]);
     assert_eq!(prepared(&tx, &prevout, VerifyFlags::NONE), Ok(true));
@@ -146,4 +155,74 @@ fn inactive_taproot_and_wrapped_v1_keep_their_witness_rules() {
         Ok(true),
         "wrapped v1 is not native Taproot"
     );
+    assert_eq!(
+        prepared(
+            &tx,
+            &wrapped,
+            VerifyFlags::MANDATORY.union(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM)
+        ),
+        Err(ScriptError::Invalid {
+            code: ScriptErrCode::DiscourageUpgradableWitnessProgram
+        }),
+        "wrapped v1 still follows upgradeable-witness policy"
+    );
+    let mut unknown = prevout;
+    unknown.script_pubkey = bitcoin::ScriptBuf::from_bytes([vec![0x51, 20], vec![1; 20]].concat());
+    tx.input[0].script_sig = bitcoin::ScriptBuf::new();
+    assert_eq!(
+        prepared(
+            &tx,
+            &unknown,
+            VerifyFlags::WITNESS.union(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM)
+        ),
+        Err(ScriptError::Invalid {
+            code: ScriptErrCode::DiscourageUpgradableWitnessProgram
+        }),
+        "v1 with another program size remains upgradeable"
+    );
+}
+
+#[test]
+fn op_success_overrides_stack_limits_and_final_truth_checks() {
+    let prevout = bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(100_000),
+        script_pubkey: fixture::success_funding_script(),
+    };
+    let mut mismatches = Vec::new();
+    for case in fixture::success_cases(outpoint(), &prevout) {
+        let result = prepared(&case.tx, &prevout, VerifyFlags::MANDATORY);
+        if result.is_ok() != case.accepted {
+            mismatches.push(format!("{}: {:?}", case.name, result));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "OP_SUCCESS mismatches: {}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn op_success_policy_rejection_precedes_stack_limits() {
+    let prevout = bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(100_000),
+        script_pubkey: fixture::success_funding_script(),
+    };
+    for case in fixture::success_cases(outpoint(), &prevout)
+        .into_iter()
+        .filter(|case| case.accepted)
+    {
+        assert_eq!(
+            prepared(
+                &case.tx,
+                &prevout,
+                VerifyFlags::MANDATORY.union(VerifyFlags::DISCOURAGE_OP_SUCCESS)
+            ),
+            Err(ScriptError::Invalid {
+                code: ScriptErrCode::DiscourageOpSuccess
+            }),
+            "{}",
+            case.name
+        );
+    }
 }
