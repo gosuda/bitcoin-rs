@@ -52,7 +52,9 @@ pub struct P2pServiceConfig {
     pub listen_addrs: Vec<SocketAddr>,
     /// Network message-start bytes.
     pub magic: Magic,
-    /// Auxiliary peer-book file. None keeps discovery in memory.
+    /// Auxiliary peer-book base/legacy path. The owner adds the P2P magic to
+    /// the filename and imports a valid matching legacy file without deleting
+    /// it. None keeps discovery in memory.
     pub address_book_path: Option<std::path::PathBuf>,
     /// Permit private/local peer addresses only on isolated regtest networks.
     pub allow_local_addresses: bool,
@@ -1216,7 +1218,15 @@ fn park_automatic_dial(
 
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
-    let mut next_dns = 0;
+    // Give a populated book one cooldown to establish a connection before
+    // asking seeds for replacements. Pending/failed dials are not successes.
+    let mut next_dns = Instant::now()
+        + if maintenance.address_book.len() < 64 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(60)
+        };
+    let mut next_save = Instant::now() + Duration::from_mins(15);
     while !maintenance.shutdown.load(Ordering::Acquire) {
         let tick_time = SystemTime::now();
         let now = tick_time
@@ -1238,10 +1248,15 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
         maintenance.address_book.refresh_connected(&ready, now);
         maintenance.address_book.expire(now);
         if maintenance.network_active.load(Ordering::Acquire) {
-            // DNS is only an input when the book lacks candidates. Disabling DNS
-            // never disables selection from retained peer knowledge.
-            if maintenance.address_book.len() < 64 && now >= next_dns {
-                next_dns = now.saturating_add(60);
+            // A fresh but unreachable book must not permanently suppress seed
+            // recovery. Retained candidates remain usable with DNS disabled.
+            if dns_recovery_due(
+                maintenance.address_book.len(),
+                ready.len(),
+                maintenance.target,
+                Instant::now(),
+                &mut next_dns,
+            ) {
                 for seed in &maintenance.seeds {
                     match crate::peer::DnsResolver::resolve(&resolver, seed) {
                         Ok(addresses) => maintenance.address_book.learn_dns(seed, &addresses, now),
@@ -1251,12 +1266,33 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             }
             queue_address_candidates(maintenance, now, tick_time);
         }
-        maintenance.address_book.save();
+        save_address_book_if_due(&maintenance.address_book, Instant::now(), &mut next_save);
         if wait_for_shutdown(&maintenance.shutdown, Duration::from_secs(1)) {
             break;
         }
     }
     maintenance.address_book.save();
+}
+
+fn dns_recovery_due(
+    book_len: usize,
+    ready: usize,
+    target: usize,
+    tick: Instant,
+    next: &mut Instant,
+) -> bool {
+    if tick < *next || (book_len >= 64 && ready >= target) {
+        return false;
+    }
+    *next = tick + Duration::from_secs(60);
+    true
+}
+
+fn save_address_book_if_due(book: &crate::addrman::AddressBook, tick: Instant, next: &mut Instant) {
+    if tick >= *next {
+        *next = tick + Duration::from_mins(15);
+        book.save();
+    }
 }
 
 /// Fill the automatic deficit once. Address-book claims cover queued, parked,
@@ -1848,6 +1884,75 @@ mod tests {
             },
             rx,
         )
+    }
+
+    #[test]
+    fn fresh_unreachable_book_reseeds_on_a_bounded_cooldown() {
+        let tick = Instant::now();
+        let mut next = tick + Duration::from_secs(60);
+        assert!(!dns_recovery_due(64, 0, 8, tick, &mut next));
+        assert!(dns_recovery_due(
+            64,
+            0,
+            8,
+            tick + Duration::from_secs(60),
+            &mut next
+        ));
+        assert!(!dns_recovery_due(
+            64,
+            0,
+            8,
+            tick + Duration::from_secs(61),
+            &mut next
+        ));
+        assert!(!dns_recovery_due(
+            64,
+            8,
+            8,
+            tick + Duration::from_secs(120),
+            &mut next
+        ));
+        assert!(dns_recovery_due(
+            64,
+            7,
+            8,
+            tick + Duration::from_secs(120),
+            &mut next
+        ));
+        assert_eq!(next, tick + Duration::from_secs(180));
+    }
+
+    #[test]
+    fn auxiliary_save_interval_retains_immediate_explicit_save() {
+        let dir = tempfile::tempdir().expect("dir");
+        let base = dir.path().join("peers.dat");
+        let book = crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true);
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        book.learn_dns("seed", &[addr], 10_000);
+        let tick = Instant::now();
+        let mut next = tick + Duration::from_mins(15);
+        save_address_book_if_due(&book, tick, &mut next);
+        assert_eq!(
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
+            0
+        );
+        save_address_book_if_due(&book, tick + Duration::from_mins(15), &mut next);
+        assert_eq!(
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
+            1
+        );
+        book.expire(10_001 + 30 * 24 * 60 * 60);
+        save_address_book_if_due(&book, tick + Duration::from_secs(901), &mut next);
+        assert_eq!(
+            crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
+            1
+        );
+        book.save();
+        assert_eq!(
+            crate::addrman::AddressBook::open(Some(base), [1; 4], true).len(),
+            0,
+            "shutdown and anchor-consumption barriers bypass the periodic throttle"
+        );
     }
 
     #[test]

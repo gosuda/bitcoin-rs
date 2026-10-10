@@ -199,6 +199,7 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
  "bytes",
  "crossbeam-channel",
  "hashbrown",

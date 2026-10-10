@@ -69,7 +69,7 @@ fn dns_disabled_restart_reconnects_to_a_gossiped_peer() -> Result<(), Error> {
     )?;
     drop(gossip);
     let datadir = learner.stop_keep_datadir()?;
-    assert!(datadir.path().join("node/peers.dat").is_file());
+    assert!(datadir.path().join("node/peers-fabfb5da.dat").is_file());
     let mut restarted = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options, datadir)?;
     restarted.wait_for(
         "persisted outbound connection",

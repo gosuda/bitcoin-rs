@@ -1411,7 +1411,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         );
                     }
                     crate::Message::GetAddr
-                        if !answered_getaddr && lease.role().relays_transactions() =>
+                        if lease.is_inbound()
+                            && !answered_getaddr
+                            && lease.role().relays_transactions() =>
                     {
                         answered_getaddr = true;
                         if let Some(book) = &shared.address_book {
@@ -3295,6 +3297,38 @@ mod address_tests {
     use super::*;
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+
+    #[test]
+    fn outbound_wire_getaddr_never_serves_the_address_book() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        book.learn_dns(
+            "seed",
+            &[SocketAddr::from(([127, 0, 0, 2], 8333))],
+            crate::addrman::now(),
+        );
+        shared.address_book = Some(book);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let lease = crate::PeerLease::new(sender);
+        table.register(source, lease.clone());
+        let mut input = Vec::new();
+        for _ in 0..2 {
+            crate::wire::write_message(&mut input, shared.magic, &Message::GetAddr).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        assert!(
+            !receiver
+                .try_iter()
+                .any(|message| matches!(message, Message::Addr(_) | Message::AddrV2(_))),
+            "an outbound peer cannot query our address book"
+        );
+    }
 
     #[test]
     fn wire_address_messages_share_one_book_and_getaddr_is_once_per_connection() {

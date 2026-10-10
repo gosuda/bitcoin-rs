@@ -170,7 +170,16 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: automatic outbound selection uses one persistent
    P2P-owned address book (`addrman.rs`, `service.rs`). DNS seeds are bootstrap
-   input; retained candidates are selected even with DNS disabled. Successful
+   input; retained candidates are selected even with DNS disabled. A populated
+   book gets 60 seconds to connect before a remaining ready-outbound deficit
+   permits DNS recovery, with at most one seed pass per 60 seconds. DNS may
+   replace only same-source, unclaimed candidates not attempted in the past
+   minute: never-success entries need three failures; previously successful
+   entries need ten failures and over a week without success. These thresholds
+   adapt Core's `IsTerrible` health criteria, not its tried-bucket eviction
+   algorithm. Retirement occurs only when a fresh admissible replacement can
+   occupy a slot; DNS-disabled nodes retain failed candidates for recovery.
+   Successful
    automatic outbound handshakes promote new candidates only when their target
    tried slot is vacant; a collision retains the candidate in the new set. The
    book has 3,072 new and 1,024 tried keyed slots and retains at most 64 entries
@@ -179,12 +188,24 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    and backs off failed attempts. Prefix
    grouping is IPv4 /16 and IPv6 /32 (IPv4-mapped IPv6 is canonicalized).
    Full-relay peers may contribute at most 32 addresses initially, replenished
-   one per 10 seconds; `getaddr` rotates through at most 32 fresh retained IP addresses once
-   per connection. `addrv2` non-IP families are ignored because no corresponding
+   one per 10 seconds; `getaddr` is answered once per inbound full-relay
+   connection, never for an outbound connection. One shared cache of at most 32
+   IP addresses remains byte-stable for 24 hours, including across reconnects
+   and new discoveries; expiration rotates the sample and excludes stale
+   records. The fixed lifetime differs from Core's randomized 21-27 hours. `addrv2` non-IP families are ignored because no corresponding
    transports exist. Block-relay-only peers neither learn nor serve addresses.
-   The auxiliary, versioned, checksummed `peers.dat` is atomically published;
-   corruption is preserved and disables writes to that file for the run while
-   discovery continues in memory. Feeler/collision probing, ASMap grouping and
+   The auxiliary, versioned, checksummed book uses a filename scoped to the
+   actual P2P magic: the configured base `peers.dat` becomes
+   `peers-<8 hexadecimal magic digits>.dat`, including custom/drynet magics.
+   A valid scoped file wins. If absent, a validated same-magic legacy base file
+   is imported and retained untouched; a valid foreign-magic base is retained
+   while a separate scoped book is created. Corrupt/unknown legacy or scoped
+   files are preserved and disable publication for the run while discovery
+   continues in memory. Publication uses exclusive random temporary files,
+   bounded name-collision retry, file sync, atomic installation and the storage
+   owner's platform directory-sync policy. First installation never overwrites
+   a destination that appeared since open. Dirty auxiliary state is saved every
+   15 minutes and at shutdown; explicit durability barriers remain immediate. Feeler/collision probing, ASMap grouping and
    restart anchors remain follow-ups under #1387; no complete Core AddrMan
    parity is claimed.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
