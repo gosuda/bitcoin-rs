@@ -494,7 +494,7 @@ mod registry_tests {
 
     #[test]
     #[expect(clippy::expect_used)]
-    fn named_binding_preserves_method_boundaries() {
+    fn named_binding_preserves_missing_output_boundaries() {
         let handler = Handler::new(Arc::new(Context::new()));
         for params in [
             json!({"options": {}}),
@@ -526,25 +526,5 @@ mod registry_tests {
             .expect_err("name validation precedes missing outputs");
         assert_eq!(error.code(), -8);
         assert_eq!(error.to_string(), "Unknown named parameter extra");
-        // The prerequisite must not newly recognize parameters whose semantics
-        // are implemented in the later raw-transaction/PSBT conversion slice.
-        for (method, params, name) in [
-            (
-                "createrawtransaction",
-                json!({"inputs": [], "outputs": {}, "version": 1}),
-                "version",
-            ),
-            (
-                "decoderawtransaction",
-                json!({"hexstring": "zz", "iswitness": false}),
-                "iswitness",
-            ),
-        ] {
-            let error = handler
-                .dispatch(method, &params)
-                .expect_err("unsupported name");
-            assert_eq!(error.code(), -8);
-            assert_eq!(error.to_string(), format!("Unknown named parameter {name}"));
-        }
     }
 }

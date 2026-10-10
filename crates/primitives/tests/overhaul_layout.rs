@@ -128,6 +128,37 @@ fn impossible_counts_are_rejected_before_allocation() {
     ));
 }
 
+/// Core 31.1 createrawtransaction([], [{"bcrt1pfeesnyr2tx":"0.00000001"}])
+/// returns this legacy, zero-input transaction. converttopsbt accepts it in
+/// legacy mode and rejects it when iswitness is explicitly true.
+#[test]
+fn explicit_legacy_mode_decodes_incomplete_transactions_without_changing_consensus() {
+    let bytes = [
+        2, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0x51, 2, 0x4e, 0x73, 0, 0, 0, 0,
+    ];
+    assert!(ParsedTransaction::parse_exact(&bytes).is_err());
+    let parsed = ParsedTransaction::parse_exact_with_witness(&bytes, false)
+        .expect("Core legacy incomplete transaction");
+    let tx = parsed.materialize();
+    assert_eq!(tx.inputs, Vec::new());
+    assert_eq!(tx.outputs.len(), 1);
+    assert_eq!(tx.outputs[0].value.to_sat(), 1);
+    assert_eq!(
+        tx.outputs[0].script_pubkey.as_slice(),
+        &[0x51, 2, 0x4e, 0x73]
+    );
+    assert_eq!(consensus_bytes(&tx), bytes);
+    for len in 0..bytes.len() {
+        assert!(ParsedTransaction::parse_exact_with_witness(&bytes[..len], false).is_err());
+    }
+    let mut trailing = bytes.to_vec();
+    trailing.push(0);
+    assert!(matches!(
+        ParsedTransaction::parse_exact_with_witness(&trailing, false),
+        Err(DecodeError::TrailingBytes { remaining: 1 })
+    ));
+}
+
 /// Non-canonical compact-size encodings are rejected with `Varint`.
 #[test]
 fn noncanonical_varints_are_rejected() {

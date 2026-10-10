@@ -55,9 +55,24 @@
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
-  `deriveaddresses`, `decodescript`, `scantxoutset`, `combinepsbt`, and `finalizepsbt`
+  `deriveaddresses`, `decodescript`, `scantxoutset`, `createpsbt`,
+  `converttopsbt`, `combinepsbt`, and `finalizepsbt`
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
+- `createpsbt` and `createrawtransaction` share the native unsigned-transaction
+  constructor: exact decimal BTC amounts, ordered outputs, version and
+  sequence defaults, and duplicate-output checks. Creation preserves duplicate
+  inputs without admitting the transaction. The JSON boundary preserves number
+  spelling until the method parses it; amounts are never rounded through f64.
+- `converttopsbt` and `decoderawtransaction` share the native parser's explicit
+  legacy/witness modes and Core's script-sanity selection. Conversion refuses
+  scriptSig/witness data with `-22` unless `permitsigdata` allows discarding it.
+  These four helpers return concise `-1` arity errors instead of full Core
+  usage help. Direct-call hex/transaction construction is bounded by the same
+  16 MiB budget as HTTP request bodies; no wallet or chain lookup is involved.
+  PSBT creation and conversion also enforce the shared PSBT admission and
+  library limits below, checking item counts before allocating PSBT maps.
+  Raw creation does not inherit the PSBT map-count limit.
 
 - Core script JSON has one projection owner in `tx_render.rs`: decimal short
   pushes, malformed-instruction markers, checksummed inferred descriptors,
@@ -94,7 +109,7 @@
   metadata for decode, analyze and join. Already
   decoded CompactSize types/subtypes and BIP373 fields receive Core checks.
 - PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
-  maps to 10,000, and retained map entries to 100,000. Creators can check
+  maps to 10,000, and retained map entries to 100,000. Creators check
   counts before map allocation. Serialized bytes are checked before library
   input decoding; structural checks occur after that decode and do not
   claim to prevent its intermediate allocations. Combine checks aggregate

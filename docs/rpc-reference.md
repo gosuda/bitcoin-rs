@@ -30,6 +30,10 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
 | `sendrawtransaction` | 0.4.0 | Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported. |
 | `testmempoolaccept` | 0.4.0 | Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported. |
+| `decoderawtransaction` | 0.4.0 | Uses Core legacy/witness selection. Arity errors return -1 with concise text instead of full usage help; direct hex input is capped at the 16 MiB RPC body budget. Script descriptors share decodescript's documented fallback (crates/rpc/src/handlers/tx.rs). |
+| `createrawtransaction` | 0.4.0 | Shares exact amount, input/output and sequence parsing with createpsbt. Arity errors return -1 with concise text instead of full usage help; direct transaction construction uses the 16 MiB RPC body budget (crates/rpc/src/handlers/tx.rs). |
+| `createpsbt` | 0.12.0 | Creates unsigned PSBTs without wallet or key access through the shared strict PSBT codec and its byte/map/library limits. Arity errors return -1 with concise text instead of full usage help; direct transaction construction uses the 16 MiB RPC body budget (crates/rpc/src/handlers/tx.rs, crates/rpc/src/psbt.rs). |
+| `converttopsbt` | 0.12.0 | Converts transactions to unsigned PSBTs through the shared strict codec and its byte/map/library limits, discarding scriptSig/witness only when permitsigdata is true. Arity errors return -1 with concise text instead of full usage help; direct hex input is capped at the 16 MiB RPC body budget (crates/rpc/src/handlers/tx.rs, crates/rpc/src/psbt.rs). |
 | `combinepsbt` | 0.4.0 | Shared strict library PSBT codec enforces EOF, non-witness UTXO correspondence, Core null-witness/CompactSize/MuSig2 rules, and 16 MiB encoded / 10000 item / 100000 map-entry bounds (aggregate before combine merges). Malformed inputs retain the existing -32602 boundary rather than Core -22; library read limits (including 4000000-byte global maps), typed-field/finalization restrictions explicit DEFAULT/unknown Taproot signature suffix and uncompressed BIP32 origin rejection, and canonical TapTree sibling ordering remain (Core-equivalent commitment, not identical original byte/JSON order). |
 | `finalizepsbt` | 0.4.0 | Shared strict library PSBT codec enforces EOF, non-witness UTXO correspondence, Core null-witness/CompactSize/MuSig2 rules, and 16 MiB encoded / 10000 item / 100000 map-entry bounds (aggregate before combine merges). Malformed inputs retain the existing -32602 boundary rather than Core -22; library read limits (including 4000000-byte global maps), typed-field/finalization restrictions explicit DEFAULT/unknown Taproot signature suffix and uncompressed BIP32 origin rejection, and canonical TapTree sibling ordering remain (Core-equivalent commitment, not identical original byte/JSON order). |
 | `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md. |
@@ -64,8 +68,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `gettxout` | 0.4.0 |  |
 | `gettxoutproof` | 0.4.0 |  |
 | `verifytxoutproof` | 0.4.0 |  |
-| `decoderawtransaction` | 0.4.0 |  |
-| `createrawtransaction` | 0.4.0 |  |
 | `getmempoolentry` | 0.4.0 |  |
 | `getrawmempool` | 0.4.0 |  |
 | `getmempoolancestors` | 0.4.0 |  |
@@ -127,8 +129,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
 | `analyzepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
 | `combinerawtransaction` | n/a | Raw-transaction combination not implemented. |
-| `converttopsbt` | n/a | PSBT creation not implemented. |
-| `createpsbt` | n/a | PSBT creation not implemented. |
 | `decodepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
 | `descriptorprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
 | `fundrawtransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 22, Implemented (unverified) 59, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 26, Implemented (unverified) 57, Extension 2, Disabled 0, Unimplemented 90 - total 175.

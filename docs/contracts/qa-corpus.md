@@ -85,6 +85,10 @@ end-state evidence roles.
     before the lock time, at the same check position as Core and rust-bitcoin.
 - A seed that decodes to neither verdict — an untyped error or a panic —
   fails the gate regardless of `verdicts.json` presence.
+- The consensus entry retains witness-aware decoding. RPC helpers may request
+  explicit legacy interpretation of an incomplete transaction through
+  `ParsedTransaction::parse_exact_with_witness`; that mode reuses the same
+  layout parser and bounds, and does not change the consensus corpus verdict.
 
 ### `QAC-03`: Importer acquisition and provenance publication
 

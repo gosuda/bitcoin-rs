@@ -324,7 +324,7 @@ impl<'a> ParsedTransaction<'a> {
     pub(crate) fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
-        let parsed = Self::parse_at(image, &mut cursor)?;
+        let parsed = Self::parse_at(image, &mut cursor, true)?;
         let consumed = usize::try_from(cursor)
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
         *reader = &image[consumed..];
@@ -334,8 +334,20 @@ impl<'a> ParsedTransaction<'a> {
     /// Parses one transaction that must occupy exactly `bytes`; trailing
     /// bytes are a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
+        Self::parse_exact_with_witness(bytes, true)
+    }
+
+    /// Parses exactly one transaction with explicit BIP144 interpretation.
+    ///
+    /// `allow_witness = false` reads the legacy serialization even when it
+    /// starts with zero inputs. RPC conversion of incomplete transactions
+    /// needs that form; consensus and block parsing retain witness support.
+    pub fn parse_exact_with_witness(
+        bytes: &'a [u8],
+        allow_witness: bool,
+    ) -> Result<Self, DecodeError> {
         let mut cursor = 0_u64;
-        let parsed = Self::parse_at(bytes, &mut cursor)?;
+        let parsed = Self::parse_at(bytes, &mut cursor, allow_witness)?;
         let consumed = usize::try_from(cursor)
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
         if consumed != bytes.len() {
@@ -348,7 +360,11 @@ impl<'a> ParsedTransaction<'a> {
 
     /// Parses one transaction starting at `*cursor` inside `image` and
     /// advances `*cursor` past it; spans are absolute offsets into `image`.
-    fn parse_at(image: &'a [u8], cursor: &mut u64) -> Result<Self, DecodeError> {
+    fn parse_at(
+        image: &'a [u8],
+        cursor: &mut u64,
+        allow_witness: bool,
+    ) -> Result<Self, DecodeError> {
         let mut cur = ImageCursor {
             image,
             pos: *cursor,
@@ -359,7 +375,7 @@ impl<'a> ParsedTransaction<'a> {
         let (mut input_count_value, mut input_count_span) = cur.read_compact()?;
         let mut output_count_override: Option<(u64, ByteSpan)> = None;
         let mut segwit = false;
-        if input_count_value == 0 {
+        if input_count_value == 0 && allow_witness {
             // Core treats a zero flag as the legacy empty-input/empty-output form,
             // while 0x01 is the BIP144 segwit marker; any other value is rejected.
             let (flag, flag_span) = cur.read_u8()?;
@@ -697,7 +713,7 @@ impl<'a> ParsedBlock<'a> {
         let mut tx_spans = Vec::new();
         let mut txs = Vec::new();
         for _ in 0..tx_count_value {
-            let tx = ParsedTransaction::parse_at(image, &mut cur.pos)?;
+            let tx = ParsedTransaction::parse_at(image, &mut cur.pos, true)?;
             tx_spans.push(tx.span());
             txs.push(tx);
         }
