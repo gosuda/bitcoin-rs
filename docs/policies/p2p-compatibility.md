@@ -76,8 +76,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. The shared inbound channel is bounded once for the node, and each connection's unsolicited share of it is bounded separately; a body the download window asked that connection for is always admitted (`docs/contracts/p2p-wire.md` `P2P-07`). |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel, except while the node is in initial block download: unsolicited transaction bodies are then dropped before ingress, without a misbehavior score or disconnect (Core 31.1 `net_processing.cpp:4713-4716`). Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | ignored | No address gossip: Core answers with an `addr` burst. Deviation: silent. |
-| `addr` / `addrv2` | ignored | Decoded (bound: 1 000 entries, Core `MAX_ADDR_TO_SEND`); never gossiped onward. |
+| `getaddr` | served | At most 32 retained IP addresses, once per full-relay connection. Book-disabled test/embedding connections remain silent. |
+| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. |
 | `feefilter` | ignored | BIP133. We never send one and do not enforce a peer's. Core filters relay by it. |
 | `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. Inbound announcements also publish compact-fetch eligibility. |
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
@@ -168,12 +168,23 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
-4. **Address management**: absent. There is no address store, no feeler
-   connection policy, no `getaddr` response, and no addr/addrv2 gossip.
-   Outbound peer discovery runs through DNS-seed bootstrap (on by default:
-   `run_dns_peer_maintenance`, `crates/p2p/src/service.rs`, seeds from
-   `Network::dns_seeds`), the configured `--connect` peers, and the
-   `addnode` RPC.
+4. **Address management**: automatic outbound selection uses one persistent
+   P2P-owned address book (`addrman.rs`, `service.rs`). DNS seeds are bootstrap
+   input; retained candidates are selected even with DNS disabled. Successful
+   automatic outbound handshakes promote new candidates to tried slots. The
+   book has 3,072 new and 1,024 tried keyed slots and retains at most 64 entries
+   from a source group. Selection avoids active endpoint/network-group reuse,
+   alternates new/tried preference, and backs off failed attempts. Prefix
+   grouping is IPv4 /16 and IPv6 /32 (IPv4-mapped IPv6 is canonicalized).
+   Full-relay peers may contribute at most 32 addresses initially, replenished
+   one per 10 seconds; `getaddr` returns at most 32 retained IP addresses once
+   per connection. `addrv2` non-IP families are ignored because no corresponding
+   transports exist. Block-relay-only peers neither learn nor serve addresses.
+   The auxiliary, versioned, checksummed `peers.dat` is atomically published;
+   corruption is preserved and disables writes to that file for the run while
+   discovery continues in memory. Feeler/collision probing, ASMap grouping and
+   restart anchors remain follow-ups under #1387; no complete Core AddrMan
+   parity is claimed.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.

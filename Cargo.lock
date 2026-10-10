@@ -444,9 +444,11 @@ dependencies = [
  "metrics",
  "parking_lot",
  "proptest",
+ "serde",
  "serde_json",
  "sha2",
  "smallvec",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

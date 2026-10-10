@@ -279,6 +279,8 @@ impl NodeState {
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig {
                 listen_addrs: config.p2p.listen.clone(),
+                address_book_path: Some(config.data_dir.join("peers.dat")),
+                allow_local_addresses: config.network == bitcoin_rs_primitives::Network::Regtest,
                 magic: bitcoin::p2p::Magic::from_bytes(config.p2p.magic),
                 dns_seeds_enabled: config.p2p.dns_seeds_enabled,
                 dns_seeds: config

@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Persistent, bounded peer discovery and automatic address selection.
+pub(crate) mod addrman;
 /// Outbound block announcements: headers-first, high-bandwidth compact, inv fallback.
 pub mod block_announce;
 /// Out-of-order inbound block staging bounded by the download window budget.

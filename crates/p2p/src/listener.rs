@@ -93,6 +93,8 @@ pub struct ConnectionShared {
     pub peer_table: Arc<crate::PeerTable>,
     /// Manual subnet bans shared with the RPC `setban` handler.
     pub banned: crate::BannedReader,
+    /// Shared P2P-owned auxiliary address book.
+    pub(crate) address_book: Option<Arc<crate::addrman::AddressBook>>,
     /// Network kill-switch behind `setnetworkactive`.
     pub activity: Arc<crate::NetworkActivity>,
     /// Start-scoped cancellation token. Tests that never cancel pass a
@@ -164,6 +166,7 @@ impl ConnectionShared {
         Self {
             peer_table,
             banned: banned.into(),
+            address_book: None,
             activity,
             session_cancel: session_cancel.into(),
             peer_ready,
@@ -222,6 +225,11 @@ impl ConnectionShared {
         {
             if let Some(announcer) = &self.block_announcer {
                 announcer.on_peer_ready();
+            }
+            if !lease.is_inbound() && !lease.is_manual() {
+                if let Some(book) = &self.address_book {
+                    book.succeeded(peer_addr, info.services, crate::addrman::now());
+                }
             }
             self.notify_peer_ready(source);
             true
@@ -1273,6 +1281,18 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
+    let mut address_budget = 32_u64;
+    let mut last_address_refill = crate::addrman::now();
+    let mut answered_getaddr = false;
+    if !lease.is_inbound()
+        && lease.role().relays_transactions()
+        && shared
+            .address_book
+            .as_ref()
+            .is_some_and(|book| book.len() < 1024)
+    {
+        let _ = lease.send(crate::Message::GetAddr);
+    }
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
@@ -1347,6 +1367,58 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
                 )?;
                 match message {
+                    crate::Message::Addr(addresses) => {
+                        let addresses: Vec<_> = addresses
+                            .iter()
+                            .filter_map(|(seen, addr)| {
+                                addr.socket_addr().ok().map(|socket| {
+                                    (socket, addr.services.to_u64(), u64::from(*seen))
+                                })
+                            })
+                            .collect();
+                        learn_addresses(
+                            shared,
+                            lease,
+                            peer_addr,
+                            &addresses,
+                            &mut address_budget,
+                            &mut last_address_refill,
+                        );
+                    }
+                    crate::Message::AddrV2(addresses) => {
+                        let addresses: Vec<_> = addresses
+                            .iter()
+                            .filter_map(|addr| {
+                                let ip: std::net::IpAddr = match addr.addr {
+                                    bitcoin::p2p::address::AddrV2::Ipv4(ip) => ip.into(),
+                                    bitcoin::p2p::address::AddrV2::Ipv6(ip) => ip.into(),
+                                    _ => return None,
+                                };
+                                Some((
+                                    SocketAddr::new(ip, addr.port),
+                                    addr.services.to_u64(),
+                                    u64::from(addr.time),
+                                ))
+                            })
+                            .collect();
+                        learn_addresses(
+                            shared,
+                            lease,
+                            peer_addr,
+                            &addresses,
+                            &mut address_budget,
+                            &mut last_address_refill,
+                        );
+                    }
+                    crate::Message::GetAddr
+                        if !answered_getaddr && lease.role().relays_transactions() =>
+                    {
+                        answered_getaddr = true;
+                        if let Some(book) = &shared.address_book {
+                            let _ = lease
+                                .send(crate::Message::Addr(book.gossip(crate::addrman::now())));
+                        }
+                    }
                     crate::Message::Headers(headers) => {
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
@@ -1408,6 +1480,30 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Consume a bounded, replenishing per-connection gossip allowance before
+/// touching the book. Source-group limits survive peer reconnects in the book.
+fn learn_addresses(
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    peer_addr: SocketAddr,
+    addresses: &[(SocketAddr, u64, u64)],
+    budget: &mut u64,
+    last_refill: &mut u64,
+) {
+    if !lease.role().relays_transactions() {
+        return;
+    }
+    let now = crate::addrman::now();
+    let refill = now.saturating_sub(*last_refill) / 10;
+    *budget = budget.saturating_add(refill).min(32);
+    *last_refill = last_refill.saturating_add(refill.saturating_mul(10));
+    let count = addresses.len().min(usize::try_from(*budget).unwrap_or(0));
+    *budget = budget.saturating_sub(u64::try_from(count).unwrap_or(0));
+    if let Some(book) = &shared.address_book {
+        book.learn_peer(peer_addr.ip(), &addresses[..count], now);
     }
 }
 
@@ -3190,5 +3286,54 @@ mod block_forward_tests {
             "a forwarding slot returns once sync has taken the body"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod address_tests {
+    use super::*;
+    use crate::{Message, PeerState};
+    use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+
+    #[test]
+    fn wire_address_messages_share_one_book_and_getaddr_is_once_per_connection() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        shared.address_book = Some(Arc::clone(&book));
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let candidate = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let lease = crate::PeerLease::new_inbound(sender);
+        table.register(source, lease.clone());
+        let timestamp = u32::try_from(crate::addrman::now()).expect("timestamp");
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let mut input = Vec::new();
+        for message in [
+            Message::Addr(vec![(timestamp, Address::new(&candidate, services))]),
+            Message::AddrV2(vec![AddrV2Message {
+                time: timestamp,
+                services,
+                addr: AddrV2::Ipv4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                port: 8333,
+            }]),
+            Message::GetAddr,
+            Message::GetAddr,
+        ] {
+            crate::wire::write_message(&mut input, shared.magic, &message).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        assert_eq!(book.len(), 1);
+        let replies: Vec<_> = receiver.try_iter().collect();
+        let [Message::Addr(addresses)] = replies.as_slice() else {
+            panic!("expected exactly one addr response: {replies:?}");
+        };
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].1.socket_addr().expect("socket"), candidate);
     }
 }
