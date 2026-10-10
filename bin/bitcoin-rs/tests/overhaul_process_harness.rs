@@ -120,8 +120,10 @@ fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
             .rpc("getblockchaininfo", &json!([]))
             .expect("chaininfo RPC");
         let rest = node
-            .http_get_json("/rest/chaininfo.json")
+            .http_get("/rest/chaininfo.json")
             .expect("chaininfo REST");
+        assert_eq!(rest.status, 200);
+        let rest = rest.json().expect("chaininfo REST JSON");
         for response in [&rpc, &rest] {
             assert_eq!(response.get("chain"), Some(&json!("regtest")));
             assert_eq!(response.get("pruned"), Some(&json!(false)));
