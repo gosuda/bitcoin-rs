@@ -278,6 +278,20 @@ impl AddressBook {
         })
     }
 
+    pub(crate) fn refresh_connected(&self, active: &[SocketAddr], now: u64) {
+        let mut manager = self.state.lock();
+        let mut changed = false;
+        for entry in &mut manager.stored.records {
+            if active.contains(&entry.addr) && now.saturating_sub(entry.last_seen) >= 3600 {
+                entry.last_seen = now;
+                changed = true;
+            }
+        }
+        if changed {
+            manager.revision = manager.revision.wrapping_add(1);
+        }
+    }
+
     pub(crate) fn expire(&self, now: u64) {
         self.state.lock().expire(now);
     }
@@ -708,5 +722,18 @@ mod tests {
         );
         book.learn_dns("seed", &[addr(202)], 10_001 + STALE_SECS);
         assert_eq!(book.len(), 1, "learn also releases a stale source quota");
+    }
+    #[test]
+    fn a_long_lived_ready_connection_keeps_its_candidate_while_offline_peers_expire() {
+        let book = book();
+        book.learn_dns("seed", &[addr(1), addr(2)], 10_000);
+        book.succeeded(addr(1), 9, 10_001);
+        let later = 10_002 + STALE_SECS;
+        book.refresh_connected(&[addr(1)], later);
+        book.expire(later);
+        let manager = book.state.lock();
+        assert_eq!(manager.stored.records.len(), 1);
+        assert_eq!(manager.stored.records[0].addr, addr(1));
+        assert!(manager.stored.records[0].tried);
     }
 }

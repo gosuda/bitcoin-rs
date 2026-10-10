@@ -1219,6 +1219,19 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let mut next_dns = 0;
     while !maintenance.shutdown.load(Ordering::Acquire) {
         let now = crate::addrman::now();
+        let ready: Vec<_> = maintenance
+            .peer_table
+            .sessions()
+            .into_iter()
+            .filter(|session| {
+                !session.lease.is_inbound()
+                    && !session.lease.is_manual()
+                    && !session.lease.is_cancelled()
+                    && session.info.is_some()
+            })
+            .map(|session| session.addr)
+            .collect();
+        maintenance.address_book.refresh_connected(&ready, now);
         maintenance.address_book.expire(now);
         if maintenance.network_active.load(Ordering::Acquire) {
             // DNS is only an input when the book lacks candidates. Disabling DNS
