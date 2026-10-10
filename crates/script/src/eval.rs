@@ -188,6 +188,32 @@ fn item_bytes(item: &ScriptItem) -> Cow<'_, [u8]> {
     }
 }
 
+/// BIP342 preflight owned by the Taproot witness driver: an `OP_SUCCESS`
+/// bypasses initial stack limits, evaluation and the final stack checks.
+/// Parsing still fails if malformed framing precedes the success opcode.
+pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<bool, ScriptError> {
+    for parsed in instructions(script) {
+        let op = match parsed {
+            Ok(Instruction::Op(op)) => op,
+            Ok(Instruction::PushBytes(_)) => continue,
+            Err(_) => {
+                return Err(ScriptError::Invalid {
+                    code: ScriptErrCode::BadOpcode,
+                });
+            }
+        };
+        if is_op_success(op) {
+            if flags.contains(VerifyFlags::DISCOURAGE_OP_SUCCESS) {
+                return Err(ScriptError::Invalid {
+                    code: ScriptErrCode::DiscourageOpSuccess,
+                });
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Executes `script` against `stack`, mirroring Core's `EvalScript`.
 ///
 /// `find_and_delete` controls Core's `FindAndDelete(scriptCode, sig)` for
@@ -206,31 +232,6 @@ pub(crate) fn eval_script(
     validation_weight_left: &mut Option<i64>,
     tapleaf_hash: Option<&Hash256>,
 ) -> Result<(), ScriptError> {
-    // BIP342: OP_SUCCESSx opcodes make the script unconditionally valid.
-    // This scan runs before any other check (including stack element size
-    // limits) and overrides everything. Mirrors Core's ExecuteWitnessScript.
-    if sigversion == SigVersion::Tapscript {
-        for parsed in instructions(script) {
-            let op = match parsed {
-                Ok(Instruction::Op(op)) => op,
-                Ok(Instruction::PushBytes(_)) => continue,
-                Err(_) => {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::BadOpcode,
-                    });
-                }
-            };
-            if is_op_success(op) {
-                if flags.contains(VerifyFlags::DISCOURAGE_OP_SUCCESS) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::DiscourageOpSuccess,
-                    });
-                }
-                return Ok(());
-            }
-        }
-    }
-
     if (sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0)
         && script.len() > MAX_SCRIPT_SIZE
     {

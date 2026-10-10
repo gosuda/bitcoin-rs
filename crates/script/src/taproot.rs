@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use bitcoin_rs_primitives::Hash256;
-use secp256k1::{Message, Parity, Scalar, XOnlyPublicKey, schnorr::Signature};
+use secp256k1::{Parity, Scalar, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 
 /// BIP341 annex tag prefix (Core `ANNEX_TAG`).
@@ -25,18 +25,6 @@ pub(crate) const TAPROOT_LEAF_MASK: u8 = 0xfe;
 
 /// Leaf version for BIP342 tapscript.
 pub(crate) const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
-
-/// Verifies a taproot key-path Schnorr signature.
-#[must_use]
-pub(crate) fn verify_taproot_keypath(
-    signature: &Signature,
-    message: &Message,
-    public_key: &XOnlyPublicKey,
-) -> bool {
-    secp256k1::SECP256K1
-        .verify_schnorr(signature, message, public_key)
-        .is_ok()
-}
 
 // BIP340 "Tagged Hashes": the doubled tag digest is exactly one SHA256
 // block. Keep only these two fixed public prefixes, never request data.
@@ -130,13 +118,10 @@ pub(crate) fn verify_taproot_commitment(
 mod tests {
     use bitcoin::hex::FromHex;
     use bitcoin_rs_primitives::Hash256;
-    use secp256k1::{Keypair, Message, Parity, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
+    use secp256k1::{Keypair, Parity, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
     use sha2::{Digest, Sha256};
 
-    use super::{
-        TAPROOT_LEAF_TAPSCRIPT, compute_taproot_merkle_root, verify_taproot_commitment,
-        verify_taproot_keypath,
-    };
+    use super::{TAPROOT_LEAF_TAPSCRIPT, compute_taproot_merkle_root, verify_taproot_commitment};
 
     fn tagged_hash(tag: &[u8], msg: &[u8]) -> [u8; 32] {
         let tag_hash = Sha256::digest(tag);
@@ -204,21 +189,6 @@ mod tests {
     )]
     fn compact_size(n: usize) -> Vec<u8> {
         if n < 0xfd { vec![n as u8] } else { vec![] }
-    }
-
-    #[test]
-    fn taproot_helpers_accept_valid_schnorr_signature() {
-        let secp = Secp256k1::new();
-        let secret = match SecretKey::from_slice(&[1u8; 32]) {
-            Ok(secret) => secret,
-            Err(error) => panic!("fixed secret key should be valid: {error}"),
-        };
-        let keypair = Keypair::from_secret_key(&secp, &secret);
-        let (public_key, _) = XOnlyPublicKey::from_keypair(&keypair);
-        let message = Message::from_digest([2; 32]);
-        let signature = secp.sign_schnorr(&message, &keypair);
-
-        assert!(verify_taproot_keypath(&signature, &message, &public_key));
     }
 
     /// BIP341 commitment rules: the valid single-leaf tree verifies, its

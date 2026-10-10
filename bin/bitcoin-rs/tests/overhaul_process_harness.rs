@@ -32,6 +32,9 @@ mod policy_cases;
 #[path = "support/spending_prevout_cases.rs"]
 mod spending_prevout_cases;
 
+#[path = "support/taproot_spend_cases.rs"]
+mod taproot_spend_cases;
+
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
