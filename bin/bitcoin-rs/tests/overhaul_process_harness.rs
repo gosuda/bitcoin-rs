@@ -100,6 +100,56 @@ fn start(binary: Kind) -> ProcessNode {
     .expect("public process must start")
 }
 
+/// API-01/API-02: Core 31.1 omits inapplicable pruning and signet fields.
+/// Only that response-shape claim is compared; this node does not ship Core's
+/// block-filter RPC and must continue to report method-not-found for it.
+#[test]
+fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
+    for (kind, rest_flag) in [(Kind::Core, "-rest=1"), (Kind::BitcoinRs, "--rest=true")] {
+        let mut node = ProcessNode::spawn_with(
+            kind,
+            &SpawnOptions {
+                binary: Some(self_binary()),
+                extra_args: &[rest_flag],
+                ..Default::default()
+            },
+        )
+        .expect("isolated unpruned regtest node with REST must start");
+        let pid = node.pid();
+        let rpc = node
+            .rpc("getblockchaininfo", &json!([]))
+            .expect("chaininfo RPC");
+        let rest = node
+            .http_get_json("/rest/chaininfo.json")
+            .expect("chaininfo REST");
+        for response in [&rpc, &rest] {
+            assert_eq!(response.get("chain"), Some(&json!("regtest")));
+            assert_eq!(response.get("pruned"), Some(&json!(false)));
+            // Core src/rpc/blockchain.cpp inserts these keys only for the
+            // relevant pruning mode or signet, never as JSON null.
+            for field in [
+                "automatic_pruning",
+                "prune_target_size",
+                "pruneheight",
+                "signet_challenge",
+            ] {
+                assert!(
+                    response.get(field).is_none(),
+                    "{kind:?} {field}: {response}"
+                );
+            }
+        }
+        if kind == Kind::BitcoinRs {
+            let error = node
+                .rpc("getblockfilter", &json!([rpc["bestblockhash"], "basic"]))
+                .expect_err("block filters are inventoried but unimplemented");
+            assert!(matches!(error, Error::Rpc { code: -32_601, .. }), "{error}");
+        }
+        node.stop().expect("node stop");
+        assert_reaped(pid);
+    }
+}
+
 /// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
 #[test]
 fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {

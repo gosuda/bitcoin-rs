@@ -82,7 +82,7 @@ macro_rules! declare_rows {
 
 declare_rows! {
     // -- JSON-RPC: shipped methods (registration order) --------------
-    "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional prune and signet fields serialize as null rather than omitted (automatic_pruning, prune_target_size, pruneheight, signet_challenge). Tracked in #160.", "0.4.0", Some(chain::getblockchaininfo);
+    "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);
     "getchaintips", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintips);
     "getchaintxstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintxstats);
@@ -151,6 +151,7 @@ declare_rows! {
 
     // -- JSON-RPC: Core surface not exposed (blockchain/control) -----
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
+    "getblockfilter", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "BIP157/158 compact block filters and the filter index are not implemented.", "n/a", None;
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
     "getchainstates", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented.", "n/a", None;
     "getdeploymentinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists).", "n/a", None;

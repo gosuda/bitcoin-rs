@@ -84,6 +84,10 @@ fn every_unimplemented_rpc_row_answers_method_not_found() {
         !unimplemented.is_empty(),
         "Unimplemented set must not silently empty out"
     );
+    assert!(
+        unimplemented.contains("getblockfilter"),
+        "Core's getblockfilter must remain inventoried without claiming filter-index support"
+    );
     for name in &unimplemented {
         assert!(
             not_dispatchable(&handler, name),

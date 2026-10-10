@@ -1698,12 +1698,22 @@ mod tests {
     }
 
     #[test]
-    fn chaininfo_json_uses_enforcer_field_names() {
+    fn chaininfo_json_uses_core_field_names_and_omits_absent_options() {
         let ctx = Arc::new(Context::new());
         let response = route(&ctx, "/rest/chaininfo.json", "", true);
         let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
         for field in ["chain", "blocks", "headers", "bestblockhash"] {
             assert!(value.get(field).is_some(), "{field}: {value:?}");
+        }
+        // Core 31.1 rpc/blockchain.cpp only inserts pruning/signet facts
+        // when applicable; an unpruned mainnet context has none of them.
+        for field in [
+            "automatic_pruning",
+            "prune_target_size",
+            "pruneheight",
+            "signet_challenge",
+        ] {
+            assert!(value.get(field).is_none(), "{field}: {value:?}");
         }
     }
 
