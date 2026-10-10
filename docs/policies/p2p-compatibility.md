@@ -69,7 +69,7 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `pong` | ignored | No ping RTT accounting exists; the pong body is unused. |
 | `inv` | Missing transaction vectors enter the connection-bound transaction request owner; only the selected eligible source receives `getdata`. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
 | `getdata` | `MSG_BLOCK` streams stripped stored blocks from the applied chain or an eligible stale branch; `MSG_WITNESS_BLOCK` preserves the stored witness serialization (BIP144). For full-relay peers, transaction inventory is served from the mempool, or from the orphan map only for a `MSG_WTX` item whose exact wtxid is resident. For block-relay-only peers, the listener removes transaction vectors before dispatch and drops transaction-only requests without a response. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. A `MSG_CMPCT_BLOCK` item is answered with a `cmpctblock` only while the block is within 5 of the applied tip; a deeper one is served as the whole witness-bearing `block`, as Core does (`net_processing.cpp:2705-2721`). Misses among dispatched inventory resolve to one trailing `notfound`. Bound: 50 000 vectors. |
-| `notfound` | ignored | Decoded with the same inventory bound. |
+| `notfound` | transaction fallback | A matching transaction request releases only its actual source and promptly considers retained alternatives; unrelated or unsolicited responses cannot release another connection's ownership. Block entries remain ignored. Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink / outbound | Forwarded to the node's header-sync pipeline. Newly committed active tips are announced via BIP130 `headers` (up to 8 headers, Core `MAX_BLOCKS_TO_ANNOUNCE`) to peers that negotiated `sendheaders` and can anchor on active chain history. Bound: ≤ 2 000 headers per message. |
@@ -434,13 +434,28 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    immediately eligible; unsolicited `notfound` cannot release another
    source's request. Admission completion releases only the delivering source; alternate witnesses
    remain eligible until mempool/orphan/reject state retires the matching
-   identity. Accepted bodies retire both identities. Known state is reconciled on the relay worker's 100-ms
-   poll. Unknown txid/wtxid pairs cannot be inferred from hash-only inv and
-   are kept distinct until a body proves their relationship. Additional
+   identity. Accepted bodies retire both identities. A paced 100-ms pass checks
+   at most 1,024 retained identities against known state and at most 1,024 ready
+   request identities before sending. The ordered request owner supplies the
+   resumable cursors for both sweeps and ready batches, so reannounced lower
+   keys cannot starve older tail requests; no second identity index is maintained. Every selected
+   identity is checked even if its periodic sweep turn has not arrived. Gateway
+   reads happen without policy/table locks; eligible candidates are rechecked
+   before reserving and enqueueing under one owner lock. Only transaction inv
+   wakes periodic policy work from the wire: ping, headers and unrelated traffic
+   perform no gateway census. Matching notfound, disconnect and admission results
+   use scoped immediate checks, preserving prompt fallback between periodic ticks.
+   TX/WTX announcements carrying identical 32-byte hashes share one download
+   ownership domain, including source preference and failure fallback (Core
+   `txrequest.cpp` `ByPeer`/`ByTxHash`). Known/reject checks retain their inventory
+   type. Different raw hashes remain independent until a body proves their
+   txid/wtxid relationship; no persistent alias map or second body cache is added. Additional
    resource policy: at most 100,000 total announcements and eight sources
    per identity; excess valid announcements are ignored, never punished.
    Orphan-parent requests share the owner and limits but preserve their
-   existing immediate source retry rather than Core's parent delay.
+   existing immediate source retry rather than Core's parent delay. A parent
+   already announced by that source is expedited without another announcement
+   or a second in-flight owner; ordinary duplicate inv cannot bypass its delay.
    These hard caps are resource-policy bounds, not measured throughput claims.
 16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
    queued transaction as an immediate single-item `inv`; Core batches and

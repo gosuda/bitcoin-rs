@@ -411,6 +411,35 @@ impl ConnectionShared {
         }
     }
 
+    /// Only transaction inventory and matching notfound replies wake download
+    /// policy from the wire. Ping, headers and other traffic cannot amplify a
+    /// gateway census; the relay worker owns the paced background poll.
+    fn update_transaction_requests(&self, source: crate::PeerSource, message: &crate::Message) {
+        let Some(inventory) = &self.tx_inventory else {
+            return;
+        };
+        match message {
+            crate::Message::NotFound(items) => {
+                self.peer_table
+                    .transaction_not_found(source, items, inventory.as_ref());
+            }
+            crate::Message::Inv(items)
+                if items.iter().any(|item| {
+                    matches!(
+                        item,
+                        bitcoin::p2p::message_blockdata::Inventory::Transaction(_)
+                            | bitcoin::p2p::message_blockdata::Inventory::WitnessTransaction(_)
+                            | bitcoin::p2p::message_blockdata::Inventory::WTx(_)
+                    )
+                }) =>
+            {
+                self.peer_table
+                    .poll_transaction_requests(inventory.as_ref());
+            }
+            _ => {}
+        }
+    }
+
     /// Forwards a decoded transaction into the node's ingress channel.
     fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
         let inbound = crate::InboundTx::new(tx, source);
@@ -420,10 +449,11 @@ impl ConnectionShared {
             } else {
                 match channel.try_send(inbound) {
                     Ok(()) => None,
-                    Err(
-                        crossbeam_channel::TrySendError::Full(inbound)
-                        | crossbeam_channel::TrySendError::Disconnected(inbound),
-                    ) => Some(inbound),
+                    Err(crossbeam_channel::TrySendError::Full(inbound)) => Some(inbound),
+                    Err(crossbeam_channel::TrySendError::Disconnected(inbound)) => {
+                        tracing::warn!(peer_addr = %source.addr, "p2p inbound tx channel disconnected");
+                        Some(inbound)
+                    }
                 }
             }
         } else {
@@ -437,8 +467,11 @@ impl ConnectionShared {
                 inbound.tx.wtxid(),
             );
             if let Some(inventory) = &self.tx_inventory {
-                self.peer_table
-                    .poll_transaction_requests(inventory.as_ref());
+                self.peer_table.poll_transaction_response(
+                    inventory.as_ref(),
+                    inbound.tx.txid(),
+                    inbound.tx.wtxid(),
+                );
             }
         }
     }
@@ -1116,7 +1149,7 @@ fn run_connected_session(
     if let Some(inventory) = &shared.tx_inventory {
         shared
             .peer_table
-            .poll_transaction_requests(inventory.as_ref());
+            .transaction_peer_disconnected(source, inventory.as_ref());
     }
     if let Some(announcer) = &shared.block_announcer {
         announcer.on_peer_disconnected(source);
@@ -1511,17 +1544,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     return Err(error);
                 }
                 if tx_relay_open() {
-                    if let Some(inventory) = &shared.tx_inventory {
-                        if let crate::Message::NotFound(items) = &message {
-                            shared
-                                .peer_table
-                                .transaction_not_found(lease.source(peer_addr), items);
-                        }
-                        shared
-                            .peer_table
-                            .poll_transaction_requests(inventory.as_ref());
-                    }
-
+                    shared.update_transaction_requests(lease.source(peer_addr), &message);
                 }
                 match message {
                     crate::Message::Addr(addresses) => {
@@ -2022,6 +2045,88 @@ fn test_shared(
         None,
         ListenerExtras::default(),
     )
+}
+
+#[cfg(test)]
+mod transaction_poll_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct InventoryReads(AtomicUsize);
+    impl crate::TxInventory for InventoryReads {
+        fn have_tx(&self, _: bitcoin_rs_primitives::Hash256, _: bool) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+        fn get_tx(&self, _: bitcoin_rs_primitives::Txid) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+        fn get_tx_by_wtxid(
+            &self,
+            _: bitcoin_rs_primitives::Wtxid,
+        ) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+    }
+
+    #[test]
+    fn ping_and_nontransaction_messages_do_not_poll_gateway_inventory() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (sender, receiver) = crossbeam_channel::bounded(4);
+        let lease = crate::PeerLease::new(sender);
+        let addr = ([127, 0, 0, 1], 8333).into();
+        table.register(addr, lease.clone());
+        let version = crate::handshake::version_message(
+            1,
+            0,
+            crate::PeerRole::FullRelay,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        );
+        table.publish_info(
+            addr,
+            &lease,
+            crate::PeerInfo::outbound_from_version(
+                addr,
+                addr,
+                &version,
+                0,
+                0,
+                Arc::new(crate::PeerCounters::default()),
+            ),
+        );
+        let source = lease.source(addr);
+        let item = bitcoin::p2p::message_blockdata::Inventory::WTx(
+            bitcoin::Wtxid::from_byte_array([1; 32]),
+        );
+        table.announce_transactions(source, &[item]);
+        let (headers, _) = crossbeam_channel::bounded(1);
+        let (blocks, _) = crossbeam_channel::bounded(1);
+        let mut shared = test_shared(table, headers, blocks);
+        let inventory = Arc::new(InventoryReads(AtomicUsize::new(0)));
+        shared.tx_inventory = Some(inventory.clone());
+        for nonce in 0..1_000 {
+            shared.update_transaction_requests(source, &crate::Message::Ping(nonce));
+            shared.update_transaction_requests(source, &crate::Message::Headers(Vec::new()));
+            shared.update_transaction_requests(
+                source,
+                &crate::Message::Inv(vec![bitcoin::p2p::message_blockdata::Inventory::Block(
+                    bitcoin::BlockHash::from_byte_array([2; 32]),
+                )]),
+            );
+        }
+        assert_eq!(inventory.0.load(Ordering::Relaxed), 0);
+        assert!(receiver.try_recv().is_err());
+        shared.update_transaction_requests(source, &crate::Message::Inv(vec![item]));
+        assert_eq!(
+            inventory.0.load(Ordering::Relaxed),
+            2,
+            "one background and one pre-send identity check"
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::Message::GetData(_))
+        ));
+    }
 }
 
 #[cfg(test)]

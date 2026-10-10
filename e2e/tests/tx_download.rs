@@ -118,3 +118,62 @@ fn request_owner_notfound_and_disconnect_match_core() -> Result<()> {
     scenario(Kind::BitcoinRs)?;
     scenario(Kind::Core)
 }
+
+/// Core's `ByTxHash` keys ignore the `GenTxid` inventory kind for identical bytes.
+/// Use a legacy-announcing peer and a BIP339 peer so both inv forms are valid.
+fn mixed_identity_scenario(kind: Kind) -> Result<()> {
+    let mut node = ProcessNode::spawn(kind)?;
+    if kind == Kind::BitcoinRs {
+        submit_genesis(&mut node)?;
+    } else {
+        node.rpc("setmocktime", &json!([0]))?;
+    }
+    mine_bare_blocks(&mut node, 1)?;
+    let mut peers = vec![
+        LivePeer::connect_with_wtxid_relay(&node, "legacy-txid-source", 0, false)?,
+        LivePeer::connect_with_height(&node, "wtxid-source", 0)?,
+    ];
+    let raw = [0x73; 32];
+    let txid = bitcoin::Txid::from_byte_array(raw);
+    let wtxid = bitcoin::Wtxid::from_byte_array(raw);
+    peers[0].send(
+        NetworkMessage::Inv(vec![Inventory::Transaction(txid)]),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    wait_count(&mut peers, &txid.to_string(), 1)?;
+    assert_eq!(count(&peers[0], &txid.to_string()), 1);
+    peers[1].send(
+        NetworkMessage::Inv(vec![Inventory::WTx(wtxid)]),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    pump(&mut peers, Duration::from_secs(3));
+    assert_eq!(
+        peers
+            .iter()
+            .map(|peer| count(peer, &txid.to_string()))
+            .sum::<usize>(),
+        1,
+        "identical TX/WTX hashes must not acquire simultaneous owners after delay"
+    );
+    peers[0].send(
+        NetworkMessage::NotFound(vec![Inventory::WitnessTransaction(txid)]),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    wait_count(&mut peers, &txid.to_string(), 2)?;
+    assert_eq!(count(&peers[1], &txid.to_string()), 1);
+    assert!(
+        peers[1]
+            .getdata_seen
+            .iter()
+            .flat_map(|seen| &seen.items)
+            .any(|(kind, hash)| *kind == 5 && *hash == txid.to_string()),
+        "fallback must retain the alternate's WTX wire kind"
+    );
+    node.stop()
+}
+
+#[test]
+fn identical_txid_wtxid_request_ownership_matches_core() -> Result<()> {
+    mixed_identity_scenario(Kind::BitcoinRs)?;
+    mixed_identity_scenario(Kind::Core)
+}

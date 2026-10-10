@@ -109,7 +109,7 @@ impl TxIngressConsumer {
             .transaction_response_completed(inbound.source, txid, wtxid);
         self.dispatch_outcome(txid, wtxid, source, outcome);
         self.peer_table
-            .poll_transaction_requests(self.mempool_gateway.as_ref());
+            .poll_transaction_response(self.mempool_gateway.as_ref(), txid, wtxid);
     }
 
     fn process_retries(&self) -> bool {

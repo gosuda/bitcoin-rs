@@ -946,6 +946,10 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
 /// rejects only that wtxid; P2P must retain the honest txid announcer.
 #[test]
 fn rejected_witness_keeps_an_honest_transaction_source() -> anyhow::Result<()> {
+    if let Some(reason) = loopback_skip() {
+        tracing::warn!(%reason, "skipping tx ingress e2e");
+        return Ok(());
+    }
     let harness = Harness::build(0xB1)?;
     let parent = parent_txid(0xB2);
     let witness_script = vec![0x51];
@@ -1013,6 +1017,10 @@ fn rejected_witness_keeps_an_honest_transaction_source() -> anyhow::Result<()> {
 
 #[test]
 fn orphan_parent_reuses_the_completed_childs_announcement_slot() -> anyhow::Result<()> {
+    if let Some(reason) = loopback_skip() {
+        tracing::warn!(%reason, "skipping tx ingress e2e");
+        return Ok(());
+    }
     let harness = Harness::build(0xC1)?;
     // A wtxid-relay connection keeps filler txid candidates delayed while
     // the ready child's admission releases its request slot.
