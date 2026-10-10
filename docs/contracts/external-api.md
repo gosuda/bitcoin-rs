@@ -540,9 +540,14 @@ owned by [wallet-facing.md](wallet-facing.md).
   `-1` unavailable-txospenderindex error. An inconsistent spending index
   becomes an internal error, never an unspent result.
 - Empty output lists, strict object keys, txid syntax, and signed 32-bit
-  nonnegative vout validation follow the pinned reference. Missing or extra
-  argument counts retain local JSON-RPC `-32602` shape errors instead of
-  Core's `-1` help text; the registry declares this deviation.
+  nonnegative vout validation follow the pinned reference. After successful
+  named-argument binding, missing outputs and excess positional arguments
+  retain local JSON-RPC `-32602` shape errors instead of Core's `-1` help
+  text. Duplicate/unknown names, option conflicts and positional/named
+  collisions retain Core's earlier `-8` errors, including an overlong `args`
+  prefix. An omitted outputs hole retains the local missing-outputs error;
+  explicitly supplied null remains a type error. The registry declares these
+  method-validation deviations.
 - The HTTP request-body limit bounds externally supplied queries; this
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.

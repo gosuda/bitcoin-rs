@@ -152,12 +152,8 @@ fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
     }
 }
 
-/// API-02: ordinary named arguments share Core's positional binding rules.
-#[test]
-fn named_rpc_arguments_follow_core() {
-    let mut core = start(Kind::Core);
-    let mut node = start(Kind::BitcoinRs);
-    for (method, params) in [
+fn named_rpc_cases() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
         (
             "createrawtransaction",
             json!({"inputs": [], "outputs": {}, "locktime": 7}),
@@ -197,12 +193,53 @@ fn named_rpc_arguments_follow_core() {
             "gettxspendingprevout",
             json!({"args": [[], {}], "outputs": null, "extra": 1}),
         ),
-    ] {
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "outputs": []}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "outputs": null}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "options": {}}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "options": null}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "mempool_only": true}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "unknown": 1}),
+        ),
+    ]
+}
+
+/// API-02: ordinary named arguments share Core's positional binding rules.
+#[test]
+fn named_rpc_arguments_follow_core() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    for (method, params) in named_rpc_cases() {
         let request = json!({"jsonrpc": "2.0", "id": "named", "method": method, "params": params});
         let reference = core.rpc_raw(&request).expect("Core named request");
         let candidate = node.rpc_raw(&request).expect("candidate named request");
         compare_reply(&request.to_string(), &reference, &candidate)
             .expect("named binding and method errors match Core");
+    }
+    // Arity is method-owned only after name/collision binding succeeds.
+    // The existing local compact parameter error is explicitly a deviation.
+    for params in [json!([[], {}, false]), json!({"args": [[], {}, false]})] {
+        let request = json!({"jsonrpc": "2.0", "id": "arity", "method": "gettxspendingprevout", "params": params});
+        let reference = core.rpc_raw(&request).expect("Core arity control");
+        let candidate = node.rpc_raw(&request).expect("candidate arity control");
+        assert_eq!(reference["error"]["code"], json!(-1));
+        assert_eq!(candidate["error"]["code"], json!(-32602));
     }
     // Preserve repeated JSON keys until the binder rejects them. Building
     // these requests through serde_json::Value would discard that evidence.
