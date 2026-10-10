@@ -152,6 +152,84 @@ fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
     }
 }
 
+/// API-02: ordinary named arguments share Core's positional binding rules.
+#[test]
+fn named_rpc_arguments_follow_core() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    for (method, params) in [
+        (
+            "createrawtransaction",
+            json!({"inputs": [], "outputs": {}, "locktime": 7}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"args": [[]], "outputs": {}, "locktime": 7}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"args": false, "inputs": [], "outputs": {}}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"args": [[], {}], "inputs": null, "extra": 1}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"inputs": [], "outputs": {}, "extra": 1}),
+        ),
+        ("decoderawtransaction", json!({"hexstring": "zz"})),
+        (
+            "decoderawtransaction",
+            json!({"args": ["zz"], "iswitness": false}),
+        ),
+        ("gettxspendingprevout", json!({"outputs": []})),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[]], "mempool_only": true, "return_spending_tx": false}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"outputs": [], "options": null, "mempool_only": true}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}], "mempool_only": true}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}], "outputs": null, "extra": 1}),
+        ),
+    ] {
+        let request = json!({"jsonrpc": "2.0", "id": "named", "method": method, "params": params});
+        let reference = core.rpc_raw(&request).expect("Core named request");
+        let candidate = node.rpc_raw(&request).expect("candidate named request");
+        compare_reply(&request.to_string(), &reference, &candidate)
+            .expect("named binding and method errors match Core");
+    }
+    // Preserve repeated JSON keys until the binder rejects them. Building
+    // these requests through serde_json::Value would discard that evidence.
+    for body in [
+        r#"{"jsonrpc":"2.0","id":"duplicate","method":"createrawtransaction","params":{"inputs":[],"inputs":[],"outputs":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":"duplicate","method":"gettxspendingprevout","params":{"outputs":[],"mempool_only":true,"mempool_only":false}}"#,
+        r#"{"jsonrpc":"2.0","id":"duplicate","method":"decoderawtransaction","params":{"args":["zz"],"args":["00"]}}"#,
+    ] {
+        let reference = core
+            .http("POST", "/", body.as_bytes(), true)
+            .expect("Core duplicate-name request")
+            .json()
+            .expect("Core JSON");
+        let candidate = node
+            .http("POST", "/", body.as_bytes(), true)
+            .expect("candidate duplicate-name request")
+            .json()
+            .expect("candidate JSON");
+        compare_reply(body, &reference, &candidate).expect("duplicate-name refusal matches Core");
+    }
+    core.stop().expect("core stop");
+    node.stop().expect("node stop");
+}
+
 /// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
 #[test]
 fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
