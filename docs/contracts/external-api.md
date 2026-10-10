@@ -59,6 +59,10 @@
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
 
+- Verbose `getrawtransaction` uses the shared `tx_render::transaction_json`
+  projection, preserving unsigned transaction versions across mempool,
+  explicit-block, and txindex lookups. Inactive explicit blocks report zero
+  confirmations and omit time fields; mempool replies omit chain fields.
 - Core script JSON has one projection owner in `tx_render.rs`: decimal short
   pushes, malformed-instruction markers, checksummed inferred descriptors,
   and optional address/hex fields. Transaction inputs alone decode defined

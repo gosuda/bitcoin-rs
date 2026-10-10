@@ -16,9 +16,7 @@ use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{
-    self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
-};
+use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
@@ -157,20 +155,18 @@ fn render_raw_transaction(
             record.hash.into(),
             record.height,
         );
-        VerboseTxChain {
-            block_hash: record.hash.to_string(),
-            confirmations: u64::try_from(confirmations).unwrap_or(0),
-            time: u64::from(record.time),
+        crate::tx_render::TransactionChainContext {
+            block_hash: record.hash,
+            confirmations: confirmations.max(0),
+            block_time: u64::from(record.time),
             in_active_chain: explicit_block.then_some(confirmations > 0),
         }
     });
-    // Core omits unavailable optional fields. The upstream response type
-    // serializes None as null, so use the existing omission-aware boundary.
-    typed_to_sonic_omitting_nulls(&convert::raw_transaction_verbose(
+    Ok(crate::tx_render::transaction_json(
         tx,
         ctx.chain.chain_network,
         chain,
-    )?)
+    ))
 }
 
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
