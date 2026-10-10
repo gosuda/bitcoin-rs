@@ -12,6 +12,7 @@ on:
     paths:
       - 'fuzz/**'
       - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
       - '.github/workflows/fuzz-build.yml'
   workflow_dispatch:
 
