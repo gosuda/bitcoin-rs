@@ -48,7 +48,10 @@
   (not connected), `-10` (initial download), `-22` (deserialization),
   and `-25` plus `-26` (submission).
 - Amounts are integer satoshis internally. Adapters render the exact
-  external BTC or sat-per-vB units and precision.
+  external BTC or sat-per-vB units and precision. Shared transaction JSON
+  interprets raw version bits as Core's unsigned 32-bit value and raw output
+  amounts as signed 64-bit values; native transaction representations and
+  consensus checks are unchanged.
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,

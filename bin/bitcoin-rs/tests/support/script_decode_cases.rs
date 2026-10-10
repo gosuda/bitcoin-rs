@@ -313,3 +313,57 @@ fn invalid_curve_key_in_complex_miniscript_has_a_declared_address_fallback() {
         "only the explicitly declared inference field differs"
     );
 }
+
+#[test]
+fn raw_and_psbt_transaction_projections_preserve_wire_integer_meanings() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    for version in [0_u32, 1, 3, 0x8000_0000, 0xffff_ffff] {
+        for satoshis in [
+            i64::MIN,
+            -2_100_000_000_000_000,
+            -1,
+            0,
+            1,
+            2_100_000_000_000_001,
+            i64::MAX,
+        ] {
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version(i32::from_le_bytes(version.to_le_bytes())),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(
+                            [1; 32],
+                        )),
+                        vout: 0,
+                    },
+                    script_sig: bitcoin::ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(u64::from_le_bytes(satoshis.to_le_bytes())),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            };
+            let hex = bitcoin::consensus::serialize(&tx).to_lower_hex_string();
+            let decoded = compare_rpc(&mut core, &mut node, "decoderawtransaction", &json!([hex]))
+                .unwrap_or_else(|error| {
+                    panic!("wire version{version} satoshis{satoshis}: {error}")
+                });
+            assert_eq!(decoded["version"], version);
+            assert!(decoded.get("hex").is_none());
+            let psbt = core
+                .rpc("converttopsbt", &json!([hex]))
+                .expect("Core PSBT codec accepts raw wire values");
+            let psbt = core
+                .rpc("decodepsbt", &json!([psbt]))
+                .expect("Core nested transaction");
+            assert_eq!(
+                psbt["tx"], decoded,
+                "raw and PSBT transaction fields share one projection"
+            );
+        }
+    }
+}

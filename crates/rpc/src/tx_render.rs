@@ -40,13 +40,24 @@ pub(crate) struct TransactionChainContext {
 /// serialization instead of being reduced through binary floating point.
 #[must_use]
 pub(crate) fn btc_amount_json(satoshis: u64) -> Value {
-    let whole = satoshis / 100_000_000;
-    let fractional = satoshis % 100_000_000;
-    let text = format!("{whole}.{fractional:08}");
+    btc_amount_parts(false, satoshis)
+}
+
+/// Core signed amount projection, including negative fees and raw wire amounts.
+#[must_use]
+pub(crate) fn signed_btc_amount_json(satoshis: i64) -> Value {
+    btc_amount_parts(satoshis < 0, satoshis.unsigned_abs())
+}
+
+fn btc_amount_parts(negative: bool, magnitude: u64) -> Value {
+    let whole = magnitude / 100_000_000;
+    let fractional = magnitude % 100_000_000;
+    let sign = if negative { "-" } else { "" };
+    let text = format!("{sign}{whole}.{fractional:08}");
     let mut deserializer = sonic_rs::Deserializer::from_str(&text).use_rawnumber();
     match sonic_rs::Deserialize::deserialize(&mut deserializer) {
         Ok(value) => value,
-        Err(error) => panic!("formatted unsigned BTC amount was invalid JSON: {error}"),
+        Err(error) => panic!("formatted BTC amount was invalid JSON: {error}"),
     }
 }
 
@@ -87,7 +98,7 @@ pub(crate) fn transaction_json(
     let mut value = json!({
         "txid": txid,
         "hash": hash,
-        "version": i64::from(tx.version),
+        "version": u32::from_le_bytes(tx.version.to_le_bytes()),
         "size": size,
         "vsize": vsize,
         "weight": weight,
@@ -200,7 +211,7 @@ fn input_json(input: &TxIn, coinbase: bool) -> Value {
 
 fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
     json!({
-        "value": btc_amount_json(output.value.to_sat()),
+        "value": signed_btc_amount_json(i64::from_le_bytes(output.value.to_sat().to_le_bytes())),
         "n": n,
         "scriptPubKey": script_pub_key_json(&output.script_pubkey, network)
     })
@@ -642,5 +653,39 @@ mod script_projection_tests {
                 .and_then(JsonValueTrait::as_str)
                 .is_some_and(|desc| desc.contains('#'))
         );
+    }
+}
+
+#[cfg(test)]
+mod wire_value_tests {
+    use super::*;
+    use sonic_rs::JsonValueTrait as _;
+
+    #[test]
+    fn wire_integer_projection_does_not_change_native_representations() {
+        let tx = Tx {
+            version: -1,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(u64::MAX),
+                script_pubkey: Script::new(),
+            }],
+        };
+        let value = transaction_json(&tx, Network::Regtest, None);
+        assert_eq!(
+            value
+                .get("version")
+                .and_then(sonic_rs::JsonValueTrait::as_u64),
+            Some(u64::from(u32::MAX))
+        );
+        assert_eq!(value["vout"][0]["value"].to_string(), "-0.00000001");
+        assert_eq!(tx.version, -1);
+        assert_eq!(tx.outputs[0].value.to_sat(), u64::MAX);
+        assert_eq!(
+            signed_btc_amount_json(i64::MIN).to_string(),
+            "-92233720368.54775808"
+        );
+        assert_eq!(signed_btc_amount_json(-1).to_string(), "-0.00000001");
     }
 }
