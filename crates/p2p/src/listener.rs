@@ -216,8 +216,13 @@ impl ConnectionShared {
             }
         });
         if current {
-            tracing::warn!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
-                discouraged = !protected && !local, "peer protocol violation");
+            if lease.ignores_protocol_error(error) {
+                tracing::debug!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
+                    discouraged = !protected && !local, "peer protocol violation");
+            } else {
+                tracing::warn!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
+                    discouraged = !protected && !local, "peer protocol violation");
+            }
         }
     }
 

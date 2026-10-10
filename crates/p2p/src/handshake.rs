@@ -206,7 +206,7 @@ pub(crate) fn next_handshake_step<S: Read>(
         let (message, _) = read_handshake_message(peer, lease, deadline)?;
         match dispatch_inbound(peer, &message) {
             Err(error) if lease.ignores_protocol_error(&error) => {
-                tracing::warn!(node_id = lease.node_id(), %error, "protected peer protocol violation ignored");
+                tracing::debug!(node_id = lease.node_id(), %error, "protected peer protocol violation ignored");
             }
             result => return result.map(|responses| (message, responses)),
         }
@@ -236,7 +236,7 @@ pub(crate) fn read_handshake_message<S: Read>(
         }
         match peer.read_message() {
             Err(error) if lease.ignores_protocol_error(&error) => {
-                tracing::warn!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
+                tracing::debug!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
                 continue;
             }
             Ok((message, raw)) => {
