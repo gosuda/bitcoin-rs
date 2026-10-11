@@ -3,7 +3,10 @@ use std::sync::Arc;
 use bitcoin_rs_chain::regtest_fixture::{
     coinbase, mined_block_with_prev_hash, mined_regtest_child_at,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network};
+use bitcoin_rs_primitives::{
+    Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Witness, consensus_bytes,
+};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, HistoryUnavailable, RetentionBudget};
 use bitcoin_rs_storage::{CommitRecords, InMemoryUndoStore, StorageError, UndoStore};
@@ -293,6 +296,164 @@ fn certification_budget_stops_a_deep_side_anchor_before_body_io() -> Result {
     assert!(matches!(
         f.chain.block_spends(hash(&f.blocks[1]), tip(&f.chain)?),
         Err(BlockSpendsError::ResourceLimit)
+    ));
+    Ok(())
+}
+
+#[test]
+fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Result {
+    let f = fixture(101)?;
+    let second = &f.blocks[2].txs[0];
+    let first = &f.blocks[1].txs[0];
+    let input = |tx: &Tx, vout| TxIn {
+        previous_output: OutPoint::new(tx.txid(), vout),
+        // The fixture outputs have empty scripts, so the input supplies true.
+        script_sig: Script::from_bytes(vec![0x51]),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+    let parent = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        // Reverse historical height order to catch sorting by undo/height.
+        inputs: vec![input(second, 0), input(first, 0)],
+        outputs: vec![
+            TxOut {
+                value: Amount::from_sat(4_000_000_000),
+                script_pubkey: Script::new(),
+            },
+            TxOut {
+                value: Amount::from_sat(5_999_999_000),
+                script_pubkey: Script::new(),
+            },
+        ],
+    };
+    let child = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        // Same-block inputs are absent from net undo; preserve vout order too.
+        inputs: vec![input(&parent, 1), input(&parent, 0)],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(9_999_998_000),
+            script_pubkey: Script::new(),
+        }],
+    };
+    let block = mined_block_with_prev_hash(
+        f.blocks[101].block_hash(),
+        102,
+        vec![coinbase(102), parent.clone(), child],
+    )?;
+    f.chain.apply_block(&block, None)?;
+    for disconnected in [false, true] {
+        if disconnected {
+            f.chain.disconnect_block(&block)?;
+        }
+        let record = f.chain.block_spends(hash(&block), tip(&f.chain)?)?;
+        assert_eq!(record.block, block);
+        let rows = record.spent?;
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].is_empty());
+        assert_eq!(rows[1].len(), 2);
+        assert_eq!(rows[2].len(), 2);
+        for (coin, (tx, height)) in rows[1].iter().zip([(second, 2), (first, 1)]) {
+            assert_eq!(coin.outpoint, OutPoint::new(tx.txid(), 0));
+            assert_eq!(coin.txout, tx.outputs[0]);
+            assert_eq!(coin.height, height);
+            assert!(coin.coinbase);
+        }
+        for (coin, (vout, output)) in rows[2]
+            .iter()
+            .zip([(1, &parent.outputs[1]), (0, &parent.outputs[0])])
+        {
+            assert_eq!(coin.outpoint, OutPoint::new(parent.txid(), vout));
+            assert_eq!(&coin.txout, output);
+            assert_eq!(coin.height, 102);
+            assert!(!coin.coinbase);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Result {
+    let f = fixture(1)?;
+    let original = &f.blocks[1];
+    let mut injected = original.clone();
+    injected.txs[0].inputs[0].witness = Witness::from_stack(vec![vec![0; 32]]);
+    assert_eq!(injected.txs[0].txid(), original.txs[0].txid());
+    assert_eq!(hash(&injected), hash(original));
+    f.bodies
+        .persist_block_body(1, hash(original), &consensus_bytes(&injected))?;
+    assert!(matches!(
+        f.chain.block_spends(hash(original), tip(&f.chain)?),
+        Err(BlockSpendsError::Corrupt(_))
+    ));
+
+    f.bodies
+        .persist_block_body(1, hash(original), &consensus_bytes(original))?;
+
+    // BIP141: a coinbase-only witness root is zero. This independent vector is
+    // SHA256d(00*32 || 00*32), with a zero reserved witness value.
+    let commitment = [
+        0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69, 0x53,
+        0x75, 0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e,
+        0x8c, 0xf9,
+    ];
+    let mut cb = coinbase(2);
+    cb.inputs[0].witness = Witness::from_stack(vec![vec![0; 32]]);
+    cb.outputs.push(TxOut {
+        value: Amount::from_sat(0),
+        script_pubkey: Script::from_bytes(
+            [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &commitment].concat(),
+        ),
+    });
+    let committed = mined_block_with_prev_hash(original.block_hash(), 2, vec![cb])?;
+    f.chain.apply_block(&committed, None)?;
+    assert_eq!(
+        f.chain
+            .block_spends(hash(&committed), tip(&f.chain)?)?
+            .block,
+        committed
+    );
+    for witness in [Witness::from_stack(vec![vec![1; 32]]), Witness::new()] {
+        let mut changed = committed.clone();
+        changed.txs[0].inputs[0].witness = witness;
+        assert_eq!(changed.txs[0].txid(), committed.txs[0].txid());
+        assert_eq!(hash(&changed), hash(&committed));
+        f.bodies
+            .persist_block_body(2, hash(&committed), &consensus_bytes(&changed))?;
+        assert!(matches!(
+            f.chain.block_spends(hash(&committed), tip(&f.chain)?),
+            Err(BlockSpendsError::Corrupt(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalikes() -> Result {
+    let f = fixture(0)?;
+    let mut cb = coinbase(1);
+    cb.outputs.push(TxOut {
+        value: Amount::from_sat(0),
+        script_pubkey: Script::from_bytes(
+            [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0xff; 32]].concat(),
+        ),
+    });
+    let block = mined_block_with_prev_hash(f.blocks[0].block_hash(), 1, vec![cb])?;
+    f.bodies
+        .persist_block_body(1, hash(&block), &consensus_bytes(&block))?;
+    // Isolate the retained-body boundary under both deployment contexts.
+    // This fixture does not claim that regtest admits a pre-activation block.
+    let record =
+        f.chain
+            .read_block_spends(hash(&block), 1, false, Err(HistoryUnavailable::Missing))?;
+    assert_eq!(record.block, block);
+    assert!(matches!(record.spent, Err(HistoryUnavailable::Missing)));
+    assert!(matches!(
+        f.chain
+            .read_block_spends(hash(&block), 1, true, Err(HistoryUnavailable::Missing),),
+        Err(BlockSpendsError::Corrupt(_))
     ));
     Ok(())
 }

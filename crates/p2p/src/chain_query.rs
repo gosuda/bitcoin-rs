@@ -354,7 +354,7 @@ impl ChainQuery for ActiveChainQuery {
                 }
                 Some(Message::BlockTxn(BlockTxn { transactions }))
             })
-            .map_err(|_| PeerError::Protocol("getblocktxn index out of range"))
+            .map_err(|_| PeerError::Misbehavior("getblocktxn index out of range"))
     }
 }
 
@@ -1308,7 +1308,7 @@ mod tests {
             &|| true,
         );
         assert!(
-            matches!(out_of_range, Err(PeerError::Protocol(_))),
+            matches!(out_of_range, Err(PeerError::Misbehavior(_))),
             "an out-of-range index is a protocol disconnect"
         );
 
@@ -1437,6 +1437,7 @@ mod tests {
                         &|| true,
                         &mut |_| panic!("sendcmpct does not emit a response"),
                         &mut |_| {},
+                        &mut |_| {},
                     )?;
                     if version == crate::peer::COMPACT_BLOCK_VERSION {
                         negotiated = Some(version);
@@ -1525,6 +1526,7 @@ mod tests {
                     &|| true,
                     &mut |_| panic!("sendcmpct does not emit a response"),
                     &mut |_| {},
+                    &mut |_| {},
                 )?;
             }
             for (requested_hash, indexes, invalid) in [
@@ -1555,10 +1557,11 @@ mod tests {
                     &|| true,
                     &mut |_| panic!("missing or invalid request cannot emit transactions"),
                     &mut |_| {},
+                    &mut |_| {},
                 );
                 if let Some(expected) = expected {
                     assert!(
-                        matches!(result, Err(PeerError::Protocol(message)) if message == expected),
+                        matches!(result, Err(PeerError::Misbehavior(message)) if message == expected),
                         "invalid request must disconnect, got {result:?}"
                     );
                 } else {
@@ -1613,6 +1616,7 @@ mod tests {
                 crate::wire::write_message(&mut wire, bitcoin::p2p::Magic::REGTEST, &response)?;
                 Ok(())
             },
+            &mut |_| {},
             &mut |_| {},
         )?;
         Ok(bitcoin::consensus::deserialize(&wire)?)

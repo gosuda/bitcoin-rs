@@ -25,7 +25,7 @@ impl BlockUndoSource for Chainstate {
         hash: Hash256,
         expected_applied_hash: Hash256,
     ) -> Result<BlockSpends, BlockSpendsError> {
-        let (head, height, lease, availability) = {
+        let (head, height, parent, lease, availability) = {
             let _transition = self.chain_transition.lock();
             self.check_undo_read_state(expected_applied_hash)?;
             let tree = self.block_tree.read();
@@ -33,6 +33,7 @@ impl BlockUndoSource for Chainstate {
                 .node_by_hash(hash)
                 .ok_or(BlockSpendsError::UnknownBlock)?;
             let height = node.height;
+            let parent = node.parent;
             drop(tree);
             let head = self
                 .durable_head
@@ -53,10 +54,14 @@ impl BlockUndoSource for Chainstate {
                 Err(reason @ HistoryUnavailable::Pruned { .. }) => (None, Err(reason)),
                 Err(reason) => return Err(reason.into()),
             };
-            (head, height, lease, availability)
+            (head, height, parent, lease, availability)
         };
         // No tree/write/transition lock spans body I/O, decoding or projection.
-        let result = self.read_block_spends(hash, height, availability);
+        // Anchor deployment rules to the queried branch, not the current tip.
+        let segwit_active =
+            bitcoin_rs_chain::softfork_state(&self.block_tree.read(), self.network, parent, height)
+                .segwit_active;
+        let result = self.read_block_spends(hash, height, segwit_active, availability);
         self.recheck_undo_read(
             expected_applied_hash,
             &head,
@@ -118,6 +123,7 @@ impl Chainstate {
         &self,
         hash: Hash256,
         height: u32,
+        segwit_active: bool,
         availability: Result<(), HistoryUnavailable>,
     ) -> Result<BlockSpends, BlockSpendsError> {
         let store = self
@@ -135,13 +141,8 @@ impl Chainstate {
         if block.block_hash().0 != hash {
             return Err(BlockSpendsError::Corrupt("block body hash differs"));
         }
-        let txids = block
-            .txs
-            .iter()
-            .map(bitcoin_rs_primitives::Tx::txid)
-            .collect::<Vec<_>>();
-        bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).map_err(|_| {
-            BlockSpendsError::Corrupt("transactions do not match the header merkle root")
+        bitcoin_rs_consensus::check_block_body_binding(&block, segwit_active).map_err(|_| {
+            BlockSpendsError::Corrupt("block body does not match its header commitments")
         })?;
         drop(bytes);
         // Genesis has no spent inputs, but getblock still requires its real

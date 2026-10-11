@@ -139,6 +139,8 @@ fn compare_formats(core: &mut ProcessNode, node: &mut ProcessNode, hash: &str) -
     let native_json = node.http_get(&format!("{path}.json"))?;
     assert_eq!(reference_json.status, 200);
     assert_eq!(native_json.status, 200);
+    assert_eq!(reference_json.body.last(), Some(&b'\n'));
+    assert_eq!(native_json.body.last(), reference_json.body.last());
     compare_reply(
         "spent outputs JSON",
         &reference_json.json()?,

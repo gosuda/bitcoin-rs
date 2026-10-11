@@ -242,6 +242,7 @@ fn dispatch_collect(
             Ok(())
         },
         &mut |_| {},
+        &mut |items| collected.borrow_mut().push(Message::GetData(items)),
     )?;
     Ok(collected.into_inner())
 }
@@ -370,6 +371,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
             | Err(
                 PeerError::Encode(_)
                 | PeerError::Protocol(_)
+                | PeerError::Misbehavior(_)
                 | PeerError::NativeDecode(_)
                 | PeerError::Varint(_),
             ) => {}
@@ -657,7 +659,7 @@ fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<()
 
     assert!(matches!(
         error,
-        PeerError::Protocol("getheaders locator too large")
+        PeerError::Misbehavior("getheaders locator too large")
     ));
     assert_eq!(peer.state, PeerState::Ready, "rejected before FSM mutation");
     Ok(())
@@ -731,7 +733,7 @@ fn getdata_bound_of_50k_vectors_matches_core_max_inv() -> Result<(), Box<dyn Err
     )?;
     assert!(matches!(
         error,
-        PeerError::Protocol("getdata inventory too large")
+        PeerError::Misbehavior("getdata inventory too large")
     ));
     Ok(())
 }
@@ -901,7 +903,7 @@ fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>
     )?;
     assert!(matches!(
         error,
-        PeerError::Protocol("message received before handshake completed")
+        PeerError::Misbehavior("message received before handshake completed")
     ));
 
     let mut fresh = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
@@ -911,7 +913,7 @@ fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>
     )?;
     assert!(matches!(
         error,
-        PeerError::Protocol("verack received before version")
+        PeerError::Misbehavior("verack received before version")
     ));
 
     let mut ready = ready_peer(Magic::REGTEST)?;
@@ -921,7 +923,7 @@ fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>
     )?;
     assert!(matches!(
         error,
-        PeerError::Protocol("duplicate version message")
+        PeerError::Misbehavior("duplicate version message")
     ));
     Ok(())
 }

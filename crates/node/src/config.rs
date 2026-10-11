@@ -150,6 +150,10 @@ pub struct P2pConfig {
     pub listen: Vec<SocketAddr>,
     /// Whether DNS seeds are enabled.
     pub dns_seeds_enabled: bool,
+    /// Optional Bitcoin Core `ASMap` classifier file.
+    pub asmap: Option<PathBuf>,
+    /// Operator subnets exempt from automatic discouragement.
+    pub noban_subnets: Vec<bitcoin_rs_p2p::IpSubnet>,
     /// Fixed outbound peer endpoints.
     pub connect: Vec<String>,
     /// Whether fast sync (shallow, early fan-out over a larger outbound set) is enabled.
@@ -268,6 +272,8 @@ impl NodeConfig {
                 magic: settings.p2p.magic.unwrap_or(profile.magic),
                 listen: settings.p2p.listen.clone().unwrap_or(profile.listen),
                 dns_seeds_enabled: settings.p2p.dns_seeds.unwrap_or(profile.dns_seeds),
+                asmap: settings.p2p.asmap.clone(),
+                noban_subnets: settings.p2p.noban_subnets.clone().unwrap_or_default(),
                 connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
                 fast_sync: settings.p2p.fast_sync.unwrap_or(false),
             },

@@ -1,0 +1,91 @@
+{
+  "provenance": {
+    "reference": "Bitcoin Core v31.1",
+    "source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+    "source_clean": true,
+    "source_sha256": {
+      "src/addrman.cpp": "f3016b40aed19a173106ff4e4f32b95b34ecf69d2218959c74272fe7cce643c0",
+      "src/addrman_impl.h": "783f7a3a399f5a3a852bfa670d21650153c2087a9011984f0225222fe53b9cd6",
+      "src/netaddress.cpp": "743d1f336bf35ff4506a9bce8fc534031a304b0b86f4566c5b1260e19876b3ad",
+      "src/netaddress.h": "f05257c296d6999ebb6e1d7a049176bbb87f6febaa015b0100c52e504b8cb27e",
+      "src/netgroup.cpp": "278fe5951b7f65b8098995c06b75805e835db6e09bc234609b28a7057c215add",
+      "src/netgroup.h": "93ed52cd206f8f89265dc8d1db13a1c6f59d9741828d40b7ac0a825dcacc3cc1",
+      "src/hash.h": "4aefc1de4e594f88d6318a2d40daf3dbffb7f2271fe32b0ea23b99688e33c255",
+      "src/serialize.h": "87a273aa8cb9aeea82cd8038bb85284a5782c8abc35f8c826eb60f1a01e06775",
+      "src/random.h": "5459198b3ae7962176537041ae01a8f74f7fa0a02e5b363ce378e6f5ac7ac430",
+      "src/random.cpp": "36c7f0204674539fa86d78766cd0f074420a1c46578a054bc1f0ac1c0b62a090",
+      "src/util/time.cpp": "029853fc5068eb2c9ce8a93af9f2e9ef829ea7655bc959bd1d13159fb0edc487",
+      "src/crypto/sha256.cpp": "31130079f338477ab4e0ddb923a7846bc66b6bdcc814ac6225f462f6aef85755",
+      "src/crypto/sha3.cpp": "9c35767f2110d8d0df4b1dc4d8c9e1f138639781759bb2ce2214366470685983",
+      "src/crypto/chacha20.cpp": "c412e83b29f088bd11e200a0c0355e7ac4caf816dbacf9d6757a48ff4f889c55",
+      "src/crypto/sha512.cpp": "5935740854905fb3731c41db55d594a638f5526535e26a32da9c453a7273d4de",
+      "src/crypto/siphash.cpp": "538471bc7ff7d26a9df8742483cfaf5cec206331a6b78f04f519a4a2321ac07d",
+      "src/util/asmap.cpp": "eae5e8b1dfdda52d39d907ebe00fac76300f00bd5ddf01657a0c1dabf942f66f",
+      "src/util/strencodings.cpp": "e7b53609dbb5d0d025a77ae7db749c084e0c75d798cba6f4456aea0be026804f",
+      "src/logging.cpp": "1c04605e4d3a9c9633e02770cde36fef8b174e46092799fb6fff99eba76e95ce",
+      "src/util/check.cpp": "09cb9274ac9e3bc7fad7c99ccb6986dcd57909cdaf9305b8e5f639f92b0c8d43",
+      "src/clientversion.cpp": "c4b38f790251528ddcfa94034ebc9b4fa10f8a6a15ce3ed03f64f00318017b31",
+      "src/uint256.cpp": "9a94f447c78b095b738c81b0517ba02618d87319dd1d25158a31fc236a5b4d42",
+      "src/util/threadnames.cpp": "9b35b0af788edcae968981b719f42c3bae1b5ee8786db737c8cea9d399ce66d9",
+      "src/support/cleanse.cpp": "e5c85c9c419a0f98c83e9c646a1b22fa9a364fb336b1f271af5e0ab45ff9230b",
+      "src/support/lockedpool.cpp": "7d074ea1811fa10b4692ed0b852117b2ea8a28a44bbae621e72426f3993df3e2",
+      "src/randomenv.cpp": "c62f01b7328d50c229d7cecf4fd35c497c74a508ddb4d50f2b4e8c554b5d2b2f",
+      "src/util/fs.cpp": "32c071567c29fbba42d15fe0e7066a8f47c517e8901ba15f5aa0c2376bc0745a",
+      "src/test/addrman_tests.cpp": "055e67fbffd2fe978bce7a911324a2e5643a8643b6d6fb6978724d60a335ed34",
+      "cmake/bitcoin-build-config.h.in": "e3f32d5c843dc9f2b3e6a791dcf1ef4c4ac373518ec7b85d736aa2bcc189fde5"
+    },
+    "compiler": "g++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "compile_flags": "-std=c++20 -O1 -g0 -ffunction-sections -fdata-sections -Wl,--gc-sections",
+    "configuration": "Generated from the pinned cmake/bitcoin-build-config.h.in using pinned31.1 metadata and already measured Linux platform feature flags. Full upstream CMake configure was blocked by absent Boost package; standalone drivers compile actual unmodified Core sources. No candidate or replacement addrman algorithm is linked.",
+    "generated_config_sha256": "e795caf911f1ac025a338cf35620a7015d36423ef2c065aa73b17b52afea5ef4",
+    "build_script": "crates/p2p/tests/support/regenerate-core-addrman.sh",
+    "configure_script": "crates/p2p/tests/support/core-addrman-configure.cmake"
+  },
+  "method": "Scan ports1..65535 in ascending order; direct actual AddrInfo::GetNewBucket and GetBucketPosition calls for8.8.8.8/source1.1.1.1. First match at each requested position retained. No candidate algorithm or Python placement formula.",
+  "rows": [
+    {
+      "secret_raw_hex": "41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b",
+      "address": "8.8.8.8",
+      "port": 90,
+      "source": "1.1.1.1",
+      "new_bucket": 191,
+      "new_position": 0,
+      "endpoint_key_hex": "00000000000000000000ffff08080808005a"
+    },
+    {
+      "secret_raw_hex": "41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b",
+      "address": "8.8.8.8",
+      "port": 6,
+      "source": "1.1.1.1",
+      "new_bucket": 191,
+      "new_position": 1,
+      "endpoint_key_hex": "00000000000000000000ffff080808080006"
+    },
+    {
+      "secret_raw_hex": "41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b",
+      "address": "8.8.8.8",
+      "port": 88,
+      "source": "1.1.1.1",
+      "new_bucket": 191,
+      "new_position": 32,
+      "endpoint_key_hex": "00000000000000000000ffff080808080058"
+    }
+  ],
+  "ring_probabilities_if_only_pair_occupied_and_equal_chance": {
+    "positions_0_1": {
+      "position_0": "63/64",
+      "position_1": "1/64"
+    },
+    "positions_0_32": {
+      "position_0": "1/2",
+      "position_32": "1/2"
+    }
+  },
+  "driver": "crates/p2p/tests/support/core-addrman-ring-driver.cpp",
+  "driver_sha256": "669335027d154001ec979251e66de638f863d8eaf0c36c58744902f313ff982b",
+  "oracle_sha256": "3629e633561ece67dc0d3489f09fae5eae1ca11ef6ba1a91e3f323778f5ae851",
+  "raw_output_sha256": "e6574df91ae8e8e51965e21bed1cc2e60af0ac3887781d1cef768350d13be846",
+  "build_script": "crates/p2p/tests/support/regenerate-core-addrman.sh",
+  "support_configuration_script": "crates/p2p/tests/support/core-addrman-configure.cmake",
+  "generated_configuration_header": "OUTPUT_DIRECTORY/src/bitcoin-build-config.h"
+}

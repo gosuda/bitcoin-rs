@@ -30,8 +30,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
 | `sendrawtransaction` | 0.4.0 | Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported. |
 | `testmempoolaccept` | 0.4.0 | Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported. |
+| `createrawtransaction` | 0.4.0 | Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface. |
 | `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md. |
-| `gettxspendingprevout` | 0.11.0 | Mempool lookup and options follow Core 31.1 without txospenderindex. Missing or extra argument counts return local JSON-RPC shape errors rather than Core help text. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot. |
+| `gettxspendingprevout` | 0.11.0 | Mempool lookup and options follow Core 31.1 without txospenderindex. After named binding, missing outputs and excess positional arguments use local -32602 shape errors. Core uses -1 help for no arguments/excess arity but -3 for an outputs hole created by named options; explicit null matches Core -3. Name and collision errors retain Core precedence. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot. |
 | `estimatesmartfee` | 0.4.0 | See docs/contracts/external-api.md#API-26 for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs). |
 | `getrpcinfo` | 0.4.0 | active_commands is always an empty array; this node does not track in-flight RPC calls. logpath reports the configured debug log path (crates/rpc/src/handlers/util.rs). |
 | `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). The figures are resident set size read from the OS, not Core's locked-pool allocator accounting. |
@@ -40,7 +41,10 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/minimum_fee_filter/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
-| `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers. |
+| `getchainstates` | 0.12.0 | Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. |
+| `getdeploymentinfo` | 0.12.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
+| `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented. |
+| `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/rpc/src/handlers/util.rs and crates/rpc/src/tx_render.rs). |
 
 ### Implemented (unverified)
 
@@ -63,7 +67,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `gettxoutproof` | 0.4.0 |  |
 | `verifytxoutproof` | 0.4.0 |  |
 | `decoderawtransaction` | 0.4.0 |  |
-| `createrawtransaction` | 0.4.0 |  |
 | `combinepsbt` | 0.4.0 |  |
 | `finalizepsbt` | 0.4.0 |  |
 | `getmempoolentry` | 0.4.0 |  |
@@ -107,12 +110,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
 | `getblockfilter` | n/a | BIP157/158 compact block filters and the filter index are not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
-| `getchainstates` | n/a | Not implemented. |
-| `getdeploymentinfo` | n/a | Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists). |
 | `getdescriptoractivity` | n/a | No wallet/scan index to serve it. |
 | `getmempoolcluster` | n/a | Cluster mempool tracking not implemented. |
 | `importmempool` | n/a | Mempool import not implemented. |
-| `loadtxoutset` | n/a | UTXO snapshot load (assumeutxo) not implemented. |
 | `preciousblock` | n/a | No manual block-preference surface. |
 | `reconsiderblock` | n/a | No manual reorg-control surface. |
 | `savemempool` | n/a | Mempool dump/reload persistence not implemented. |
@@ -205,7 +205,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 |---|---|---|
 | `/rest/block/` | 0.4.0 | Full transaction projection omits undo fees and prevouts; the shared undo read capability is used by spenttxouts and getblock verbosity 2/3. |
 | `/rest/headers/` | 0.4.0 | Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs). |
-| `/rest/getutxos` | 0.4.0 | URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs). |
+| `/rest/getutxos` | 0.4.0 | GET and bounded canonical binary/hex POST share UTXO and mempool lookup. Intentionally corrects Core 31.1 POST string-length-prefix decoding; rejects mixed inputs, JSON bodies and trailing data. POST limit: 2048 bytes, 15 outpoints. |
+| `/rest/deploymentinfo/` | 0.4.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
+| `/rest/deploymentinfo` | 0.4.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
 | `/rest/spenttxouts/` | 0.4.0 | Serves retained certified undo in Core bin/hex/json formats. Older uncertified stale rows remain unavailable; transient retained-body absence and resource budgets return retry responses. See docs/contracts/external-api.md#retained-block-inputs. |
 
 ### Implemented (unverified)
@@ -217,8 +219,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `/rest/blockpart/` | 0.4.0 | bin/hex only; JSON rejected, matching Core's /rest/blockpart (bitcoin-core/src/rest.cpp rest_block_part). |
 | `/rest/chaininfo` | 0.4.0 |  |
 | `/rest/mempool/` | 0.4.0 |  |
-| `/rest/deploymentinfo/` | 0.4.0 |  |
-| `/rest/deploymentinfo` | 0.4.0 |  |
 | `/rest/blockhashbyheight/` | 0.4.0 |  |
 
 ### Extension
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 21, Implemented (unverified) 60, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 27, Implemented (unverified) 57, Extension 2, Disabled 0, Unimplemented 89 - total 175.

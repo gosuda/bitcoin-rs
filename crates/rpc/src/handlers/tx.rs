@@ -563,6 +563,7 @@ const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime",
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
     let params = bound.as_ref();
+    super::ensure_at_most_params(params, CREATE_TRANSACTION_ARGUMENTS.len())?;
     let array = params_array(params)?;
     let inputs = array
         .first()
@@ -982,11 +983,12 @@ mod tests {
         ctx.indexes.derived_index = Some(Arc::new(FailingQuery));
         let ctx = Arc::new(ctx);
         let genesis = fixture_genesis();
-        let coinbase = genesis
+        let mut coinbase = genesis
             .txs
             .first()
             .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
             .clone();
+        coinbase.version = -1;
         let txid = coinbase.txid();
         {
             let mut pool = ctx.mempool.gateway.pool().write();
@@ -1000,6 +1002,21 @@ mod tests {
 
         let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
+        for verbosity in [json!(true), json!(1), json!(2)] {
+            let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), verbosity]))?;
+            assert_eq!(verbose["version"].as_u64(), Some(4_294_967_295));
+            assert_eq!(verbose["hex"].as_str(), Some(expected.as_str()));
+            for field in [
+                "blockhash",
+                "confirmations",
+                "time",
+                "blocktime",
+                "in_active_chain",
+                "fee",
+            ] {
+                assert!(verbose.get(field).is_none(), "mempool omits {field}");
+            }
+        }
         Ok(())
     }
 
@@ -1157,7 +1174,9 @@ mod tests {
             }
         }
 
-        let genesis = fixture_genesis();
+        let mut genesis = fixture_genesis();
+        genesis.txs[0].version = i32::MIN;
+        genesis.header.merkle_root = genesis.txs[0].txid().0;
         let Some(coinbase) = genesis.txs.first().cloned() else {
             panic!("genesis has no transactions");
         };
@@ -1184,6 +1203,13 @@ mod tests {
         let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), true]))
             .expect("verbose txindex lookup");
         assert!(verbose.get("in_active_chain").is_none());
+        assert_eq!(verbose["version"].as_u64(), Some(2_147_483_648));
+        for field in ["time", "blocktime"] {
+            assert_eq!(
+                verbose[field].as_u64(),
+                Some(u64::from(genesis.header.time))
+            );
+        }
         assert_eq!(
             verbose.get("confirmations").and_then(Value::as_u64),
             Some(1)
