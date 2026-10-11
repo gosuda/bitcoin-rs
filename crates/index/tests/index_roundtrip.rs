@@ -1886,7 +1886,7 @@ fn redb_snapshot_preserves_history_occurrences_and_tx_positions()
     assert_eq!(occurrence.len(), 71);
     assert_eq!(&occurrence[..32], &scripthash.to_byte_array());
     assert_eq!(&occurrence[32..64], txid.as_bytes());
-    assert_eq!(&occurrence[64..70], positions[0].as_bytes());
+    assert_eq!(&occurrence[64..70], &transaction_rows.rows[0].value);
     assert_eq!(occurrence[70], 1, "funding occurrence");
     Ok(())
 }
