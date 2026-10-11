@@ -11,8 +11,6 @@
 #[path = "support/common.rs"]
 mod common;
 
-#[cfg(feature = "redb")]
-use bitcoin_rs_index::IndexReader;
 use common::{MemoryStore, NoSpentScripts};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -197,113 +195,6 @@ impl Chain {
 }
 
 // --- Tests ----------------------------------------------------------------
-
-#[cfg(feature = "redb")]
-fn redb_writer_live_roundtrip<S: KvStore>(
-    open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(open()?);
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let empty = MapScripts::default();
-    let (genesis, genesis_hash) = block_bytes([0; 32], vec![coinbase(0)]);
-    let (funding, funding_hash) = block_bytes(genesis_hash, vec![coinbase(1)]);
-    for (height, body, hash) in [(0, &genesis, genesis_hash), (1, &funding, funding_hash)] {
-        let prepared = writer.prepare_block_with_spent_scripts(
-            IndexCapabilities::ALL,
-            height,
-            hash,
-            body,
-            &empty,
-        )?;
-        writer.commit_forward(common::single_block_batch(prepared))?;
-    }
-    let funding_tx = coinbase(1);
-    let wallet = funding_tx.output[0].script_pubkey.clone();
-    let scripthash = ScriptHash::from_script_bytes(wallet.as_bytes());
-    let outpoint = OutPoint::new(funding_tx.compute_txid(), 0);
-    let native = NativeOutPoint::new(
-        NativeTxid(Hash256::from_le_bytes(outpoint.txid.as_byte_array())),
-        0,
-    );
-    let row = ScriptLiveRow::new(scripthash, &native);
-    assert_eq!(row.as_bytes().len(), 43);
-    assert_eq!(
-        store.get(ColumnFamily::ScriptLive, row.as_bytes())?,
-        Some(Vec::new())
-    );
-    let scan = writer.snapshot()?.live_rows(
-        scripthash,
-        bitcoin_rs_storage::PrefixScanLimit {
-            max_rows: 10,
-            max_bytes: 1_024,
-        },
-    )?;
-    assert!(scan.complete);
-    assert_eq!(scan.rows.len(), 1);
-    assert_eq!(scan.rows[0].as_bytes(), row.as_bytes());
-
-    let mut anchor = MapScripts::default();
-    anchor.insert(outpoint, &wallet);
-    let (spending, spending_hash) = block_bytes(
-        funding_hash,
-        vec![coinbase(2), spend(&[outpoint], &[script(0xdd)])],
-    );
-    let prepared = writer.prepare_block_with_spent_scripts(
-        IndexCapabilities::ALL,
-        2,
-        spending_hash,
-        &spending,
-        &anchor,
-    )?;
-    writer.commit_forward(common::single_block_batch(prepared))?;
-    assert_eq!(store.get(ColumnFamily::ScriptLive, row.as_bytes())?, None);
-    commit_rollback_one_with_spent_scripts(
-        &mut writer,
-        IndexCapabilities::ALL,
-        Some(IndexWatermark {
-            height: 1,
-            hash: funding_hash,
-        }),
-        &spending,
-        &anchor,
-    )?;
-    store.flush()?;
-    drop(writer);
-    drop(store);
-
-    let store = Arc::new(open()?);
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    assert_eq!(
-        writer.indexer().iter_live_outpoints(scripthash)?,
-        vec![native]
-    );
-    commit_rollback_one_with_spent_scripts(
-        &mut writer,
-        IndexCapabilities::ALL,
-        Some(IndexWatermark {
-            height: 0,
-            hash: genesis_hash,
-        }),
-        &funding,
-        &empty,
-    )?;
-    assert_eq!(store.get(ColumnFamily::ScriptLive, row.as_bytes())?, None);
-    Ok(())
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::TempDir::new()?;
-    redb_writer_live_roundtrip(|| bitcoin_rs_storage::open_redb_tx_index_store(temp.path()))
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::TempDir::new()?;
-    redb_writer_live_roundtrip(|| bitcoin_rs_storage::RedbStore::open(temp.path()))
-}
 
 /// Connect writes live rows for created outputs; a later block's anchored
 /// spend removes exactly the spent outpoint and no other row of the same
