@@ -1591,10 +1591,9 @@ fn block_verbose_typed(
     };
     // The pinned coinbase DTO narrows this unsigned wire field to i32.
     // Both typed block envelopes must already contain this object.
-    let envelope = value
+    let coinbase = value
         .as_object_mut()
-        .ok_or_else(|| RpcError::Internal("typed block response is not an object".to_owned()))?;
-    let coinbase = envelope
+        .ok_or_else(|| RpcError::Internal("typed block response is not an object".to_owned()))?
         .get_mut(&"coinbase_tx")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| RpcError::Internal("typed block coinbase is not an object".to_owned()))?;
