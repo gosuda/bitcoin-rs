@@ -1,19 +1,88 @@
 //! Retained undo across public RPC/REST, compared with pinned unmodified Core.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use bitcoin::consensus::{Decodable as _, encode::serialize_hex};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, VarInt, Witness};
-use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};
+use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::helpers::{funding_address, sign_p2pkh_inputs, signed_spend};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use serde_json::{Value, json};
 
-fn options() -> SpawnOptions<'static> {
+fn indexed_options() -> SpawnOptions<'static> {
     SpawnOptions {
-        extra_args: &["--rest=true"],
+        extra_args: &["--rest=true", "--txindex=true"],
         ..SpawnOptions::default()
     }
+}
+
+/// The complete object protects unsigned wire versions and all optional chain
+/// fields while exercising the same read consumer in each availability state.
+fn compare_raw_transaction(
+    core: &mut ProcessNode,
+    node: &mut ProcessNode,
+    txid: &str,
+    block: Option<&str>,
+) -> Result<Value> {
+    let params = if let Some(block) = block {
+        json!([txid, true, block])
+    } else {
+        json!([txid, true])
+    };
+    let reference = core.rpc("getrawtransaction", &params)?;
+    let native = node.rpc("getrawtransaction", &params)?;
+    compare_reply("verbose raw transaction", &reference, &native)?;
+    Ok(native)
+}
+
+fn compare_raw_lookup_sources(
+    core: &mut ProcessNode,
+    node: &mut ProcessNode,
+    funds: &CommonFunds,
+    txid: &str,
+    block: &str,
+) -> Result<()> {
+    let explicit = compare_raw_transaction(core, node, txid, Some(block))?;
+    assert_eq!(explicit["version"], u32::MAX);
+    assert_eq!(explicit["in_active_chain"], true);
+    for process in [&mut *core, &mut *node] {
+        process.wait_for(
+            "txindex reaches high-version block",
+            Duration::from_secs(15),
+            |process| {
+                let info = process.rpc("getindexinfo", &json!([]))?;
+                Ok((info["txindex"]["best_block_height"].as_u64() == Some(103)
+                    && info["txindex"]["synced"] == true)
+                    .then_some(()))
+            },
+        )?;
+    }
+    let indexed = compare_raw_transaction(core, node, txid, None)?;
+    assert!(indexed.get("in_active_chain").is_none());
+    assert_eq!(indexed["version"], u32::MAX);
+    // Standard version 2 can enter both mempools without a policy override.
+    // The high-bit version above is covered through actual block admission.
+    let (outpoint, prevout) = funds.confirmed_output(2)?;
+    let mempool = signed_spend(outpoint, &prevout, 1000, Sequence::MAX)?;
+    let mempool_id = mempool.compute_txid().to_string();
+    for process in [&mut *core, &mut *node] {
+        process.rpc("sendrawtransaction", &json!([serialize_hex(&mempool)]))?;
+    }
+    let unconfirmed = compare_raw_transaction(core, node, &mempool_id, None)?;
+    for field in [
+        "blockhash",
+        "confirmations",
+        "time",
+        "blocktime",
+        "in_active_chain",
+    ] {
+        assert!(
+            unconfirmed.get(field).is_none(),
+            "mempool field {field} must be absent"
+        );
+    }
+    Ok(())
 }
 
 fn submit_common(
@@ -129,11 +198,11 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
     let mut core = ProcessNode::spawn_with(
         Kind::Core,
         &SpawnOptions {
-            extra_args: &["-rest=1"],
+            extra_args: &["-rest=1", "-txindex=1"],
             ..SpawnOptions::default()
         },
     )?;
-    let mut node = ProcessNode::spawn_with(Kind::BitcoinRs, &options())?;
+    let mut node = ProcessNode::spawn_with(Kind::BitcoinRs, &indexed_options())?;
     let funds = mine_common_chain(&mut core, &mut node, 102)?;
     let mut parent = funds.signed_spend(1000, Sequence::MAX)?;
     parent.version = bitcoin::transaction::Version(-1);
@@ -158,6 +227,8 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
         &mut node,
         &[serialize_hex(&parent), serialize_hex(&child)],
     )?;
+    let txid = parent.compute_txid().to_string();
+    compare_raw_lookup_sources(&mut core, &mut node, &funds, &txid, &block)?;
     let result = compare_formats(&mut core, &mut node, &block)?;
     assert_eq!(result["tx"][1]["version"], u32::MAX);
     assert_eq!(
@@ -181,6 +252,11 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
     for process in [&mut core, &mut node] {
         process.rpc("invalidateblock", &json!([block]))?;
     }
+    let stale_tx = compare_raw_transaction(&mut core, &mut node, &txid, Some(&block))?;
+    assert_eq!(stale_tx["in_active_chain"], false);
+    assert_eq!(stale_tx["confirmations"], 0);
+    assert!(stale_tx.get("time").is_none());
+    assert!(stale_tx.get("blocktime").is_none());
     let stale = compare_formats(&mut core, &mut node, &block)?;
     assert_eq!(stale["confirmations"], -1);
     assert!(stale.get("nextblockhash").is_none());
@@ -206,7 +282,7 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
         200
     );
     let datadir = node.stop_keep_datadir()?;
-    let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options(), datadir)?;
+    let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &indexed_options(), datadir)?;
     compare_formats(&mut core, &mut node, &replacement)?;
     node.stop()?;
     core.stop()

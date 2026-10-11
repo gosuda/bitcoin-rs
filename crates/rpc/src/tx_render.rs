@@ -25,7 +25,7 @@ pub(crate) struct TransactionChainContext {
     pub block_hash: BlockHash,
     /// Confirmations on the applied chain, or `0` when the named block is inactive.
     pub confirmations: i64,
-    /// Confirming block time.
+    /// Confirming block time, rendered only with positive confirmations.
     pub block_time: u64,
     /// Whether the confirming block is on the applied chain.
     ///
@@ -110,8 +110,10 @@ pub(crate) fn transaction_json(
     if let Some(chain) = chain {
         let _ = value.insert("blockhash", json!(chain.block_hash.to_string()));
         let _ = value.insert("confirmations", json!(chain.confirmations));
-        let _ = value.insert("time", json!(chain.block_time));
-        let _ = value.insert("blocktime", json!(chain.block_time));
+        if chain.confirmations > 0 {
+            let _ = value.insert("time", json!(chain.block_time));
+            let _ = value.insert("blocktime", json!(chain.block_time));
+        }
         if let Some(in_active_chain) = chain.in_active_chain {
             let _ = value.insert("in_active_chain", json!(in_active_chain));
         }
