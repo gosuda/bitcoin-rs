@@ -4,7 +4,8 @@ use crate::batch::{BatchOp, BufferedWriteBatch};
 use std::path::{Path, PathBuf};
 
 use redb::{
-    Database, Durability, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition,
+    Database, Durability, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
 };
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
@@ -12,8 +13,8 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
 type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u8]>;
-/// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
-const SCRIPT_LIVE_KEY_LEN: usize = 44;
+/// `ScriptLive` key width: `prefix(8) || txid(32) || vout_le_u24(3)`.
+const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
 /// Unbounded scan budget: `iter_prefix` returns every matching row.
 const UNBOUNDED: crate::PrefixScanLimit = crate::PrefixScanLimit {
@@ -394,11 +395,28 @@ impl RedbTxIndexStore {
                 .open_table(TXINDEX_BLOCK_HEADERS)
                 .map_err(StorageError::backend)?,
         );
-        drop(
-            write_txn
-                .open_table(TXINDEX_SCRIPT_LIVE)
-                .map_err(StorageError::backend)?,
-        );
+        match write_txn.open_table(TXINDEX_SCRIPT_LIVE) {
+            Ok(table) => drop(table),
+            Err(redb::TableError::TableTypeMismatch { .. }) => {
+                // The former 44-byte declaration could not accept index-owned
+                // 43-byte rows. Replace only an empty table, never operator data.
+                let old: FixedTable<44> = TableDefinition::new("txindex_v1_script_live");
+                let table = write_txn.open_table(old).map_err(StorageError::backend)?;
+                if !table.is_empty().map_err(StorageError::backend)? {
+                    return Err(StorageError::InvalidOperation(
+                        "non-empty 44-byte ScriptLive table; rebuild the derived index in a separately named directory",
+                    ));
+                }
+                drop(table);
+                write_txn.delete_table(old).map_err(StorageError::backend)?;
+                drop(
+                    write_txn
+                        .open_table(TXINDEX_SCRIPT_LIVE)
+                        .map_err(StorageError::backend)?,
+                );
+            }
+            Err(error) => return Err(StorageError::backend(error)),
+        }
         drop(
             write_txn
                 .open_table(TXINDEX_META)
@@ -829,7 +847,7 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Rejects a `ScriptLive` write that is not a 44-byte key with an empty value.
+/// Rejects a `ScriptLive` write that is not a 43-byte key with an empty value.
 fn validate_script_live_put(key: &[u8], value: &[u8]) -> Result<(), StorageError> {
     fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ())?;
     if !value.is_empty() {

@@ -147,6 +147,10 @@ unneeded funding record lists when callers only require history records.
   `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
   and recovery full-resets the store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
+- The dedicated redb store corrects the former 44-byte ScriptLive table
+  declaration only when that table is empty. A populated incompatible table
+  refuses open without changing its data; the operator must rebuild the derived
+  index in a separately named directory. No live-row conversion is performed.
 - On node startup, index workers read their persisted watermarks and reconcile
   against `Chainstate::chain_snapshot()` (via `NodeState::chainstate()`):
   - If the watermark is an ancestor of the restored tip, the worker connects

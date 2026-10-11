@@ -11,6 +11,8 @@
 #[path = "support/common.rs"]
 mod common;
 
+#[cfg(any(feature = "redb", feature = "fjall"))]
+use bitcoin_rs_index::IndexReader;
 use common::MemoryStore;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -195,6 +197,244 @@ impl Chain {
 }
 
 // --- Tests ----------------------------------------------------------------
+
+#[cfg(any(feature = "redb", feature = "fjall"))]
+fn persistent_writer_live_roundtrip<S: KvStore>(
+    open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
+    capabilities: IndexCapabilities,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(open()?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let empty = MapScripts::default();
+    let (genesis, genesis_hash) = block_bytes([0; 32], vec![coinbase(0)]);
+    let mut funding_tx = coinbase(1);
+    funding_tx.output.push(funding_tx.output[0].clone());
+    funding_tx.output[0].script_pubkey = script(0xab);
+    let (funding, funding_hash) = block_bytes(genesis_hash, vec![funding_tx.clone()]);
+    for (height, body, hash) in [(0, &genesis, genesis_hash), (1, &funding, funding_hash)] {
+        let prepared =
+            writer.prepare_block_with_spent_scripts(capabilities, height, hash, body, &empty)?;
+        writer.commit_forward(common::single_block_batch(prepared))?;
+    }
+    let funding_tip = IndexWatermark {
+        height: 1,
+        hash: funding_hash,
+    };
+    assert_eq!(
+        writer.watermarks()?,
+        IndexWatermarks {
+            tx_lookup: (capabilities != IndexCapabilities::SCRIPT_LIVE).then_some(funding_tip),
+            script_history: (capabilities == IndexCapabilities::ALL).then_some(funding_tip),
+            script_live: (capabilities != IndexCapabilities::TX_LOOKUP).then_some(funding_tip),
+        }
+    );
+    if capabilities == IndexCapabilities::TX_LOOKUP {
+        return tx_lookup_only_reopen(open, store, writer, funding_tip);
+    }
+    let wallet = funding_tx.output[1].script_pubkey.clone();
+    let scripthash = ScriptHash::from_script_bytes(wallet.as_bytes());
+    let outpoint = OutPoint::new(funding_tx.compute_txid(), 1);
+    let native = NativeOutPoint::new(
+        NativeTxid(Hash256::from_le_bytes(outpoint.txid.as_byte_array())),
+        1,
+    );
+    let row = ScriptLiveRow::new(scripthash, &native);
+    assert_eq!(row.as_bytes().len(), 43);
+    assert_eq!(
+        store.get(ColumnFamily::ScriptLive, row.as_bytes())?,
+        Some(Vec::new())
+    );
+    let scan = writer.snapshot()?.live_rows(
+        scripthash,
+        bitcoin_rs_storage::PrefixScanLimit {
+            max_rows: 10,
+            max_bytes: 1_024,
+        },
+    )?;
+    assert!(scan.complete);
+    assert_eq!(scan.rows.len(), 1);
+    assert_eq!(scan.rows[0].as_bytes(), row.as_bytes());
+
+    let mut anchor = MapScripts::default();
+    anchor.insert(outpoint, &wallet);
+    let (spending, spending_hash) = block_bytes(
+        funding_hash,
+        vec![coinbase(2), spend(&[outpoint], &[script(0xdd)])],
+    );
+    let prepared = writer.prepare_block_with_spent_scripts(
+        capabilities,
+        2,
+        spending_hash,
+        &spending,
+        &anchor,
+    )?;
+    writer.commit_forward(common::single_block_batch(prepared))?;
+    assert_eq!(store.get(ColumnFamily::ScriptLive, row.as_bytes())?, None);
+    commit_rollback_one_with_spent_scripts(
+        &mut writer,
+        capabilities,
+        Some(IndexWatermark {
+            height: 1,
+            hash: funding_hash,
+        }),
+        &spending,
+        &anchor,
+    )?;
+    store.flush()?;
+    drop(writer);
+    drop(store);
+
+    let store = Arc::new(open()?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    assert_eq!(
+        writer.indexer().iter_live_outpoints(scripthash)?,
+        vec![native]
+    );
+    commit_rollback_one_with_spent_scripts(
+        &mut writer,
+        capabilities,
+        Some(IndexWatermark {
+            height: 0,
+            hash: genesis_hash,
+        }),
+        &funding,
+        &empty,
+    )?;
+    assert_eq!(store.get(ColumnFamily::ScriptLive, row.as_bytes())?, None);
+    seed_live_and_reopen(open, store, writer, native, scripthash)
+}
+
+#[cfg(any(feature = "redb", feature = "fjall"))]
+fn tx_lookup_only_reopen<S: KvStore>(
+    open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
+    store: Arc<S>,
+    writer: IndexWriter<S>,
+    funding_tip: IndexWatermark,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        writer
+            .indexer()
+            .capability_watermark(IndexCapability::ScriptLive)?,
+        None
+    );
+    assert!(
+        store
+            .iter_prefix(ColumnFamily::ScriptLive, &[])?
+            .next()
+            .is_none()
+    );
+    store.flush()?;
+    drop(writer);
+    drop(store);
+    let writer = IndexWriter::open(Arc::new(open()?), 1)?;
+    assert_eq!(
+        writer
+            .indexer()
+            .capability_watermark(IndexCapability::TxLookup)?,
+        Some(funding_tip)
+    );
+    assert_eq!(
+        writer
+            .indexer()
+            .capability_watermark(IndexCapability::ScriptLive)?,
+        None
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "redb", feature = "fjall"))]
+fn seed_live_and_reopen<S: KvStore>(
+    open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
+    store: Arc<S>,
+    mut writer: IndexWriter<S>,
+    native: NativeOutPoint,
+    scripthash: ScriptHash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The production seed path must publish readiness only with the live rows,
+    // without resetting the independent historical/transaction watermarks.
+    writer.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+    let (_, before_seed) = writer.fenced_watermarks()?;
+    let seed_tip = IndexWatermark {
+        height: 42,
+        hash: [0x42; 32],
+    };
+    let high_vout = NativeOutPoint::new(native.txid, 256);
+    let coins = [(native, scripthash), (high_vout, scripthash)];
+    assert_eq!(writer.seed_script_live(coins, seed_tip)?, 2);
+    let (_, after_seed) = writer.fenced_watermarks()?;
+    assert_eq!(after_seed.script_live, Some(seed_tip));
+    assert_eq!(after_seed.tx_lookup, before_seed.tx_lookup);
+    assert_eq!(after_seed.script_history, before_seed.script_history);
+    assert!(matches!(
+        writer.seed_script_live(coins, seed_tip),
+        Err(IndexError::LiveAlreadySeeded)
+    ));
+    store.flush()?;
+    drop(writer);
+    drop(store);
+    let writer = IndexWriter::open(Arc::new(open()?), 1)?;
+    let live = writer.indexer().iter_live_outpoints(scripthash)?;
+    assert_eq!(live.len(), 2);
+    assert!(live.contains(&native) && live.contains(&high_vout));
+    assert_eq!(
+        writer
+            .indexer()
+            .capability_watermark(IndexCapability::ScriptLive)?,
+        Some(seed_tip)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    for capabilities in [
+        IndexCapabilities::SCRIPT_LIVE,
+        IndexCapabilities::ALL,
+        IndexCapabilities::TX_LOOKUP,
+    ] {
+        let temp = tempfile::TempDir::new()?;
+        persistent_writer_live_roundtrip(
+            || bitcoin_rs_storage::open_redb_tx_index_store(temp.path()),
+            capabilities,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    for capabilities in [
+        IndexCapabilities::SCRIPT_LIVE,
+        IndexCapabilities::ALL,
+        IndexCapabilities::TX_LOOKUP,
+    ] {
+        let temp = tempfile::TempDir::new()?;
+        persistent_writer_live_roundtrip(
+            || bitcoin_rs_storage::RedbStore::open(temp.path()),
+            capabilities,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    for capabilities in [
+        IndexCapabilities::SCRIPT_LIVE,
+        IndexCapabilities::ALL,
+        IndexCapabilities::TX_LOOKUP,
+    ] {
+        let temp = tempfile::TempDir::new()?;
+        persistent_writer_live_roundtrip(
+            || bitcoin_rs_storage::FjallStore::open(temp.path()),
+            capabilities,
+        )?;
+    }
+    Ok(())
+}
 
 /// Connect writes live rows for created outputs; a later block's anchored
 /// spend removes exactly the spent outpoint and no other row of the same
