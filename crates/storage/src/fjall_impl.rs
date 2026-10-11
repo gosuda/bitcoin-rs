@@ -316,6 +316,7 @@ impl KvSnapshot for FjallSnapshot<'_> {
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
         use core::ops::Bound;
+        let start = core::cmp::max(start, prefix);
         let prefix = prefix.to_vec();
         let iterator = self
             .snapshot

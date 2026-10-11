@@ -344,6 +344,7 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
         let handle = self.db.cf_handle(cf)?;
+        let start = core::cmp::max(start, prefix);
         let prefix = prefix.to_vec();
         let iterator = self.snapshot.iterator_cf_opt(
             handle,

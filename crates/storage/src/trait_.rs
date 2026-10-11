@@ -311,6 +311,8 @@ pub trait KvSnapshot: Send + Sync {
     }
 
     /// Collects matching rows beginning at the inclusive full-key seek point.
+    /// A seek before the prefix starts at its first matching row; a seek after
+    /// the prefix returns an empty, complete scan.
     /// Backends should override this to turn cursor pagination into an engine
     /// seek; the default preserves correctness for test stores.
     fn scan_prefix_from_bounded(
