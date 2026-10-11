@@ -20,8 +20,8 @@ Under [docs/benchmarks/README.md](https://github.com/gosuda/bitcoin-rs/blob/361c
 | Required identity | Recorded evidence / missing requirement |
 |---|---|
 | Artifact | Exact binary SHA-256 and source commit linked through each run ID: present. |
-| Configuration | CLI, input TOML, features, backend, cache and native validation are recorded. Complete resolved `NodeConfig` and allocator identity are absent: **BLOCKED**. |
-| Corpus | Manifest digest, height range, stop height/hash, per-block hashes and Core UTXO controls: present. |
+| Configuration | Build flags, features, backend, cache and native validation are recorded. CLI, input TOML, complete resolved `NodeConfig` and allocator identity are absent from the retained artifact: **BLOCKED**. |
+| Corpus | Manifest digest, height range, stop height/hash and Core UTXO controls: present. Corpus block files and their per-block manifest are not bundled. |
 | Durability | Fjall backend is recorded. Per-sample batch mode and explicit flush/sync posture were not captured: **BLOCKED**. |
 | Toolchain | Release profile/features/lockfile are recorded. The required exact `rustc 1.99.0`/edition-2024 build attestation is not attached to these samples: **BLOCKED**. |
 | Hardware | CPU/RAM/kernel/filesystem context is available. Pinned core set and storage-device identity were not recorded: **BLOCKED**. |
