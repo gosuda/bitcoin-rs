@@ -124,6 +124,8 @@ pub struct Peer<S> {
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
+    /// Partial inbound frame kept across poll timeouts.
+    receive: crate::wire::V1Receiver,
 }
 
 impl<S> Peer<S> {
@@ -140,6 +142,7 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             net_trace: None,
+            receive: crate::wire::V1Receiver::default(),
         }
     }
 
@@ -178,12 +181,16 @@ impl<S: Read + Write> Peer<S> {
 
 impl<S: Read> Peer<S> {
     /// Read one framed message.
+    ///
+    /// A poll timeout part-way through a frame keeps the bytes already read,
+    /// so retrying after `TimedOut` or `WouldBlock` continues the same frame.
     pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
         let net_trace = self.net_trace.as_ref();
-        crate::wire::read_message_with(&mut self.stream, self.magic, |command, payload| {
-            crate::net_trace::inbound_message(net_trace, command, payload);
-        })
-        .map_err(PeerError::inbound)
+        self.receive
+            .read_message_with(&mut self.stream, self.magic, |command, payload| {
+                crate::net_trace::inbound_message(net_trace, command, payload);
+            })
+            .map_err(PeerError::inbound)
     }
 }
 
@@ -347,6 +354,49 @@ mod tests {
 
         assert_eq!(message, Message::Pong(2));
         assert!(!payload.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn socket_read_continues_a_frame_that_outlasts_the_poll_timeout() -> Result<(), PeerError> {
+        use std::io::ErrorKind;
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let mut sender = TcpStream::connect(listener.local_addr()?)?;
+        let (receiver, _) = listener.accept()?;
+        receiver.set_read_timeout(Some(Duration::from_millis(20)))?;
+        let mut frame = Vec::new();
+        write_message(&mut frame, Magic::REGTEST, &Message::Ping(5))?;
+        let (head, tail) = frame.split_at(10);
+        let tail = tail.to_vec();
+        sender.write_all(head)?;
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            sender.write_all(&tail)
+        });
+
+        let mut peer = Peer::new(receiver, Magic::REGTEST);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stalls = 0_usize;
+        let message = loop {
+            match peer.read_message() {
+                Ok((message, _)) => break message,
+                Err(PeerError::Io(error))
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                        && Instant::now() < deadline =>
+                {
+                    stalls += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        late.join()
+            .map_err(|_| PeerError::Protocol("late writer panicked"))??;
+
+        assert_eq!(message, Message::Ping(5));
+        assert!(stalls > 0, "the read timed out mid-frame at least once");
         Ok(())
     }
 }

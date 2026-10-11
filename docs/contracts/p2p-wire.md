@@ -124,6 +124,10 @@ expiry.
 - Handshake, the connection reader, and the writer-thread clone share one
   `PeerCounters`. Timeouts stay with the listener: handshake and the message
   loop use different poll intervals.
+- A poll timeout never loses inbound bytes. `Peer::read_message` reads through
+  the peer's `wire::V1Receiver`, which keeps a partial header or payload across
+  `TimedOut`/`WouldBlock`, so the retrying handshake and message loops continue
+  the same frame instead of resuming mid-frame.
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 

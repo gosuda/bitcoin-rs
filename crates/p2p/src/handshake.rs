@@ -397,6 +397,50 @@ mod tests {
     }
 
     #[test]
+    fn inbound_handshake_resumes_frames_split_by_poll_timeouts() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+
+        let magic = Magic::BITCOIN;
+        let mut version = Vec::new();
+        write_message(
+            &mut version,
+            magic,
+            &Message::Version(version_message(
+                99,
+                0,
+                PeerRole::FullRelay,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            )),
+        )?;
+        let mut verack = Vec::new();
+        write_message(&mut verack, magic, &Message::Verack)?;
+        // Each frame stops arriving part-way for longer than one socket poll.
+        let stream = StallingStream::new([
+            Inbound::Bytes(version[..30].to_vec()),
+            Inbound::Stall(io::ErrorKind::TimedOut),
+            Inbound::Bytes(version[30..].to_vec()),
+            Inbound::Bytes(verack[..5].to_vec()),
+            Inbound::Stall(io::ErrorKind::WouldBlock),
+            Inbound::Bytes(verack[5..].to_vec()),
+        ]);
+        let mut peer = Peer::new(stream, magic);
+
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_inbound(lease_tx);
+        run_inbound_handshake(
+            &mut peer,
+            1,
+            0,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            &lease,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )?;
+
+        assert_eq!(peer.state, PeerState::Ready);
+        Ok(())
+    }
+
+    #[test]
     fn version_message_advertises_relay_only_for_full_relay() {
         assert!(
             version_message(1, 0, PeerRole::FullRelay, ServiceFlags::NETWORK).relay,

@@ -438,6 +438,10 @@ pub fn write_message<W: Write + ?Sized>(
 }
 
 /// Read and validate a Bitcoin v1 network message.
+///
+/// One-shot: a read timeout part-way through a frame discards the bytes
+/// already consumed. Connection loops that retry poll timeouts read through
+/// [`V1Receiver`] instead.
 pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -451,9 +455,88 @@ pub(crate) fn read_message_with<R: Read>(
     expected_magic: Magic,
     observe: impl FnOnce(&str, &[u8]),
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    let mut header = [0u8; HEADER_LEN];
-    reader.read_exact(&mut header)?;
+    V1Receiver::default().read_message_with(reader, expected_magic, observe)
+}
 
+/// Receive state for one v1 byte stream that survives poll timeouts.
+///
+/// Peer sockets poll with a short read timeout, so a frame can stop arriving
+/// anywhere inside its header or payload. The receiver keeps every byte it
+/// has consumed: after `TimedOut` or `WouldBlock` the caller retries and the
+/// same frame continues, instead of the next read starting mid-frame. Every
+/// other outcome, a complete frame or a rejected one, returns the receiver
+/// to the start of a header.
+#[derive(Debug, Default)]
+pub(crate) struct V1Receiver {
+    header: [u8; HEADER_LEN],
+    header_filled: usize,
+    body: Option<PendingBody>,
+}
+
+/// A validated header whose payload is still arriving.
+#[derive(Debug)]
+struct PendingBody {
+    command: String,
+    checksum: [u8; 4],
+    payload: Vec<u8>,
+    filled: usize,
+}
+
+impl V1Receiver {
+    /// Read one validated wire payload, observing it before typed decoding.
+    ///
+    /// POST: a poll-timeout I/O error keeps the partial frame for the next
+    /// call; any other result leaves the receiver at a frame boundary.
+    pub(crate) fn read_message_with<R: Read>(
+        &mut self,
+        reader: &mut R,
+        expected_magic: Magic,
+        observe: impl FnOnce(&str, &[u8]),
+    ) -> Result<(Message, bytes::Bytes), PeerError> {
+        let mut body = if let Some(body) = self.body.take() {
+            body
+        } else {
+            self.read_header(reader, expected_magic)?
+        };
+        if let Err(error) = fill(reader, &mut body.payload, &mut body.filled) {
+            if is_poll_timeout(&error) {
+                self.body = Some(body);
+            }
+            return Err(error);
+        }
+        if checksum(&body.payload) != body.checksum {
+            return Err(PeerError::BadChecksum);
+        }
+
+        observe(&body.command, &body.payload);
+        let message = decode_payload(&body.command, &body.payload)?;
+        Ok((message, bytes::Bytes::from(body.payload)))
+    }
+
+    /// Completes the current header, then validates it before any payload
+    /// byte is read.
+    fn read_header<R: Read>(
+        &mut self,
+        reader: &mut R,
+        expected_magic: Magic,
+    ) -> Result<PendingBody, PeerError> {
+        if let Err(error) = fill(reader, &mut self.header, &mut self.header_filled) {
+            if !is_poll_timeout(&error) {
+                self.header_filled = 0;
+            }
+            return Err(error);
+        }
+        self.header_filled = 0;
+        pending_body(&self.header, expected_magic)
+    }
+}
+
+/// Validates a complete header and allocates its payload: magic, command,
+/// and length are checked before any payload byte is read.
+fn pending_body(
+    header: &[u8; HEADER_LEN],
+    expected_magic: Magic,
+) -> Result<PendingBody, PeerError> {
     let actual_magic = Magic::from_bytes([header[0], header[1], header[2], header[3]]);
     if actual_magic != expected_magic {
         return Err(PeerError::WrongNetwork {
@@ -470,17 +553,44 @@ pub(crate) fn read_message_with<R: Read>(
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
 
-    let mut expected = [0u8; 4];
-    expected.copy_from_slice(&header[20..24]);
-    let mut payload = vec![0u8; payload_len];
-    reader.read_exact(&mut payload)?;
-    if checksum(&payload) != expected {
-        return Err(PeerError::BadChecksum);
-    }
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&header[20..24]);
+    Ok(PendingBody {
+        command,
+        checksum,
+        payload: vec![0u8; payload_len],
+        filled: 0,
+    })
+}
 
-    observe(&command, &payload);
-    let message = decode_payload(&command, &payload)?;
-    Ok((message, bytes::Bytes::from(payload)))
+/// Reads until `buffer` is full, recording progress in `filled` so a poll
+/// timeout resumes where it stopped.
+fn fill<R: Read>(reader: &mut R, buffer: &mut [u8], filled: &mut usize) -> Result<(), PeerError> {
+    while *filled < buffer.len() {
+        match reader.read(&mut buffer[*filled..]) {
+            Ok(0) => {
+                return Err(PeerError::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )));
+            }
+            Ok(read) => *filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(PeerError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+/// The socket's poll interval elapsed; the rest of the frame may still arrive.
+fn is_poll_timeout(error: &PeerError) -> bool {
+    matches!(
+        error,
+        PeerError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
 }
 
 /// Returns the full encoded wire size of `message`: the 24-byte framing
@@ -843,6 +953,56 @@ mod tests {
         });
         assert!(matches!(result, Err(PeerError::BadChecksum)));
         assert!(!observed_bad_checksum);
+    }
+
+    #[test]
+    fn receiver_resumes_a_frame_split_by_poll_timeouts() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+        use std::io::ErrorKind;
+
+        let mut ping = Vec::new();
+        write_message(&mut ping, Magic::REGTEST, &super::Message::Ping(42))?;
+        let mut pong = Vec::new();
+        write_message(&mut pong, Magic::REGTEST, &super::Message::Pong(7))?;
+        // The ping stops arriving once inside its header and once inside its payload.
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(ping[..10].to_vec()),
+            Inbound::Stall(ErrorKind::TimedOut),
+            Inbound::Bytes(ping[10..HEADER_LEN + 3].to_vec()),
+            Inbound::Stall(ErrorKind::WouldBlock),
+            Inbound::Bytes([&ping[HEADER_LEN + 3..], pong.as_slice()].concat()),
+        ]);
+
+        let mut receiver = super::V1Receiver::default();
+        for stall in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+            assert!(
+                matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
+                "a stall surfaces as a retryable timeout, got {result:?}"
+            );
+        }
+        let (first, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(first, super::Message::Ping(42));
+        let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(second, super::Message::Pong(7));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), PeerError> {
+        let mut corrupt = Vec::new();
+        write_message(&mut corrupt, Magic::REGTEST, &super::Message::Ping(1))?;
+        corrupt[HEADER_LEN] ^= 1;
+        let mut valid = Vec::new();
+        write_message(&mut valid, Magic::REGTEST, &super::Message::Pong(2))?;
+        let mut stream = Cursor::new([corrupt, valid].concat());
+
+        let mut receiver = super::V1Receiver::default();
+        let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+        assert!(matches!(rejected, Err(PeerError::BadChecksum)));
+        let (message, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(message, super::Message::Pong(2));
+        Ok(())
     }
 
     #[test]
