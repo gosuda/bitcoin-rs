@@ -44,7 +44,7 @@ fn states(node: &mut ProcessNode) -> Result<Value> {
     // Sending a historical block is not an acknowledgement that validation has
     // released the lifecycle owner. Retry only this declared transient result,
     // with one deadline shared by transport and polling; preserve other errors.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + bitcoin_rs_e2e::node::REQUEST_TIMEOUT;
     loop {
         match node.rpc_until("getchainstates", &json!([]), deadline) {
             Err(Error::Rpc {
