@@ -68,6 +68,17 @@ pub struct DeploymentParams {
     pub threshold: u32,
 }
 
+impl DeploymentParams {
+    /// Whether this block version signals this deployment under BIP9.
+    #[must_use]
+    pub fn signals(self, version: i32) -> bool {
+        let version = u32::from_ne_bytes(version.to_ne_bytes());
+        self.bit < 32
+            && version & VERSIONBITS_TOP_MASK == VERSIONBITS_TOP_BITS
+            && version & (1_u32 << self.bit) != 0
+    }
+}
+
 /// CSV/Segwit activation at one connect height.
 #[derive(Clone, Copy, Debug)]
 pub struct SoftforkState {
@@ -168,10 +179,9 @@ fn compute_state_at_boundary(
                 return DeploymentState::Failed;
             }
 
-            let Some(mask) = 1_u32.checked_shl(u32::from(params.bit)) else {
+            if params.bit >= 32 {
                 return DeploymentState::Started;
-            };
-
+            }
             let window_start = prior_boundary.max(1);
             let window_end = boundary;
             let mut count = 0_u32;
@@ -179,9 +189,7 @@ fn compute_state_at_boundary(
                 let Some(version) = ctx.block_version(height) else {
                     continue;
                 };
-                let version = u32::from_ne_bytes(version.to_ne_bytes());
-                let has_bip9_top_bits = version & VERSIONBITS_TOP_MASK == VERSIONBITS_TOP_BITS;
-                if has_bip9_top_bits && version & mask != 0 {
+                if params.signals(version) {
                     count = count.saturating_add(1);
                 }
             }
