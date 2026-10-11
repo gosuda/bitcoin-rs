@@ -37,7 +37,7 @@ use bitcoin_rs_storage::{BlockFilePosition, FlatFileBlockStore, RocksDbStore};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use std::{hint::black_box, sync::Arc};
 
@@ -186,6 +186,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
 
     let mut positions = HashMap::new();
     let mut last_target = None;
+    let mut target_txids = HashSet::new();
     let midpoint = txs_per_block / 2;
     let mut prev_blockhash = BlockHash::default();
 
@@ -193,6 +194,10 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         let height = BASE_HEIGHT + index;
         let planted = target_tx(height, &target_script);
         let planted_txid = planted.txid();
+        assert!(
+            target_txids.insert(planted_txid),
+            "target txids must be unique per height"
+        );
 
         let mut txdata = Vec::with_capacity(txs_per_block + 1);
         for slot in 0..txs_per_block {
@@ -245,6 +250,16 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         usize::try_from(heights).unwrap_or(0),
         "fixture must plant exactly one target transaction per height"
     );
+    let target_entries = planted
+        .iter()
+        .filter(|entry| entry.txid == target_txid)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        target_entries.len(),
+        1,
+        "last target must have exactly one occurrence"
+    );
+    assert_eq!(target_entries[0].height, BASE_HEIGHT + heights - 1);
     assert!(
         indexer
             .resolve_transaction(target_txid, &source)
