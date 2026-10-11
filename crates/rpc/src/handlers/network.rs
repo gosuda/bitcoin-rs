@@ -262,7 +262,11 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             addresses_relay_enabled: None,
             addresses_processed: None,
             addresses_rate_limited: None,
-            permissions: Vec::new(),
+            permissions: if session.lease.is_no_ban() {
+                vec!["noban".to_owned()]
+            } else {
+                Vec::new()
+            },
             minimum_fee_filter: 0.0,
             bytes_sent_per_message: std::collections::BTreeMap::new(),
             bytes_received_per_message: std::collections::BTreeMap::new(),

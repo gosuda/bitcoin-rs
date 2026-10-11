@@ -93,6 +93,10 @@ pub struct ConnectionShared {
     pub peer_table: Arc<crate::PeerTable>,
     /// Manual subnet bans shared with the RPC `setban` handler.
     pub banned: crate::BannedReader,
+    /// Shared P2P-owned auxiliary address book.
+    pub(crate) address_book: Option<Arc<crate::addrman::AddressBook>>,
+    /// A short-lived automatic handshake probe; never published as a work peer.
+    pub(crate) feeler: bool,
     /// Network kill-switch behind `setnetworkactive`.
     pub activity: Arc<crate::NetworkActivity>,
     /// Start-scoped cancellation token. Tests that never cancel pass a
@@ -164,6 +168,8 @@ impl ConnectionShared {
         Self {
             peer_table,
             banned: banned.into(),
+            address_book: None,
+            feeler: false,
             activity,
             session_cancel: session_cancel.into(),
             peer_ready,
@@ -180,6 +186,43 @@ impl ConnectionShared {
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        }
+    }
+
+    fn check_destination(&self, addr: SocketAddr, manual: bool) -> Result<(), crate::PeerError> {
+        if self.banned.is_banned(addr.ip(), SystemTime::now()) {
+            return Err(crate::PeerError::BannedDestination(addr.ip()));
+        }
+        if !manual && self.banned.is_discouraged(addr.ip()) {
+            return Err(crate::PeerError::DiscouragedDestination(addr.ip()));
+        }
+        Ok(())
+    }
+
+    fn note_misbehavior(
+        &self,
+        addr: SocketAddr,
+        lease: &crate::PeerLease,
+        error: &crate::PeerError,
+    ) {
+        if !error.is_misbehavior() || self.is_session_cancelled() || !self.activity.is_active() {
+            return;
+        }
+        let protected = lease.is_protected();
+        let local = crate::discouragement::is_local(addr.ip());
+        let current = self.peer_table.with_current(lease.source(addr), || {
+            if !protected && !local {
+                self.banned.discourage(addr.ip());
+            }
+        });
+        if current {
+            if lease.ignores_protocol_error(error) {
+                tracing::debug!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
+                    discouraged = !protected && !local, "peer protocol violation");
+            } else {
+                tracing::warn!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
+                    discouraged = !protected && !local, "peer protocol violation");
+            }
         }
     }
 
@@ -223,6 +266,11 @@ impl ConnectionShared {
             if let Some(announcer) = &self.block_announcer {
                 announcer.on_peer_ready();
             }
+            if !lease.is_inbound() {
+                if let Some(book) = &self.address_book {
+                    book.succeeded(peer_addr, info.services, crate::addrman::now());
+                }
+            }
             self.notify_peer_ready(source);
             true
         } else {
@@ -232,29 +280,6 @@ impl ConnectionShared {
 
     fn is_session_cancelled(&self) -> bool {
         self.session_cancel.load()
-    }
-
-    /// The local tip age in target-spacing units (Core
-    /// `ApproximateBestBlockDepth`, `net_processing.cpp:1445-1448`).
-    ///
-    /// PRE: none.
-    /// POST: returns `(now - active tip header time) / target spacing`, and
-    ///   `u64::MAX` when no chain view or no tip exists — with nothing
-    ///   applied the node is as deep as it can be, so only full-history
-    ///   peers are desirable.
-    /// INVARIANT: reads the shared chain view once; no per-handshake block
-    ///   tree walk exists.
-    #[must_use]
-    fn approximate_best_block_depth(&self) -> u64 {
-        let Some(tip_time) = self
-            .chain_query
-            .as_ref()
-            .and_then(|query| query.best_block_time())
-        else {
-            return u64::MAX;
-        };
-        let now = unix_time_secs();
-        now.saturating_sub(u64::from(tip_time)) / POW_TARGET_SPACING_SECS
     }
 
     fn send_headers(
@@ -386,26 +411,66 @@ impl ConnectionShared {
         }
     }
 
-    /// Forwards a decoded transaction into the node's ingress channel.
-    fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
-        let Some(inbound_tx) = self.inbound_tx.as_ref() else {
+    /// Only transaction inventory and matching notfound replies wake download
+    /// policy from the wire. Ping, headers and other traffic cannot amplify a
+    /// gateway census; the relay worker owns the paced background poll.
+    fn update_transaction_requests(&self, source: crate::PeerSource, message: &crate::Message) {
+        let Some(inventory) = &self.tx_inventory else {
             return;
         };
-        if self.is_session_cancelled() {
-            return;
-        }
-        match inbound_tx.try_send(crate::InboundTx::new(tx, source)) {
-            Ok(()) => {}
-            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                tracing::debug!(
-                    peer_addr = %source.addr,
-                    "p2p inbound tx channel full; dropping body"
-                );
+        match message {
+            crate::Message::NotFound(items) => {
+                self.peer_table
+                    .transaction_not_found(source, items, inventory.as_ref());
             }
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                tracing::warn!(
-                    peer_addr = %source.addr,
-                    "p2p inbound tx channel disconnected"
+            crate::Message::Inv(items)
+                if items.iter().any(|item| {
+                    matches!(
+                        item,
+                        bitcoin::p2p::message_blockdata::Inventory::Transaction(_)
+                            | bitcoin::p2p::message_blockdata::Inventory::WitnessTransaction(_)
+                            | bitcoin::p2p::message_blockdata::Inventory::WTx(_)
+                    )
+                }) =>
+            {
+                self.peer_table
+                    .poll_transaction_requests(inventory.as_ref());
+            }
+            _ => {}
+        }
+    }
+
+    /// Forwards a decoded transaction into the node's ingress channel.
+    fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
+        let inbound = crate::InboundTx::new(tx, source);
+        let dropped = if let Some(channel) = &self.inbound_tx {
+            if self.is_session_cancelled() {
+                Some(inbound)
+            } else {
+                match channel.try_send(inbound) {
+                    Ok(()) => None,
+                    Err(crossbeam_channel::TrySendError::Full(inbound)) => Some(inbound),
+                    Err(crossbeam_channel::TrySendError::Disconnected(inbound)) => {
+                        tracing::warn!(peer_addr = %source.addr, "p2p inbound tx channel disconnected");
+                        Some(inbound)
+                    }
+                }
+            }
+        } else {
+            Some(inbound)
+        };
+        if let Some(inbound) = dropped {
+            tracing::debug!(peer_addr = %source.addr, "p2p transaction ingress unavailable; dropping body");
+            self.peer_table.transaction_response_completed(
+                source,
+                inbound.tx.txid(),
+                inbound.tx.wtxid(),
+            );
+            if let Some(inventory) = &self.tx_inventory {
+                self.peer_table.poll_transaction_response(
+                    inventory.as_ref(),
+                    inbound.tx.txid(),
+                    inbound.tx.wtxid(),
                 );
             }
         }
@@ -505,9 +570,9 @@ fn accept_connections(
         match listener.accept() {
             Ok((stream, peer_addr)) => {
                 accept_backoff = POLL_INTERVAL;
-                if shared.banned.is_banned(peer_addr.ip(), SystemTime::now()) {
+                if shared.check_destination(peer_addr, false).is_err() {
                     drop(stream);
-                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: banned");
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected by address policy");
                     continue;
                 }
                 if !shared.activity.is_active() {
@@ -522,14 +587,16 @@ fn accept_connections(
                 // itself is the handshaking-peer accounting Core's connman
                 // performs (`net.cpp:1838-1845`, eviction cut to refusal).
                 let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-                let lease = crate::PeerLease::new_inbound(outbound_tx);
-                let Some(lease) =
-                    shared
-                        .peer_table
-                        .try_register_inbound(peer_addr, lease, shared.max_inbound)
-                else {
+                let lease = crate::PeerLease::new_inbound(outbound_tx)
+                    .with_no_ban(shared.banned.is_noban(peer_addr.ip()));
+                let Some(lease) = shared.peer_table.try_register_inbound(
+                    peer_addr,
+                    lease,
+                    shared.max_inbound,
+                    &shared.activity,
+                ) else {
                     drop(stream);
-                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: at capacity");
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: inactive or at capacity");
                     continue;
                 };
                 spawn_handshake_thread(stream, peer_addr, shared.clone(), lease, outbound_rx);
@@ -570,7 +637,7 @@ pub fn spawn_outbound_connection(
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_dial(addr, shared, role, false)
+    spawn_dial(addr, shared, role, false, false)
 }
 
 /// Spawn one operator-pinned outbound connection dial of `role`: an address
@@ -588,19 +655,20 @@ pub(crate) fn spawn_pinned_outbound_connection(
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_dial(addr, shared, role, true)
+    spawn_dial(addr, shared, role, true, false)
 }
 
-fn spawn_dial(
+pub(crate) fn spawn_dial(
     addr: SocketAddr,
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
     pinned: bool,
+    count_failure: bool,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || run_outbound_connection(addr, &shared, role, pinned));
+        .spawn(move || run_outbound_connection(addr, &shared, role, pinned, count_failure));
 
     match result {
         Ok(handle) => handle,
@@ -615,15 +683,18 @@ fn spawn_dial(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One connection owner keeps admission, TCP health, lease publication, and handshake teardown ordered"
+)]
 fn run_outbound_connection(
     addr: SocketAddr,
     shared: &ConnectionShared,
     role: crate::peer_info::PeerRole,
     manual: bool,
+    count_failure: bool,
 ) -> Result<(), crate::wire::PeerError> {
-    if shared.banned.is_banned(addr.ip(), SystemTime::now()) {
-        return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
-    }
+    shared.check_destination(addr, manual)?;
     if !shared.activity.is_active() {
         return Err(crate::wire::PeerError::Protocol("network inactive"));
     }
@@ -631,9 +702,27 @@ fn run_outbound_connection(
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
     }
 
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .map_err(crate::wire::PeerError::Io)?;
+    if !manual && !shared.feeler {
+        let depth = approximate_best_block_depth(shared.chain_query.as_deref());
+        if shared
+            .address_book
+            .as_ref()
+            .is_some_and(|book| !book.ordinary_services_eligible(addr, depth))
+        {
+            return Err(crate::wire::PeerError::Protocol(
+                "outbound peer lacks desirable services",
+            ));
+        }
+    }
+    let connection = TcpStream::connect_timeout(&addr, Duration::from_secs(10));
+    if let Some(book) = &shared.address_book {
+        // Like Core ConnectNode, record actual TCP attempts on success/failure,
+        // after local admission guards. Spawn failures/cancellation are not peer evidence.
+        book.attempted(addr, count_failure && !manual, crate::addrman::now());
+    }
+    let stream = connection.map_err(crate::wire::PeerError::Io)?;
     configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
+    shared.check_destination(addr, manual)?;
     if shared.is_session_cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
@@ -654,8 +743,20 @@ fn run_outbound_connection(
             crate::PeerLease::new_block_relay(outbound_tx)
         }
         (_, true) => crate::PeerLease::new_manual(outbound_tx, role),
+    }
+    .with_no_ban(shared.banned.is_noban(addr.ip()));
+    let Some(lease) = shared
+        .peer_table
+        .try_register_outbound(addr, lease, &shared.activity)
+    else {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Err(crate::wire::PeerError::Protocol("network inactive"));
     };
-    shared.peer_table.register(addr, lease.clone());
+    if let Err(error) = shared.check_destination(addr, manual) {
+        shared.peer_table.remove_current(addr, &lease);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Err(error);
+    }
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(addr, &lease);
         lease.cancel();
@@ -675,20 +776,22 @@ fn run_outbound_connection(
         manual,
     ));
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let best_block_depth = shared.approximate_best_block_depth();
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
         0,
         &lease,
         handshake_deadline,
-        best_block_depth,
-        shared.local_services,
+        addr,
+        shared,
     ) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
         let revoked = lease.is_cancelled();
+        if !revoked {
+            shared.note_misbehavior(addr, &lease, &error);
+        }
         shared.peer_table.remove_current(addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         if revoked {
@@ -715,15 +818,30 @@ fn run_outbound_connection(
         counters,
     );
 
+    if shared.feeler {
+        if shared.peer_table.is_current(lease.source(addr))
+            && !lease.is_cancelled()
+            && !shared.is_session_cancelled()
+            && shared.activity.is_active()
+        {
+            if let Some(book) = &shared.address_book {
+                book.succeeded(addr, info.services, unix_time_secs());
+            }
+        }
+        shared.peer_table.remove_current(addr, &lease);
+        lease.cancel();
+        let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+        return Ok(());
+    }
     run_connected_session(&mut peer, addr, shared, lease, outbound_rx, info)
 }
 
 /// Drives the outbound handshake until the peer is ready.
 ///
 /// PRE: `peer` wraps a connected outbound stream, `lease` belongs to it,
-///   and `best_block_depth` is the local tip age read for this dial.
-/// POST: `peer` is `Ready`, the post-verack messages are sent, and the
-///   remote offered the desirable services ([`has_all_desirable_service_flags`]).
+///   and `shared` holds this dial's chain query and service policy.
+/// POST: a feeler has an accepted VERSION; an ordinary `peer` is `Ready`,
+///   post-verack messages are sent, and the remote offered desirable services ([`has_all_desirable_service_flags`]).
 /// INVARIANT: This function counts no bytes; the stream that `peer` wraps
 ///   owns byte accounting. The service check runs once the remote `version`
 ///   is decoded and before the peer can be published as usable.
@@ -733,18 +851,43 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     start_height: i32,
     lease: &crate::PeerLease,
     deadline: Instant,
-    best_block_depth: u64,
-    local_services: ServiceFlags,
+    addr: SocketAddr,
+    shared: &ConnectionShared,
 ) -> Result<(), crate::wire::PeerError> {
-    let outbound_messages =
-        crate::handshake::start(peer, nonce, start_height, lease.role(), local_services);
+    let best_block_depth = approximate_best_block_depth(shared.chain_query.as_deref());
+    let outbound_messages = crate::handshake::start(
+        peer,
+        nonce,
+        start_height,
+        lease.role(),
+        shared.local_services,
+    );
     for message in outbound_messages {
         peer.send(&message)?;
     }
 
     while peer.state != crate::peer::PeerState::Ready {
-        let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
-        let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
+        let (accepted, responses) = crate::handshake::next_handshake_step(peer, lease, deadline)?;
+        if !shared.feeler
+            && matches!(accepted, crate::Message::Version(_))
+            && let Some(version) = peer.remote_version.as_ref()
+        {
+            // Record received services even when the ordinary service gate rejects
+            // this VERSION. Metadata does not imply handshake success or Good.
+            let _ = shared.peer_table.with_current(lease.source(addr), || {
+                if !shared.is_session_cancelled()
+                    && shared.activity.is_active()
+                    && let Some(book) = &shared.address_book
+                {
+                    book.set_services(addr, version.services.to_u64());
+                }
+            });
+        }
+        // Feelers establish address liveness from an accepted native VERSION.
+        // They neither require ordinary services nor wait for VERACK/ready work.
+        if shared.feeler && peer.remote_version.is_some() {
+            return Ok(());
+        }
         if peer.remote_version.as_ref().is_some_and(|version| {
             !has_all_desirable_service_flags(version.services, best_block_depth)
         }) {
@@ -760,11 +903,21 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     Ok(())
 }
 
+/// Local applied-tip age in target-spacing units, shared by selection and admission.
+/// Returns `u64::MAX` without a chain view/tip, preserving full-history eligibility.
+/// Read the chain view before acquiring the address-book lock.
+pub(crate) fn approximate_best_block_depth(query: Option<&dyn crate::ChainQuery>) -> u64 {
+    let Some(tip_time) = query.and_then(crate::ChainQuery::best_block_time) else {
+        return u64::MAX;
+    };
+    unix_time_secs().saturating_sub(u64::from(tip_time)) / POW_TARGET_SPACING_SECS
+}
+
 /// Returns the service flags required from an outbound peer.
 ///
 /// PRE: `remote_services` is the flags received in `version`;
 ///   `best_block_depth` is the local approximate tip age in target-spacing
-///   units ([`ConnectionShared::approximate_best_block_depth`]).
+///   units ([`approximate_best_block_depth`]).
 /// POST: a peer with NETWORK and WITNESS is accepted; a LIMITED peer is
 ///   accepted only when it also has WITNESS and `best_block_depth < 144`;
 ///   every other service set is rejected.
@@ -829,6 +982,10 @@ fn run_handshake(
     lease: crate::PeerLease,
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
 ) -> Result<(), crate::wire::PeerError> {
+    if let Err(error) = shared.check_destination(peer_addr, lease.is_manual()) {
+        shared.peer_table.remove_current(peer_addr, &lease);
+        return Err(error);
+    }
     // The accept loop reserved this lease: every exit from here on must
     // release it, or a failed setup would consume an admission slot forever.
     if let Err(error) = configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io) {
@@ -887,6 +1044,9 @@ fn run_handshake(
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
         let revoked = lease.is_cancelled();
+        if !revoked {
+            shared.note_misbehavior(peer_addr, &lease, &error);
+        }
         shared.peer_table.remove_current(peer_addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         if revoked {
@@ -970,7 +1130,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
+    let ready = shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -982,9 +1142,22 @@ fn run_connected_session(
     let loop_result = run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref());
 
     let source = lease.source(peer_addr);
+    if let Err(error) = &loop_result {
+        shared.note_misbehavior(peer_addr, &lease, error);
+    }
     shared.peer_table.remove_current(peer_addr, &lease);
+    if let Some(inventory) = &shared.tx_inventory {
+        shared
+            .peer_table
+            .transaction_peer_disconnected(source, inventory.as_ref());
+    }
     if let Some(announcer) = &shared.block_announcer {
         announcer.on_peer_disconnected(source);
+    }
+    if ready && !lease.is_inbound() && !lease.is_manual() && lease.role().relays_transactions() {
+        if let Some(book) = &shared.address_book {
+            book.connected(peer_addr, crate::addrman::now());
+        }
     }
     lease.cancel();
     let _ = peer.stream.shutdown(std::net::Shutdown::Both);
@@ -1273,6 +1446,18 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
+    let mut address_budget = 32_u64;
+    let mut last_address_refill = crate::addrman::now();
+    let mut answered_getaddr = false;
+    if !lease.is_inbound()
+        && lease.role().relays_transactions()
+        && shared
+            .address_book
+            .as_ref()
+            .is_some_and(|book| book.len() < 1024)
+    {
+        let _ = lease.send(crate::Message::GetAddr);
+    }
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
@@ -1327,7 +1512,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
-                crate::dispatch::dispatch_inbound_full(
+                let dispatched = crate::dispatch::dispatch_inbound_full(
                     peer,
                     &message,
                     shared.chain_query.as_deref(),
@@ -1345,8 +1530,77 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             })
                     },
                     &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
-                )?;
+                    &mut |items| {
+                        shared
+                            .peer_table
+                            .announce_transactions(lease.source(peer_addr), &items);
+                    },
+                );
+                if let Err(error) = dispatched {
+                    if lease.ignores_protocol_error(&error) {
+                        shared.note_misbehavior(peer_addr, lease, &error);
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if tx_relay_open() {
+                    shared.update_transaction_requests(lease.source(peer_addr), &message);
+                }
                 match message {
+                    crate::Message::Addr(addresses) => {
+                        let addresses: Vec<_> = addresses
+                            .iter()
+                            .filter_map(|(seen, addr)| {
+                                addr.socket_addr().ok().map(|socket| {
+                                    (socket, addr.services.to_u64(), u64::from(*seen))
+                                })
+                            })
+                            .collect();
+                        learn_addresses(
+                            shared,
+                            lease,
+                            peer_addr,
+                            &addresses,
+                            &mut address_budget,
+                            &mut last_address_refill,
+                        );
+                    }
+                    crate::Message::AddrV2(addresses) => {
+                        let addresses: Vec<_> = addresses
+                            .iter()
+                            .filter_map(|addr| {
+                                let ip: std::net::IpAddr = match addr.addr {
+                                    bitcoin::p2p::address::AddrV2::Ipv4(ip) => ip.into(),
+                                    bitcoin::p2p::address::AddrV2::Ipv6(ip) => ip.into(),
+                                    _ => return None,
+                                };
+                                Some((
+                                    SocketAddr::new(ip, addr.port),
+                                    addr.services.to_u64(),
+                                    u64::from(addr.time),
+                                ))
+                            })
+                            .collect();
+                        learn_addresses(
+                            shared,
+                            lease,
+                            peer_addr,
+                            &addresses,
+                            &mut address_budget,
+                            &mut last_address_refill,
+                        );
+                    }
+                    crate::Message::GetAddr
+                        if lease.is_inbound()
+                            && !answered_getaddr
+                            && lease.role().relays_transactions() =>
+                    {
+                        answered_getaddr = true;
+                        if let Some(book) = &shared.address_book {
+                            let _ = lease
+                                .send(crate::Message::Addr(book.gossip(crate::addrman::now())));
+                        }
+                    }
                     crate::Message::Headers(headers) => {
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
@@ -1406,8 +1660,36 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             {
                 continue;
             }
+            Err(error) if lease.ignores_protocol_error(&error) => {
+                shared.note_misbehavior(peer_addr, lease, &error);
+                continue;
+            }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Consume a bounded, replenishing per-connection gossip allowance before
+/// touching the book. Source-group limits survive peer reconnects in the book.
+fn learn_addresses(
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    peer_addr: SocketAddr,
+    addresses: &[(SocketAddr, u64, u64)],
+    budget: &mut u64,
+    last_refill: &mut u64,
+) {
+    if !lease.role().relays_transactions() {
+        return;
+    }
+    let now = crate::addrman::now();
+    let refill = now.saturating_sub(*last_refill) / 10;
+    *budget = budget.saturating_add(refill).min(32);
+    *last_refill = last_refill.saturating_add(refill.saturating_mul(10));
+    let count = addresses.len().min(usize::try_from(*budget).unwrap_or(0));
+    *budget = budget.saturating_sub(u64::try_from(count).unwrap_or(0));
+    if let Some(book) = &shared.address_book {
+        book.learn_peer(peer_addr.ip(), &addresses[..count], now);
     }
 }
 
@@ -1763,6 +2045,88 @@ fn test_shared(
         None,
         ListenerExtras::default(),
     )
+}
+
+#[cfg(test)]
+mod transaction_poll_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct InventoryReads(AtomicUsize);
+    impl crate::TxInventory for InventoryReads {
+        fn have_tx(&self, _: bitcoin_rs_primitives::Hash256, _: bool) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+        fn get_tx(&self, _: bitcoin_rs_primitives::Txid) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+        fn get_tx_by_wtxid(
+            &self,
+            _: bitcoin_rs_primitives::Wtxid,
+        ) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+    }
+
+    #[test]
+    fn ping_and_nontransaction_messages_do_not_poll_gateway_inventory() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (sender, receiver) = crossbeam_channel::bounded(4);
+        let lease = crate::PeerLease::new(sender);
+        let addr = ([127, 0, 0, 1], 8333).into();
+        table.register(addr, lease.clone());
+        let version = crate::handshake::version_message(
+            1,
+            0,
+            crate::PeerRole::FullRelay,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        );
+        table.publish_info(
+            addr,
+            &lease,
+            crate::PeerInfo::outbound_from_version(
+                addr,
+                addr,
+                &version,
+                0,
+                0,
+                Arc::new(crate::PeerCounters::default()),
+            ),
+        );
+        let source = lease.source(addr);
+        let item = bitcoin::p2p::message_blockdata::Inventory::WTx(
+            bitcoin::Wtxid::from_byte_array([1; 32]),
+        );
+        table.announce_transactions(source, &[item]);
+        let (headers, _) = crossbeam_channel::bounded(1);
+        let (blocks, _) = crossbeam_channel::bounded(1);
+        let mut shared = test_shared(table, headers, blocks);
+        let inventory = Arc::new(InventoryReads(AtomicUsize::new(0)));
+        shared.tx_inventory = Some(inventory.clone());
+        for nonce in 0..1_000 {
+            shared.update_transaction_requests(source, &crate::Message::Ping(nonce));
+            shared.update_transaction_requests(source, &crate::Message::Headers(Vec::new()));
+            shared.update_transaction_requests(
+                source,
+                &crate::Message::Inv(vec![bitcoin::p2p::message_blockdata::Inventory::Block(
+                    bitcoin::BlockHash::from_byte_array([2; 32]),
+                )]),
+            );
+        }
+        assert_eq!(inventory.0.load(Ordering::Relaxed), 0);
+        assert!(receiver.try_recv().is_err());
+        shared.update_transaction_requests(source, &crate::Message::Inv(vec![item]));
+        assert_eq!(
+            inventory.0.load(Ordering::Relaxed),
+            2,
+            "one background and one pre-send identity check"
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::Message::GetData(_))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2188,7 +2552,7 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new_inbound(outbound_tx);
         let lease = shared
             .peer_table
-            .try_register_inbound(peer_addr, lease, 1)
+            .try_register_inbound(peer_addr, lease, 1, &shared.activity)
             .expect("the test lease reserves its inbound slot");
         let result = crate::listener::run_handshake(server, peer_addr, &shared, lease, outbound_rx);
         let Err(error) = result else {
@@ -2905,6 +3269,79 @@ mod writer_shutdown_tests {
     }
 
     #[test]
+    fn session_disconnect_updates_full_relay_and_preserves_block_relay_privacy() {
+        for (block_relay, stale) in [(false, false), (true, false), (false, true)] {
+            let (client, server, peer_addr) = loopback_pair();
+            drop(client);
+
+            let peer_table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                peer_table,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+            book.learn_dns("seed", &[peer_addr], 5000);
+            shared.address_book = Some(Arc::clone(&book));
+
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let lease = if block_relay {
+                crate::PeerLease::new_block_relay(outbound_tx)
+            } else {
+                crate::PeerLease::new(outbound_tx)
+            };
+            shared.peer_table.register(peer_addr, lease.clone());
+            if stale {
+                let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+                assert!(
+                    shared
+                        .peer_table
+                        .register(peer_addr, crate::PeerLease::new(replacement_tx),)
+                );
+            }
+
+            let info = crate::PeerInfo {
+                addr: peer_addr,
+                version: 70_016,
+                wtxid_relay: false,
+                compact_block_relay: false,
+                send_headers: false,
+                services: 9,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: peer_addr,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            };
+
+            let mut peer = Peer::new(
+                crate::CountingStream::new(
+                    server,
+                    std::sync::Arc::new(crate::PeerCounters::default()),
+                ),
+                Magic::BITCOIN,
+            );
+            let _ = run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
+
+            let last_seen = book.gossip(10_000)[0].0;
+            if block_relay || stale {
+                assert_eq!(
+                    last_seen, 5000,
+                    "block-relay or rejected ready session must never refresh last_seen"
+                );
+            } else {
+                assert_ne!(
+                    last_seen, 5000,
+                    "full-relay disconnect must refresh last_seen"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn message_loop_disconnects_saturated_peer() {
         let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_with_budget(
@@ -3000,6 +3437,35 @@ mod ready_notify_tests {
             time_offset: 0,
             counters: Arc::new(crate::PeerCounters::default()),
         }
+    }
+
+    #[test]
+    fn manual_outbound_ready_updates_known_address_health_without_automatic_claims() {
+        let mut shared = shared_with_notify_counter(&Arc::new(AtomicUsize::new(0)));
+        let now = crate::addrman::now();
+        let known = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        book.learn_dns("seed", &[known], now);
+        shared.address_book = Some(Arc::clone(&book));
+        let (tx, _) = crossbeam_channel::bounded(1);
+        let lease = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
+        shared.peer_table.register(known, lease.clone());
+        assert!(shared.publish_info_and_notify_ready(known, &lease, &peer_info(known, 0)));
+        assert_eq!(book.gossip(now)[0].1.services.to_u64(), 1);
+        assert_eq!(book.pending_count_excluding(&[]), 0);
+        book.queued(known);
+        assert!(shared.publish_info_and_notify_ready(known, &lease, &peer_info(known, 0)));
+        assert_eq!(
+            book.pending_count_excluding(&[]),
+            1,
+            "manual success does not transfer an existing automatic claim"
+        );
+        let unknown = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let manual = crate::PeerLease::new_manual(tx, crate::PeerRole::FullRelay);
+        shared.peer_table.register(unknown, manual.clone());
+        assert!(shared.publish_info_and_notify_ready(unknown, &manual, &peer_info(unknown, 0)));
+        assert_eq!(book.len(), 1, "Good does not insert manual endpoints");
+        assert_eq!(book.pending_count_excluding(&[]), 1);
     }
 
     fn shared_with_notify_counter(notified: &Arc<AtomicUsize>) -> ConnectionShared {
@@ -3189,6 +3655,704 @@ mod block_forward_tests {
             1,
             "a forwarding slot returns once sync has taken the body"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod address_tests {
+    use super::*;
+    use crate::{Message, PeerState};
+    use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+
+    #[test]
+    fn local_dial_cancellation_is_not_attempt_evidence_but_tcp_failure_is() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let target = listener.local_addr().expect("address");
+        drop(listener);
+        let now = crate::addrman::now();
+        for cancelled in [true, false] {
+            let table = Arc::new(crate::PeerTable::new());
+            let (headers, _) = crossbeam_channel::unbounded();
+            let (blocks, _) = crossbeam_channel::unbounded();
+            let mut shared = test_shared(table, headers, blocks);
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+            book.learn_dns("seed", &[target], now - 31 * 86400);
+            shared.address_book = Some(Arc::clone(&book));
+            shared.session_cancel.store(cancelled);
+            assert!(
+                run_outbound_connection(target, &shared, crate::PeerRole::FullRelay, false, false)
+                    .is_err()
+            );
+            assert_eq!(
+                book.gossip(now).is_empty(),
+                cancelled,
+                "only an actual TCP attempt supplies Core's recent-attempt protection"
+            );
+            assert_eq!(
+                book.pending_count_excluding(&[]),
+                0,
+                "health updates do not invent automatic claims"
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_wire_getaddr_never_serves_the_address_book() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        book.learn_dns(
+            "seed",
+            &[SocketAddr::from(([127, 0, 0, 2], 8333))],
+            crate::addrman::now(),
+        );
+        shared.address_book = Some(book);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let lease = crate::PeerLease::new(sender);
+        table.register(source, lease.clone());
+        let mut input = Vec::new();
+        for _ in 0..2 {
+            crate::wire::write_message(&mut input, shared.magic, &Message::GetAddr).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        assert!(
+            !receiver
+                .try_iter()
+                .any(|message| matches!(message, Message::Addr(_) | Message::AddrV2(_))),
+            "an outbound peer cannot query our address book"
+        );
+    }
+
+    #[test]
+    fn wire_address_messages_share_one_book_and_getaddr_is_once_per_connection() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        shared.address_book = Some(Arc::clone(&book));
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let candidate = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let lease = crate::PeerLease::new_inbound(sender);
+        table.register(source, lease.clone());
+        let timestamp = u32::try_from(crate::addrman::now()).expect("timestamp");
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let mut input = Vec::new();
+        for message in [
+            Message::Addr(vec![(timestamp, Address::new(&candidate, services))]),
+            Message::AddrV2(vec![AddrV2Message {
+                time: timestamp,
+                services,
+                addr: AddrV2::Ipv4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                port: 8333,
+            }]),
+            Message::GetAddr,
+            Message::GetAddr,
+        ] {
+            crate::wire::write_message(&mut input, shared.magic, &message).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        assert_eq!(book.len(), 1);
+        let replies: Vec<_> = receiver.try_iter().collect();
+        let [Message::Addr(addresses)] = replies.as_slice() else {
+            panic!("expected exactly one addr response: {replies:?}");
+        };
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].1.socket_addr().expect("socket"), candidate);
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod feeler_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Scripted(std::io::Cursor<Vec<u8>>);
+    impl std::io::Read for Scripted {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.0, bytes)
+        }
+    }
+    impl std::io::Write for Scripted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn version_only_feeler_uses_native_acceptance_without_publishing_work() {
+        for (services, revoked) in [(0_u64, 0), (1, 0), (9, 0), (9, 1), (9, 2)] {
+            let server = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = server.local_addr().expect("address");
+            let table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                Arc::clone(&table),
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let directory = tempfile::tempdir().expect("directory");
+            let base = directory.path().join("peers.dat");
+            let path = directory.path().join("peers-f9beb4d9.dat");
+            let book =
+                crate::addrman::AddressBook::open(Some(base), shared.magic.to_bytes(), true, None);
+            book.learn_peer(
+                address.ip(),
+                &[(address, 9, unix_time_secs())],
+                unix_time_secs(),
+            );
+            book.set_services(address, 1);
+            shared.address_book = Some(Arc::clone(&book));
+            shared.feeler = true;
+            assert!(book.queued_feeler(address));
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&notifications);
+            shared.peer_ready = Some(Arc::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            }));
+            let magic = shared.magic;
+            let remote_table = Arc::clone(&table);
+            let remote = std::thread::spawn(move || {
+                let (stream, _) = server.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .expect("timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .expect("timeout");
+                let mut peer = Peer::new(stream, magic);
+                assert!(matches!(
+                    peer.read_message().expect("initial version").0,
+                    crate::Message::Version(_)
+                ));
+                assert!(
+                    remote_table
+                        .sessions()
+                        .iter()
+                        .all(|session| session.info.is_none())
+                );
+                if revoked == 1 {
+                    remote_table.cancel_all();
+                } else if revoked == 2 {
+                    let replacement = crate::PeerLease::new(crossbeam_channel::unbounded().0);
+                    remote_table.register(address, replacement);
+                }
+                let sent = peer.send(&crate::Message::Version(crate::handshake::version_message(
+                    123,
+                    0,
+                    crate::PeerRole::FullRelay,
+                    ServiceFlags::from(services),
+                )));
+                if revoked == 0 {
+                    sent.expect("VERSION only");
+                }
+                // No VERACK is sent; a feeler closes after native VERSION acceptance.
+                while let Ok((message, _)) = peer.read_message() {
+                    assert!(
+                        !matches!(message, crate::Message::GetAddr | crate::Message::Verack),
+                        "no ready/post-verack publication: {message:?}"
+                    );
+                }
+            });
+            spawn_outbound_connection(address, shared, crate::PeerRole::BlockRelayOnly)
+                .join()
+                .expect("thread")
+                .expect("probe");
+            remote.join().expect("remote");
+            assert!(
+                book.is_feeler(address),
+                "the service reaper owns claim release"
+            );
+            book.unqueue(address);
+            assert_eq!(notifications.load(Ordering::Relaxed), 0);
+            assert_eq!(table.sessions().len(), usize::from(revoked == 2));
+            assert!(
+                table
+                    .sessions()
+                    .iter()
+                    .all(|session| session.info.is_none() && session.demonstrated_tips.is_empty())
+            );
+            book.save();
+            let bytes = std::fs::read(path).expect("book");
+            let stored: serde_json::Value =
+                serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("JSON");
+            assert_eq!(
+                stored["records"][0]["tried"],
+                revoked == 0,
+                "services={services} revoked={revoked}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_handshake_still_requires_services_and_verack() {
+        for services in [1_u64, 9] {
+            let mut wire = Vec::new();
+            crate::wire::write_message(
+                &mut wire,
+                Magic::BITCOIN,
+                &crate::Message::Version(crate::handshake::version_message(
+                    123,
+                    0,
+                    crate::PeerRole::FullRelay,
+                    ServiceFlags::from(services),
+                )),
+            )
+            .expect("wire");
+            let mut peer = Peer::new(Scripted(std::io::Cursor::new(wire)), Magic::BITCOIN);
+            let lease = crate::PeerLease::new(crossbeam_channel::unbounded().0);
+            let shared = test_shared(
+                Arc::new(crate::PeerTable::new()),
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let result = run_outbound_handshake(
+                &mut peer,
+                124,
+                0,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+                "127.0.0.1:8333".parse().expect("address"),
+                &shared,
+            );
+            assert!(
+                result.is_err(),
+                "services={services} without VERACK must not complete"
+            );
+            assert_ne!(peer.state, crate::peer::PeerState::Ready);
+        }
+    }
+    #[test]
+    fn rejected_ordinary_version_updates_services_without_good() {
+        for (prior_good, services) in [(false, 1_u64), (false, 0), (true, 1), (true, 0)] {
+            let directory = tempfile::tempdir().expect("directory");
+            let address: SocketAddr = "127.0.0.1:8333".parse().expect("address");
+            let table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                Arc::clone(&table),
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let book = crate::addrman::AddressBook::open(
+                Some(directory.path().join("peers.dat")),
+                shared.magic.to_bytes(),
+                true,
+                None,
+            );
+            book.learn_dns("seed", &[address], 10_000);
+            book.set_services(address, 9);
+            if prior_good {
+                book.succeeded(address, 9, 10_000);
+            }
+            shared.address_book = Some(Arc::clone(&book));
+            let lease = crate::PeerLease::new(crossbeam_channel::unbounded().0);
+            table.register(address, lease.clone());
+            let mut wire = Vec::new();
+            crate::wire::write_message(
+                &mut wire,
+                shared.magic,
+                &crate::Message::Version(crate::handshake::version_message(
+                    123,
+                    0,
+                    crate::PeerRole::FullRelay,
+                    ServiceFlags::from(services),
+                )),
+            )
+            .expect("VERSION");
+            let mut peer = Peer::new(Scripted(std::io::Cursor::new(wire)), shared.magic);
+            assert!(
+                run_outbound_handshake(
+                    &mut peer,
+                    124,
+                    0,
+                    &lease,
+                    Instant::now() + Duration::from_secs(1),
+                    address,
+                    &shared
+                )
+                .is_err()
+            );
+            book.save();
+            let bytes = std::fs::read(directory.path().join("peers-f9beb4d9.dat")).expect("book");
+            let stored: serde_json::Value =
+                serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("JSON");
+            let record = &stored["records"][0];
+            assert_eq!(record["services"], services);
+            assert_eq!(record["last_success"], if prior_good { 10_000 } else { 0 });
+            assert_eq!(record["tried"], prior_good);
+            assert!(
+                !book.ordinary_services_eligible(address, u64::MAX),
+                "an observed VERSION is known even when it advertises zero services; no fabricated success"
+            );
+        }
+    }
+    #[test]
+    fn manual_dial_bypasses_known_incomplete_stored_services() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        drop(listener); // Local refused TCP distinguishes an attempted dial from service rejection.
+        let mut shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        book.learn_peer(
+            address.ip(),
+            &[(address, 1, unix_time_secs())],
+            unix_time_secs(),
+        );
+        shared.address_book = Some(book);
+        let ordinary =
+            spawn_outbound_connection(address, shared.clone(), crate::PeerRole::FullRelay)
+                .join()
+                .expect("ordinary thread");
+        assert!(matches!(
+            ordinary,
+            Err(crate::PeerError::Protocol(
+                "outbound peer lacks desirable services"
+            ))
+        ));
+        let manual = spawn_pinned_outbound_connection(address, shared, crate::PeerRole::FullRelay)
+            .join()
+            .expect("manual thread");
+        assert!(
+            matches!(manual, Err(crate::PeerError::Io(_))),
+            "explicit manual dial reaches TCP instead of applying stored-service policy"
+        );
+    }
+}
+
+#[cfg(test)]
+mod discouragement_tests {
+    use super::*;
+    use crate::{Message, PeerError, PeerLease, PeerRole};
+
+    fn shared() -> ConnectionShared {
+        let (headers, _) = crossbeam_channel::unbounded();
+        let (blocks, _) = crossbeam_channel::unbounded();
+        test_shared(Arc::new(crate::PeerTable::new()), headers, blocks)
+    }
+
+    fn lease(manual: bool, noban: bool) -> PeerLease {
+        let (tx, _) = crossbeam_channel::unbounded();
+        let lease = if manual {
+            PeerLease::new_manual(tx, PeerRole::FullRelay)
+        } else {
+            PeerLease::new(tx)
+        };
+        lease.with_no_ban(noban)
+    }
+
+    struct ServiceUpdateScript {
+        bytes: std::io::Cursor<Vec<u8>>,
+        update_at: Option<u64>,
+        book: Arc<crate::addrman::AddressBook>,
+        addr: SocketAddr,
+    }
+    impl std::io::Read for ServiceUpdateScript {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.update_at.is_some_and(|at| self.bytes.position() >= at) {
+                self.update_at = None;
+                self.book.learn_peer(
+                    self.addr.ip(),
+                    &[(self.addr, 1024, unix_time_secs())],
+                    unix_time_secs(),
+                );
+            }
+            std::io::Read::read(&mut self.bytes, bytes)
+        }
+    }
+    impl std::io::Write for ServiceUpdateScript {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn accepted_version_updates_each_time_without_replaying_on_later_steps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (repeated_version, protected) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let directory = tempfile::tempdir()?;
+            let address: SocketAddr = "8.8.8.8:8333".parse()?;
+            let mut shared = shared();
+            let book = crate::addrman::AddressBook::open(
+                Some(directory.path().join("peers.dat")),
+                shared.magic.to_bytes(),
+                false,
+                None,
+            );
+            book.learn_peer(
+                address.ip(),
+                &[(address, 9, unix_time_secs())],
+                unix_time_secs(),
+            );
+            shared.address_book = Some(Arc::clone(&book));
+            let lease = lease(false, protected);
+            shared.peer_table.register(address, lease.clone());
+            let mut wire = Vec::new();
+            if protected {
+                crate::wire::write_message(&mut wire, shared.magic, &Message::Verack)?;
+            }
+            crate::wire::write_message(
+                &mut wire,
+                shared.magic,
+                &Message::Version(crate::handshake::version_message(
+                    42,
+                    0,
+                    PeerRole::FullRelay,
+                    ServiceFlags::from(9),
+                )),
+            )?;
+            let update_at = (!repeated_version).then_some(u64::try_from(wire.len())?);
+            if repeated_version {
+                crate::wire::write_message(
+                    &mut wire,
+                    shared.magic,
+                    &Message::Version(crate::handshake::version_message(
+                        43,
+                        0,
+                        PeerRole::FullRelay,
+                        ServiceFlags::from(1),
+                    )),
+                )?;
+            } else {
+                crate::wire::write_message(&mut wire, shared.magic, &Message::WtxidRelay)?;
+                crate::wire::write_message(&mut wire, shared.magic, &Message::Verack)?;
+            }
+            let mut peer = Peer::new(
+                ServiceUpdateScript {
+                    bytes: std::io::Cursor::new(wire),
+                    update_at,
+                    book: Arc::clone(&book),
+                    addr: address,
+                },
+                shared.magic,
+            );
+            let result = run_outbound_handshake(
+                &mut peer,
+                44,
+                0,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+                address,
+                &shared,
+            );
+            if repeated_version {
+                assert!(matches!(
+                    result,
+                    Err(PeerError::Protocol(
+                        "outbound peer lacks desirable services"
+                    ))
+                ));
+            } else {
+                result?;
+                assert_eq!(peer.state, crate::PeerState::Ready);
+            }
+            book.save();
+            let bytes = std::fs::read(directory.path().join("peers-f9beb4d9.dat"))?;
+            let stored: serde_json::Value = serde_json::from_slice(&bytes[..bytes.len() - 32])?;
+            assert_eq!(
+                stored["records"][0]["services"],
+                if repeated_version { 1 } else { 1033 },
+                "accepted VERSION replaces flags; later feature/VERACK must preserve a fresh gossip update"
+            );
+            assert_eq!(stored["records"][0]["last_success"], 0);
+            assert_eq!(stored["records"][0]["tried"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn only_current_remote_protocol_faults_change_automatic_avoidance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shared = shared();
+        let address: SocketAddr = "8.8.8.8:8333".parse()?;
+        let stale = lease(false, false);
+        shared.peer_table.register(address, stale.clone());
+        let current = lease(false, false);
+        shared.peer_table.register(address, current.clone());
+        let fault = PeerError::Incoming(Box::new(PeerError::BadChecksum));
+        shared.note_misbehavior(address, &stale, &fault);
+        assert!(!shared.banned.is_discouraged(address.ip()));
+        for error in [
+            PeerError::Protocol("outbound queue closed or saturated"),
+            PeerError::Protocol("network inactive"),
+            PeerError::Protocol("p2p startup cancelled"),
+            PeerError::Protocol("outbound peer lacks desirable services"),
+            PeerError::PayloadTooLarge(usize::MAX),
+            PeerError::Io(io::Error::from(io::ErrorKind::TimedOut)),
+        ] {
+            shared.note_misbehavior(address, &current, &error);
+        }
+        assert!(
+            !shared.banned.is_discouraged(address.ip()),
+            "local/backpressure/policy failures are not remote misbehavior"
+        );
+        shared.note_misbehavior(address, &current, &fault);
+        assert!(shared.banned.is_discouraged(address.ip()));
+        assert!(
+            shared.banned.read().is_empty(),
+            "automatic avoidance must not become a manual ban"
+        );
+        assert!(matches!(
+            shared.check_destination(address, false),
+            Err(PeerError::DiscouragedDestination(_))
+        ));
+        assert!(
+            shared.check_destination(address, true).is_ok(),
+            "manual dials bypass automatic avoidance"
+        );
+        assert!(
+            !shared
+                .banned
+                .automatic_snapshot(SystemTime::now())
+                .allows(address.ip())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for inbound in [false, true] {
+            let shared = shared();
+            // Exercise real socket framing and teardown with a nonlocal
+            // connection identity. The test never dials this public address.
+            let address: SocketAddr = "8.8.8.8:8333".parse()?;
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let mut sender = TcpStream::connect(listener.local_addr()?)?;
+            let (stream, _) = listener.accept()?;
+            configure_peer_stream(&stream)?;
+            let counters = Arc::new(crate::PeerCounters::default());
+            let local = stream.local_addr()?;
+            let mut peer = Peer::new(
+                crate::CountingStream::new(stream, Arc::clone(&counters)),
+                Magic::BITCOIN,
+            );
+            peer.state = crate::PeerState::Ready;
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let lease = if inbound {
+                PeerLease::new_inbound(tx)
+            } else {
+                PeerLease::new(tx)
+            };
+            let probe = lease.clone();
+            shared.peer_table.register(address, lease.clone());
+            let version = crate::handshake::version_message(
+                42,
+                0,
+                PeerRole::FullRelay,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            );
+            let mut info =
+                crate::PeerInfo::outbound_from_version(address, local, &version, 0, 0, counters);
+            info.inbound = inbound;
+            let mut malformed = Vec::new();
+            crate::wire::write_message(&mut malformed, Magic::BITCOIN, &Message::Ping(7))?;
+            malformed[20] ^= 1; // A fully delivered frame with a bad checksum.
+            io::Write::write_all(&mut sender, &malformed)?;
+            io::Write::write_all(&mut sender, &malformed)?;
+            let Err(error) = run_connected_session(&mut peer, address, &shared, lease, rx, info)
+            else {
+                return Err("malformed frames must close the session with an error".into());
+            };
+            assert!(matches!(error, PeerError::Incoming(_)));
+            assert!(probe.is_cancelled());
+            assert!(shared.peer_table.sessions().is_empty());
+            assert!(matches!(
+                shared.check_destination(address, false),
+                Err(PeerError::DiscouragedDestination(_))
+            ));
+            assert!(shared.banned.read().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn manual_protected_and_local_connections_never_discourage_an_ip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (ip, manual, noban) in [
+            ("8.8.8.8", true, false),
+            ("8.8.4.4", false, true),
+            ("127.0.0.1", false, false),
+            ("::ffff:127.0.0.1", false, false),
+            ("::1", false, false),
+        ] {
+            let shared = shared();
+            let address = SocketAddr::new(ip.parse()?, 8333);
+            let lease = lease(manual, noban);
+            shared.peer_table.register(address, lease.clone());
+            let error = PeerError::Misbehavior("getheaders locator too large");
+            shared.note_misbehavior(address, &lease, &error);
+            assert!(!shared.banned.is_discouraged(address.ip()), "{ip}");
+            assert_eq!(lease.ignores_protocol_error(&error), manual || noban);
+            assert!(
+                !lease.ignores_protocol_error(&PeerError::Incoming(Box::new(
+                    PeerError::WrongNetwork {
+                        expected: Magic::BITCOIN,
+                        actual: Magic::REGTEST
+                    }
+                ))),
+                "unread framing cannot be safely resumed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn protected_handshake_discards_bad_order_without_extending_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for manual in [false, true] {
+            let lease = lease(manual, !manual);
+            let mut bytes = Vec::new();
+            crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
+            crate::wire::write_message(
+                &mut bytes,
+                Magic::REGTEST,
+                &Message::Version(crate::handshake::version_message(
+                    42,
+                    0,
+                    PeerRole::FullRelay,
+                    ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                )),
+            )?;
+            crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
+            let mut peer = Peer::new(std::io::Cursor::new(bytes), Magic::REGTEST);
+            // A cursor-backed outbound reader avoids interleaving test writes
+            // with unread input; the steps are the production handshake owner.
+            let (accepted, _) = crate::handshake::next_handshake_step(
+                &mut peer,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+            )?;
+            assert!(matches!(accepted, Message::Version(_)));
+            let (accepted, _) = crate::handshake::next_handshake_step(
+                &mut peer,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+            )?;
+            assert!(matches!(accepted, Message::Verack));
+            assert_eq!(peer.state, crate::peer::PeerState::Ready);
+        }
         Ok(())
     }
 }
