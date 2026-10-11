@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::{Block, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
@@ -913,14 +913,28 @@ impl AssumeUtxoManager {
         }
     }
 
-    /// Produces the established embedding summary from the coherent lifecycle read.
+    /// Produces the established embedding summary, waiting for a coherent lifecycle read.
     pub fn chainstates_summary(&self) -> Result<ChainstatesSummary, AssumeUtxoError> {
-        self.chainstates_report().map(|report| report.lifecycle)
+        let lifecycle = self.lifecycle.lock();
+        self.capture_chainstates_report(&lifecycle)
+            .map(|report| report.lifecycle)
     }
 
-    /// Captures both roles and transaction-based progress under lifecycle and transition exclusion.
-    pub fn chainstates_report(&self) -> Result<ChainstatesReport, AssumeUtxoError> {
-        let _lifecycle = self.lifecycle.lock();
+    /// Captures lifecycle roles and progress unless a lifecycle operation is in progress.
+    /// Returns `None` on lifecycle contention without waiting for activation or historical
+    /// validation. Once admitted, the read still waits for ordinary chain transitions.
+    pub fn try_chainstates_report(&self) -> Result<Option<ChainstatesReport>, AssumeUtxoError> {
+        let Some(lifecycle) = self.lifecycle.try_lock() else {
+            return Ok(None);
+        };
+        self.capture_chainstates_report(&lifecycle).map(Some)
+    }
+
+    /// Shares one capture for blocking embedding reads and admitted RPC reads.
+    fn capture_chainstates_report(
+        &self,
+        _lifecycle: &MutexGuard<'_, ()>,
+    ) -> Result<ChainstatesReport, AssumeUtxoError> {
         let _transition = self.active_chainstate.chain_transition.lock();
         let active_role = self.active_chainstate.role();
         let active_applied = self.active_chainstate.applied_tip_snapshot();

@@ -690,11 +690,41 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
 }
 
 #[test]
+fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> TestResult {
+    let fixture = Fixture::new()?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active, None)?;
+    let observed = std::thread::scope(|scope| {
+        let guard = manager.lifecycle.lock();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let reader = &manager;
+        scope.spawn(move || {
+            let _ = sent.send(reader.try_chainstates_report());
+        });
+        let observed = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(guard);
+        observed
+    });
+    let report = observed.map_err(|_| "report waited for the lifecycle owner")??;
+    assert!(
+        report.is_none(),
+        "busy lifecycle must not report fabricated roles"
+    );
+    let report = manager
+        .try_chainstates_report()?
+        .ok_or("lifecycle remained busy after release")?;
+    assert_eq!(report.lifecycle, manager.chainstates_summary()?);
+    Ok(())
+}
+
+#[test]
 fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
     let fixture = Fixture::new()?;
     let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
     assert_eq!(
-        manager.chainstates_report()?.active_verification_progress,
+        manager
+            .try_chainstates_report()?
+            .ok_or("uncontended lifecycle is busy")?
+            .active_verification_progress,
         None
     );
     assert_eq!(known_progress(None, 0.5), None);

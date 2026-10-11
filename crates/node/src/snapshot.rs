@@ -121,14 +121,21 @@ impl SnapshotControl {
         }
     }
 
-    pub(crate) fn import(&self, input: &Path) -> Result<SnapshotImport, SnapshotImportError> {
-        let _permit = self
+    // Both input formats claim the same resource permit and refuse a second
+    // activation before resolving a path, reading input or reconstructing coins.
+    fn claim_import(&self) -> Result<parking_lot::MutexGuard<'_, ()>, SnapshotImportError> {
+        let permit = self
             .import
             .try_lock()
             .ok_or(SnapshotImportError::ImportInProgress)?;
         if !matches!(self.manager.status()?, AssumeUtxoDiskStatus::Uninitialized) {
             return Err(AssumeUtxoError::AlreadyActive.into());
         }
+        Ok(permit)
+    }
+
+    pub(crate) fn import(&self, input: &Path) -> Result<SnapshotImport, SnapshotImportError> {
+        let _permit = self.claim_import()?;
         let path = if input.is_absolute() {
             input.to_path_buf()
         } else {
@@ -166,10 +173,7 @@ impl SnapshotControl {
     /// Existing embedding contract: native v4 input and caller-relative paths.
     /// This entry shares the same resource permit and activation effects with RPC.
     pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
-        let _permit = self
-            .import
-            .try_lock()
-            .ok_or(SnapshotImportError::ImportInProgress)?;
+        let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
         let snapshot = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
         self.activate(snapshot.set, snapshot.tip_hash, snapshot.height)
@@ -208,8 +212,11 @@ impl SnapshotControl {
     pub(crate) fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
         let report = self
             .manager
-            .chainstates_report()
-            .map_err(|error| SnapshotControlError::Failed(error.to_string()))?;
+            .try_chainstates_report()
+            .map_err(|error| SnapshotControlError::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                SnapshotControlError::Unavailable("snapshot lifecycle update is in progress".into())
+            })?;
         let summary = report.lifecycle;
         let mut chainstates = Vec::with_capacity(2);
         if let Some(historical) = summary.historical_chainstate {
@@ -375,6 +382,14 @@ mod tests {
         // The established embedding call still selects native v4 explicitly.
         assert!(state.activate_assumeutxo_snapshot_file(&core_path).is_err());
         state.activate_assumeutxo_snapshot_file(&native_path)?;
+        assert!(matches!(
+            state
+                .snapshots
+                .import_native(&dir.path().join("missing.dat")),
+            Err(SnapshotImportError::Activation(
+                AssumeUtxoError::AlreadyActive
+            ))
+        ));
         let view = state.chainstates_summary()?;
         assert_eq!(view.active_chainstate.height, Some(200));
         assert!(!view.active_chainstate.validated);

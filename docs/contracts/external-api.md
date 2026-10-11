@@ -616,7 +616,10 @@ namespace. The shared UTXO codec applies its finite resource limits and resolves
 height, commitment, and cumulative transaction count only from the compiled
 network anchor matching the header's base block hash. The complete decoded
 state must reproduce `hash_serialized_3`; a parsed header is not authentication.
-Only one file import per node may materialize a UTXO set at a time.
+Only one file import per node may materialize a UTXO set at a time. Both the
+portable RPC and native-v4 embedding entry claim that same permit and reject
+an existing activation before opening or decoding input. The manager retains
+its lifecycle-protected admission recheck before activation.
 Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
 cleanup does not reset the accepted head or modify source artifact contents.
 
@@ -637,8 +640,15 @@ failures -22, and underlying read-I/O, lifecycle, storage or settlement failures
 -32603. These explicit error-code deviations are not a full Core RPC parity
 claim. Historical validation continues through the existing P2P scheduler.
 
-`getchainstates()` captures both roles under the existing lifecycle and active
-transition exclusion. `headers` is the best admitted header height; the
+`getchainstates()` attempts lifecycle exclusion before capturing both roles.
+If activation or historical lifecycle work owns it, the query reports typed
+unavailability (`-32603`) instead of waiting or inventing a partial role set.
+This is an availability deviation: Core can report its prior committed roles
+while staging a snapshot. Ordinary active-chain transition exclusion can still
+wait; this is not a claim that every query is nonblocking. The established
+embedding summary retains its blocking contract. Successful reports share one
+capture owner under lifecycle and active transition exclusion.
+`headers` is the best admitted header height; the
 historical role, when present, is first and the active role last. Each reports
 `blocks`, `bestblockhash`, `validated`, and `verificationprogress` when a known
 cumulative transaction count permits the existing transaction-based estimate.

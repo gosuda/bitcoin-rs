@@ -41,7 +41,28 @@ fn admit_headers(node: &mut ProcessNode, blocks: &[Block]) -> Result<()> {
 }
 
 fn states(node: &mut ProcessNode) -> Result<Value> {
-    node.rpc("getchainstates", &json!([]))
+    // Sending a historical block is not an acknowledgement that validation has
+    // released the lifecycle owner. Retry only this declared transient result,
+    // with one deadline shared by transport and polling; preserve other errors.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match node.rpc_until("getchainstates", &json!([]), deadline) {
+            Err(Error::Rpc {
+                ref method,
+                code: -32603,
+                ref message,
+            }) if method == "getchainstates"
+                && message == "internal error: snapshot lifecycle update is in progress"
+                && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
 }
 
 fn reject(node: &mut ProcessNode, path: &Path, code: i64) -> Result<()> {
