@@ -2777,4 +2777,288 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn bip30_duplicate_coinbase_esplora_history_and_paging_91812_91842() {
+        use bitcoin::hex::FromHex;
+        use core::str::FromStr as _;
+
+        // Mainnet BIP30 case 1: duplicate coinbase at heights 91,812 and 91,842.
+        let txid_str = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599";
+        let expected_txid = Txid::from_str(txid_str).expect("txid parses");
+        let hash_91812_str = "00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f";
+        let hash_91842_str = "00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec";
+        let script_pubkey = Vec::from_hex(
+            "41046896ecfc449cb8560594eb7f413f199deb9b4e5d947a142e7dc7d2de0b811b8e204833ea2a2fd9d4c7b153a8ca7661d0a0b7fc981df1f42f55d64b26b3da1e9cac",
+        )
+        .expect("script parses");
+        let script_hash = ScriptHash::new(&script_pubkey);
+        let script_hash_hex = script_hash.to_byte_array().to_lower_hex_string();
+
+        let tx = Tx {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: null_outpoint(),
+                script_sig: Script::from_bytes(
+                    Vec::from_hex("0456720e1b00").expect("scriptsig hex"),
+                ),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: script_pubkey.into(),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        assert_eq!(tx.txid(), expected_txid);
+
+        let mut ctx = Context::new();
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                91_812,
+                BlockHash::from_str(hash_91812_str).expect("blockhash parses"),
+            ));
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                91_842,
+                BlockHash::from_str(hash_91842_str).expect("blockhash parses"),
+            ));
+
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: vec![
+                ScriptHistoryRecord {
+                    txid: expected_txid,
+                    height: 91_812,
+                },
+                ScriptHistoryRecord {
+                    txid: expected_txid,
+                    height: 91_842,
+                },
+            ],
+            funding: vec![
+                ScriptIndexRecord {
+                    txid: expected_txid,
+                    height: 91_812,
+                    value: 5_000_000_000,
+                    vout: 0,
+                },
+                ScriptIndexRecord {
+                    txid: expected_txid,
+                    height: 91_842,
+                    value: 5_000_000_000,
+                    vout: 0,
+                },
+            ],
+            unspent: vec![ScriptIndexRecord {
+                txid: expected_txid,
+                height: 91_842,
+                value: 5_000_000_000,
+                vout: 0,
+            }],
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(tx)));
+
+        let projection = Projection::new(&ctx);
+        let activity = projection
+            .script_activity(script_hash)
+            .expect("activity resolves");
+        assert_eq!(activity.confirmed.len(), 2);
+        let stats = activity.chain_stats();
+        assert_eq!(stats.tx_count, 2);
+        assert_eq!(stats.funded_txo_count, 2);
+        assert_eq!(stats.funded_txo_sum, 10_000_000_000);
+        assert_eq!(stats.spent_txo_count, 1);
+        assert_eq!(stats.spent_txo_sum, 5_000_000_000);
+
+        let history_records = projection
+            .confirmed_history(script_hash)
+            .expect("confirmed history resolves");
+        assert_eq!(history_records.len(), 2);
+        assert_eq!(history_records[0].height, 91_842);
+        assert_eq!(history_records[1].height, 91_812);
+
+        let handler = Handler::new(Arc::new(ctx));
+
+        // /scripthash/:hash summary check
+        let summary_resp = route(&handler, &format!("/scripthash/{script_hash_hex}"), "");
+        assert_eq!(summary_resp.status, 200);
+        let summary_json: Value = serde_json::from_slice(&summary_resp.body).expect("summary json");
+        assert_eq!(summary_json["chain_stats"]["tx_count"], 2);
+        assert_eq!(summary_json["chain_stats"]["funded_txo_count"], 2);
+        assert_eq!(
+            summary_json["chain_stats"]["funded_txo_sum"],
+            10_000_000_000_u64
+        );
+
+        // /scripthash/:hash/txs and /txs/chain: returns both historical occurrences
+        let chain_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain"),
+            "",
+        );
+        assert_eq!(chain_resp.status, 200);
+        let chain_json: Value = serde_json::from_slice(&chain_resp.body).expect("chain json");
+        let chain_arr = chain_json.as_array().expect("array of txs");
+        assert_eq!(chain_arr.len(), 2);
+        assert_eq!(chain_arr[0]["txid"], txid_str);
+        assert_eq!(chain_arr[0]["status"]["block_height"], 91_842);
+        assert_eq!(chain_arr[0]["status"]["block_hash"], hash_91842_str);
+        assert_eq!(chain_arr[1]["txid"], txid_str);
+        assert_eq!(chain_arr[1]["status"]["block_height"], 91_812);
+        assert_eq!(chain_arr[1]["status"]["block_hash"], hash_91812_str);
+
+        // Cursor pagination with the duplicate txid advances past all occurrences
+        // without looping
+        let page2_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_str}"),
+            "",
+        );
+        assert_eq!(page2_resp.status, 200);
+        assert_eq!(page2_resp.body, b"[]");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn bip30_duplicate_coinbase_esplora_history_and_paging_91722_91880() {
+        use bitcoin::hex::FromHex;
+        use core::str::FromStr as _;
+
+        // Mainnet BIP30 case 2: duplicate coinbase at heights 91,722 and 91,880.
+        let txid_str = "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468";
+        let expected_txid = Txid::from_str(txid_str).expect("txid parses");
+        let hash_91722_str = "00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e";
+        let hash_91880_str = "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721";
+        let script_pubkey = Vec::from_hex(
+            "4104124b212f5416598a92ccec88819105179dcb2550d571842601492718273fe0f2179a9695096bff94cd99dcccdea7cd9bd943bfca8fea649cac963411979a33e9ac",
+        )
+        .expect("script parses");
+        let script_hash = ScriptHash::new(&script_pubkey);
+        let script_hash_hex = script_hash.to_byte_array().to_lower_hex_string();
+
+        let tx = Tx {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: null_outpoint(),
+                script_sig: Script::from_bytes(
+                    Vec::from_hex("0456720e1b00").expect("scriptsig hex"),
+                ),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: script_pubkey.into(),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        assert_eq!(tx.txid(), expected_txid);
+
+        let mut ctx = Context::new();
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                91_722,
+                BlockHash::from_str(hash_91722_str).expect("blockhash parses"),
+            ));
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                91_880,
+                BlockHash::from_str(hash_91880_str).expect("blockhash parses"),
+            ));
+
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: vec![
+                ScriptHistoryRecord {
+                    txid: expected_txid,
+                    height: 91_722,
+                },
+                ScriptHistoryRecord {
+                    txid: expected_txid,
+                    height: 91_880,
+                },
+            ],
+            funding: vec![
+                ScriptIndexRecord {
+                    txid: expected_txid,
+                    height: 91_722,
+                    value: 5_000_000_000,
+                    vout: 0,
+                },
+                ScriptIndexRecord {
+                    txid: expected_txid,
+                    height: 91_880,
+                    value: 5_000_000_000,
+                    vout: 0,
+                },
+            ],
+            unspent: vec![ScriptIndexRecord {
+                txid: expected_txid,
+                height: 91_880,
+                value: 5_000_000_000,
+                vout: 0,
+            }],
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(tx)));
+
+        let projection = Projection::new(&ctx);
+        let activity = projection
+            .script_activity(script_hash)
+            .expect("activity resolves");
+        assert_eq!(activity.confirmed.len(), 2);
+        let stats = activity.chain_stats();
+        assert_eq!(stats.tx_count, 2);
+        assert_eq!(stats.funded_txo_count, 2);
+        assert_eq!(stats.funded_txo_sum, 10_000_000_000);
+        assert_eq!(stats.spent_txo_count, 1);
+        assert_eq!(stats.spent_txo_sum, 5_000_000_000);
+
+        let history_records = projection
+            .confirmed_history(script_hash)
+            .expect("confirmed history resolves");
+        assert_eq!(history_records.len(), 2);
+        assert_eq!(history_records[0].height, 91_880);
+        assert_eq!(history_records[1].height, 91_722);
+
+        let handler = Handler::new(Arc::new(ctx));
+
+        // /scripthash/:hash summary check
+        let summary_resp = route(&handler, &format!("/scripthash/{script_hash_hex}"), "");
+        assert_eq!(summary_resp.status, 200);
+        let summary_json: Value = serde_json::from_slice(&summary_resp.body).expect("summary json");
+        assert_eq!(summary_json["chain_stats"]["tx_count"], 2);
+        assert_eq!(summary_json["chain_stats"]["funded_txo_count"], 2);
+        assert_eq!(
+            summary_json["chain_stats"]["funded_txo_sum"],
+            10_000_000_000_u64
+        );
+
+        // /scripthash/:hash/txs and /txs/chain: returns both historical occurrences
+        let chain_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain"),
+            "",
+        );
+        assert_eq!(chain_resp.status, 200);
+        let chain_json: Value = serde_json::from_slice(&chain_resp.body).expect("chain json");
+        let chain_arr = chain_json.as_array().expect("array of txs");
+        assert_eq!(chain_arr.len(), 2);
+        assert_eq!(chain_arr[0]["txid"], txid_str);
+        assert_eq!(chain_arr[0]["status"]["block_height"], 91_880);
+        assert_eq!(chain_arr[0]["status"]["block_hash"], hash_91880_str);
+        assert_eq!(chain_arr[1]["txid"], txid_str);
+        assert_eq!(chain_arr[1]["status"]["block_height"], 91_722);
+        assert_eq!(chain_arr[1]["status"]["block_hash"], hash_91722_str);
+
+        // Cursor pagination with the duplicate txid advances past all occurrences
+        // without looping
+        let page2_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_str}"),
+            "",
+        );
+        assert_eq!(page2_resp.status, 200);
+        assert_eq!(page2_resp.body, b"[]");
+    }
 }

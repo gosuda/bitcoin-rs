@@ -401,7 +401,9 @@ impl<'a> Projection<'a> {
                 .cmp(&left.record.height)
                 .then_with(|| right.record.txid.cmp(&left.record.txid))
         });
-        confirmed.dedup_by_key(|activity| activity.record.txid);
+        confirmed.dedup_by(|left, right| {
+            left.record.txid == right.record.txid && left.record.height == right.record.height
+        });
 
         let confirmed_unspent = index.unspent_outputs(script_hash).map_err(query_error)?;
         let mempool = self.mempool_activity(script_hash, &confirmed_unspent)?;
@@ -430,7 +432,7 @@ impl<'a> Projection<'a> {
                 .cmp(&left.height)
                 .then_with(|| right.txid.cmp(&left.txid))
         });
-        history.dedup_by_key(|record| record.txid);
+        history.dedup_by(|left, right| left.txid == right.txid && left.height == right.height);
         Ok(history)
     }
 

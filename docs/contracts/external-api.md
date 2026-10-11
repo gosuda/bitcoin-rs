@@ -250,7 +250,10 @@
    are the exact lowercase `txid` display text: malformed, noncanonical
    (including uppercase or prefixed), unknown, and missing cursors restart from
    the beginning; a valid known cursor strictly excludes that transaction and
-   earlier entries.
+   earlier entries. Historical confirmation heights for duplicate transactions
+   (such as BIP30 duplicate coinbases) are preserved as distinct occurrences in
+   script history and summary counts; cursor pagination advances past all
+   occurrences of the cursor txid to ensure forward progression without cycles.
   A richer internal revision token stays
   internal or is a documented extension. Lag, reorg, or a disabled
   capability returns the declared unavailable response, never an empty
