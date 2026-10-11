@@ -160,6 +160,19 @@ pub const fn instructions(script: &[u8]) -> Instructions<'_> {
     }
 }
 
+/// Whether every instruction has Core's valid legacy opcode and element encoding.
+///
+/// This checks parsing, the maximum defined opcode, and the 520-byte push limit;
+/// it does not evaluate the script or impose a total script-size limit.
+#[must_use]
+pub fn has_valid_ops(script: &[u8]) -> bool {
+    instructions(script).all(|instruction| match instruction {
+        Ok(Instruction::Op(op)) => op <= opcode::OP_CHECKSIGADD,
+        Ok(Instruction::PushBytes(data)) => data.len() <= crate::eval::MAX_SCRIPT_ELEMENT_SIZE,
+        Err(_) => false,
+    })
+}
+
 impl<'a> Iterator for Instructions<'a> {
     type Item = Result<Instruction<'a>, EarlyEndOfScript>;
 

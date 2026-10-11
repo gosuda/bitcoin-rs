@@ -178,7 +178,7 @@ declare_rows! {
     "converttopsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
     "createpsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
     "decodepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
-    "decodescript", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Script decode helper not implemented.", "n/a", None;
+    "decodescript", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/rpc/src/handlers/util.rs and crates/rpc/src/tx_render.rs).", "0.12.0", Some(util::decodescript);
     "descriptorprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "fundrawtransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "getprivatebroadcastinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;

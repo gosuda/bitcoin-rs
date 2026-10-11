@@ -1,9 +1,11 @@
 //! Bitcoin Core wire-contract compatibility tests.
 //!
-//! Every dispatched response covered by a `corepc_types` structured type must
-//! deserialize into that exact upstream type under the crate's strict
-//! `serde-deny-unknown-fields` feature. Hardcoded key-set equality is gone:
-//! the versioned type is the schema. `getblockchaininfo` additionally carries
+//! Representable response fixtures deserialize into the pinned `corepc_types`
+//! structured types under the strict `serde-deny-unknown-fields` feature.
+//! Those DTOs narrow transaction versions to i32; the full unsigned wire range
+//! is instead qualified against actual Core by the process harness's
+//! `verbose_transaction_cases` and `script_decode_cases`. A DTO range is not
+//! authority to narrow Core's JSON. `getblockchaininfo` additionally carries
 //! declared extension keys: its decoder strips exactly that declared set
 //! before the strict decode, so any other unlisted key still fails the gate.
 //!

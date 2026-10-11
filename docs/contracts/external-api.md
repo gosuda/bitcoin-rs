@@ -54,13 +54,44 @@
   Duplicate, collision and unknown-name validation precedes this method-owned
   arity check. The registry declares this transaction-creation deviation.
 - Amounts are integer satoshis internally. Adapters render the exact
-  external BTC or sat-per-vB units and precision.
+  external BTC or sat-per-vB units and precision. Shared transaction JSON
+  interprets raw version bits as Core's unsigned 32-bit value and raw output
+  amounts as signed 64-bit values. `decoderawtransaction`, verbose
+  `getrawtransaction` and verbose block transaction entries reuse that owner;
+  block `coinbase_tx.version` uses the same unsigned conversion, while block
+  header versions keep their signed interpretation. Raw transaction chain
+  times appear only for positive confirmations. Native transaction
+  representations, consensus checks and undo availability are unchanged.
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
-  `deriveaddresses`, `scantxoutset`, `combinepsbt`, and `finalizepsbt`
+  `deriveaddresses`, `decodescript`, `scantxoutset`, `combinepsbt`, and `finalizepsbt`
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
+
+- Core script JSON has one projection owner in `tx_render.rs`: decimal short
+  pushes, malformed-instruction markers, checksummed inferred descriptors,
+  and optional address/hex fields. Transaction inputs alone decode defined
+  sighash suffixes. Esplora retains its separate opcode/push spelling.
+- `decodescript` uses the native instruction parser and script validity
+  predicates. Wrapper eligibility follows Core 31.1, and P2WSH inference
+  receives only its redeem script, with no key provider. Parsed Miniscript
+  properties enforce Core's sanity checks, including sane unsatisfiable
+  scripts; no second script parser or signing state is introduced.
+- `decodescript` accepts positional and named `hexstring` forms. Its
+  declared differences are compact usage text for missing/extra arguments,
+  a direct-call hex-input limit equal to the 16 MiB HTTP body budget, and
+  address-descriptor fallback when a complex Miniscript contains an
+  invalid-curve public key rejected by the Miniscript parser. Core can
+  infer `wsh(...)` from that syntactically encoded key; the fallback retains
+  the same script, addresses and wrappers. Bare P2PK/multisig inference
+  keeps Core's syntactic key handling.
+  This is an input/work limit, not a response-size limit: disassembly and
+  descriptors can be larger than their input. No response-memory or
+  performance claim follows from the input limit. The pinned process matrix
+  in `overhaul_process_harness::script_decode_cases` covers script classes,
+  invalid encodings, wrappers, descriptor checksums, parameters, network
+  addresses, and shared RPC/REST/UTXO projections.
 
 #### Native deployment reporting
 

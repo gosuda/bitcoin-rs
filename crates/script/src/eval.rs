@@ -25,7 +25,7 @@ use bitcoin_hashes::{Hash as _, ripemd160, sha1};
 pub(crate) use crate::script::opcode::*;
 
 /// Maximum serialized script size accepted for `Base`/`WitnessV0` evaluation.
-pub(crate) const MAX_SCRIPT_SIZE: usize = 10_000;
+pub const MAX_SCRIPT_SIZE: usize = 10_000;
 /// Maximum size of one pushed stack element.
 pub(crate) const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
 /// Maximum non-push opcodes per script.
@@ -388,7 +388,8 @@ const fn is_disabled(op: u8) -> bool {
 
 /// BIP342 `OP_SUCCESSx` opcodes (Core's `IsOpSuccess`). A script containing
 /// any of these is unconditionally valid under tapscript.
-const fn is_op_success(op: u8) -> bool {
+#[must_use]
+pub const fn is_op_success(op: u8) -> bool {
     op == 80
         || op == 98
         || (op >= 126 && op <= 129)

@@ -1483,17 +1483,15 @@ fn block_verbose_typed(
     verbosity: u64,
 ) -> Result<Value, RpcError> {
     let header = decode_header(record)?;
+    let hash = Hash256::from(record.hash);
     // One capture serves confirmations and the next-applied-block hash, so the
     // two cannot describe different applied publications.
     let view = ctx.chain.applied_view();
-    let block_confirmations = confirmations(ctx, &view, Hash256::from(record.hash), record.height);
-    let mediantime = ctx
-        .chain
-        .median_time_past_for_hash(Hash256::from(record.hash))
-        .unwrap_or(0);
+    let block_confirmations = confirmations(ctx, &view, hash, record.height);
+    let mediantime = ctx.chain.median_time_past_for_hash(hash).unwrap_or(0);
     let chainwork_hex = ctx
         .chain
-        .chain_work_hex_for_hash(Hash256::from(record.hash))
+        .chain_work_hex_for_hash(hash)
         .unwrap_or_else(|| "00".to_owned());
     let next_block_hash = next_applied_block_hash(ctx, &view, record.height);
     if !include_block_fields {
@@ -1519,68 +1517,76 @@ fn block_verbose_typed(
     let (_bytes, block) = decode_block(ctx, record)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
-    let size = i64_saturated_len(block.total_size());
-    let stripped_size = i64_saturated_len(block.stripped_size());
-    let weight = block.weight();
-    let bits = format!("{:08x}", header.bits);
-    let version_hex = format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes()));
-    if verbosity < 2 {
-        return typed_to_sonic(&v31::GetBlockVerboseOne {
+    let coinbase_version = crate::tx_render::wire_transaction_version(coinbase_tx.version);
+    let mut value = if verbosity < 2 {
+        typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
             confirmations: block_confirmations,
-            size,
-            stripped_size: Some(stripped_size),
-            weight,
+            size: i64_saturated_len(block.total_size()),
+            stripped_size: Some(i64_saturated_len(block.stripped_size())),
+            weight: block.weight(),
             coinbase_tx,
             height: i64::from(record.height),
             version: header.version,
-            version_hex,
+            version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
             merkle_root: header.merkle_root.to_string_be(),
             tx: block.txs.iter().map(|tx| tx.txid().to_string()).collect(),
             time: i64::from(header.time),
             median_time: Some(i64_saturated(u64::from(mediantime))),
             nonce: i64::from(header.nonce),
-            bits,
+            bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
             n_tx: i64_saturated_len(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
-        });
+        })?
+    } else {
+        typed_to_sonic_omitting_nulls(&v31::GetBlockVerboseTwo {
+            hash: record.hash.to_string(),
+            confirmations: block_confirmations,
+            size: i64_saturated_len(block.total_size()),
+            stripped_size: Some(i64_saturated_len(block.stripped_size())),
+            weight: block.weight(),
+            coinbase_tx,
+            height: i64::from(record.height),
+            version: header.version,
+            version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
+            merkle_root: header.merkle_root.to_string_be(),
+            tx: Vec::new(),
+            time: i64::from(header.time),
+            median_time: Some(i64_saturated(u64::from(mediantime))),
+            nonce: i64::from(header.nonce),
+            bits: format!("{:08x}", header.bits),
+            target: compact_target_hex(header.bits),
+            difficulty: ctx.chain.difficulty_for_bits(header.bits),
+            chain_work: chainwork_hex,
+            n_tx: i64_saturated_len(record.tx_count),
+            previous_block_hash: Some(header.prev_blockhash.to_string()),
+            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
+        })?
+    };
+    // The pinned coinbase DTO narrows this unsigned wire field to i32.
+    // Both typed block envelopes must already contain this object.
+    let envelope = value
+        .as_object_mut()
+        .ok_or_else(|| RpcError::Internal("typed block response is not an object".to_owned()))?;
+    if verbosity >= 2 {
+        // Verbosity 3 retains the verbosity-2 shape: no fee/prevout source is wired.
+        let txs: Vec<Value> = block
+            .txs
+            .iter()
+            .map(|tx| crate::tx_render::transaction_json(tx, ctx.chain.chain_network, None))
+            .collect();
+        let _ = envelope.insert("tx", Value::from(txs));
     }
-    // Verbosity 3 serves the verbosity-2 shape here: no prevout source is
-    // wired into block rendering, so per-input prevouts stay absent.
-    let mut txs = Vec::with_capacity(block.txs.len());
-    for tx in &block.txs {
-        txs.push(v31::GetBlockVerboseTwoTransaction {
-            transaction: convert::raw_transaction_verbose(tx, ctx.chain.chain_network, None)?,
-            fee: None,
-        });
-    }
-    typed_to_sonic(&v31::GetBlockVerboseTwo {
-        hash: record.hash.to_string(),
-        confirmations: block_confirmations,
-        size,
-        stripped_size: Some(stripped_size),
-        weight,
-        coinbase_tx,
-        height: i64::from(record.height),
-        version: header.version,
-        version_hex,
-        merkle_root: header.merkle_root.to_string_be(),
-        tx: txs,
-        time: i64::from(header.time),
-        median_time: Some(i64_saturated(u64::from(mediantime))),
-        nonce: i64::from(header.nonce),
-        bits,
-        target: compact_target_hex(header.bits),
-        difficulty: ctx.chain.difficulty_for_bits(header.bits),
-        chain_work: chainwork_hex,
-        n_tx: i64_saturated_len(record.tx_count),
-        previous_block_hash: Some(header.prev_blockhash.to_string()),
-        next_block_hash: next_block_hash.map(|hash| hash.to_string()),
-    })
+    let coinbase = envelope
+        .get_mut(&"coinbase_tx")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| RpcError::Internal("typed block coinbase is not an object".to_owned()))?;
+    let _ = coinbase.insert("version", json!(coinbase_version));
+    Ok(value)
 }
 
 fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
@@ -2076,6 +2082,96 @@ mod tests {
                 Some(tx.outputs.len()),
                 "vout must carry every output: {object:?}"
             );
+        }
+    }
+
+    #[test]
+    fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
+        // Core 31.1 CTransaction::version is uint32_t; CBlockHeader::nVersion
+        // remains int32_t. Literal expected values independently pin that split.
+        let mut block = fixture_block_with_spend();
+        block.header.version = -1;
+        block.txs[0].version = -1;
+        block.txs[1].version = i32::MIN;
+        let mut leaves = block
+            .txids()
+            .into_iter()
+            .map(|txid| txid.0.to_le_bytes())
+            .collect();
+        let root = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
+            .expect("fixture merkle root");
+        block.header.merkle_root = Hash256::from_le_bytes(&root);
+        let record = BlockRecord::from_block(0, &block);
+        let mut ctx = Context::new();
+        ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
+            height: 0,
+            hash: record.hash,
+            body: consensus_bytes(&block),
+            calls: AtomicUsize::new(0),
+        }));
+        let ctx = Arc::new(ctx);
+        seed_block(&ctx, &block, record);
+        let hash = block.block_hash().to_string();
+        let header = getblockheader(&ctx, &json!([hash, true])).expect("header");
+        assert_eq!(header["version"].as_i64(), Some(-1));
+        assert_eq!(header["versionHex"].as_str(), Some("ffffffff"));
+        for verbosity in [1, 2, 3] {
+            let value = getblock(&ctx, &json!([hash, verbosity])).expect("verbose block");
+            assert_eq!(value["version"].as_i64(), Some(-1));
+            assert_eq!(value["versionHex"].as_str(), Some("ffffffff"));
+            assert_eq!(
+                value["coinbase_tx"]["version"].as_u64(),
+                Some(4_294_967_295)
+            );
+            if verbosity == 1 {
+                assert!(value.get("nextblockhash").is_some_and(Value::is_null));
+                assert_eq!(
+                    value["tx"][0].as_str(),
+                    Some(block.txs[0].txid().to_string().as_str())
+                );
+                continue;
+            }
+            assert!(value.get("nextblockhash").is_none());
+            for (index, expected) in [4_294_967_295, 2_147_483_648].into_iter().enumerate() {
+                let object = &value["tx"][index];
+                assert_eq!(object["version"].as_u64(), Some(expected));
+                assert_eq!(
+                    object["hex"].as_str(),
+                    Some(
+                        consensus_bytes(&block.txs[index])
+                            .to_lower_hex_string()
+                            .as_str()
+                    )
+                );
+                for field in [
+                    "fee",
+                    "blockhash",
+                    "confirmations",
+                    "time",
+                    "blocktime",
+                    "in_active_chain",
+                ] {
+                    assert!(
+                        object.get(field).is_none(),
+                        "block transaction omits {field}"
+                    );
+                }
+                assert!(object["vin"][0].get("prevout").is_none());
+                let raw = super::super::tx::getrawtransaction(
+                    &ctx,
+                    &json!([block.txs[index].txid().to_string(), true, hash]),
+                )
+                .expect("explicit verbose transaction");
+                assert_eq!(raw["version"].as_u64(), Some(expected));
+                assert_eq!(raw["confirmations"].as_u64(), Some(0));
+                assert_eq!(raw["in_active_chain"].as_bool(), Some(false));
+                for field in ["time", "blocktime", "fee"] {
+                    assert!(
+                        raw.get(field).is_none(),
+                        "inactive raw transaction omits {field}"
+                    );
+                }
+            }
         }
     }
 

@@ -14,7 +14,7 @@ use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
 
-const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
+pub(crate) const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
 
