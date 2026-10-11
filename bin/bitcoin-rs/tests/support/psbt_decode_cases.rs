@@ -18,6 +18,15 @@ fn decoded_psbt_metadata_matches_core() {
             let params = json!([case["psbt"]]);
             let reference = core.rpc("decodepsbt", &params);
             let candidate = node.rpc("decodepsbt", &params);
+            if name.starts_with("core-identity-") {
+                assert_eq!(
+                    reference.is_ok(),
+                    case["core_valid"]
+                        .as_bool()
+                        .expect("Core identity acceptance"),
+                    "{name}: recorded Core acceptance",
+                );
+            }
             if case["candidate_valid"] == false {
                 assert!(reference.is_ok(), "{name}: measured Core acceptance");
                 assert!(
@@ -53,15 +62,17 @@ fn decoded_psbt_metadata_matches_core() {
                         ..
                     }),
                 ) => {
-                    if matches!(
-                        name,
-                        "wrong-nonwitness-hash"
-                            | "wrong-nonwitness-index"
-                            | "trailing-data"
-                            | "invalid-base64"
-                            | "global-truncated-keytype"
-                            | "truncated-subtype"
-                    ) {
+                    if name.starts_with("core-identity-")
+                        || matches!(
+                            name,
+                            "wrong-nonwitness-hash"
+                                | "wrong-nonwitness-index"
+                                | "trailing-data"
+                                | "invalid-base64"
+                                | "global-truncated-keytype"
+                                | "truncated-subtype"
+                        )
+                    {
                         assert_eq!(candidate, reference, "{name}: adapted diagnostic");
                     }
                 }
