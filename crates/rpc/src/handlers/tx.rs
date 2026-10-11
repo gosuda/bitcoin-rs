@@ -1245,6 +1245,14 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     budget
         .add_decoded(&psbt)
         .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
+    // Match the codec's public-key/chain-code identity. Retain only the first
+    // full key and whether aliases/mixed origins were admitted for that key.
+    let mut xpub_identities: std::collections::BTreeMap<_, _> = psbt
+        .xpub
+        .keys()
+        .map(|xpub| ((xpub.public_key, xpub.chain_code), (*xpub, false, false)))
+        .collect();
+    let mut mixed_alias = false;
     for value in iter {
         let Some(s) = value.as_str() else {
             return Err(RpcError::InvalidType(
@@ -1259,8 +1267,33 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         budget
             .add_decoded(&other)
             .map_err(|_| RpcError::InvalidParams("combined PSBT exceeds RPC limits"))?;
+        for (xpub, origin) in &other.xpub {
+            use std::collections::btree_map::Entry;
+            match xpub_identities.entry((xpub.public_key, xpub.chain_code)) {
+                Entry::Occupied(mut entry) => {
+                    let (first_key, alias_seen, mixed_origins) = entry.get_mut();
+                    let alias = *first_key != *xpub;
+                    *alias_seen |= alias;
+                    *mixed_origins |= psbt.xpub.get(&*first_key) != Some(origin);
+                    mixed_alias |= *alias_seen && *mixed_origins;
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((*xpub, false, false));
+                }
+            }
+        }
         psbt.combine(other)
             .map_err(|err| RpcError::Internal(format!("combine failed: {err}")))?;
+    }
+    // Coalesce only same-origin aliases, once, preserving source order.
+    // Mixed-origin aliases remain intact for the codec's existing duplicate
+    // validation; input, library and encoder errors keep their precedence.
+    if !mixed_alias {
+        psbt.xpub.retain(|xpub, _| {
+            xpub_identities
+                .get(&(xpub.public_key, xpub.chain_code))
+                .is_some_and(|(first_key, _, _)| first_key == xpub)
+        });
     }
 
     typed_to_sonic(&v31::CombinePsbt(crate::psbt::encode(&psbt)?))
@@ -3127,6 +3160,99 @@ mod combinepsbt_tests {
         let ctx = Arc::new(Context::new());
         let result = combinepsbt(&ctx, &json!([[]]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn combinepsbt_xpub_aliases_follow_core_without_mutating_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let data: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/data/psbt-combine-core-v31.1.json"
+        ))?;
+        let ctx = Arc::new(Context::new());
+        for case in data["cases"].as_array().ok_or("combine cases")? {
+            let name = case["name"].as_str().ok_or("case name")?;
+            let params: Value = sonic_rs::from_str(&serde_json::to_string(&serde_json::json!([
+                case["sources"]
+            ]))?)?;
+            let before = params.clone();
+            let result = combinepsbt(&ctx, &params);
+            assert_eq!(params, before, "{name}: input preservation");
+            if let Some(expected) = case["candidate_result"].as_str() {
+                assert_eq!(result?.as_str(), Some(expected), "{name}");
+            } else {
+                let error = match result {
+                    Err(error) => error,
+                    Ok(output) => panic!("{name}: mixed origins returned {output}"),
+                };
+                let expected = case
+                    .get("candidate_error")
+                    .unwrap_or_else(|| &case["core_output_error"]);
+                assert_eq!(Some(error.code()), expected["code"].as_i64(), "{name}");
+                assert_eq!(
+                    error.to_string(),
+                    expected["message"].as_str().ok_or("candidate error")?,
+                    "{name}",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn combinepsbt_admits_original_xpub_entries_and_preserves_library_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let data: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/data/psbt-combine-core-v31.1.json"
+        ))?;
+        let first = data["cases"][0]["sources"][0]
+            .as_str()
+            .ok_or("first source")?;
+        let second = data["cases"][0]["sources"][1]
+            .as_str()
+            .ok_or("second source")?;
+        let mut large = crate::psbt::decode(first).map_err(|error| format!("{error:?}"))?;
+        let original = crate::psbt::measure(&large).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(original.map_pairs, 4);
+        // The second source has four entries. Dropping its alias before
+        // admission would turn MAX+1 into MAX and incorrectly accept it.
+        for index in 0..crate::psbt::MAX_PSBT_MAP_PAIRS - 3 - original.map_pairs {
+            large.unknown.insert(
+                bitcoin::psbt::raw::Key {
+                    type_value: 0x42,
+                    key: index.to_le_bytes().to_vec(),
+                },
+                Vec::new(),
+            );
+        }
+        let ctx = Arc::new(Context::new());
+        let result = combinepsbt(&ctx, &json!([[crate::psbt::encode(&large)?, second]]));
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidParams("combined PSBT exceeds RPC limits"))
+        ));
+
+        let mut different = crate::psbt::decode(second).map_err(|error| format!("{error:?}"))?;
+        different.unsigned_tx.lock_time = bitcoin::absolute::LockTime::from_consensus(501);
+        let result = combinepsbt(&ctx, &json!([[first, crate::psbt::encode(&different)?]]));
+        assert!(
+            matches!(result, Err(RpcError::Internal(message)) if message.starts_with("combine failed:"))
+        );
+
+        let mixed = data["cases"]
+            .as_array()
+            .ok_or("cases")?
+            .iter()
+            .find(|case| case["name"] == "different-origin-forward")
+            .ok_or("mixed case")?;
+        let mut sources = mixed["sources"].as_array().ok_or("mixed sources")?.clone();
+        sources.push(serde_json::json!("not base64"));
+        let params: Value =
+            sonic_rs::from_str(&serde_json::to_string(&serde_json::json!([sources]))?)?;
+        assert!(matches!(
+            combinepsbt(&ctx, &params),
+            Err(RpcError::InvalidParams("invalid base64 PSBT"))
+        ));
+        Ok(())
     }
 }
 
