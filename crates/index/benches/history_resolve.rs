@@ -20,6 +20,14 @@
 
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
 
+struct NoSpentScripts;
+
+impl bitcoin_rs_index::SpentCoinScripts for NoSpentScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        None
+    }
+}
+
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
     consensus_bytes, deserialize,
@@ -209,7 +217,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         };
         let bytes = consensus_bytes(&block);
         writer
-            .commit_block(height, &bytes)
+            .commit_block(height, &bytes, &NoSpentScripts)
             .expect("commit fixture block");
         prev_blockhash = block.block_hash();
         let hash = *block.block_hash().as_bytes();

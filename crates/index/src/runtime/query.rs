@@ -549,12 +549,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             IndexCapabilities::HISTORICAL,
             |snapshot, _tip, budget, floors| {
                 Self::confirmed_history_page_for(
-                    snapshot,
-                    budget,
-                    scripthash,
-                    cursor,
-                    limit,
-                    floors.script_history,
+                    snapshot, budget, scripthash, cursor, limit, floors,
                 )
             },
         )

@@ -14,7 +14,7 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
 
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 
 const HEIGHT: u32 = 0;
 
@@ -91,7 +91,7 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
 
     let target = ScriptHash::from_script_bytes(&target_script);
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes)?;
+    IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes, &NoSpentScripts)?;
     let indexer = Indexer::new(Arc::clone(&store));
 
     // A real eight-byte collision makes the writer merge both valid positions

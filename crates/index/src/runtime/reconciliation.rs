@@ -212,11 +212,18 @@ impl Worker {
                     fence = next_fence;
                     watermarks = next_watermarks;
                 }
+                Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. })
+                    if capabilities.contains(IndexCapability::ScriptHistory) =>
+                {
+                    // History cannot reconstruct spent scripts from the body.
+                    // Resetting only Live would leave this watermark selected
+                    // and retry the same unavailable undo without progress.
+                    return Err(error);
+                }
                 Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
-                    // Undo is the ScriptLive spend-script authority. TxLookup
-                    // and ScriptHistory roll back from the block body alone,
-                    // so a pruned undo must not force those families through
-                    // a full rebuild.
+                    // Only Live needs this anchor when History is not selected.
+                    // TxLookup still rolls back from the retained body, so it
+                    // must not be reset with the reseedable Live capability.
                     tracing::warn!(
                         error = %error,
                         "index cursor cannot restore ScriptLive without undo; rebuilding ScriptLive"

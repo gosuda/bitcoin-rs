@@ -99,15 +99,13 @@ pub enum IndexError {
         /// Watermark found in the store.
         actual: Option<IndexWatermark>,
     },
-    /// A capability set containing `ScriptLive` was prepared through a path
-    /// that carries no spent-coin script source. Live deletes need the spent
-    /// coin's exact script (#225), and a prevout-only block parse cannot
-    /// produce it.
-    #[error("ScriptLive preparation requires a spent-coin script source")]
+    /// ScriptHistory or ScriptLive was requested without a spent-coin source.
+    /// An external input's script is absent from the block body and must be
+    /// supplied for history occurrences and live-output deletes.
+    #[error("ScriptHistory and ScriptLive require a spent-coin script source")]
     MissingSpentScripts,
     /// The spent-coin source could not resolve an external input's script.
-    /// Failing closed here is deliberate: a missing anchor means the Live view
-    /// would silently keep a spent output alive.
+    /// Missing evidence must not omit a history spend or retain a spent live output.
     #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
     MissingSpentCoin {
         /// Spent transaction id (little-endian bytes).

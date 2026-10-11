@@ -71,11 +71,9 @@ pub trait TxIndexSnapshot: Send + Sync {
     fn funding_rows_from(
         &self,
         scripthash: ScriptHash,
-        _start_height: u32,
+        start_height: u32,
         limit: PrefixScanLimit,
-    ) -> Result<TxIndexScan, IndexError> {
-        self.funding_rows(scripthash, limit)
-    }
+    ) -> Result<TxIndexScan, IndexError>;
     /// Scans spending rows for `outpoint`.
     fn spending_rows(
         &self,

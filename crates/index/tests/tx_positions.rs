@@ -21,7 +21,7 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
 
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 
 fn header() -> Header {
     Header {
@@ -108,7 +108,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let store = Arc::new(MemoryStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
-        .commit_block(0, &bytes)
+        .commit_block(0, &bytes, &NoSpentScripts)
         .expect("commit");
 
     // Script 0x11 is funded by transaction 0 and again by transaction 1, which
@@ -156,7 +156,7 @@ fn txid_positions_address_their_own_transaction() {
     let store = Arc::new(MemoryStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
-        .commit_block(0, &bytes)
+        .commit_block(0, &bytes, &NoSpentScripts)
         .expect("commit");
 
     let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);

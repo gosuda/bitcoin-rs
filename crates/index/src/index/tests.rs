@@ -1,4 +1,4 @@
-use super::block::is_op_return_script;
+use super::block::{NoSpentScripts, is_op_return_script};
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{
@@ -14,18 +14,33 @@ use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, ScriptLiveRow, Spendi
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
+/// Explicit prior coins for the synthetic external-spend fixtures.
+struct FixtureScripts<'a>(&'a [(OutPoint, &'a [u8])]);
+
+impl crate::SpentCoinScripts for FixtureScripts<'_> {
+    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(txid)), vout);
+        self.0
+            .iter()
+            .find(|(coin, _)| *coin == outpoint)
+            .map(|(_, script)| *script)
+    }
+}
+
 fn commit_rollback_one<S: KvStore>(
     writer: &mut IndexWriter<S>,
     prev: Option<crate::IndexWatermark>,
     body: &[u8],
+    spent_scripts: &dyn crate::SpentCoinScripts,
 ) -> Result<(), IndexError> {
     let (fence, _) = writer.fenced_watermarks()?;
-    writer.commit_rollback_one_for_with_cursor(
+    writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
         fence,
         crate::IndexCapabilities::HISTORICAL,
         prev,
         body,
         crate::ConsumerCursorUpdate::Clear,
+        spent_scripts,
     )
 }
 
@@ -40,10 +55,12 @@ fn raw_op_return_check_matches_script_prefix_semantics() {
 #[test]
 fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
-    let tx = tx(spent_outpoint(1, 0), script.clone());
+    let prevout = spent_outpoint(1, 0);
+    let tx = tx(prevout, script.clone());
+    let spent = FixtureScripts(&[(prevout, &[0x52])]);
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
+    writer.commit_block(0, &consensus_bytes(&block(vec![tx])), &spent)?;
 
     let scripthash = ScriptHash::from_script_bytes(&script);
     assert_eq!(
@@ -53,15 +70,10 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Proves that lexicographic key byte order matches numeric height order
-/// within one prefix, because the height suffix is big-endian (format 5).
-/// Height 1 is `[0x00, 0x00, 0x00, 0x01]`, height 256 is
-/// `[0x00, 0x00, 0x01, 0x00]`, so byte order puts 1 before 256.
-///
-/// This pins the doc contract on `iter_funding_rows`: prefix-range scans
-/// arrive in chronological order without a numeric re-sort.
+/// Format 6 inverted big-endian suffixes produce newest-first history rows
+/// directly from the prefix range, without a numeric re-sort.
 #[test]
-fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_height_order_is_newest_first() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
@@ -73,11 +85,11 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Store iteration order is BE byte order, so 1 precedes 256.
+    // Inverted BE byte order puts height 256 before height 1.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256],
-        "BE byte order matches numeric height order"
+        vec![256, 1],
+        "inverted BE keys order history newest first"
     );
     Ok(())
 }
@@ -125,9 +137,10 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn 
 fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
     let outpoint = spent_outpoint(2, 3);
     let tx = tx(outpoint, vec![0x51, 0x02]);
+    let spent = FixtureScripts(&[(outpoint, &[0x53])]);
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
+    writer.commit_block(0, &consensus_bytes(&block(vec![tx])), &spent)?;
 
     assert_eq!(
         writer.indexer().iter_spending_rows(&outpoint)?,
@@ -150,7 +163,7 @@ fn resolve_script_history_returns_entries_for_funded_scripthash()
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -178,7 +191,7 @@ fn resolve_unspent_outputs_returns_txid_vout_value_for_funded_scripthash()
     let value = output.value.to_sat();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -206,7 +219,7 @@ fn resolve_transaction_returns_coinbase_for_genesis_block_indexed_at_height_zero
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -228,7 +241,7 @@ fn resolve_transaction_returns_none_when_indexed_height_is_not_visible()
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -250,7 +263,7 @@ fn resolve_outpoint_value_returns_genesis_coinbase_subsidy()
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -272,7 +285,7 @@ fn resolve_outpoint_value_via_dyn_block_source() -> Result<(), Box<dyn std::erro
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -298,7 +311,7 @@ fn resolve_outpoint_value_returns_none_for_vout_out_of_range()
     let txid = tx.txid();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -348,7 +361,7 @@ fn resolve_unspent_outputs_with_height_returns_funding_height()
     let value = output.value.to_sat();
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block))?;
+    writer.commit_block(0, &consensus_bytes(&block), &NoSpentScripts)?;
 
     let source = FakeSource {
         block,
@@ -392,7 +405,7 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn st
     let body = consensus_bytes(&candidate);
     let before = stored_rows(writer.indexer())?;
 
-    writer.commit_block(0, &body)?;
+    writer.commit_block(0, &body, &NoSpentScripts)?;
     let after_commit = stored_rows(writer.indexer())?;
     assert!(
         after_commit.len() > before.len(),
@@ -410,7 +423,7 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn st
         );
     }
 
-    commit_rollback_one(&mut writer, None, &body)?;
+    commit_rollback_one(&mut writer, None, &body, &NoSpentScripts)?;
     assert_eq!(
         stored_rows(writer.indexer())?,
         before,
@@ -426,7 +439,7 @@ fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::
     let body = consensus_bytes(&candidate);
 
     assert!(matches!(
-        commit_rollback_one(&mut writer, None, &body),
+        commit_rollback_one(&mut writer, None, &body, &NoSpentScripts),
         Err(IndexError::NonContiguousPrepared { watermark: None })
     ));
     assert!(stored_rows(writer.indexer())?.is_empty());
@@ -439,12 +452,12 @@ fn a_second_rollback_is_rejected_once_the_watermark_is_gone()
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
-    writer.commit_block(0, &body)?;
-    commit_rollback_one(&mut writer, None, &body)?;
+    writer.commit_block(0, &body, &NoSpentScripts)?;
+    commit_rollback_one(&mut writer, None, &body, &NoSpentScripts)?;
     let after_first = stored_rows(writer.indexer())?;
 
     assert!(matches!(
-        commit_rollback_one(&mut writer, None, &body),
+        commit_rollback_one(&mut writer, None, &body, &NoSpentScripts),
         Err(IndexError::NonContiguousPrepared { watermark: None })
     ));
     assert_eq!(
@@ -522,7 +535,7 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
     {
         let store = Arc::new(RocksDbStore::open(dir.path())?);
         let mut writer = IndexWriter::open(store, 1)?;
-        writer.commit_block(0, &body)?;
+        writer.commit_block(0, &body, &NoSpentScripts)?;
     }
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     let before = stored_rows(&Indexer::new(Arc::clone(&store)))?;
@@ -531,7 +544,7 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
 
     let failing = Arc::new(FailingWriteStore(RocksDbStore::open(dir.path())?));
     let mut writer = IndexWriter::open(Arc::clone(&failing), 1)?;
-    let outcome = commit_rollback_one(&mut writer, None, &body);
+    let outcome = commit_rollback_one(&mut writer, None, &body, &NoSpentScripts);
     assert!(outcome.is_err(), "a failing write must surface as an error");
     drop(writer);
     drop(failing);
@@ -572,10 +585,14 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
         "the two blocks must differ, or there is nothing to confuse"
     );
 
+    let spent = FixtureScripts(&[
+        (spent_outpoint(0xa1, 0), &[0x53]),
+        (spent_outpoint(0xb2, 0), &[0x54]),
+    ]);
     let old_body = consensus_bytes(&old_block);
-    writer.commit_block(0, &old_body)?;
-    commit_rollback_one(&mut writer, None, &old_body)?;
-    writer.commit_block(0, &consensus_bytes(&replacement))?;
+    writer.commit_block(0, &old_body, &spent)?;
+    commit_rollback_one(&mut writer, None, &old_body, &spent)?;
+    writer.commit_block(0, &consensus_bytes(&replacement), &spent)?;
     writer.indexer.store.flush()?;
     let after_replacement = stored_rows(writer.indexer())?;
     assert!(
@@ -584,7 +601,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     );
 
     assert!(
-        commit_rollback_one(&mut writer, None, &old_body).is_err(),
+        commit_rollback_one(&mut writer, None, &old_body, &spent).is_err(),
         "rolling back the old body against the replacement watermark must fail"
     );
     writer.indexer.store.flush()?;
@@ -650,10 +667,16 @@ fn put_funding_row(
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut batch = store.new_batch();
+    let occurrence = crate::types::ScriptHistoryOccurrence {
+        scripthash,
+        txid: [0x42; 32],
+        position: crate::types::TxPosition::new(81, 60),
+        flags: crate::types::ScriptHistoryOccurrence::FUNDING,
+    };
     batch.put(
         ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
+        &ScriptHashRow::row(scripthash, !height).to_db_row(),
+        &crate::types::ScriptHistoryOccurrence::encode_all(&[occurrence]),
     );
     store.write(batch)?;
     Ok(())

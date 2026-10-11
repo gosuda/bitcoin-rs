@@ -159,8 +159,13 @@ history transition closed; no secondary coin set is introduced.
 
 ### `IDX-10`: Atomic commit durability and recovery
 
-- `IndexWriter` is the sole owner of index mutations. `commit_block` prepares
-  all rows and commits them together with the capability watermark in one
+- `IndexWriter` is the sole owner of index mutations. Historical `prepare_block`
+  and `commit_block` require an explicit `SpentCoinScripts` source for external
+  inputs; the block itself supplies earlier same-block outputs. Anchorless
+  `prepare_block_for` and rollback calls support TxLookup only and refuse
+  ScriptHistory/ScriptLive with `MissingSpentScripts`. An unresolved input in
+  an explicit source returns `MissingSpentCoin` before any rows are committed.
+  `commit_block` prepares all historical rows and commits them with the watermark in one
   store batch; its successful return is the commit point and implies the rows
   and watermark are durable according to the store's atomic-write guarantee.
 - A failed commit must be treated as ambiguous by callers: callers must not

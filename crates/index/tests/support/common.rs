@@ -19,6 +19,15 @@ use bitcoin_rs_storage::{
 };
 use parking_lot::RwLock;
 
+/// Source used only by fixtures with no external inputs (coinbases or same-block spends).
+pub(crate) struct NoSpentScripts;
+
+impl bitcoin_rs_index::SpentCoinScripts for NoSpentScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        None
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,

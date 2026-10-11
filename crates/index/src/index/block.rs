@@ -21,9 +21,8 @@ use bitcoin_rs_storage::KvStore;
 ///
 /// A block body carries only each input's previous outpoint; the spent coin's
 /// `script_pubkey` lives in authoritative UTXO state, and on disconnect in the
-/// block's undo record. #225 requires Live deletes to be anchored to that
-/// authoritative script, so preparation of a `ScriptLive` transition takes one
-/// of these instead of guessing from the parse.
+/// block's undo record. ScriptHistory spending occurrences and ScriptLive
+/// deletes require this authoritative script instead of guessing from the parse.
 pub trait SpentCoinScripts {
     /// The exact `script_pubkey` bytes of the coin `txid:vout`, if known.
     ///
@@ -33,8 +32,8 @@ pub trait SpentCoinScripts {
 
 /// The anchorless source: answers nothing.
 ///
-/// Used by the legacy prepare path, which refuses `ScriptLive` outright rather
-/// than producing a Live transition with unanchored deletes.
+/// Used by the anchorless TxLookup path. ScriptHistory and ScriptLive require
+/// an explicit spent-script source, even when a particular block has no spends.
 pub(crate) struct NoSpentScripts;
 
 impl SpentCoinScripts for NoSpentScripts {
@@ -302,17 +301,27 @@ fn live_admission(script: &[u8]) -> Option<ScriptHash> {
 }
 
 impl<S: KvStore> IndexWriter<S> {
-    /// Derives a `PreparedBlock` from a serialized body without allocating a decoded block.
+    /// Prepares historical rows with the exact scripts of external spent coins.
+    /// Same-block input scripts are resolved from the earlier body transactions.
     pub fn prepare_block(
         &self,
         height: u32,
         hash: [u8; 32],
         body: &[u8],
+        spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<PreparedBlock, IndexError> {
-        self.prepare_block_for(IndexCapabilities::HISTORICAL, height, hash, body)
+        self.prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            height,
+            hash,
+            body,
+            spent_scripts,
+        )
     }
 
-    /// Derives capability-selected row mutations from one serialized block scan.
+    /// Prepares anchorless TxLookup rows from one serialized block scan.
+    /// ScriptHistory and ScriptLive return [`IndexError::MissingSpentScripts`];
+    /// use [`Self::prepare_block_with_spent_scripts`] for either capability.
     pub fn prepare_block_for(
         &self,
         capabilities: IndexCapabilities,
@@ -320,14 +329,16 @@ impl<S: KvStore> IndexWriter<S> {
         hash: [u8; 32],
         body: &[u8],
     ) -> Result<PreparedBlock, IndexError> {
-        if capabilities.contains(IndexCapability::ScriptLive) {
+        if capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
+        {
             return Err(IndexError::MissingSpentScripts);
         }
         self.prepare_block_with_spent_scripts(capabilities, height, hash, body, &NoSpentScripts)
     }
 
-    /// [`Self::prepare_block_for`] with the spent-coin script source
-    /// `ScriptLive` preparation requires (#225).
+    /// Prepares capability-selected rows with the exact external spent scripts
+    /// required by ScriptHistory occurrences and ScriptLive deletes.
     pub fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,
