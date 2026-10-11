@@ -108,6 +108,15 @@
   of every original entry, and encode without a zero-leaf suffix. Encoding
   programmatic maps uses their library serialization order and preserves the
   caller's metadata.
+  `combinepsbt` admits original source counts and passes every original map
+  through the library merge before coalescing global XPUB aliases with the
+  same public key, chain code and origin; the first source's full XPUB wins.
+  Existing library failures keep precedence. Successful merges involving
+  aliases and mixed origins are refused with the existing -22 output-admission
+  error: pinned Core can emit unreadable output for those cases. Identical
+  full-key origin merges retain existing library behavior. The separate
+  `psbt-combine-core-v31.1.json` vectors record both input orders and mixed-origin
+  controls without changing the single-PSBT admission corpus.
 - PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
   maps to 10,000, and retained map entries to 100,000. Creators can check
   counts before map allocation. Serialized bytes are checked before library
