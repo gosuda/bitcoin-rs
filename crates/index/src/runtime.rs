@@ -202,6 +202,14 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
         engine.history_snapshot(scripthash)
     }
 
+    fn confirmed_history(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.confirmed_history(scripthash)
+    }
+
     fn unspent_outputs(
         &self,
         scripthash: ScriptHash,
