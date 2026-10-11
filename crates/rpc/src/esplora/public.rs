@@ -682,10 +682,12 @@ pub(super) fn history(
     };
     // API-09: only an exact known lowercase txid advances the page. Unknown
     // or noncanonical cursors restart, including links made stale by a reorg.
+    // Use rposition to advance past all occurrences of the cursor txid (such as
+    // consensus-valid duplicate coinbases), strictly excluding that transaction.
     let start = last.and_then(|x| {
         records
             .iter()
-            .position(|entry| entry.txid.to_string() == x)
+            .rposition(|entry| entry.txid.to_string() == x)
             .map(|n| n + 1)
     });
     let chain = match records
