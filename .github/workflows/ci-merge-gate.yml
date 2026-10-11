@@ -11,8 +11,8 @@ name: ci-merge-gate
 # while a broken kernel/native graph cannot enter main.
 #
 # Clippy compiles the kernel/native targets and rejects production lint
-# warnings. Tests, fixture provisioning, parity evidence, and benchmarks stay
-# main-only (ci-main).
+# warnings. The focused kernel oracle parity tests run here (issue #1511);
+# large replay, fuzz, and campaign jobs stay main-only (ci-main).
 on:
   merge_group:
     types: [checks_requested]
@@ -70,6 +70,15 @@ jobs:
       # targets (`core_vectors`, `segwit_v0_sighash_edges`).
       - name: Kernel-gated script targets Clippy
         run: cargo clippy --locked -p bitcoin-rs-script --all-targets --features kernel -- -D warnings
+      # Focused kernel oracle parity tests at the merge-gate boundary (issue #1511).
+      - name: Kernel consensus oracle parity tests
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --features kernel \
+            --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+      - name: Kernel script core-vectors oracle test
+        run: |
+          cargo test --locked -p bitcoin-rs-script --features kernel \
+            --test core_vectors -- --nocapture
 
   # Match ci-main's production binary lint graph exactly. A cargo check here
   # misses dead-code and other warnings that fail ci-main after merge.

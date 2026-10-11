@@ -475,9 +475,11 @@ impl Verdict {
     fn from_kernel(result: &Result<(), bitcoin_rs_consensus::ConsensusError>) -> Self {
         // The kernel reports a verdict, not Core's error name, so its column
         // can prove accept-or-reject parity and nothing about error names.
+        // Infrastructure and setup errors must fail closed (panic), never count as Reject.
         match result {
             Ok(()) => Self::Accept,
-            Err(_) => Self::Reject(None),
+            Err(bitcoin_rs_consensus::ConsensusError::Script { .. }) => Self::Reject(None),
+            Err(other) => panic!("kernel oracle infrastructure error: {other}"),
         }
     }
 
@@ -528,6 +530,45 @@ impl std::fmt::Display for Counts {
 /// VAL-02: zero mismatches on runnable rows is not corpus coverage unless
 /// skip reasons stay inside the named allow-list and the skip/executed
 /// counts stay pinned. A new skip category or a silent shrink fails.
+fn assert_pinned_column(
+    counts: &Counts,
+    mismatch_count: usize,
+    pinned_failures: usize,
+    pinned_skips: usize,
+    pinned_executed: usize,
+    allowed_skip_reasons: &[&str],
+    corpus: &str,
+    column: &str,
+) {
+    assert_eq!(
+        mismatch_count, pinned_failures,
+        "{corpus} {column} mismatches changed; triage each row, then move the pinned count"
+    );
+    assert_eq!(
+        counts.skipped, pinned_skips,
+        "{corpus} {column} skips changed; a new skip category shrinks coverage"
+    );
+    assert_eq!(
+        counts.executed, pinned_executed,
+        "{corpus} {column} executed count changed; update the pin with the skip triage"
+    );
+    for reason in &counts.skip_reasons {
+        assert!(
+            allowed_skip_reasons
+                .iter()
+                .copied()
+                .any(|allowed| allowed == reason),
+            "{corpus} {column}: unexpected skip reason `{reason}`; allowed {allowed_skip_reasons:?}"
+        );
+    }
+    assert_eq!(
+        counts.skip_reasons.len(),
+        allowed_skip_reasons.len(),
+        "{corpus} {column}: skip-reason set changed: {:?}",
+        counts.skip_reasons
+    );
+}
+
 fn assert_pinned_native_column(
     counts: &Counts,
     mismatch_count: usize,
@@ -537,32 +578,15 @@ fn assert_pinned_native_column(
     allowed_skip_reasons: &[&str],
     corpus: &str,
 ) {
-    assert_eq!(
-        mismatch_count, pinned_failures,
-        "{corpus} native mismatches changed; triage each row, then move the pinned count"
-    );
-    assert_eq!(
-        counts.skipped, pinned_skips,
-        "{corpus} native skips changed; a new skip category shrinks coverage"
-    );
-    assert_eq!(
-        counts.executed, pinned_executed,
-        "{corpus} native executed count changed; update the pin with the skip triage"
-    );
-    for reason in &counts.skip_reasons {
-        assert!(
-            allowed_skip_reasons
-                .iter()
-                .copied()
-                .any(|allowed| allowed == reason),
-            "{corpus}: unexpected skip reason `{reason}`; allowed {allowed_skip_reasons:?}"
-        );
-    }
-    assert_eq!(
-        counts.skip_reasons.len(),
-        allowed_skip_reasons.len(),
-        "{corpus}: skip-reason set changed: {:?}",
-        counts.skip_reasons
+    assert_pinned_column(
+        counts,
+        mismatch_count,
+        pinned_failures,
+        pinned_skips,
+        pinned_executed,
+        allowed_skip_reasons,
+        corpus,
+        "native",
     );
 }
 
@@ -1029,6 +1053,26 @@ fn load_tx_vectors(
             continue;
         }
 
+        // In Core's transaction_tests.cpp, the vector supplies a map of available
+        // UTXOs. Resolved prevouts must match the transaction in input order.
+        let mut ordered_prevouts = Vec::with_capacity(tx.inputs.len());
+        let mut missing_prevout = false;
+        for input in &tx.inputs {
+            if let Some((_, spent)) = prevouts.iter().find(|(op, _)| *op == input.previous_output) {
+                ordered_prevouts.push((input.previous_output, spent.clone()));
+            } else {
+                counts.record_skip(&format!(
+                    "input spending {:?} missing from prevout set",
+                    input.previous_output
+                ));
+                missing_prevout = true;
+                break;
+            }
+        }
+        if missing_prevout {
+            continue;
+        }
+
         let expected = if expected_accept {
             Verdict::Accept
         } else {
@@ -1037,7 +1081,7 @@ fn load_tx_vectors(
 
         rows.push(TxVectorRow {
             tx,
-            prevouts,
+            prevouts: ordered_prevouts,
             flags,
             expected,
             row_index: index + 1,
@@ -1047,21 +1091,19 @@ fn load_tx_vectors(
 }
 
 fn verify_native_tx(row: &TxVectorRow) -> Verdict {
-    let prepared = PreparedTransaction::new(&row.tx, &row.prevouts);
+    let prepared = match PreparedTransaction::new(&row.tx, &row.prevouts) {
+        Ok(prepared) => prepared,
+        Err(error) => panic!("native harness prevout error: {error}"),
+    };
     // The first failing input decides the row, and its error name is what
     // a triage reader needs; a bare Reject says nothing.
     let mut first_failure = None;
-    match prepared {
-        Ok(prepared) => {
-            for input_idx in 0..row.tx.inputs.len() {
-                let result = prepared.verify_input(input_idx, row.flags);
-                if !matches!(result, Ok(true)) {
-                    first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
-                    break;
-                }
-            }
+    for input_idx in 0..row.tx.inputs.len() {
+        let result = prepared.verify_input(input_idx, row.flags);
+        if !matches!(result, Ok(true)) {
+            first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
+            break;
         }
-        Err(error) => first_failure = Some((0, Verdict::Reject(Some(error.to_string())))),
     }
 
     match &first_failure {
@@ -1318,6 +1360,49 @@ fn script_tests_native_column() {
     );
 }
 
+/// libbitcoinkernel enforces mandatory consensus flags only, so test vector
+/// rows expecting rejection under policy-only flags are filtered and pinned.
+#[cfg(feature = "kernel")]
+const SCRIPT_TESTS_POLICY_SKIP: &str =
+    "policy-only rejection: libbitcoinkernel enforces mandatory consensus flags only";
+
+#[cfg(feature = "kernel")]
+const KERNEL_SCRIPT_TESTS_FAILURES: usize = 0;
+#[cfg(feature = "kernel")]
+const KERNEL_SCRIPT_TESTS_SKIPS: usize = 172;
+#[cfg(feature = "kernel")]
+const KERNEL_SCRIPT_TESTS_EXECUTED: usize = 1116;
+
+#[cfg(feature = "kernel")]
+fn is_policy_only_script_test(row: &ScriptTestRow) -> bool {
+    if row.expected == "OK" {
+        return false;
+    }
+    if row.flags.bits() & !VerifyFlags::MANDATORY.bits() == 0 {
+        return false;
+    }
+    let prevouts = [bitcoin_rs_primitives::TxOut {
+        value: bitcoin_rs_primitives::Amount::from_sat(row.amount),
+        script_pubkey: row.script_pubkey.clone().into(),
+    }];
+    let credit = build_crediting_tx(&row.script_pubkey, row.amount);
+    let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
+    let mand_flags =
+        VerifyFlags::from_bits_retain(row.flags.filled().bits() & VerifyFlags::MANDATORY.bits());
+    matches!(
+        Interpreter.execute_with_prevouts(
+            &row.script_pubkey,
+            &row.script_sig,
+            &row.witness,
+            mand_flags,
+            &prevouts,
+            &spend,
+            0,
+        ),
+        Ok(true)
+    )
+}
+
 #[cfg(feature = "kernel")]
 #[test]
 fn script_tests_kernel_column() {
@@ -1328,7 +1413,19 @@ fn script_tests_kernel_column() {
     };
     assert!(!rows.is_empty(), "script_tests produced zero runnable rows");
 
-    let mismatches = run_script_tests(&rows, &mut counts, |row, credit, spend| {
+    let runnable: Vec<ScriptTestRow> = rows
+        .into_iter()
+        .filter(|row| {
+            if is_policy_only_script_test(row) {
+                counts.record_skip(SCRIPT_TESTS_POLICY_SKIP);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let mismatches = run_script_tests(&runnable, &mut counts, |row, credit, spend| {
         let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
 
         let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
@@ -1344,16 +1441,19 @@ fn script_tests_kernel_column() {
         counts.executed > 0,
         "harness executed zero script_tests rows — wiring is broken"
     );
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows did not match expected)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
+    for m in mismatches.iter().take(mismatch_print_limit()) {
+        println!("  {m}");
     }
+    assert_pinned_column(
+        &counts,
+        mismatches.len(),
+        KERNEL_SCRIPT_TESTS_FAILURES,
+        KERNEL_SCRIPT_TESTS_SKIPS,
+        KERNEL_SCRIPT_TESTS_EXECUTED,
+        &[SCRIPT_TESTS_PROSE_SKIP, SCRIPT_TESTS_POLICY_SKIP],
+        "script_tests",
+        "kernel",
+    );
 }
 
 /// Pinned like `NATIVE_SCRIPT_TESTS_FAILURES`: a shrink lowers it with
@@ -1389,6 +1489,13 @@ fn tx_valid_native_column() {
 }
 
 #[cfg(feature = "kernel")]
+const KERNEL_TX_VALID_FAILURES: usize = 0;
+#[cfg(feature = "kernel")]
+const KERNEL_TX_VALID_SKIPS: usize = 0;
+#[cfg(feature = "kernel")]
+const KERNEL_TX_VALID_EXECUTED: usize = 121;
+
+#[cfg(feature = "kernel")]
 #[test]
 fn tx_valid_kernel_column() {
     let mut counts = Counts::default();
@@ -1409,16 +1516,19 @@ fn tx_valid_kernel_column() {
     });
     println!("tx_valid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows mismatched)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
+    for m in mismatches.iter().take(mismatch_print_limit()) {
+        println!("  {m}");
     }
+    assert_pinned_column(
+        &counts,
+        mismatches.len(),
+        KERNEL_TX_VALID_FAILURES,
+        KERNEL_TX_VALID_SKIPS,
+        KERNEL_TX_VALID_EXECUTED,
+        &[],
+        "tx_valid",
+        "kernel",
+    );
 }
 
 /// A `tx_invalid` mismatch means the evaluator ACCEPTED a transaction Core
@@ -1456,6 +1566,35 @@ fn tx_invalid_native_column() {
 }
 
 #[cfg(feature = "kernel")]
+fn is_policy_only_tx_invalid(row: &TxVectorRow) -> bool {
+    if row.flags.bits() & !VerifyFlags::MANDATORY.bits() == 0 {
+        return false;
+    }
+    let mand_flags =
+        VerifyFlags::from_bits_retain(row.flags.filled().bits() & VerifyFlags::MANDATORY.bits());
+    let Ok(prepared) = PreparedTransaction::new(&row.tx, &row.prevouts) else {
+        return false;
+    };
+    for input_idx in 0..row.tx.inputs.len() {
+        let result = prepared.verify_input(input_idx, mand_flags);
+        if !matches!(result, Ok(true)) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(feature = "kernel")]
+const TX_INVALID_POLICY_SKIP: &str =
+    "policy-only flags: libbitcoinkernel enforces mandatory consensus flags only";
+#[cfg(feature = "kernel")]
+const KERNEL_TX_INVALID_FAILURES: usize = 0;
+#[cfg(feature = "kernel")]
+const KERNEL_TX_INVALID_SKIPS: usize = 23;
+#[cfg(feature = "kernel")]
+const KERNEL_TX_INVALID_EXECUTED: usize = 70;
+
+#[cfg(feature = "kernel")]
 #[test]
 fn tx_invalid_kernel_column() {
     let mut counts = Counts::default();
@@ -1465,7 +1604,19 @@ fn tx_invalid_kernel_column() {
     };
     assert!(!rows.is_empty(), "tx_invalid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors(&rows, &mut counts, |row| {
+    let runnable: Vec<TxVectorRow> = rows
+        .into_iter()
+        .filter(|row| {
+            if is_policy_only_tx_invalid(row) {
+                counts.record_skip(TX_INVALID_POLICY_SKIP);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let mismatches = run_tx_vectors(&runnable, &mut counts, |row| {
         let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
             &row.tx,
             &row.prevouts,
@@ -1476,14 +1627,25 @@ fn tx_invalid_kernel_column() {
     });
     println!("tx_invalid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows mismatched)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
+    for m in mismatches.iter().take(mismatch_print_limit()) {
+        println!("  {m}");
     }
+    assert_pinned_column(
+        &counts,
+        mismatches.len(),
+        KERNEL_TX_INVALID_FAILURES,
+        KERNEL_TX_INVALID_SKIPS,
+        KERNEL_TX_INVALID_EXECUTED,
+        &[TX_INVALID_BADTX_SKIP, TX_INVALID_POLICY_SKIP],
+        "tx_invalid",
+        "kernel",
+    );
+}
+
+#[cfg(feature = "kernel")]
+#[test]
+#[should_panic(expected = "kernel oracle infrastructure error:")]
+fn kernel_oracle_infrastructure_error_panics() {
+    let err = bitcoin_rs_consensus::ConsensusError::Kernel("simulated harness failure".to_string());
+    Verdict::from_kernel(&Err(err));
 }
