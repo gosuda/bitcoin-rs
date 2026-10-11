@@ -101,11 +101,13 @@ state (`crates/mempool/src/orphan.rs`).
   explicit `finish` leaves the generation odd — admission stays closed.
   Only `finish` may compare-exchange the odd value to the reserved even value,
   reopening admission. One guard covers one externally coherent chain operation.
-- Snapshot replacement retires the old pool and fee history through
-  `clear_for_snapshot`, which also clears orphan/reject residency, verifies the gateway identity and exact odd
-  generation under the pool write lock. It publishes ordinary `Clear` removals
-  and keeps admission fenced until the node settles the new chain's consumers.
-  Ordinary reconnect/reorg recovery does not use this wholesale reset.
+- Snapshot activation requires empty membership under the node-owned generation
+  fence. A populated pool is refused and the fence is settled without removing
+  transactions or operator fee deltas. Successful activation retains the existing
+  pool, prioritisation overlays (including absent txids), fee history, and orphans.
+  The existing `chain_changed` path invalidates chain-bound reject entries before
+  the fence settles; activation emits no fabricated transaction removals. Neither
+  snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,
   after reconsidering its disconnected transactions under the odd generation.

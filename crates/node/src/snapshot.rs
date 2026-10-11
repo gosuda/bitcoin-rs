@@ -208,11 +208,8 @@ impl SnapshotControl {
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
         let result = self.manager.activate_snapshot_state(set, base_hash, height);
-        if result.is_ok()
-            && let Err(error) = self.followers.on_snapshot(change.as_ref())
-        {
-            self.chainstate.fail_closed_for_recovery();
-            return Err(SnapshotImportError::Settlement(error));
+        if result.is_ok() {
+            self.followers.on_snapshot();
         }
         if !self.chainstate.is_closed_for_recovery()
             && let Some(change) = change
@@ -424,6 +421,53 @@ mod tests {
         assert!(view.historical_chainstate.is_some());
         assert_eq!(std::fs::read(native_path)?, native);
         assert_eq!(std::fs::read(core_path)?, core_bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> anyhow::Result<()> {
+        use bitcoin_rs_mempool::PrioritisedTransaction;
+        use bitcoin_rs_primitives::{Hash256, Txid};
+
+        // Core 31.1 AddChainstate transfers the existing empty CTxMemPool;
+        // its mapDeltas entries for absent transactions survive that transfer.
+        for native in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+            let gateway = state.mempool_gateway();
+            let txid = Txid(Hash256::from_le_bytes(&[42; 32]));
+            gateway.prioritise(txid, 123)?;
+            let expected = vec![PrioritisedTransaction {
+                txid,
+                fee_delta: 123,
+                in_mempool: false,
+                modified_fee: None,
+            }];
+            assert_eq!(gateway.prioritised_transactions(), expected);
+            assert!(gateway.read().is_empty());
+            let sequence = gateway.read().sequence_number();
+            if native {
+                state.snapshots.import_native(&native_path)?;
+            } else {
+                state.snapshots.import(&core_path)?;
+            }
+            assert_eq!(
+                gateway.prioritised_transactions(),
+                expected,
+                "successful import must preserve operator fee deltas (native={native})"
+            );
+            assert!(gateway.read().is_empty());
+            assert_eq!(gateway.read().sequence_number(), sequence);
+            assert!(gateway.stable_generation().is_some());
+            assert_eq!(
+                state
+                    .chainstate()
+                    .applied_tip_snapshot()
+                    .map(|tip| tip.height),
+                Some(200)
+            );
+            assert!(state.chainstate().role().is_assumed_active());
+        }
         Ok(())
     }
 

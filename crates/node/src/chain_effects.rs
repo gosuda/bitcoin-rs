@@ -315,18 +315,13 @@ impl ChainFollowers {
     /// Reconciles derived consumers after an atomic snapshot-tip replacement.
     /// The caller has verified an empty mempool under the held generation fence.
     /// No per-block notifications are fabricated for the skipped history.
-    pub(crate) fn on_snapshot(
-        &self,
-        change: Option<&ChainChangeGuard>,
-    ) -> Result<(), bitcoin_rs_mempool::ChainChangeError> {
+    pub(crate) fn on_snapshot(&self) {
         if let Some(gateway) = &self.mempool {
-            let change = change.ok_or(bitcoin_rs_mempool::ChainChangeError::ForeignGuard)?;
-            gateway.clear_for_snapshot(change)?;
+            gateway.chain_changed(&[]);
         }
         self.blocks.write().clear();
         self.wake_index();
         self.mining.publish_generation();
-        Ok(())
     }
 
     fn wake_index(&self) {
@@ -698,7 +693,7 @@ mod tests {
         let fence = followers
             .begin_mempool_change()?
             .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
-        followers.on_snapshot(Some(&fence))?;
+        followers.on_snapshot();
         assert!(gateway.read().is_empty());
         assert!(gateway.stable_generation().is_none());
         assert!(wake_rx.try_recv().is_ok());

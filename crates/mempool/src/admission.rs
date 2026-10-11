@@ -677,8 +677,9 @@ impl MempoolGateway {
         self.lifecycle.lock().orphans.maintain(time, &live_peers)
     }
 
-    /// Called for every committed connect/disconnect, including ones with no
-    /// pool mutation, while the caller still holds its chain transition.
+    /// Called for committed connect/disconnect or snapshot replacement,
+    /// including ones with no pool mutation. The caller keeps the chain-change
+    /// generation fenced until consumers settle.
     pub fn chain_changed(&self, available_parents: &[Txid]) {
         let _pool = self.pool.read();
         let mut lifecycle = self.lifecycle.lock();

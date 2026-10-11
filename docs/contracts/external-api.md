@@ -627,7 +627,9 @@ The node enters the existing mempool generation fence and refuses activation
 while transactions remain in the mempool. Refusal settles the fence and preserves
 those transactions, fee deltas, and chainstate. With an empty pool, it activates
 through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
-consumers. Successful return certifies the durable snapshot anchor and consumer
+consumers. Successful activation retains operator fee prioritisation, including
+entries for transactions absent from the pool, as Core does when moving the
+existing mempool to the new chainstate. Successful return certifies the durable snapshot anchor and consumer
 settlement. Settlement failure closes admission for recovery and is an error,
 even if the anchor committed. Headers through the base must already be known.
 The installation boundary, under chain-transition exclusion, rejects an invalid

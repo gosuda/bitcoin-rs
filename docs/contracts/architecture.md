@@ -499,7 +499,8 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   that journal across the snapshot jump. Node activation fences mempool admission
   and refuses a nonempty mempool before invoking the manager; refusal settles the
   fence without changing transactions, fee deltas, or lifecycle state. Successful
-  activation clears stale empty-pool/orphan bookkeeping and wakes index/mining consumers. It does not manufacture
+  activation preserves fee prioritisation, fee history, and orphans, invalidates
+  the chain-bound reject cache, and wakes index/mining consumers. It does not manufacture
   per-block ZMQ events for imported history. Historical undo makes below-base reorgs
   possible after finalization; crossing below the base removes the snapshot anchor
   in the disconnect's authoritative batch.

@@ -519,6 +519,43 @@ fn nonempty_mempool_refuses_snapshot_without_losing_transaction() -> Result<()> 
     Ok(())
 }
 
+/// An empty mempool can still contain operator fee adjustments for absent
+/// transactions. Snapshot activation must retain that overlay, as Core does.
+#[test]
+fn core_snapshot_import_preserves_absent_transaction_prioritisation() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    let txid = "11".repeat(32);
+    for kind in [Kind::Core, Kind::BitcoinRs] {
+        let mut node = ProcessNode::spawn(kind)?;
+        admit_headers(&mut node, &blocks)?;
+        assert_eq!(
+            node.rpc("prioritisetransaction", &json!([txid, 0, 5000]))?,
+            true
+        );
+        assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+        let before = node.rpc("getprioritisedtransactions", &json!([]))?;
+        assert_eq!(before.as_object().unwrap().len(), 1);
+        assert_eq!(
+            before[&txid],
+            json!({"fee_delta": 5000, "in_mempool": false})
+        );
+        let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+        assert_eq!(imported["tip_hash"], BASE);
+        assert_eq!(imported["coins_loaded"], 200);
+        assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+        assert_eq!(
+            node.rpc("getprioritisedtransactions", &json!([]))?,
+            before,
+            "{kind:?} snapshot import must preserve the operator fee overlay"
+        );
+        node.stop()?;
+    }
+    Ok(())
+}
+
 #[test]
 fn corrupt_snapshot_recovery_fails_closed() -> Result<()> {
     let artifacts = tempfile::tempdir()?;

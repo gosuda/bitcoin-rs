@@ -144,13 +144,13 @@ pub enum AssumeUtxoError {
     ActivationBehindTip,
     /// Snapshot activation cannot replace an unsettled durable/applied chain view.
     #[error(
-        "snapshot activation requires matching durable and applied tip hash, height and transaction count (durable {durable_tip:?}, applied {applied_tip:?})"
+        "snapshot activation requires matching tip (hash, height, transaction count): durable {durable_tip:?}, applied {applied_tip:?}"
     )]
     SnapshotTipNotSettled {
-        /// Tip certified by the durable head, if present.
-        durable_tip: Option<Hash256>,
-        /// Tip describing the currently applied UTXO state, if present.
-        applied_tip: Option<Hash256>,
+        /// Durable tip's hash, height and cumulative transaction count, if present.
+        durable_tip: Option<(Hash256, u32, u64)>,
+        /// Applied tip's hash, height and cumulative transaction count, if present.
+        applied_tip: Option<(Hash256, u32, u64)>,
     },
     /// Lifecycle transitions require a committed snapshot anchor.
     #[error("missing durable snapshot anchor")]
