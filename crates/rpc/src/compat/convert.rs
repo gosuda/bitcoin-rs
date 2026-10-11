@@ -390,6 +390,41 @@ pub(crate) fn raw_transaction_verbose(
     })
 }
 
+/// Projects one native transaction into Core's `decoderawtransaction` shape.
+///
+/// The response body is the `psbt`-level `RawTransaction` that `corepc_types`
+/// re-exports from `v17`; `v31` re-exports the `DecodeRawTransaction` wrapper
+/// and the input/output component types but not the bare body name, so the
+/// body is named at its only public path. Same struct, same wire shape.
+pub(crate) fn raw_transaction(
+    tx: &Tx,
+    network: Network,
+) -> Result<corepc_types::v17::RawTransaction, RpcError> {
+    let coinbase = tx_render::is_coinbase(tx);
+    let inputs = tx
+        .inputs
+        .iter()
+        .map(|input| raw_input_typed(input, coinbase))
+        .collect::<Vec<_>>();
+    let outputs = tx
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| raw_output_typed(output, index, network))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(corepc_types::v17::RawTransaction {
+        txid: tx.txid().to_string(),
+        hash: tx.wtxid().to_string(),
+        size: u64::try_from(tx.total_size()).unwrap_or(u64::MAX),
+        vsize: tx.vsize(),
+        weight: tx.weight(),
+        version: tx.version,
+        lock_time: tx.lock_time.to_consensus(),
+        inputs,
+        outputs,
+    })
+}
+
 /// Projects one transaction input, coinbase-shaped when flagged.
 fn raw_input_typed(input: &TxIn, coinbase: bool) -> corepc_types::v31::RawTransactionInput {
     let txin_witness = (!input.witness.is_empty()).then(|| {

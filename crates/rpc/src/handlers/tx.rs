@@ -14,7 +14,7 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
-use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
     self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
@@ -223,7 +223,7 @@ fn txout_typed(
     coinbase: bool,
     best_block: Hash256,
 ) -> Result<Value, RpcError> {
-    typed_to_sonic_omitting_nulls(&v31::GetTxOut {
+    typed_to_sonic(&v31::GetTxOut {
         best_block: best_block.to_string(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
@@ -555,11 +555,10 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
-    let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
-    if let Some(object) = value.as_object_mut() {
-        object.remove(&"hex");
-    }
-    Ok(value)
+    typed_to_sonic(&v31::DecodeRawTransaction(convert::raw_transaction(
+        &tx,
+        ctx.chain.chain_network,
+    )?))
 }
 
 const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
@@ -567,6 +566,7 @@ const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime",
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
     let params = bound.as_ref();
+    super::ensure_at_most_params(params, CREATE_TRANSACTION_ARGUMENTS.len())?;
     let array = params_array(params)?;
     let inputs = array
         .first()
