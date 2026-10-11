@@ -50,9 +50,10 @@ only scheduling mechanics.
   value positions.
 - CLI `--scriptindex` / `--script-index` (env `BITCOIN_RS_SCRIPTINDEX`,
   configuration `scriptindex=1`) selects `full` and enables the
-  `ScriptHistory` capability. This builds generic scripthash funding rows
-  (`ScriptHashRow`), spending rows (`SpendingPrefixRow`), and outpoint spender
-  records.
+  `ScriptHistory` capability. This builds unified funding/spending occurrences
+  in `Funding`, keyed by an eight-byte script prefix and inverted height, plus
+  `SpendingPrefixRow` locators for outpoint-spender queries. Occurrence values
+  retain full script and transaction identities; see the format-6 layout below.
 - `scriptindex=utxo` enables only the compact `ScriptLive` view for script
   activity; `scriptindex=full` enables both `ScriptLive` and `ScriptHistory`.
   The historical boolean spellings (`true`, `1`, `yes`) continue to mean

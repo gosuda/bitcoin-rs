@@ -15,11 +15,11 @@ use tracing::debug;
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
-/// On-disk format 6: exact unified script-history occurrences ordered newest
-/// first. This derived schema is intentionally rebuilt rather than dual-read.
-/// `vout`, and 6-byte `TxPosition` values. Any older marker refuses start
-/// (`UnsupportedTxIndexFormatVersion`) so the store fully resets and rebuilds
-/// from chainstate; no in-place upgrade path exists.
+/// On-disk format 6: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// `ScriptLive` keys with u24 `vout`, and 6-byte `TxPosition` locators.
+/// Older markers refuse start (`UnsupportedTxIndexFormatVersion`) so the
+/// derived store fully resets and rebuilds from chainstate; no in-place
+/// upgrade or dual-read path exists.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 /// Monotonic revision shared by every ordinary index mutation.

@@ -56,6 +56,50 @@ fn positioned_history() -> Vec<PositionedHistory> {
         .collect()
 }
 
+#[test]
+fn positioned_history_order_matches_equality_for_distinct_flags() {
+    let mut entries = [positioned_history()[0]; 3];
+    for (entry, flags) in entries.iter_mut().zip([
+        ScriptHistoryOccurrence::FUNDING,
+        ScriptHistoryOccurrence::SPENDING,
+        ScriptHistoryOccurrence::FUNDING | ScriptHistoryOccurrence::SPENDING,
+    ]) {
+        entry.occurrence.flags = flags;
+    }
+    for left in &entries {
+        for right in &entries {
+            assert_eq!(left.cmp(right).is_eq(), left == right);
+            assert_eq!(left.partial_cmp(right), Some(left.cmp(right)));
+        }
+    }
+    let distinct: std::collections::BTreeSet<_> = entries.into_iter().collect();
+    assert_eq!(distinct.len(), entries.len());
+}
+
+#[test]
+fn history_sort_merges_flags_in_either_input_order() {
+    let funding = positioned_history()[0];
+    let mut spending = funding;
+    spending.occurrence.flags = ScriptHistoryOccurrence::SPENDING;
+    let mut combined = funding;
+    combined.occurrence.flags |= ScriptHistoryOccurrence::SPENDING;
+    let mut other = funding;
+    other.occurrence.position = TxPosition::new(600, 30);
+    for reverse in [false, true] {
+        let mut rows = PendingRows {
+            funding_rows: vec![spending, other, funding, spending],
+            ..PendingRows::default()
+        };
+        if reverse {
+            rows.funding_rows.reverse();
+        }
+        rows.sort();
+        assert_eq!(rows.funding_rows, vec![combined, other]);
+        rows.sort();
+        assert_eq!(rows.funding_rows, vec![combined, other]);
+    }
+}
+
 // Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical bytes
 // (rows 163-181), together with `crates/index/src/index/rows.rs`'s
 // `for_each_row_group` contract: one stored key retains all numeric positions.

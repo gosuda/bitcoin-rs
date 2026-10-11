@@ -1,12 +1,8 @@
-//! Big-endian key-order vs numeric-height-order contract tests.
+//! Format-6 `Funding` key order and resolved-history order contract tests.
 //!
-//! The 4-byte height suffix in `HashPrefixRow` is big-endian (format 5), so
-//! lexicographic key-byte order matches numeric height order within one
-//! 8-byte prefix. Height 1 (`00 00 00 01`) sorts before height 256
-//! (`00 00 01 00`) in byte order.
-//!
-//! These tests pin two contracts:
-//!
+//! `Funding` keys invert their big-endian height suffix, so storage traversal
+//! is newest first within an eight-byte prefix. High-level history resolution
+//! retains its separate ascending numeric-height contract.
 #[path = "support/common.rs"]
 mod common;
 
@@ -117,11 +113,10 @@ fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
 }
 
-/// Two funding rows with the same 8-byte prefix at heights 1 and 256 iterate
-/// in numeric order under BE keys, and `resolve_script_history` sorts by
-/// numeric height.
+/// Funding rows sharing an eight-byte prefix iterate newest first, while
+/// `resolve_script_history` sorts the resolved entries by ascending height.
 #[test]
-fn be_key_order_matches_numeric_and_history_sorts_by_height()
+fn funding_keys_sort_newest_first_and_history_sorts_by_height()
 -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
@@ -141,13 +136,13 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     put_funding_row(&store, scripthash, 256, block_at_256.txs[0].txid())?;
     let indexer = Indexer::new(store);
 
-    // --- Part A: iter_funding_rows returns BE byte order, hence numeric ---
+    // Part A: iter_funding_rows returns newest-first storage order.
 
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Height 1 is [0x00, 0x00, 0x00, 0x01]; height 256 is
-    // [0x00, 0x00, 0x01, 0x00]. BE byte order puts 1 before 256.
+    // Inverted height 1 is [0xff, 0xff, 0xff, 0xfe]; height 256 is
+    // [0xff, 0xff, 0xfe, 0xff]. Byte order therefore puts 256 before 1.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![256, 1],

@@ -55,6 +55,7 @@ impl Ord for PositionedHistory {
             .then_with(|| self.occurrence.position.cmp(&other.occurrence.position))
             .then_with(|| self.occurrence.txid.cmp(&other.occurrence.txid))
             .then_with(|| self.occurrence.scripthash.cmp(&other.occurrence.scripthash))
+            .then_with(|| self.occurrence.flags.cmp(&other.occurrence.flags))
     }
 }
 

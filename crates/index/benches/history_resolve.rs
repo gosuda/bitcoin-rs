@@ -150,10 +150,11 @@ fn filler_tx(seed: u64) -> Tx {
 
 /// The transaction the resolvers are asked to find. Pays `target_script` so it
 /// is reachable through a funding row.
-fn target_tx(_height: u32, target_script: &[u8]) -> Tx {
+fn target_tx(height: u32, target_script: &[u8]) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        // Distinct wire identities per height without changing scripts or size.
+        lock_time: LockTime::from_consensus(height),
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
             script_sig: Vec::new().into(),

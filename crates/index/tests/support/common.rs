@@ -165,11 +165,10 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
-/// Writes one funding-row key at `height` with an empty value.
+/// Writes one format-6 funding occurrence with a synthetic byte position.
 ///
-/// Empty values take the scan-fallback resolver path. Tests that pin
-/// little-endian key order, not watermark contiguity, use this instead of
-/// [`bitcoin_rs_index::IndexWriter::commit_block`].
+/// This direct row fixture supplies full script/transaction identities for
+/// key-order reads; it does not exercise transaction body resolution.
 pub(crate) fn put_funding_row(
     store: &MemoryStore,
     scripthash: ScriptHash,
@@ -179,20 +178,18 @@ pub(crate) fn put_funding_row(
     put_funding_row_positions(store, scripthash, height, &[(txid, TxPosition::new(1, 1))])
 }
 
-/// Writes one funding-row key at `height` carrying `positions`.
+/// Writes a format-6 funding row with the supplied transaction occurrences.
 ///
-/// Real positions take the resolver's positioned-read path; tests that pin
-/// `TxPosition`-backed resolution use this instead of the empty-value
-/// [`put_funding_row`].
+/// Each tuple supplies a txid and byte position; every value item also carries
+/// the full script identity and the funding flag.
 pub(crate) fn put_funding_row_positions(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
     occurrences: &[(bitcoin_rs_primitives::Txid, TxPosition)],
 ) -> Result<(), StorageError> {
-    // An empty slice encodes an empty value — indistinguishable from
-    // `put_funding_row`'s scan-path marker, so the positioned read would
-    // silently not be exercised.
+    // A row must contain at least one complete occurrence; an empty value
+    // is malformed under format 6 rather than a scan-fallback marker.
     assert!(
         !occurrences.is_empty(),
         "a funding row exists only because at least one transaction produced it"

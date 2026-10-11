@@ -69,8 +69,7 @@ fn script(tag: u8) -> Vec<u8> {
 }
 
 #[test]
-fn eight_byte_prefix_collision_resolves_full_script_identity()
--> Result<(), Box<dyn std::error::Error>> {
+fn synthetic_history_row_filters_full_script_identity() -> Result<(), Box<dyn std::error::Error>> {
     let target_script = script(0x51);
     let decoy_script = script(0x52);
     let block = Block {
@@ -94,10 +93,10 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
     IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes, &NoSpentScripts)?;
     let indexer = Indexer::new(Arc::clone(&store));
 
-    // A real eight-byte collision makes the writer merge both valid positions
-    // under one row key. Model that persisted result directly; unlike the
-    // removed fallback tests, every position is an exact range in this
-    // canonical block and no row value is blank, stale, or malformed.
+    // Inject two full-script identities into one row to isolate read-side
+    // exact-hash filtering. These scripts do not share an eight-byte prefix;
+    // this is not evidence of a real hash collision or writer grouping.
+    // Both positions still name exact transaction ranges in the fixture body.
     let row = store
         .rows(ColumnFamily::Funding)
         .into_iter()

@@ -7,7 +7,7 @@ This document owns the on-disk format of the generic index in the target node (T
 | Family | Key | Value | Purpose |
 |---|---|---|---|
 | Transaction occurrence | `txid + block identity + position` | body locator and transaction byte range | pre-BIP34 duplicate txids and side branches never overwrite evidence |
-| Script history | `script digest + chronological position + event identity` | funding or spending locator | ordering-preserving integer encoding, byte order explicitly tested; retains provably unspendable outputs |
+| Script history (`Funding`, format 6) | `script_hash_prefix(8) + !height_be(4)` (12 bytes) | `n × (full_script_hash(32) + txid(32) + TxPosition(6) + flags(1))` (71 bytes per occurrence) | newest-first funding/spending history with exact full-script filtering; 12 + 71n logical bytes per row |
 | Live script locator | `script prefix + full outpoint` | minimal locator | truncated prefix accelerates lookup only with exact script verification; value and script resolve against coherent coins |
 | Spender relation | `origin occurrence + vout` | spending occurrence and input index | outspend queries |
 | Capability watermark | `capability` | height, hash, schema version, revision | readiness by hash, never height alone |
@@ -45,7 +45,7 @@ The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.
 
 ## Prior candidate evidence (frozen audit 2026-09-02)
 
-Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
+The layout and byte-count tables below are the pre-format-6 baseline. Later versioning notes are annotations, not new measurements. The current ScriptHistory layout is specified above; nothing in this historical audit establishes its current performance.
 
 Froze 2026-09-02 at branch `overhaul/one-session` commit `a24d23b`.
 This document is a **frozen** audit: the methodology and verdicts below are
@@ -137,7 +137,7 @@ as a benchmark corpus or a data file.
 
 ### Logical bytes
 
-#### Logical byte layout (from `crates/index/src/types.rs`)
+#### Pre-format-6 logical byte layout (historical baseline)
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
@@ -214,7 +214,7 @@ entries sorted by numeric height. The raw `iter_funding_rows`,
 `iter_spending_rows`, and `iter_txid_rows_with_values` functions return rows in store
 order, so callers get chronological order without sorting.
 
-#### Q4: Per-CF logical cost
+#### Q4: Historical per-CF logical cost
 
 **Verdict: retain only the exact serialized row sizes. No current physical
 amplification claim is supported by matched evidence.**
