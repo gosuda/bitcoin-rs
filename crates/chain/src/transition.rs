@@ -67,8 +67,8 @@ impl TransitionAuthority {
 
 /// Read-side role: excludes authoritative transitions for as long as a stable read runs.
 ///
-/// This is the capability RPC, index, and mining receive. It offers `lock`
-/// and nothing else in production builds: no access to the shared cell and no path to a
+/// This is the capability RPC, index, and mining receive. It offers blocking and bounded read exclusion, with no access to the shared
+/// cell and no path to a
 /// [`TransitionAuthority`]. A caller with access to [`TransitionDomain::new`]
 /// can still mint an unrelated read role.
 #[derive(Clone)]
@@ -77,6 +77,14 @@ pub struct StableRead {
 }
 
 impl StableRead {
+    /// Waits at most timeout for the read exclusion, permitting bounded callers
+    /// to observe cancellation before trying again.
+    pub fn try_lock_for(&self, timeout: std::time::Duration) -> Option<StableReadGuard<'_>> {
+        self.inner
+            .try_lock_for(timeout)
+            .map(|guard| StableReadGuard { _guard: guard })
+    }
+
     /// Excludes authoritative transitions until the returned guard is dropped.
     pub fn lock(&self) -> StableReadGuard<'_> {
         StableReadGuard {

@@ -25,6 +25,9 @@ const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
 pub enum UtxoError {
+    /// A complete script scan was refused or interrupted.
+    #[error(transparent)]
+    Scan(#[from] crate::scan::UtxoScanError),
     /// A script does not fit the snapshot and record `u16` length field.
     #[error("script_pubkey is too large for a u16 length: {len} bytes")]
     ScriptTooLarge {
@@ -158,6 +161,7 @@ pub(crate) struct SpendPayload<'a> {
 pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
     stable_view_lock: RwLock<()>,
+    pub(crate) scan: crate::scan::ScanState,
     listener: Option<CoinStatsListener>,
 }
 
@@ -247,15 +251,6 @@ impl UtxoSetView<'_> {
         crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
     }
 
-    /// Scans every live output for exact scriptPubKey matches.
-    pub(crate) fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> UtxoScan {
-        let mut scan = UtxoScan::default();
-        for shard in &self.set.shards {
-            shard.scan_script_pubkeys(scripts, &mut scan);
-        }
-        scan
-    }
-
     /// Visits every live output without materializing the complete set.
     pub fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {
         for shard in &self.set.shards {
@@ -289,8 +284,18 @@ impl UtxoSet {
         Self {
             shards: [(); UtxoKey::SHARD_COUNT].map(|()| Shard::new()),
             stable_view_lock: RwLock::new(()),
+            scan: crate::scan::ScanState::default(),
             listener: None,
         }
+    }
+
+    pub(crate) fn try_stable_view(&self, timeout: std::time::Duration) -> Option<UtxoSetView<'_>> {
+        self.stable_view_lock
+            .try_read_for(timeout)
+            .map(|guard| UtxoSetView {
+                set: self,
+                _guard: guard,
+            })
     }
 
     /// Installs an owned snapshot under the stable-view lock.
@@ -366,7 +371,13 @@ impl UtxoSet {
 
     /// Scans a stable whole-set view for exact scriptPubKey matches.
     pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
-        Ok(self.with_stable_view(|view| view.scan_script_pubkeys(scripts)))
+        let permit = crate::scan::UtxoScanPermit::reserve(self)?;
+        let scripts = scripts.iter().cloned().collect();
+        let (complete, scan) = permit.scan(&scripts, || false)?;
+        if !complete {
+            return Err(crate::scan::UtxoScanError::Aborted.into());
+        }
+        Ok(scan)
     }
 
     /// Returns true when any output of `txid` is live in the set.
@@ -611,6 +622,24 @@ pub struct UtxoReader {
 }
 
 impl UtxoReader {
+    /// Reserves the sole cancellable scan of this authoritative set.
+    pub fn reserve_scan(
+        &self,
+    ) -> Result<crate::scan::UtxoScanPermit<'_>, crate::scan::UtxoScanError> {
+        crate::scan::UtxoScanPermit::reserve(&self.set)
+    }
+
+    /// Approximate scan progress, or None when no scan is reserved.
+    #[must_use]
+    pub fn scan_progress(&self) -> Option<u8> {
+        self.set.scan.status()
+    }
+
+    /// Requests cancellation; false means no scan is reserved.
+    pub fn abort_scan(&self) -> bool {
+        self.set.scan.abort()
+    }
+
     /// Wraps the owner's set into a read capability.
     #[must_use]
     pub fn new(set: Arc<UtxoSet>) -> Self {

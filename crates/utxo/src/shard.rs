@@ -7,12 +7,11 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 
 use crate::{
-    UtxoError, UtxoKey,
+    UtxoCoin, UtxoError, UtxoKey,
     contract::UtxoAdd,
     listener::{UtxoChangeEvents, UtxoInserted, UtxoRemoved},
     record::{OutputParts, OwnedUtxoOut, RemovedRecord, UtxoRecord, vouts_are_strictly_increasing},
     set::{BuildPayload, SpendPayload},
-    set::{UtxoCoin, UtxoScan},
     stats::CoinStatsListener,
 };
 
@@ -161,23 +160,6 @@ impl Shard {
     pub(crate) fn with_table<R>(&self, f: impl FnOnce(&ShardTable) -> R) -> R {
         let table = self.inner.read();
         f(&table)
-    }
-
-    pub(crate) fn scan_script_pubkeys(&self, scripts: &[Vec<u8>], scan: &mut UtxoScan) {
-        let table = self.inner.read();
-        for record in &table.table {
-            for output in record.outputs() {
-                scan.txouts = scan.txouts.saturating_add(1);
-                if scripts.iter().any(|target| *target == output.script_pubkey) {
-                    scan.unspents.push(UtxoCoin {
-                        outpoint: OutPoint::new(record.txid().into(), output.vout),
-                        txout: txout_from_parts(output.value, output.script_pubkey),
-                        coinbase: output.coinbase,
-                        height: output.height,
-                    });
-                }
-            }
-        }
     }
 
     pub(crate) fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {

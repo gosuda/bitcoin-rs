@@ -104,7 +104,22 @@ impl Handler {
         let _blocking = row
             .execution
             .is_blocking(params)
-            .then(|| self.reserve_blocking_request())
+            .then(|| {
+                self.reserve_blocking_request().map_err(|error| {
+                    // Refusal observes the existing scan owner; it never starts
+                    // a scan without the shared blocking permit. Preserve Core's
+                    // in-progress error even when the long-operation quota is full.
+                    if matches!(row.execution, crate::registry::Execution::Scan)
+                        && self.ctx.chain.utxo.scan_progress().is_some()
+                    {
+                        RpcError::InvalidParameter(
+                            bitcoin_rs_utxo::scan::UtxoScanError::InProgress.to_string(),
+                        )
+                    } else {
+                        error
+                    }
+                })
+            })
             .transpose()?;
         let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
         match handler {

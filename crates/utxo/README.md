@@ -16,7 +16,11 @@ while `get_entry` returns the one `UtxoCoin` shape, and
 duplicate-spend predicate.
 `with_stable_view` blocks commits while a `UtxoSetView` reads the whole set,
 computes the Core `hash_serialized_3` commitment, and scans for exact
-scriptPubKey matches; `track_coin_stats` attaches the single
+scriptPubKey matches. The set also owns one transient bounded scan reservation:
+`UtxoReader::reserve_scan`, `scan_progress` and `abort_scan` expose it without
+mutation access to coins. `scan` owns its resource limits and cancellation
+checkpoints; the RPC layer additionally captures the chain tip under the shared
+transition exclusion (external-api API-34). `track_coin_stats` attaches the single
 `CoinStatsListener` whose MuHash and accounting follow every commit.
 
 `UtxoReader` is what a consumer receives instead of the set. It carries the

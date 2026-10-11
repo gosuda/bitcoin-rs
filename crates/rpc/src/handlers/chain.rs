@@ -12,10 +12,9 @@ use bitcoin_rs_primitives::{
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
-use hashbrown::HashMap;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use super::util::{descriptor_checksum, strip_addr_wrapper};
+use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
 use bitcoin::hex::DisplayHex as _;
 
 use crate::compat::convert::{
@@ -1139,76 +1138,255 @@ pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 
-#[derive(Debug)]
-struct ScanScript {
-    script_pubkey: Vec<u8>,
-    desc: String,
-}
+// Aggregate bounds apply before descriptor expansion; the UTXO owner separately
+// bounds traversal, matches, duration and cancellation checkpoints.
+const MAX_SCAN_DESCRIPTOR_BYTES: usize = 16_384;
+const MAX_SCAN_INPUT_BYTES: usize = 1_048_576;
+const MAX_SCAN_ANCESTRY_STEPS: usize = 2_000_000;
+const MAX_SCAN_RESPONSE_BYTES: usize = 16 * 1_048_576;
 
-pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let action = required_str(params, 0, "action is required")?;
-    match action {
-        "start" => scantxoutset_addr_scan(ctx, scanobjects_param(params)?),
-        "abort" => typed_to_sonic(&v31::ScanTxOutSetAbort(false)),
-        "status" => Ok(Value::new_null()),
-        _ => Err(RpcError::InvalidParams(
-            "action must be one of: start, abort, status",
-        )),
-    }
-}
-
-fn scanobjects_param(params: &Value) -> Result<&sonic_rs::Array, RpcError> {
-    let array = params_array(params)?;
-    let Some(scanobjects) = array.get(1) else {
-        return Err(RpcError::InvalidParams(
-            "scanobjects are required for scantxoutset start",
-        ));
-    };
-    let scanobjects = scanobjects
-        .as_array()
-        .ok_or_else(|| RpcError::InvalidType("scanobjects must be an array".to_owned()))?;
-    if scanobjects.is_empty() {
-        return Err(RpcError::InvalidParams("scanobjects must not be empty"));
-    }
-    Ok(scanobjects)
-}
-
-fn scantxoutset_addr_scan(
+pub(crate) fn scantxoutset(
     ctx: &Arc<Context>,
-    scanobjects: &sonic_rs::Array,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let scan_scripts = parse_scan_scripts(ctx.chain.chain_network, scanobjects)?;
-    let scripts = scan_scripts
-        .iter()
-        .map(|scan| scan.script_pubkey.clone())
-        .collect::<Vec<_>>();
-    let (tip, scan) = ctx.chain.with_stable_chainstate(|| {
-        let tip = ctx.chain.applied_tip.load_full();
-        let scan = ctx.chain.utxo.scan_script_pubkeys(&scripts);
-        (tip, scan)
+    let params = super::bind_named_params(params, &["action", "scanobjects"])?;
+    let (action, objects) = scan_arguments(&params)?;
+    match action {
+        "start" => {
+            let permit = ctx
+                .chain
+                .utxo
+                .reserve_scan()
+                .map_err(|error| scan_error(&error))?;
+            let objects = objects.ok_or_else(|| {
+                RpcError::Misc("scanobjects argument is required for the start action".into())
+            })?;
+            let scripts = parse_scan_scripts(ctx.chain.chain_network, objects, || {
+                permit
+                    .cancelled(|| cancellation.is_triggered())
+                    .map_err(|error| scan_error(&error))
+            })?;
+            scantxoutset_scan(ctx, &permit, &scripts, cancellation)
+        }
+        "abort" => Ok(json!(ctx.chain.utxo.abort_scan())),
+        "status" => Ok(ctx
+            .chain
+            .utxo
+            .scan_progress()
+            .map_or_else(Value::new_null, |progress| json!({"progress": progress}))),
+        _ => Err(RpcError::InvalidParameter(format!(
+            "Invalid action '{action}'"
+        ))),
+    }
+}
+
+fn scan_arguments(params: &Value) -> Result<(&str, Option<&sonic_rs::Array>), RpcError> {
+    let array = params_array(params)?;
+    if array.len() > 2 {
+        return Err(RpcError::InvalidParams("too many parameters"));
+    }
+    let (action, objects) = (array.first(), array.get(1));
+    let action = action
+        .ok_or_else(|| RpcError::Misc("scantxoutset \"action\" ( [scanobjects,...] )".into()))?;
+    let action = action
+        .as_str()
+        .ok_or_else(|| super::wrong_type(1, "action", action, "string"))?;
+    let objects = objects
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| super::wrong_type(2, "scanobjects", value, "array"))
+        })
+        .transpose()?;
+    Ok((action, objects))
+}
+
+fn scan_error(error: &bitcoin_rs_utxo::scan::UtxoScanError) -> RpcError {
+    match error {
+        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+            RpcError::InvalidParameter(error.to_string())
+        }
+        _ => RpcError::Misc(error.to_string()),
+    }
+}
+
+fn scantxoutset_scan(
+    ctx: &Context,
+    permit: &bitcoin_rs_utxo::scan::UtxoScanPermit<'_>,
+    scan_scripts: &std::collections::BTreeMap<Vec<u8>, String>,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    let scripts = scan_scripts.keys().cloned().collect();
+    let (applied, complete, mut scan) = loop {
+        if permit
+            .cancelled(|| cancellation.is_triggered())
+            .map_err(|error| scan_error(&error))?
+        {
+            break (
+                ctx.chain.applied_view(),
+                false,
+                bitcoin_rs_utxo::UtxoScan::default(),
+            );
+        }
+        if let Some(transition) = ctx
+            .chain
+            .chain_transition
+            .try_lock_for(std::time::Duration::from_millis(50))
+        {
+            let applied = ctx.chain.applied_view();
+            let (complete, scan) = permit
+                .scan(&scripts, || cancellation.is_triggered())
+                .map_err(|error| scan_error(&error))?;
+            drop(transition);
+            break (applied, complete, scan);
+        }
+    };
+    let cancelled = || {
+        permit
+            .cancelled(|| cancellation.is_triggered())
+            .map_err(|error| scan_error(&error))
+    };
+    let mut complete = complete;
+    let hashes = scan_ancestry(ctx, &scan, &applied, cancelled, MAX_SCAN_ANCESTRY_STEPS)?;
+    let hashes = if let Some(hashes) = hashes {
+        hashes
+    } else {
+        complete = false;
+        scan.unspents.clear();
+        std::collections::BTreeMap::new()
+    };
+    if cancelled()? {
+        complete = false;
+        scan.unspents.clear();
+    }
+    // At most 10,000 coins. Core orders COutPoint by internal txid bytes,
+    // then by output index; cancellation is rechecked after the bounded sort.
+    scan.unspents.sort_unstable_by_key(|coin| {
+        let outpoint = coin.outpoint;
+        let txid = outpoint.txid;
+        (Hash256::from(txid).to_le_bytes(), outpoint.vout)
     });
-    let scan = scan.map_err(|error| RpcError::Internal(error.to_string()))?;
-    let height = tip.as_ref().map_or(0, |tip| tip.height);
-    let bestblock = tip.as_ref().map_or_else(Hash256::default, |tip| tip.hash);
-    let (unspents, total_amount) = scan_unspents(ctx, &scan, &scan_scripts, height);
-    typed_to_sonic(&v31::ScanTxOutSetStart {
-        success: true,
+    let (unspents, total_amount, projected) =
+        scan_unspents(&scan, scan_scripts, &hashes, applied.height(), cancelled)?;
+    let mut result = typed_to_sonic(&v31::ScanTxOutSetStart {
+        success: complete && projected && !cancelled()?,
         tx_outs: u64::try_from(scan.txouts).unwrap_or(u64::MAX),
-        height: u64::from(height),
-        best_block: bestblock.to_string_be(),
+        height: u64::from(applied.height()),
+        best_block: applied.hash(ctx.chain.chain_network).to_string_be(),
         unspents,
         total_amount: sat_to_btc(total_amount),
-    })
+    })?;
+    if cancelled()?
+        && let Some(object) = result.as_object_mut()
+    {
+        let _ = object.insert("success", json!(false));
+    }
+    Ok(result)
+}
+
+/// Resolves only requested creation heights from the retained branch in one
+/// bounded walk. A reorg cannot turn this into one full walk per matched coin.
+fn scan_ancestry(
+    ctx: &Context,
+    scan: &bitcoin_rs_utxo::UtxoScan,
+    applied: &AppliedView,
+    cancelled: impl Fn() -> Result<bool, RpcError>,
+    max_steps: usize,
+) -> Result<Option<std::collections::BTreeMap<u32, Hash256>>, RpcError> {
+    let mut heights = scan
+        .unspents
+        .iter()
+        .map(|coin| coin.height)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut hashes = std::collections::BTreeMap::new();
+    if heights.remove(&applied.height()) {
+        hashes.insert(applied.height(), applied.hash(ctx.chain.chain_network));
+    }
+    if heights.is_empty() {
+        return Ok(Some(hashes));
+    }
+    let unavailable = || RpcError::Misc("scan block ancestry is unavailable".into());
+    let tip = applied.tip().ok_or_else(unavailable)?;
+    let tree = loop {
+        if cancelled()? {
+            return Ok(None);
+        }
+        if let Some(tree) = ctx
+            .chain
+            .block_tree
+            .try_read_for(std::time::Duration::from_millis(50))
+        {
+            break tree;
+        }
+    };
+    let mut cursor = tip.tip_id;
+    let mut previous_height = None;
+    for steps in 0..max_steps {
+        if steps.is_multiple_of(256) && cancelled()? {
+            return Ok(None);
+        }
+        let node = tree.node(cursor).map_err(|_| unavailable())?;
+        if (steps == 0 && (node.hash != tip.hash || node.height != tip.height))
+            || previous_height.is_some_and(|height| node.height >= height)
+        {
+            return Err(unavailable());
+        }
+        if heights.remove(&node.height) {
+            hashes.insert(node.height, node.hash);
+            if heights.is_empty() {
+                return Ok(Some(hashes));
+            }
+        }
+        if heights.last().is_some_and(|height| *height > node.height) {
+            return Err(unavailable());
+        }
+        previous_height = Some(node.height);
+        cursor = node.parent.ok_or_else(unavailable)?;
+    }
+    Err(RpcError::Misc(
+        "UTXO scan limit exceeded: 2 million ancestry steps".into(),
+    ))
 }
 
 fn parse_scan_scripts(
-    chain_network: Network,
+    network: Network,
     scanobjects: &sonic_rs::Array,
-) -> Result<Vec<ScanScript>, RpcError> {
-    let mut scripts = Vec::with_capacity(scanobjects.len());
+    cancelled: impl Fn() -> Result<bool, RpcError>,
+) -> Result<std::collections::BTreeMap<Vec<u8>, String>, RpcError> {
+    if scanobjects.len() > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS {
+        return Err(RpcError::InvalidParameter(
+            "At most 1024 scan descriptors are supported".into(),
+        ));
+    }
+    let mut scripts = std::collections::BTreeMap::new();
+    let mut input_bytes = 0usize;
+    let mut script_bytes = 0usize;
     for scanobject in scanobjects {
+        if cancelled()? {
+            break;
+        }
         let descriptor = scanobject_descriptor(scanobject)?;
-        scripts.push(parse_addr_scan_script(descriptor, chain_network)?);
+        input_bytes = input_bytes.saturating_add(descriptor.len());
+        if descriptor.len() > MAX_SCAN_DESCRIPTOR_BYTES || input_bytes > MAX_SCAN_INPUT_BYTES {
+            return Err(RpcError::InvalidParameter(
+                "Scan descriptor byte limit exceeded".into(),
+            ));
+        }
+        let ScanScript {
+            script_pubkey,
+            desc,
+        } = scan_descriptor(descriptor, network)?;
+        if let std::collections::btree_map::Entry::Vacant(entry) = scripts.entry(script_pubkey) {
+            script_bytes += entry.key().len();
+            if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
+                return Err(RpcError::InvalidParameter(
+                    "Scan script byte limit exceeded".into(),
+                ));
+            }
+            entry.insert(desc);
+        }
     }
     Ok(scripts)
 }
@@ -1217,140 +1395,70 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
     if let Some(descriptor) = scanobject.as_str() {
         return Ok(descriptor);
     }
-    let Some(descriptor) = scanobject.get("desc") else {
-        return Err(RpcError::InvalidParams("scan object missing desc"));
-    };
+    let object = scanobject.as_object().ok_or_else(|| {
+        RpcError::InvalidParameter("Scan object needs to be either a string or an object".into())
+    })?;
+    let descriptor = object
+        .get(&"desc")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| {
+            RpcError::InvalidParameter("Descriptor needs to be provided in scan object".into())
+        })?;
     let descriptor = descriptor
         .as_str()
-        .ok_or_else(|| RpcError::InvalidType("scan object desc must be a string".to_owned()))?;
-    if let Some(range) = scanobject.get("range") {
-        validate_scanobject_range(range)?;
+        .ok_or_else(|| super::wrong_type_plain(descriptor, "string"))?;
+    if let Some(range) = object.get(&"range").filter(|value| !value.is_null()) {
+        parse_derivation_range(range)?;
     }
     Ok(descriptor)
 }
 
-fn validate_scanobject_range(range: &Value) -> Result<(), RpcError> {
-    if range.as_u64().is_some() {
-        return Ok(());
-    }
-    let Some(bounds) = range.as_array() else {
-        return Err(RpcError::InvalidType(
-            "scan object range must be an integer or two-integer array".to_owned(),
-        ));
-    };
-    if bounds.len() != 2 {
-        return Err(RpcError::InvalidParams(
-            "scan object range array must contain two entries",
-        ));
-    }
-    let Some(start) = bounds.first().and_then(Value::as_u64) else {
-        return Err(RpcError::InvalidType(
-            "scan object range start must be an integer".to_owned(),
-        ));
-    };
-    let Some(end) = bounds.get(1).and_then(Value::as_u64) else {
-        return Err(RpcError::InvalidType(
-            "scan object range end must be an integer".to_owned(),
-        ));
-    };
-    if start > end {
-        return Err(RpcError::InvalidParams(
-            "scan object range start must not exceed end",
-        ));
-    }
-    Ok(())
-}
-
-fn parse_addr_scan_script(
-    descriptor: &str,
-    chain_network: Network,
-) -> Result<ScanScript, RpcError> {
-    let payload = checked_descriptor_payload(descriptor)?;
-    if payload.contains('*') {
-        return Err(RpcError::InvalidParams(
-            "ranged scantxoutset descriptors are not supported",
-        ));
-    }
-    let Some(address_text) = strip_addr_wrapper(payload) else {
-        return Err(RpcError::InvalidParams(
-            "unsupported scantxoutset descriptor; only addr() is supported",
-        ));
-    };
-    let Ok(unchecked) = bitcoin::Address::from_str(address_text) else {
-        return Err(RpcError::InvalidParams("Address is not valid"));
-    };
-    let Ok(address) = unchecked.require_network(convert::bitcoin_network(chain_network)) else {
-        return Err(RpcError::InvalidParams("Address is not valid"));
-    };
-    let payload = format!("addr({address})");
-    let desc = descriptor_checksum(&payload).map_or_else(
-        || payload.clone(),
-        |checksum| format!("{payload}#{checksum}"),
-    );
-    Ok(ScanScript {
-        script_pubkey: address.script_pubkey().as_bytes().to_vec(),
-        desc,
-    })
-}
-
-fn checked_descriptor_payload(descriptor: &str) -> Result<&str, RpcError> {
-    let Some((body, checksum)) = descriptor.rsplit_once('#') else {
-        return Ok(descriptor);
-    };
-    let expected = descriptor_checksum(body).ok_or(RpcError::InvalidParams(
-        "descriptor contains invalid characters",
-    ))?;
-    if checksum == expected {
-        Ok(body)
-    } else {
-        Err(RpcError::InvalidParams("descriptor checksum mismatch"))
-    }
-}
-
 fn scan_unspents(
-    ctx: &Context,
     scan: &bitcoin_rs_utxo::UtxoScan,
-    scan_scripts: &[ScanScript],
+    descs: &std::collections::BTreeMap<Vec<u8>, String>,
+    hashes: &std::collections::BTreeMap<u32, Hash256>,
     applied_height: u32,
-) -> (Vec<v31::ScanTxOutSetUnspent>, u64) {
-    let descs = scan_scripts
-        .iter()
-        .map(|scan| (scan.script_pubkey.as_slice(), scan.desc.as_str()))
-        .collect::<HashMap<_, _>>();
+    cancelled: impl Fn() -> Result<bool, RpcError>,
+) -> Result<(Vec<v31::ScanTxOutSetUnspent>, u64, bool), RpcError> {
     let mut total_amount = 0_u64;
-    let unspents = scan
-        .unspents
-        .iter()
-        .map(|utxo| {
-            total_amount = total_amount.saturating_add(utxo.txout.value.to_sat());
-            let desc = descs
-                .get(utxo.txout.script_pubkey.as_slice())
-                .copied()
-                .unwrap_or("");
-            // Field copies come before any `&self` method: `OutPoint` is
-            // `#[repr(packed)]` (consensus wire layout).
-            let (txid, vout) = {
-                let outpoint = utxo.outpoint;
-                (outpoint.txid, outpoint.vout)
-            };
-            let block_hash = ctx
-                .chain
-                .block_hash_at_height(utxo.height)
-                .map_or_else(|| "0".repeat(64), |hash| hash.to_string());
-            v31::ScanTxOutSetUnspent {
-                txid: txid.to_string(),
-                vout,
-                script_pubkey: utxo.txout.script_pubkey.to_lower_hex_string(),
-                descriptor: desc.to_owned(),
-                amount: sat_to_btc(utxo.txout.value.to_sat()),
-                coinbase: utxo.coinbase,
-                height: u64::from(utxo.height),
-                block_hash,
-                confirmations: scan_confirmations(applied_height, utxo.height),
-            }
-        })
-        .collect();
-    (unspents, total_amount)
+    let mut response_bytes = 0usize;
+    let mut unspents = Vec::with_capacity(scan.unspents.len());
+    for utxo in &scan.unspents {
+        if cancelled()? {
+            return Ok((unspents, total_amount, false));
+        }
+        let desc = descs
+            .get(utxo.txout.script_pubkey.as_slice())
+            .ok_or_else(|| RpcError::Internal("scan matched an unknown script".into()))?;
+        // Include repeated attribution and hex expansion as well as fixed
+        // JSON/numeric overhead before materializing this output.
+        response_bytes += desc.len() + utxo.txout.script_pubkey.len() * 2 + 1024;
+        if response_bytes > MAX_SCAN_RESPONSE_BYTES {
+            return Err(RpcError::Misc(
+                "UTXO scan limit exceeded: 16 MiB response budget".into(),
+            ));
+        }
+        let outpoint = utxo.outpoint;
+        let txid = outpoint.txid;
+        let block_hash = hashes
+            .get(&utxo.height)
+            .ok_or_else(|| RpcError::Misc("scan block ancestry is unavailable".into()))?;
+        unspents.push(v31::ScanTxOutSetUnspent {
+            txid: txid.to_string(),
+            vout: outpoint.vout,
+            script_pubkey: utxo.txout.script_pubkey.to_lower_hex_string(),
+            descriptor: desc.clone(),
+            amount: sat_to_btc(utxo.txout.value.to_sat()),
+            coinbase: utxo.coinbase,
+            height: u64::from(utxo.height),
+            block_hash: block_hash.to_string(),
+            confirmations: scan_confirmations(applied_height, utxo.height),
+        });
+        total_amount = total_amount
+            .checked_add(utxo.txout.value.to_sat())
+            .ok_or_else(|| RpcError::Internal("scan amount overflow".into()))?;
+    }
+    Ok((unspents, total_amount, !cancelled()?))
 }
 
 fn scan_confirmations(applied_height: u32, output_height: u32) -> u64 {
@@ -5095,6 +5203,10 @@ mod verification_progress_wiring_tests {
 
 #[cfg(test)]
 mod scantxoutset_tests {
+    fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+        super::scantxoutset(ctx, params, &bitcoin_rs_chain::LatchReader::fixture_never())
+    }
+
     use alloc::sync::Arc;
 
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
@@ -5222,7 +5334,7 @@ mod scantxoutset_tests {
                 script_pubkey: script.clone().into(),
             },
             false,
-            0,
+            1,
         );
 
         let transition_guard = transition.lock();
@@ -5273,11 +5385,7 @@ mod scantxoutset_tests {
             .and_then(Value::as_array)
             .unwrap_or_else(|| panic!("unspents missing: {result:?}"));
         assert_eq!(unspents.len(), 2);
-        assert!(unspents.iter().any(|entry| {
-            entry.get("height").and_then(Value::as_u64) == Some(0)
-                && entry.get("confirmations").and_then(Value::as_u64) == Some(2)
-        }));
-        assert!(unspents.iter().any(|entry| {
+        assert!(unspents.iter().all(|entry| {
             entry.get("height").and_then(Value::as_u64) == Some(1)
                 && entry.get("confirmations").and_then(Value::as_u64) == Some(1)
         }));
@@ -5324,47 +5432,45 @@ mod scantxoutset_tests {
             (
                 "missing scanobjects",
                 json!(["start"]),
-                "scanobjects are required",
+                "scanobjects argument is required",
             ),
             (
                 "non-array scanobjects",
                 json!(["start", "addr(1111111111111111111114oLvT2)"]),
-                "scanobjects must be an array",
-            ),
-            (
-                "empty scanobjects",
-                json!(["start", []]),
-                "scanobjects must not be empty",
+                "is not of expected type array",
             ),
             (
                 "object without desc",
                 json!(["start", [{"range": 0}]]),
-                "missing desc",
+                "Descriptor needs to be provided",
             ),
             (
                 "ranged descriptor",
                 json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
-                "ranged scantxoutset descriptors are not supported",
+                "Ranged and multipath scantxoutset descriptors are not supported",
             ),
             (
                 "inverted range",
                 json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
-                "range start must not exceed end",
+                "must not have begin after end",
             ),
             (
                 "unsupported descriptor in object form",
-                json!(["start", [{"desc": "raw(51)"}]]),
-                "only addr() is supported",
+                json!(["start", [{"desc": "wsh(pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798))"}]]),
+                "Supported scan descriptors",
             ),
             (
                 "unsupported descriptor",
-                json!(["start", ["raw(51)"]]),
-                "only addr() is supported",
+                json!([
+                    "start",
+                    ["pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"]
+                ]),
+                "Supported scan descriptors",
             ),
             (
                 "bad descriptor checksum",
                 json!(["start", ["addr(1111111111111111111114oLvT2)#badbadba"]]),
-                "checksum mismatch",
+                "does not match computed checksum",
             ),
             (
                 "address from another network",
@@ -5385,6 +5491,380 @@ mod scantxoutset_tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn scantxoutset_empty_and_named_start_match_genesis() {
+        let ctx = Arc::new(Context::new());
+        let result = scantxoutset(&ctx, &json!({"action":"start", "scanobjects":[]}))
+            .unwrap_or_else(|error| panic!("empty scan: {error}"));
+        assert_eq!(result["success"].as_bool(), Some(true));
+        assert_eq!(
+            result["bestblock"].as_str(),
+            Some(
+                ctx.chain
+                    .chain_network
+                    .genesis_block_hash()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(result["txouts"].as_u64(), Some(0));
+        assert!(
+            result["unspents"]
+                .as_array()
+                .unwrap_or_else(|| panic!("expected array"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scantxoutset_status_abort_release_and_failure_cleanup() {
+        let ctx = Arc::new(Context::new());
+        let permit = ctx
+            .chain
+            .utxo
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["status"]))
+                .unwrap_or_else(|error| panic!("status: {error}"))["progress"]
+                .as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["start", []]))
+                .err()
+                .unwrap_or_else(|| panic!("reserved"))
+                .code(),
+            -8
+        );
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["abort"]))
+                .unwrap_or_else(|error| panic!("abort: {error}"))
+                .as_bool(),
+            Some(true)
+        );
+        let result = scantxoutset_scan(
+            &ctx,
+            &permit,
+            &std::collections::BTreeMap::new(),
+            &bitcoin_rs_chain::LatchReader::fixture_never(),
+        )
+        .unwrap_or_else(|error| panic!("cancel result: {error}"));
+        assert_eq!(result["success"].as_bool(), Some(false));
+        drop(permit);
+        assert!(
+            scantxoutset(&ctx, &json!(["status"]))
+                .unwrap_or_else(|error| panic!("idle: {error}"))
+                .is_null()
+        );
+        assert!(scantxoutset(&ctx, &json!(["start", ["invalid"]])).is_err());
+        assert!(
+            scantxoutset(&ctx, &json!(["status"]))
+                .unwrap_or_else(|error| panic!("idle after error: {error}"))
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn scan_can_abort_while_waiting_for_chain_transition() {
+        let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+        let ctx = Arc::new(Context::new().with_chain_transition(transition.clone()));
+        let held = transition.lock();
+        let worker_ctx = Arc::clone(&ctx);
+        let (sent, received) = crossbeam_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            let result = scantxoutset(&worker_ctx, &json!(["start", []]));
+            sent.send(result)
+                .unwrap_or_else(|error| panic!("send scan result: {error}"));
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ctx.chain.utxo.scan_progress().is_none() {
+            assert!(std::time::Instant::now() < deadline, "scan never reserved");
+            std::thread::yield_now();
+        }
+        assert!(ctx.chain.utxo.abort_scan());
+        let result = received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap_or_else(|error| panic!("abort blocked behind transition: {error}"))
+            .unwrap_or_else(|error| panic!("cancel response: {error}"));
+        assert_eq!(result["success"].as_bool(), Some(false));
+        assert_eq!(result["txouts"].as_u64(), Some(0));
+        drop(held);
+        worker.join().unwrap_or_else(|_| panic!("worker panicked"));
+        assert_eq!(ctx.chain.utxo.scan_progress(), None);
+    }
+
+    #[test]
+    fn scan_projection_uses_retained_branch_after_tip_changes() {
+        let ctx = Context::new();
+        let tip = TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 3,
+            chainwork: ChainWork::ZERO,
+            hash: test_txid(300),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        };
+        ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
+        let applied = ctx.chain.applied_view();
+        let script = burn_p2pkh_script();
+        let scan = bitcoin_rs_utxo::UtxoScan {
+            txouts: 1,
+            unspents: vec![bitcoin_rs_utxo::UtxoCoin {
+                outpoint: OutPoint::new(test_txid(301).into(), 0),
+                txout: TxOut {
+                    value: Amount::from_sat(7),
+                    script_pubkey: script.clone().into(),
+                },
+                coinbase: false,
+                height: 3,
+            }],
+        };
+        let mut changed = tip.clone();
+        changed.hash = test_txid(302);
+        ctx.chain.applied_tip.store(Some(Arc::new(changed)));
+        let descs = std::collections::BTreeMap::from([(script, "original descriptor".into())]);
+        let hashes = scan_ancestry(&ctx, &scan, &applied, || Ok(false), 1)
+            .unwrap_or_else(|error| panic!("ancestry: {error}"))
+            .unwrap_or_else(|| panic!("unexpected cancellation"));
+        let (unspents, _, _) =
+            scan_unspents(&scan, &descs, &hashes, applied.height(), || Ok(false))
+                .unwrap_or_else(|error| panic!("retained view: {error}"));
+        assert_eq!(unspents[0].block_hash, tip.hash.to_string());
+    }
+
+    fn stale_branch_fixture()
+    -> anyhow::Result<(Context, AppliedView, bitcoin_rs_utxo::UtxoScan, Hash256)> {
+        let ctx = Context::new();
+        let (old, new, expected) = {
+            let mut tree = ctx.chain.block_tree.write();
+            let genesis = Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 1_000_000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            };
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let mut parent = genesis_id;
+            let mut expected = Hash256::default();
+            for height in 1..=300 {
+                let header = Header {
+                    prev_blockhash: BlockHash::from(tree.node(parent)?.hash),
+                    time: 1_000_000 + height,
+                    nonce: height,
+                    ..genesis
+                };
+                parent = tree.insert_node(Some(parent), header, NodeStatus::Active)?;
+                if height == 1 {
+                    expected = tree.node(parent)?.hash;
+                }
+            }
+            let old = tree
+                .tip()
+                .ok_or_else(|| anyhow::anyhow!("missing old tip"))?;
+            parent = genesis_id;
+            for height in 1..=301 {
+                let header = Header {
+                    prev_blockhash: BlockHash::from(tree.node(parent)?.hash),
+                    time: 1_000_000 + height,
+                    nonce: 1000 + height,
+                    ..genesis
+                };
+                parent = tree.insert_node(Some(parent), header, NodeStatus::Active)?;
+            }
+            let new = tree
+                .tip()
+                .ok_or_else(|| anyhow::anyhow!("missing new tip"))?;
+            (old, new, expected)
+        };
+        ctx.chain.applied_tip.store(Some(old));
+        let applied = ctx.chain.applied_view();
+        ctx.chain.applied_tip.store(Some(new));
+        let scan = bitcoin_rs_utxo::UtxoScan {
+            txouts: 100,
+            unspents: (0..100)
+                .map(|index| bitcoin_rs_utxo::UtxoCoin {
+                    outpoint: OutPoint::new(test_txid(index).into(), 0),
+                    txout: TxOut {
+                        value: Amount::from_sat(7),
+                        script_pubkey: vec![0x51].into(),
+                    },
+                    height: 1,
+                    coinbase: false,
+                })
+                .collect(),
+        };
+        Ok((ctx, applied, scan, expected))
+    }
+
+    #[test]
+    fn scan_stale_ancestry_walk_is_shared_bounded_and_cancellable() -> anyhow::Result<()> {
+        let (ctx, applied, scan, expected) = stale_branch_fixture()?;
+        let checks = std::cell::Cell::new(0);
+        let hashes = scan_ancestry(
+            &ctx,
+            &scan,
+            &applied,
+            || {
+                checks.set(checks.get() + 1);
+                Ok(false)
+            },
+            301,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("unexpected abort"))?;
+        assert_eq!(
+            hashes.len(),
+            1,
+            "only requested distinct heights are retained"
+        );
+        assert_eq!(hashes.get(&1), Some(&expected));
+        assert!(
+            checks.get() < 10,
+            "duplicates must not repeat the ancestry walk"
+        );
+        assert!(matches!(
+            scan_ancestry(&ctx, &scan, &applied, || Ok(false), 100),
+            Err(RpcError::Misc(_))
+        ));
+        checks.set(0);
+        assert!(
+            scan_ancestry(
+                &ctx,
+                &scan,
+                &applied,
+                || {
+                    checks.set(checks.get() + 1);
+                    Ok(checks.get() == 3)
+                },
+                301
+            )?
+            .is_none(),
+            "abort during an old-branch walk"
+        );
+        checks.set(0);
+        assert!(
+            scan_ancestry(
+                &ctx,
+                &scan,
+                &applied,
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 3 {
+                        Err(RpcError::Misc("deadline reached".into()))
+                    } else {
+                        Ok(false)
+                    }
+                },
+                301
+            )
+            .is_err(),
+            "deadline errors must survive ancestry projection"
+        );
+        let held = ctx.chain.block_tree.write();
+        checks.set(0);
+        assert!(
+            scan_ancestry(
+                &ctx,
+                &scan,
+                &applied,
+                || {
+                    checks.set(checks.get() + 1);
+                    Ok(checks.get() == 2)
+                },
+                301
+            )?
+            .is_none(),
+            "abort while waiting for the tree writer"
+        );
+        drop(held);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_projection_abort_totals_only_the_completed_prefix() -> anyhow::Result<()> {
+        let (ctx, applied, scan, expected) = stale_branch_fixture()?;
+        let hashes = std::collections::BTreeMap::from([(1, expected)]);
+        let descs = std::collections::BTreeMap::from([(vec![0x51], "raw(51)#8lvh9jxk".into())]);
+        let checks = std::cell::Cell::new(0);
+        let (unspents, amount, complete) =
+            scan_unspents(&scan, &descs, &hashes, applied.height(), || {
+                checks.set(checks.get() + 1);
+                Ok(checks.get() == 2)
+            })?;
+        assert!(!complete);
+        assert_eq!(unspents.len(), 1);
+        assert_eq!(amount, 7);
+        assert_eq!(unspents[0].block_hash, expected.to_string());
+        assert_ne!(
+            ctx.chain.applied_hash(),
+            applied.hash(ctx.chain.chain_network)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scan_descriptor_limits_and_public_fixed_forms() {
+        let ctx = Arc::new(Context::new());
+        let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        for desc in [
+            "raw(51)".to_string(),
+            format!("pkh({key})"),
+            format!("wpkh({key})"),
+            format!("sh(wpkh({key}))"),
+            format!("tr({key})"),
+        ] {
+            assert!(scantxoutset(&ctx, &json!(["start", [desc]])).is_ok());
+        }
+        for range in [
+            json!(-1),
+            json!([-1, 1]),
+            json!([2, 1]),
+            json!(2_147_483_648u64),
+            json!([0, 1_000_000]),
+        ] {
+            assert_eq!(
+                scantxoutset(&ctx, &json!(["start", [{"desc":"raw(51)","range":range}]]))
+                    .err()
+                    .unwrap_or_else(|| panic!("range refused"))
+                    .code(),
+                -8
+            );
+        }
+        let descriptors = vec!["raw(51)"; bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS + 1];
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["start", descriptors]))
+                .err()
+                .unwrap_or_else(|| panic!("count bound"))
+                .code(),
+            -8
+        );
+        let secret = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["start", [format!("wpkh({secret}/0)")]]))
+                .err()
+                .unwrap_or_else(|| panic!("private descriptor refused"))
+                .code(),
+            -5
+        );
+        let repeated = vec![format!("raw({})", "51".repeat(550)); 1024];
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["start", repeated]))
+                .err()
+                .unwrap_or_else(|| panic!("aggregate bytes bounded before scan"))
+                .code(),
+            -8
+        );
+        let oversized = format!("raw({})", "51".repeat(MAX_SCAN_DESCRIPTOR_BYTES));
+        assert_eq!(
+            scantxoutset(&ctx, &json!(["start", [oversized]]))
+                .err()
+                .unwrap_or_else(|| panic!("byte bound"))
+                .code(),
+            -8
+        );
     }
 
     #[test]

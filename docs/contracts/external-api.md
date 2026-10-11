@@ -83,6 +83,48 @@
   invalid encodings, wrappers, descriptor checksums, parameters, network
   addresses, and shared RPC/REST/UTXO projections.
 
+### `API-34`: Bounded public-descriptor UTXO scans
+
+- `scantxoutset` accepts strings and `{desc, range}` objects with optional
+  verified checksums. Public fixed `addr`, `raw`, `pkh`, `wpkh`, `sh(wpkh)`
+  and key-only `tr` are supported. Private keys, wildcard/multipath expansion,
+  Taproot trees and other descriptors are refused; these are explicit Core
+  deviations. A valid range on a fixed descriptor is checked and ignored.
+- One transient reservation belongs to the authoritative `UtxoSet`. A second
+  start returns -8. Status is null when idle, otherwise approximate progress;
+  abort requests cancellation and returns whether a reservation exists.
+  Abort produces `success: false` with actual visited `txouts` and only fully
+  projected unspents; abort during ancestry resolution may leave these empty.
+  The amount sums only that projected prefix.
+  Errors and guard drop release the reservation; restart has no active scan.
+- Input limits are 1,024 descriptors, 16 KiB per descriptor, 1 MiB combined
+  descriptor bytes and 1 MiB of distinct scripts. The reservation has a
+  60-second deadline, checked while waiting for exclusion and every 256 coins
+  or shard boundary. Traversal permits at most 250 million coins, 10,000
+  matches and 8 MiB of matched script bytes; projection additionally caps
+  estimated JSON materialization at 16 MiB, including repeated descriptors.
+  Retained-branch ancestry resolves requested distinct heights in one walk
+  capped at 2 million nodes, with timed lock acquisition and cancellation
+  checks every 256 nodes; sorting and projection also recheck cancellation.
+  Limit failures return errors, never a complete/truncated success.
+- Script lookup uses one bounded set; duplicate scripts preserve the first
+  descriptor's inferred attribution. Unspents follow Core outpoint order.
+  `raw` and `addr` use shared script descriptor inference; public key
+  descriptors retain specialized key/origin data and checksums.
+- The applied publication and UTXO view are captured under the existing
+  chain-transition read exclusion. Coin creation hashes and confirmations use
+  that retained publication even if a reorg happens during projection.
+  Missing ancestry is unavailable, never a fabricated hash. This bounded read
+  blocks chain transitions; it is not Core's independently retained DB cursor.
+- Active traversal observes the shared RPC shutdown lifecycle. Blocking scan
+  starts share the server's bounded blocking-operation admission; status and
+  abort remain ordinary requests. No second HTTP worker pool or scan index is
+  introduced.
+- Evidence owners: UTXO scan unit tests, RPC `scantxoutset_tests`, and
+  `e2e/tests/scantxoutset.rs`, which runs the pinned unmodified Core
+  process and retains exact request/reply comparisons in process evidence.
+  The presence of these tests is not itself a successful execution claim.
+
 ### `API-03`: REST dialect
 
 
