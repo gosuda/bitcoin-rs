@@ -496,16 +496,10 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   the snapshot archive, then replays the certified foreground suffix to the head.
   A checkpoint remains an accelerator, including after finalized history is pruned.
   Activation detaches the old checkpoint journal; anchored recovery does not replay
-  that journal across the snapshot jump. Node activation fences mempool admission
-  and refuses a nonempty mempool before invoking the manager; refusal settles the
-  fence without changing transactions, fee deltas, or lifecycle state. Successful
-  activation preserves fee prioritisation, fee history, and orphan residency,
-  invalidates the chain-bound reject cache, and schedules each resident orphan
-  once through the existing ready queue. Its normal retry driver can admit
-  newly funded transactions after the generation fence settles. Existing
-  queued identities are coalesced; no new queue or timer is introduced. Index
-  and mining consumers are woken without manufacturing
-  per-block ZMQ events for imported history. Historical undo makes below-base reorgs
+  that journal across the snapshot jump. Node-owned mempool reconciliation follows
+  [MPL-04](mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
+  Activation wakes index/mining consumers without emitting per-block ZMQ events
+  for imported history. Historical undo makes below-base reorgs
   possible after finalization; crossing below the base removes the snapshot anchor
   in the disconnect's authoritative batch.
 

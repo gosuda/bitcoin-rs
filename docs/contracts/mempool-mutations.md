@@ -111,8 +111,9 @@ state (`crates/mempool/src/orphan.rs`).
   work. No retry claim is consumed while the generation is odd; after settlement,
   the normal retry driver checks the current coins, policy and announcer before
   admission. Still-missing entries remain held without self-rescheduling. This
-  snapshot-wide wakeup is native policy; Core's tip notification only resets its
-  rejection filters. Activation emits no fabricated transaction removals. Neither
+  snapshot-wide wakeup is native policy;
+  [Core 31.1's tip notification](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/node/txdownloadman_impl.cpp#L92-L109)
+  only resets rejection filters. Activation emits no fabricated transaction removals. Neither
   snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,
