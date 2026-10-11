@@ -164,11 +164,87 @@ pub trait PruneService: Send + Sync {
 
 /// Node-owned control plane for consensus-affecting chain RPCs.
 pub trait ChainControl: Send + Sync {
+    /// Imports a Core snapshot through the node's fenced activation boundary.
+    /// Existing implementors may omit this optional capability.
+    fn load_txoutset(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<SnapshotImport, SnapshotControlError> {
+        Err(SnapshotControlError::Unavailable(
+            "snapshot import is not attached to this chain control".to_owned(),
+        ))
+    }
+
+    /// Reads one coherent view of the existing active and historical roles.
+    /// Existing implementors may omit this optional capability.
+    fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
+        Err(SnapshotControlError::Unavailable(
+            "chainstate lifecycle is not attached to this chain control".to_owned(),
+        ))
+    }
+
     /// Invalidates a block and descendants and selects the best remaining chain.
     fn invalidate_block(
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<(), ChainControlError>;
+}
+
+/// A completed, durable Core snapshot activation.
+#[derive(Debug, serde::Serialize)]
+pub struct SnapshotImport {
+    /// Number of unspent outputs loaded, not transaction records.
+    pub coins_loaded: u64,
+    /// Pinned base block hash in RPC display order.
+    pub tip_hash: String,
+    /// Compiled base height.
+    pub base_height: u32,
+    /// UTF-8 display of the absolute input path, rendered before activation.
+    /// Non-UTF-8 filesystem bytes are replaced for JSON output only.
+    pub path: String,
+}
+
+/// Coherent lifecycle projection supplied by the chainstate owner.
+#[derive(Debug, serde::Serialize)]
+pub struct ChainstatesInfo {
+    /// Best known header height.
+    pub headers: u32,
+    /// Historical role first, active role last.
+    pub chainstates: Vec<ChainstateInfo>,
+}
+
+/// One chainstate's current lifecycle facts.
+#[derive(Debug, serde::Serialize)]
+pub struct ChainstateInfo {
+    /// Applied block height.
+    pub blocks: u32,
+    /// Applied block hash in RPC display order.
+    pub bestblockhash: String,
+    /// Transaction-based estimate; unavailable counts are omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verificationprogress: Option<f64>,
+    /// Pinned base for a snapshot-derived active role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_blockhash: Option<String>,
+    /// Whether these coins have been verified from genesis.
+    pub validated: bool,
+}
+
+/// Categorized error at the RPC-to-node snapshot boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotControlError {
+    /// Input path cannot be opened or is not a regular file.
+    #[error("{0}")]
+    File(String),
+    /// The file or its compiled trust anchor was rejected before activation.
+    #[error("{0}")]
+    Invalid(String),
+    /// The lifecycle cannot accept this request at present.
+    #[error("{0}")]
+    Unavailable(String),
+    /// Activation, persistence, or post-commit consumer settlement failed.
+    #[error("{0}")]
+    Failed(String),
 }
 
 /// Failure from a node-owned chain mutation.

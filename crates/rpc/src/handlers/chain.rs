@@ -88,6 +88,62 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     Ok(response)
 }
 
+/// Keep transport mapping at the RPC boundary; the node retains typed causes.
+fn snapshot_error(error: crate::context::SnapshotControlError) -> RpcError {
+    use crate::context::SnapshotControlError;
+    match error {
+        SnapshotControlError::File(message) => RpcError::InvalidParameter(message),
+        SnapshotControlError::Invalid(message) => RpcError::Deserialization(message),
+        SnapshotControlError::Unavailable(message) | SnapshotControlError::Failed(message) => {
+            RpcError::Internal(message)
+        }
+    }
+}
+
+pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let path = if let Some(object) = params.as_object() {
+        if object.len() != 1 || !object.contains_key(&"path") {
+            return Err(RpcError::InvalidParams(
+                "loadtxoutset requires only the named path parameter",
+            ));
+        }
+        object
+            .get(&"path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::InvalidType("path must be a string".to_owned()))?
+    } else {
+        let values = params_array(params)?;
+        if values.len() != 1 {
+            return Err(RpcError::InvalidParams(
+                "loadtxoutset requires a snapshot path",
+            ));
+        }
+        required_str(params, 0, "path")?
+    };
+    let control = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .ok_or_else(|| RpcError::Internal("snapshot control unavailable".to_owned()))?;
+    typed_to_sonic(
+        &control
+            .load_txoutset(std::path::Path::new(path))
+            .map_err(snapshot_error)?,
+    )
+}
+
+pub(crate) fn getchainstates(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    if !params.as_object().is_some_and(sonic_rs::Object::is_empty) {
+        ensure_no_params(params)?;
+    }
+    let control = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .ok_or_else(|| RpcError::Internal("chainstate lifecycle unavailable".to_owned()))?;
+    typed_to_sonic(&control.chainstates().map_err(snapshot_error)?)
+}
+
 pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let difficulty = {

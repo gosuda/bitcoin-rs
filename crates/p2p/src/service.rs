@@ -1544,7 +1544,7 @@ fn park_automatic_dial(
 // One census preserves all automatic ready roles for recovery. Active peer
 // timestamps are not refreshed while connected to prevent topology leakage;
 // only disconnect updates full-relay timestamps in the book.
-fn ready_address_count(peer_table: &crate::PeerTable) -> usize {
+fn ready_address_count(peer_table: &crate::PeerTable, book: &crate::addrman::AddressBook) -> usize {
     peer_table
         .sessions()
         .into_iter()
@@ -1686,7 +1686,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let ready_count = ready_address_count(&maintenance.peer_table);
+        let ready_count = ready_address_count(&maintenance.peer_table, &maintenance.address_book);
         if maintenance.network_active.load(Ordering::Acquire) {
             if !anchors_taken && maintenance.block_slots > 0 {
                 anchors = maintenance.address_book.take_restart_anchors(now).into();
@@ -2511,7 +2511,15 @@ mod tests {
             };
             assert!(table.publish_info(addr, &lease, info));
         }
-        assert_eq!(ready_address_count(&table), 2);
+        assert_eq!(ready_address_count(&table, &book), 2);
+        assert!(book.queued_feeler(block));
+        assert_eq!(
+            ready_address_count(&table, &book),
+            1,
+            "exclude ready feelers"
+        );
+        book.reject_queued(block, true);
+        assert_eq!(ready_address_count(&table, &book), 2);
         let response = book.gossip(10_000);
         for (addr, expected) in [(full, 5000), (block, 5000)] {
             let timestamp = response
@@ -2558,7 +2566,7 @@ mod tests {
         let probe_lease = register_ready_block_peer(&table, probe);
         assert!(!count_address_failure(&table, 125, &book));
         assert!(count_address_failure(&table, 2, &book));
-        assert_eq!(refresh_ready_addresses(&book, &table, 10_000), 0);
+        assert_eq!(ready_address_count(&table, &book), 0);
         assert_eq!(anchor_peers(&table, &book), Vec::<SocketAddr>::new());
         table.remove_current(probe, &probe_lease);
         book.unqueue(probe);

@@ -3307,7 +3307,7 @@ mod writer_shutdown_tests {
                 crossbeam_channel::unbounded().0,
                 crossbeam_channel::unbounded().0,
             );
-            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
             book.learn_dns("seed", &[peer_addr], 5000);
             shared.address_book = Some(Arc::clone(&book));
 

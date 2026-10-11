@@ -215,6 +215,38 @@ impl DerivedIndexQueryEngine {
         Ok(ScriptIndexSnapshot { history, funding })
     }
 
+    pub(super) fn confirmed_history_for(
+        &self,
+        snapshot: &dyn TxIndexSnapshot,
+        tip: &TipSnapshot,
+        budget: &mut QueryBudget,
+        scripthash: ScriptHash,
+        floor: u32,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        if floor > 0 {
+            return Err(TxQueryError::Unavailable(
+                format!("script history coverage starts at height {floor}; history cannot be proven complete").into(),
+            ));
+        }
+        let funding_outputs = self.funding_outputs_for(snapshot, tip, budget, scripthash)?;
+
+        let mut history = Vec::with_capacity(funding_outputs.len());
+        for (txid, vout, _value, height) in funding_outputs {
+            history.push(ScriptHistoryRecord { txid, height });
+            let outpoint = OutPoint { txid, vout };
+            if let Some(spender) = self.spender_for(snapshot, tip, budget, &outpoint, floor)? {
+                history.push(ScriptHistoryRecord {
+                    txid: spender.txid,
+                    height: spender.height,
+                });
+            }
+        }
+
+        history.sort_by(|a, b| a.height.cmp(&b.height).then_with(|| a.txid.cmp(&b.txid)));
+        history.dedup_by(|a, b| a.txid == b.txid && a.height == b.height);
+        Ok(history)
+    }
+
     pub(super) fn unspent_outputs_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
