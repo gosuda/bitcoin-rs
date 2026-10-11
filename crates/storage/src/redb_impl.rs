@@ -404,7 +404,7 @@ impl RedbTxIndexStore {
                 let table = write_txn.open_table(old).map_err(StorageError::backend)?;
                 if !table.is_empty().map_err(StorageError::backend)? {
                     return Err(StorageError::InvalidOperation(
-                        "non-empty 44-byte ScriptLive table; rebuild the derived index in a separately named directory".into(),
+                        "non-empty 44-byte ScriptLive table; rebuild the derived index in a separately named directory",
                     ));
                 }
                 drop(table);
