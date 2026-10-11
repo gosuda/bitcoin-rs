@@ -144,7 +144,9 @@ pub enum AssumeUtxoError {
     ActivationBehindTip,
     /// Snapshot activation cannot replace an unsettled durable/applied chain view.
     #[error(
-        "snapshot activation requires matching tip (hash, height, transaction count): durable {durable_tip:?}, applied {applied_tip:?}"
+        "snapshot activation requires matching tip (hash, height, transaction count): durable {}, applied {}",
+        durable_tip.map_or_else(|| "<none>".to_owned(), |(hash, height, count)| format!("({hash}, {height}, {count})")),
+        applied_tip.map_or_else(|| "<none>".to_owned(), |(hash, height, count)| format!("({hash}, {height}, {count})"))
     )]
     SnapshotTipNotSettled {
         /// Durable tip's hash, height and cumulative transaction count, if present.

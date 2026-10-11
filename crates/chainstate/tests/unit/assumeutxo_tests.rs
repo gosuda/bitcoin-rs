@@ -281,9 +281,21 @@ fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>
 fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResult {
     let fixture = Fixture::new()?;
     let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
-    // Prepare the verified candidate while its base is still the selected
-    // best header. Final admission must use the later authoritative tree.
+    // Authenticate the candidate before changing header selection. Invoke the
+    // final installation owner directly so a manager-only precheck cannot
+    // replace its guarded best-header admission rule.
     let loaded = fixture.load()?;
+    assert_eq!(
+        (loaded.tip_hash, loaded.height),
+        (fixture.pinned.block_hash, fixture.pinned.height)
+    );
+    let (commitment, verified_stats) = loaded.set.with_stable_view(|view| {
+        Ok::<_, bitcoin_rs_utxo::UtxoError>((
+            view.hash_serialized_3_at_height(fixture.pinned.height)?,
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
+        ))
+    })?;
+    assert_eq!(commitment, fixture.pinned.hash_serialized);
     let fork = competing_snapshot_headers()?;
     let fork_root = {
         let mut tree = fixture.active.block_tree.write();
@@ -301,7 +313,14 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     };
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+    let persisted = AtomicBool::new(false);
+    let result =
+        fixture
+            .active
+            .install_snapshot(loaded.set, verified_stats, &fixture.pinned, |_, _, _| {
+                persisted.store(true, Ordering::Relaxed);
+                Ok(())
+            });
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -312,6 +331,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
             && base_height == fixture.pinned.height
             && best == fork[2].block_hash().0
     ));
+    assert!(!persisted.load(Ordering::Relaxed));
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(manager.historical_chainstate().is_none());
     assert!(fixture.head.load()?.is_none());
