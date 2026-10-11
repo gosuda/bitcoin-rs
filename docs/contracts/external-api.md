@@ -623,13 +623,21 @@ its lifecycle-protected admission recheck before activation.
 Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
 cleanup does not reset the accepted head or modify source artifact contents.
 
-The node enters the existing mempool generation fence, activates through
-`AssumeUtxoManager`, and reconciles the block log, index, mining, and mempool
+The node enters the existing mempool generation fence and refuses activation
+while transactions remain in the mempool. Refusal settles the fence and preserves
+those transactions, fee deltas, and chainstate. With an empty pool, it activates
+through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
 consumers. Successful return certifies the durable snapshot anchor and consumer
 settlement. Settlement failure closes admission for recovery and is an error,
-even if the anchor committed. Headers through the base must already be known;
-repeated activation, missing headers, an existing full-revalidation requirement,
-and a base behind the durable tip are rejected. Existing native v4 checkpoints
+even if the anchor committed. Headers through the base must already be known.
+The installation boundary, under chain-transition exclusion, rejects an invalid
+base or a base outside the current best-work header ancestry before publishing
+the lifecycle record. Repeated activation, missing headers, an existing
+full-revalidation requirement, and a base without strictly greater cumulative
+work than the settled active tip are also rejected. Height alone does not rank
+competing branches. Equal work is refused; the native header tree does not
+model Core's block-availability sequence/pointer tie-breaker, so this condition
+is not full Core comparator parity. Existing native v4 checkpoints
 remain internal recovery artifacts and are not accepted by this RPC.
 
 The result contains `coins_loaded` (unspent **outputs**, not txid records),

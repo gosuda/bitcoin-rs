@@ -75,6 +75,51 @@ fn activate(
 }
 
 #[test]
+fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let committed = {
+        let mut fixture = snapshot_work_fixture(1, 0x2000_ffff, 2, 0x207f_ffff)?;
+        let prior = fixture
+            .active
+            .durable_head
+            .load()?
+            .ok_or("prior head missing")?;
+        let store = Arc::new(FjallStore::open(dir.path())?);
+        let head = Arc::new(KvDurableHeadStore::new(store));
+        head.commit(None, &prior, &CommitRecords::default())?;
+        Arc::get_mut(&mut fixture.active)
+            .ok_or("shared fixture")?
+            .durable_head = head.clone();
+        // The unequal-work header fixture intentionally bypasses regtest's
+        // contextual difficulty rule. Test the real durable commit/reopen
+        // boundary only; do not claim these headers pass node recovery.
+        let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+        fixture.activate(&manager)?;
+        let next = head.load()?.ok_or("snapshot commit missing")?;
+        assert!(next.height < prior.height);
+        assert_eq!(next.commit_id, prior.commit_id + 1);
+        assert_eq!(next.tip, fixture.pinned.block_hash);
+        assert_eq!(next.chain_tx_count, fixture.pinned.chain_tx_count);
+        assert_eq!(
+            fixture
+                .active
+                .applied_tip_snapshot()
+                .ok_or("applied tip missing")?
+                .hash,
+            next.tip
+        );
+        assert!(
+            matches!(next.assumeutxo, AssumeUtxoDiskStatus::Validating { base_height, base_hash, .. }
+            if base_height == next.height && base_hash == next.tip)
+        );
+        next
+    };
+    let reopened = KvDurableHeadStore::new(Arc::new(FjallStore::open(dir.path())?));
+    assert_eq!(reopened.load()?, Some(committed));
+    Ok(())
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "One datadir must survive the complete activation, convergence, reorg and restart sequence"

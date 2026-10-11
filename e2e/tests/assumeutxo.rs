@@ -6,10 +6,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use bitcoin::Block;
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hex::FromHex as _;
-use bitcoin_rs_e2e::helpers::funding_address;
+use bitcoin::{Block, Witness};
+use bitcoin_rs_e2e::helpers::{
+    funding_address, funding_output, grind_pow, mempool_txids, op_true_script, spend_anyone,
+};
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use serde_json::{Value, json};
@@ -337,6 +339,184 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
     assert!(Path::new(imported.str_field("path")?).is_absolute());
     reject(&mut node, &snapshot, -32603)?;
     node.stop()
+}
+
+fn ordinary_chainstate(node: &mut ProcessNode) -> Result<Value> {
+    let view = states(node)?;
+    assert_eq!(view["chainstates"].as_array().unwrap().len(), 1, "{view}");
+    let active = &view["chainstates"][0];
+    assert_eq!(active["validated"], true, "{view}");
+    assert!(active["snapshot_blockhash"].is_null(), "{view}");
+    Ok(json!({
+        "headers": view["headers"],
+        "blocks": active["blocks"],
+        "bestblockhash": active["bestblockhash"],
+    }))
+}
+
+/// The pinned base must belong to the best header chain, even while all
+/// competing bodies are deliberately withheld. Restoring that ancestry must
+/// allow a retry in the same process, without a failed-import lifecycle left over.
+#[test]
+fn snapshot_base_must_belong_to_best_header_chain() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    // A different height-200 header and its child beat the pinned branch.
+    // These are header-only candidates: valid PoW and timestamps are checked
+    // by both daemons; no corresponding block body is offered.
+    let mut fork = blocks[199].header;
+    fork.time += 1;
+    fork.nonce = 0;
+    grind_pow(&mut fork)?;
+    assert_ne!(fork.block_hash().to_string(), BASE);
+    let mut fork_child = fork;
+    fork_child.prev_blockhash = fork.block_hash();
+    fork_child.time += 1;
+    fork_child.nonce = 0;
+    grind_pow(&mut fork_child)?;
+
+    let mut extension = blocks[199].header;
+    extension.prev_blockhash = blocks[199].block_hash();
+    extension.time += 1;
+    extension.nonce = 0;
+    grind_pow(&mut extension)?;
+    let mut winner = extension;
+    winner.prev_blockhash = extension.block_hash();
+    winner.time += 1;
+    winner.nonce = 0;
+    grind_pow(&mut winner)?;
+
+    for kind in [Kind::Core, Kind::BitcoinRs] {
+        let mut node = ProcessNode::spawn(kind)?;
+        admit_headers(&mut node, &blocks)?;
+        for header in [&fork, &fork_child] {
+            assert!(
+                node.rpc("submitheader", &json!([serialize_hex(header)]))?
+                    .is_null()
+            );
+        }
+        let before = ordinary_chainstate(&mut node)?;
+        assert_eq!(before["headers"], 201);
+        reject(&mut node, &snapshot, -32603)?;
+        assert_eq!(ordinary_chainstate(&mut node)?, before);
+        assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
+        for header in [&extension, &winner] {
+            assert!(
+                node.rpc("submitheader", &json!([serialize_hex(header)]))?
+                    .is_null()
+            );
+        }
+        let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+        assert_eq!(imported["tip_hash"], BASE);
+        assert_eq!(imported["coins_loaded"], 200);
+        node.stop()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn invalidated_snapshot_base_cannot_activate() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    for kind in [Kind::Core, Kind::BitcoinRs] {
+        let mut node = ProcessNode::spawn(kind)?;
+        // Keep the surviving parent fully validated so invalidation does not
+        // also need to fetch missing historical bodies on the ordinary chain.
+        for block in &blocks[..199] {
+            assert!(
+                node.rpc("submitblock", &json!([serialize_hex(block)]))?
+                    .is_null()
+            );
+        }
+        admit_headers(&mut node, &blocks[199..])?;
+        assert!(node.rpc("invalidateblock", &json!([BASE]))?.is_null());
+        let before = ordinary_chainstate(&mut node)?;
+        reject(&mut node, &snapshot, -32603)?;
+        assert_eq!(ordinary_chainstate(&mut node)?, before);
+        assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
+        node.stop()?;
+    }
+    Ok(())
+}
+
+/// Refusing a nonempty pool must preserve the transaction and ordinary tip.
+/// Confirming it on a short active fork drains the pool while the original
+/// 200-header branch still wins, allowing an immediate import retry.
+#[test]
+fn nonempty_mempool_refuses_snapshot_without_losing_transaction() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    let (outpoint, prevout) = funding_output(&blocks[0].txdata[0])?;
+    let witness_script = op_true_script();
+    assert_eq!(prevout.script_pubkey, witness_script.to_p2wsh());
+    let mut spend = spend_anyone(outpoint, &prevout, 1_000);
+    spend.input[0].witness = Witness::from_slice(&[witness_script.as_bytes()]);
+    let txid = spend.compute_txid().to_string();
+    let mut confirmation: Option<Block> = None;
+    for kind in [Kind::Core, Kind::BitcoinRs] {
+        let mut node = ProcessNode::spawn(kind)?;
+        for block in &blocks[..101] {
+            assert!(
+                node.rpc("submitblock", &json!([serialize_hex(block)]))?
+                    .is_null()
+            );
+        }
+        admit_headers(&mut node, &blocks[101..])?;
+        assert_eq!(
+            node.rpc("sendrawtransaction", &json!([serialize_hex(&spend)]))?,
+            txid
+        );
+        assert_eq!(mempool_txids(&mut node)?, std::slice::from_ref(&txid));
+        let before = ordinary_chainstate(&mut node)?;
+        assert_eq!(before["blocks"], 101);
+        let reply = node.rpc_raw(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "loadtxoutset", "params": [snapshot]
+        }))?;
+        assert_eq!(reply["error"]["code"], -32603, "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("mempool"),
+            "{reply}"
+        );
+        assert_eq!(mempool_txids(&mut node)?, std::slice::from_ref(&txid));
+        assert_eq!(ordinary_chainstate(&mut node)?, before);
+        assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
+
+        if kind == Kind::Core {
+            let mined = node.rpc(
+                "generateblock",
+                &json!([funding_address()?.to_string(), [txid]]),
+            )?;
+            let raw = node.rpc("getblock", &json!([mined["hash"], 0]))?;
+            let bytes = Vec::<u8>::from_hex(raw.as_str().unwrap())
+                .map_err(|error| Error::Assertion(error.to_string()))?;
+            confirmation =
+                Some(deserialize(&bytes).map_err(|error| Error::Assertion(error.to_string()))?);
+        } else {
+            assert!(
+                node.rpc(
+                    "submitblock",
+                    &json!([serialize_hex(confirmation.as_ref().unwrap())])
+                )?
+                .is_null()
+            );
+        }
+        assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+        assert_eq!(ordinary_chainstate(&mut node)?["blocks"], 102);
+        let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+        assert_eq!(imported["tip_hash"], BASE);
+        assert_eq!(imported["coins_loaded"], 200);
+        node.stop()?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -139,9 +139,19 @@ pub enum HistoricalAdvance {
 /// Errors produced by `AssumeUTXO` management and validation.
 #[derive(Debug, thiserror::Error)]
 pub enum AssumeUtxoError {
-    /// A snapshot must advance a chainstate that has not reached its base.
-    #[error("snapshot base is not ahead of the active durable tip")]
+    /// The snapshot base must have strictly more accumulated work than the applied tip.
+    #[error("snapshot base does not have more accumulated work than the applied tip")]
     ActivationBehindTip,
+    /// Snapshot activation cannot replace an unsettled durable/applied chain view.
+    #[error(
+        "snapshot activation requires matching durable and applied tip hash, height and transaction count (durable {durable_tip:?}, applied {applied_tip:?})"
+    )]
+    SnapshotTipNotSettled {
+        /// Tip certified by the durable head, if present.
+        durable_tip: Option<Hash256>,
+        /// Tip describing the currently applied UTXO state, if present.
+        applied_tip: Option<Hash256>,
+    },
     /// Lifecycle transitions require a committed snapshot anchor.
     #[error("missing durable snapshot anchor")]
     MissingDurableAnchor,
@@ -164,6 +174,18 @@ pub enum AssumeUtxoError {
         expected: u32,
         /// Header height.
         found: u32,
+    },
+    /// The compiled snapshot base is outside the current best-work header ancestry.
+    #[error(
+        "snapshot base {base_hash} at height {base_height} is not on the best-work header chain ending at {best_header:?}"
+    )]
+    SnapshotBaseNotOnBestHeaderChain {
+        /// Compiled base whose snapshot would be installed.
+        base_hash: Hash256,
+        /// Compiled height at which the base must be on the selected ancestry.
+        base_height: u32,
+        /// Current best-work header tip, if one exists.
+        best_header: Option<Hash256>,
     },
     /// Historical validation must reproduce the pinned cumulative transaction count.
     #[error("historical transaction count {found} does not match pinned count {expected}")]
@@ -637,7 +659,7 @@ impl AssumeUtxoManager {
             crate::assumeutxo_snapshot::write_coins(dir, &set, pinned)?;
         }
         self.active_chainstate
-            .install_snapshot(set, stats, pinned, |tree, tip| {
+            .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 // Recheck under transition exclusion: disconnect/recovery may
                 // arm the sticky marker while the import is being verified.
                 if self
@@ -650,10 +672,6 @@ impl AssumeUtxoManager {
                 if let Some(dir) = &self.data_dir {
                     crate::assumeutxo_snapshot::write_headers(dir, tree, tip)?;
                 }
-                let prior = self.active_chainstate.durable_head.load()?;
-                if prior.is_some_and(|head| head.height >= pinned.height) {
-                    return Err(AssumeUtxoError::ActivationBehindTip);
-                }
                 let next = bitcoin_rs_storage::DurableHead {
                     assumeutxo: new_status,
                     commit_id: prior.map_or(1, |head| head.commit_id + 1),
@@ -664,7 +682,7 @@ impl AssumeUtxoManager {
                     undo_extent: prior.and_then(|head| head.undo_extent),
                 };
                 self.active_chainstate.durable_head.commit(
-                    prior.as_ref(),
+                    prior,
                     &next,
                     &bitcoin_rs_storage::CommitRecords::default(),
                 )?;

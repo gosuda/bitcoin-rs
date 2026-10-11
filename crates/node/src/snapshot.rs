@@ -37,6 +37,8 @@ pub(crate) enum SnapshotImportError {
     NotRegular,
     #[error("another snapshot import is in progress")]
     ImportInProgress,
+    #[error("snapshot activation requires an empty mempool")]
+    MempoolNotEmpty,
     #[error("snapshot input cannot be in the node's snapshot recovery namespace")]
     RecoveryInput,
     #[error("invalid Core snapshot: {0}")]
@@ -69,10 +71,12 @@ impl From<SnapshotImportError> for SnapshotControlError {
                 Self::Invalid(error.to_string())
             }
             SnapshotImportError::ImportInProgress
+            | SnapshotImportError::MempoolNotEmpty
             | SnapshotImportError::Activation(
                 AssumeUtxoError::AlreadyActive
                 | AssumeUtxoError::FullRevalidationRequired
                 | AssumeUtxoError::SnapshotHeaderMissing(_)
+                | AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain { .. }
                 | AssumeUtxoError::ActivationBehindTip,
             ) => Self::Unavailable(error.to_string()),
             _ => Self::Failed(error.to_string()),
@@ -186,6 +190,23 @@ impl SnapshotControl {
         height: u32,
     ) -> Result<(), SnapshotImportError> {
         let change = self.followers.begin_mempool_change()?;
+        // The generation fence serializes with in-flight admission and prevents
+        // new commits. Drop the pool read guard before costly activation work.
+        if self
+            .followers
+            .mempool_gateway()
+            .is_some_and(|gateway| !gateway.read().is_empty())
+        {
+            // A guard's Drop intentionally leaves admission closed. This is an
+            // operational refusal, so settle without invoking any consumers.
+            if let Some(change) = change
+                && let Err(error) = change.finish()
+            {
+                self.chainstate.fail_closed_for_recovery();
+                return Err(SnapshotImportError::Settlement(error));
+            }
+            return Err(SnapshotImportError::MempoolNotEmpty);
+        }
         let result = self.manager.activate_snapshot_state(set, base_hash, height);
         if result.is_ok()
             && let Err(error) = self.followers.on_snapshot(change.as_ref())
@@ -330,11 +351,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn native_embedding_contract_and_shared_import_budget() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn snapshot_inputs(dir: &Path) -> anyhow::Result<(crate::state::NodeState, PathBuf, PathBuf)> {
         let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
-        config.data_dir = dir.path().join("node");
+        config.data_dir = dir.join("node");
         config.p2p.listen.clear();
         let state = crate::state::NodeState::open(config, None)?;
         state.apply_block(&Network::Regtest.genesis_block())?;
@@ -351,7 +370,7 @@ mod tests {
             .collect::<anyhow::Result<Vec<bitcoin_rs_primitives::Header>>>()?;
         state.chainstate().admit_headers(&headers)?;
         let core_bytes = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
-        let core_path = dir.path().join("core.dat");
+        let core_path = dir.join("core.dat");
         std::fs::write(&core_path, core_bytes)?;
         let snapshot = read_and_verify(
             &mut core_bytes.as_slice(),
@@ -366,8 +385,17 @@ mod tests {
             &mut native,
             (),
         )?;
-        let native_path = dir.path().join("native.dat");
+        let native_path = dir.join("native.dat");
         std::fs::write(&native_path, &native)?;
+        Ok((state, core_path, native_path))
+    }
+
+    #[test]
+    fn native_embedding_contract_and_shared_import_budget() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+        let native = std::fs::read(&native_path)?;
+        let core_bytes = std::fs::read(&core_path)?;
         {
             let _permit = state.snapshots.import.lock();
             assert!(matches!(
@@ -396,6 +424,88 @@ mod tests {
         assert!(view.historical_chainstate.is_some());
         assert_eq!(std::fs::read(native_path)?, native);
         assert_eq!(std::fs::read(core_path)?, core_bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn nonempty_mempool_refuses_both_formats_without_changing_state() -> anyhow::Result<()> {
+        use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
+        use bitcoin_rs_primitives::{
+            Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
+
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+        let gateway = state.mempool_gateway();
+        let transaction = Arc::new(Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Network::Regtest.genesis_block().txs[0].txid(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: Script::from_bytes(vec![0x6a, 0x04, 0xaa, 0xbb, 0xcc, 0xdd]),
+            }],
+            lock_time: LockTime::ZERO,
+        });
+        // Stage membership through the existing test seam. The independent
+        // process case covers admission of a real spend on both implementations.
+        gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::clone(&transaction), 100, 1_000, 0, 0, 0),
+        )?;
+        gateway.prioritise(transaction.txid(), 123)?;
+        let before_tip = state.chainstate().applied_tip_snapshot();
+        let before_stats = state.chainstate().coin_stats_handle().snapshot();
+        let before_sequence = gateway.read().sequence_number();
+        let before_fees = gateway.prioritised_transactions();
+        let core_bytes = std::fs::read(&core_path)?;
+        let native_bytes = std::fs::read(&native_path)?;
+        for native in [false, true] {
+            let result = if native {
+                state.snapshots.import_native(&native_path)
+            } else {
+                state.snapshots.import(&core_path).map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(SnapshotImportError::MempoolNotEmpty)),
+                "a populated mempool must refuse snapshot activation"
+            );
+            assert!(gateway.read().contains_txid(&transaction.txid()));
+            assert_eq!(gateway.read().sequence_number(), before_sequence);
+            assert_eq!(gateway.prioritised_transactions(), before_fees);
+            assert!(
+                gateway.stable_generation().is_some(),
+                "refusal must settle its admission fence"
+            );
+            assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+            assert_eq!(
+                state.chainstate().coin_stats_handle().snapshot(),
+                before_stats
+            );
+            assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+            assert!(matches!(
+                state.snapshots.manager.status()?,
+                AssumeUtxoDiskStatus::Uninitialized
+            ));
+            assert!(!state.chainstate().is_closed_for_recovery());
+            assert!(!dir.path().join("node/assumeutxo").exists());
+            assert_eq!(std::fs::read(&core_path)?, core_bytes);
+            assert_eq!(std::fs::read(&native_path)?, native_bytes);
+        }
+        gateway.clear(AdmissionOrigin::Rpc);
+        state.snapshots.import(&core_path)?;
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.height),
+            Some(200)
+        );
+        assert!(gateway.stable_generation().is_some());
         Ok(())
     }
 }

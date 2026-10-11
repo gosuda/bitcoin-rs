@@ -643,42 +643,51 @@ impl Chainstate {
     ///
     /// # Errors
     ///
-    /// Refuses missing or inconsistent base headers, closed admission, or a
-    /// lifecycle record that cannot be persisted.
+    /// Refuses missing, invalid, inconsistent or off-best-chain base headers,
+    /// closed admission, or a lifecycle record that cannot be persisted.
     fn install_snapshot(
         &self,
         snapshot_set: bitcoin_rs_utxo::UtxoSet,
         mut stats: bitcoin_rs_utxo::stats::CoinStats,
         pinned: &bitcoin_rs_primitives::AssumeUtxoData,
-        persist: impl FnOnce(&BlockTree, &TipSnapshot) -> Result<(), AssumeUtxoError>,
+        persist: impl FnOnce(
+            &BlockTree,
+            &TipSnapshot,
+            Option<&bitcoin_rs_storage::DurableHead>,
+        ) -> Result<(), AssumeUtxoError>,
     ) -> Result<(), AssumeUtxoError> {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
         let tree = self.block_tree.read();
-        let node_id = tree
-            .lookup(pinned.block_hash)
-            .ok_or(AssumeUtxoError::SnapshotHeaderMissing(pinned.block_hash))?;
-        let node = tree.node(node_id).map_err(ApplyError::from)?;
-        if node.height != pinned.height {
-            return Err(AssumeUtxoError::SnapshotHeaderHeightMismatch {
-                expected: pinned.height,
-                found: node.height,
+        let tip_snapshot = Self::snapshot_base_tip(&tree, pinned)?;
+        let prior = self.durable_head.load().inspect_err(|_| {
+            self.fail_closed_for_recovery();
+        })?;
+        let applied = self.applied_tip_snapshot();
+        if prior.map(|head| (head.tip, head.height, head.chain_tx_count))
+            != applied
+                .as_ref()
+                .map(|tip| (tip.hash, tip.height, tip.chain_tx_count.to_wire()))
+        {
+            self.fail_closed_for_recovery();
+            return Err(AssumeUtxoError::SnapshotTipNotSettled {
+                durable_tip: prior.map(|head| head.tip),
+                applied_tip: applied.as_ref().map(|tip| tip.hash),
             });
         }
-        let tip_snapshot = TipSnapshot {
-            tip_id: node_id,
-            height: pinned.height,
-            chainwork: node.chainwork,
-            hash: pinned.block_hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(pinned.chain_tx_count),
-        };
+        // Height cannot order unequal-difficulty forks. Require strictly
+        // greater base work; unlike Core's comparator this does not admit
+        // an equal-work alternative using block-arrival tie breakers.
+        if applied
+            .as_ref()
+            .is_some_and(|tip| tip_snapshot.chainwork <= tip.chainwork)
+        {
+            return Err(AssumeUtxoError::ActivationBehindTip);
+        }
         // All refusals precede publication. The transition stays held across the
         // lifecycle record and the whole coin/statistics/tip installation.
-        persist(&tree, &tip_snapshot).inspect_err(|error| {
-            if !matches!(
-                error,
-                AssumeUtxoError::ActivationBehindTip | AssumeUtxoError::FullRevalidationRequired
-            ) {
+        persist(&tree, &tip_snapshot, prior.as_ref()).inspect_err(|error| {
+            if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
                 self.fail_closed_for_recovery();
             }
         })?;
@@ -690,7 +699,7 @@ impl Chainstate {
         // This journal extends the old checkpoint, not the new snapshot root.
         // Snapshot recovery uses its immutable anchor and the certified suffix.
         *self.journal.write() = None;
-        tree.restore_chain_tx_count(node_id, tip_snapshot.chain_tx_count)
+        tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
             .inspect_err(|_| self.fail_closed_for_recovery())?;
         self.utxo.replace_from(snapshot_set);
@@ -707,6 +716,53 @@ impl Chainstate {
         };
 
         Ok(())
+    }
+
+    /// Resolves the pinned candidate against the header tree held by snapshot admission.
+    fn snapshot_base_tip(
+        tree: &BlockTree,
+        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+    ) -> Result<TipSnapshot, AssumeUtxoError> {
+        let node_id = tree
+            .lookup(pinned.block_hash)
+            .ok_or(AssumeUtxoError::SnapshotHeaderMissing(pinned.block_hash))?;
+        let node = tree.node(node_id).map_err(ApplyError::from)?;
+        if node.status == bitcoin_rs_chain::NodeStatus::Invalid {
+            return Err(
+                ApplyError::from(bitcoin_rs_chain::ChainError::KnownInvalidHeader {
+                    hash: pinned.block_hash,
+                })
+                .into(),
+            );
+        }
+        if node.height != pinned.height {
+            return Err(AssumeUtxoError::SnapshotHeaderHeightMismatch {
+                expected: pinned.height,
+                found: node.height,
+            });
+        }
+        // Core 31.1 ActivateSnapshot requires the base to belong to the
+        // best-work header ancestry. Recheck at the final commit boundary:
+        // header selection may have changed while the snapshot was verified.
+        let best_header = tree.tip();
+        if best_header
+            .as_ref()
+            .and_then(|tip| tree.node_at_height_from(tip.tip_id, pinned.height))
+            != Some(node_id)
+        {
+            return Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
+                base_hash: pinned.block_hash,
+                base_height: pinned.height,
+                best_header: best_header.as_ref().map(|tip| tip.hash),
+            });
+        }
+        Ok(TipSnapshot {
+            tip_id: node_id,
+            height: pinned.height,
+            chainwork: node.chainwork,
+            hash: pinned.block_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(pinned.chain_tx_count),
+        })
     }
 
     /// Constructs an isolated historical chainstate, optionally from a validated

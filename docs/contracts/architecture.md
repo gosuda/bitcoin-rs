@@ -392,7 +392,11 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   caller-supplied digests and snapshot trailers do not establish trust. This is Core's
   `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
   active tip; it is independently checked during historical finalization. The base
-  header must already exist at the pinned height. Coin statistics are rebuilt from
+  header must already exist at the pinned height, be valid, and be an ancestor
+  of the current best-work header tip. The installer rechecks these facts under
+  transition exclusion before the lifecycle commit. The snapshot base must carry
+  strictly more cumulative work than the settled active tip; height alone does
+  not order competing branches. Coin statistics are rebuilt from
   the imported coins, and the resolved header supplies chainwork. Installation and
   role changes serialize with chain transitions; failed validation publishes nothing.
 - **Compiled mainnet anchors and provenance**:
@@ -492,8 +496,10 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   the snapshot archive, then replays the certified foreground suffix to the head.
   A checkpoint remains an accelerator, including after finalized history is pruned.
   Activation detaches the old checkpoint journal; anchored recovery does not replay
-  that journal across the snapshot jump. Node activation fences mempool admission,
-  clears old transactions, and wakes index/mining consumers. It does not manufacture
+  that journal across the snapshot jump. Node activation fences mempool admission
+  and refuses a nonempty mempool before invoking the manager; refusal settles the
+  fence without changing transactions, fee deltas, or lifecycle state. Successful
+  activation clears stale empty-pool/orphan bookkeeping and wakes index/mining consumers. It does not manufacture
   per-block ZMQ events for imported history. Historical undo makes below-base reorgs
   possible after finalization; crossing below the base removes the snapshot anchor
   in the disconnect's authoritative batch.

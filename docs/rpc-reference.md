@@ -43,7 +43,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
 | `getchainstates` | 0.12.0 | Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. |
 | `getdeploymentinfo` | 0.12.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
-| `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented. |
+| `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented. |
 
 ### Implemented (unverified)
 

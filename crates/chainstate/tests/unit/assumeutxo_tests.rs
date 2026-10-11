@@ -212,6 +212,536 @@ fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult 
     Ok(())
 }
 
+// Core 31.1 ActivateSnapshot rejects an invalid base and any base outside
+// m_best_header's ancestry before making the snapshot chainstate active.
+#[test]
+fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResult {
+    for invalid_height in [2, 1] {
+        let fixture = Fixture::new()?;
+        {
+            let mut tree = fixture.active.block_tree.write();
+            let invalid = tree
+                .lookup(fixture.blocks[invalid_height].block_hash().0)
+                .ok_or("invalidated header missing")?;
+            tree.invalidate_subtree(invalid)?;
+            let base = tree
+                .node_by_hash(fixture.pinned.block_hash)
+                .ok_or("snapshot base missing")?;
+            assert_eq!(base.status, NodeStatus::Invalid);
+        }
+        let before_stats = fixture.active.coin_stats.snapshot();
+        let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
+        let persisted = AtomicBool::new(false);
+        let loaded = fixture.load()?;
+        let result = fixture.active.install_snapshot(
+            loaded.set,
+            fixture.stats.clone(),
+            &fixture.pinned,
+            |_, _, _| {
+                persisted.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(AssumeUtxoError::Apply(ApplyError::Chain(
+                bitcoin_rs_chain::ChainError::KnownInvalidHeader { hash }
+            ))) if hash == fixture.pinned.block_hash
+        ));
+        assert!(!persisted.load(Ordering::Relaxed));
+        assert!(fixture.head.load()?.is_none());
+        assert!(fixture.active.applied_tip_snapshot().is_none());
+        assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
+        assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
+        assert_eq!(
+            fixture.active.utxo.lock_stable_view().hash_serialized_3()?,
+            before_coins
+        );
+        assert!(!fixture.active.is_closed_for_recovery());
+    }
+    Ok(())
+}
+
+fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>> {
+    let mut parent = Network::Regtest.genesis_block().block_hash();
+    let mut fork = Vec::new();
+    for height in 1..=3 {
+        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at_time(
+            parent,
+            bitcoin_rs_chain::regtest_fixture::genesis_time() + 100 + height,
+            height,
+        )?;
+        parent = block.block_hash();
+        fork.push(block);
+    }
+    Ok(fork)
+}
+
+#[test]
+fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResult {
+    let fixture = Fixture::new()?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let fork = competing_snapshot_headers()?;
+    let fork_root = {
+        let mut tree = fixture.active.block_tree.write();
+        let root = tree.insert_header(fork[0].header, NodeStatus::HeaderValid)?;
+        for block in &fork[1..] {
+            tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+        }
+        let tip = tree.tip().ok_or("best header missing")?;
+        let base = tree
+            .node_by_hash(fixture.pinned.block_hash)
+            .ok_or("snapshot base missing")?;
+        assert!(tip.chainwork > base.chainwork);
+        assert_eq!(tip.hash, fork[2].block_hash().0);
+        root
+    };
+    let before_stats = fixture.active.coin_stats.snapshot();
+    let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
+    let loaded = fixture.load()?;
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+    assert!(matches!(
+        result,
+        Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
+            base_hash,
+            base_height,
+            best_header: Some(best),
+        }) if base_hash == fixture.pinned.block_hash
+            && base_height == fixture.pinned.height
+            && best == fork[2].block_hash().0
+    ));
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert!(manager.historical_chainstate().is_none());
+    assert!(fixture.head.load()?.is_none());
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
+    assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
+    assert_eq!(
+        fixture.active.utxo.lock_stable_view().hash_serialized_3()?,
+        before_coins
+    );
+    assert!(!fixture.active.is_closed_for_recovery());
+
+    // Invalidating the competing branch restores the pinned ancestry; an
+    // operational refusal must not poison the next legitimate activation.
+    fixture
+        .active
+        .block_tree
+        .write()
+        .invalidate_subtree(fork_root)?;
+    fixture.activate(&manager)?;
+    assert_eq!(
+        fixture
+            .active
+            .applied_tip_snapshot()
+            .ok_or("snapshot tip missing")?
+            .hash,
+        fixture.pinned.block_hash
+    );
+    assert!(fixture.active.role().is_assumed_active());
+    Ok(())
+}
+
+#[test]
+fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut harder = competing_snapshot_headers()?.remove(0);
+    // Tree-level work-order fixture: this harder declared target makes a
+    // shorter branch win. It does not claim regtest difficulty admission.
+    harder.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
+    harder.header.nonce = 0;
+    bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut harder)?;
+    {
+        let mut tree = fixture.active.block_tree.write();
+        tree.insert_header(harder.header, NodeStatus::HeaderValid)?;
+        let tip = tree.tip().ok_or("best header missing")?;
+        let base = tree
+            .node_by_hash(fixture.pinned.block_hash)
+            .ok_or("base missing")?;
+        assert!(tip.height < base.height);
+        assert!(tip.chainwork > base.chainwork);
+        assert_eq!(tip.hash, harder.block_hash().0);
+    }
+    let persisted = AtomicBool::new(false);
+    let loaded = fixture.load()?;
+    let result = fixture.active.install_snapshot(
+        loaded.set,
+        fixture.stats.clone(),
+        &fixture.pinned,
+        |_, _, _| {
+            persisted.store(true, Ordering::Relaxed);
+            Ok(())
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
+            base_hash,
+            base_height,
+            best_header: Some(best),
+        }) if base_hash == fixture.pinned.block_hash
+            && base_height == fixture.pinned.height
+            && best == harder.block_hash().0
+    ));
+    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(fixture.head.load()?.is_none());
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
+    assert!(!fixture.active.is_closed_for_recovery());
+    Ok(())
+}
+
+#[test]
+fn snapshot_rechecks_best_headers_after_waiting_for_transition() -> TestResult {
+    let fixture = Fixture::new()?;
+    let loaded = fixture.load()?;
+    let fork = competing_snapshot_headers()?;
+    let persisted = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| -> Result<_, Box<dyn std::error::Error>> {
+        let transition = fixture.active.chain_transition.lock();
+        assert_eq!(
+            fixture
+                .active
+                .block_tree
+                .read()
+                .tip()
+                .ok_or("best header missing")?
+                .hash,
+            fixture.pinned.block_hash
+        );
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let active = &fixture.active;
+        let pinned = &fixture.pinned;
+        let stats = fixture.stats.clone();
+        let persist_called = &persisted;
+        let worker = scope.spawn(move || {
+            let _ = sent.send(());
+            active.install_snapshot(loaded.set, stats, pinned, |_, _, _| {
+                persist_called.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+        });
+        received.recv_timeout(std::time::Duration::from_secs(5))?;
+        // The candidate was prepared against the pinned best tip. Change the
+        // header authority while its final transition admission is excluded.
+        {
+            let mut tree = fixture.active.block_tree.write();
+            for block in &fork {
+                tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+            }
+        }
+        assert!(!persisted.load(Ordering::Relaxed));
+        drop(transition);
+        worker.join().map_err(|_| "snapshot worker panicked".into())
+    })?;
+    assert!(matches!(
+        result,
+        Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
+            base_hash,
+            base_height,
+            best_header: Some(best),
+        }) if base_hash == fixture.pinned.block_hash
+            && base_height == fixture.pinned.height
+            && best == fork[2].block_hash().0
+    ));
+    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(fixture.head.load()?.is_none());
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
+    assert!(!fixture.active.is_closed_for_recovery());
+    Ok(())
+}
+
+#[test]
+fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult {
+    let fixture = Fixture::new()?;
+    let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        fixture.blocks[2].block_hash(),
+        3,
+    )?;
+    fixture
+        .active
+        .block_tree
+        .write()
+        .insert_header(child.header, NodeStatus::HeaderValid)?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    fixture.activate(&manager)?;
+    assert_eq!(
+        fixture
+            .active
+            .applied_tip_snapshot()
+            .ok_or("snapshot tip missing")?
+            .hash,
+        fixture.pinned.block_hash
+    );
+    assert_eq!(
+        fixture
+            .active
+            .block_tree
+            .read()
+            .tip()
+            .ok_or("best header missing")?
+            .hash,
+        child.block_hash().0
+    );
+    Ok(())
+}
+
+// These fixtures exercise the shared installation owner with unequal-work
+// forks. Coin contents come from ordinarily applied regtest blocks; changing
+// only the declared header target does not change their coinbase transactions.
+// Every replacement header meets its declared target, but this is not a claim
+// that regtest's fixed contextual difficulty would admit those replacements.
+fn snapshot_work_branch(
+    height: u32,
+    bits: u32,
+    time_offset: u32,
+) -> Result<(Vec<Block>, SnapshotLoad, CoinStats), Box<dyn std::error::Error>> {
+    let source = chainstate();
+    let mut blocks = vec![Network::Regtest.genesis_block()];
+    for next_height in 1..=height {
+        blocks.push(
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at_time(
+                blocks.last().ok_or("branch parent missing")?.block_hash(),
+                bitcoin_rs_chain::regtest_fixture::genesis_time() + time_offset + next_height,
+                next_height,
+            )?,
+        );
+    }
+    for block in &blocks {
+        source.begin_transition()?.connect(block, None)?;
+    }
+    for index in 1..blocks.len() {
+        blocks[index].header.prev_blockhash = blocks[index - 1].block_hash();
+        blocks[index].header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(bits);
+        blocks[index].header.nonce = 0;
+        bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut blocks[index])?;
+    }
+    let tip = blocks.last().ok_or("branch tip missing")?.block_hash().0;
+    let mut encoded = Vec::new();
+    write_snapshot_observed(&source.utxo, &tip, height, &mut encoded, ())?;
+    let loaded = read_snapshot_strict_v4(&mut Cursor::new(encoded))?;
+    Ok((blocks, loaded, source.coin_stats.snapshot()))
+}
+
+fn snapshot_work_fixture(
+    snapshot_height: u32,
+    snapshot_bits: u32,
+    applied_height: u32,
+    applied_bits: u32,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let (blocks, snapshot, stats) = snapshot_work_branch(snapshot_height, snapshot_bits, 0)?;
+    let (applied_blocks, mut applied, applied_stats) =
+        snapshot_work_branch(applied_height, applied_bits, 100)?;
+    let mut tree = bitcoin_rs_chain::BlockTree::new();
+    for block in blocks.iter().chain(applied_blocks.iter().skip(1)) {
+        tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    }
+    let applied_id = tree
+        .lookup(applied.tip_hash)
+        .ok_or("applied header missing")?;
+    tree.restore_chain_tx_count(
+        applied_id,
+        bitcoin_rs_chain::ChainTxCount::established(applied_stats.tx_count),
+    )?;
+    let applied_node = tree.node(applied_id)?;
+    let applied_tip = bitcoin_rs_chain::TipSnapshot {
+        tip_id: applied_id,
+        height: applied_node.height,
+        chainwork: applied_node.chainwork,
+        hash: applied_node.hash,
+        chain_tx_count: applied_node.chain_tx_count,
+    };
+    let coin_stats = Arc::new(CoinStatsListener::new(applied_stats));
+    applied.set.track_coin_stats((*coin_stats).clone());
+    let mut active = Chainstate::new(
+        Network::Regtest,
+        Arc::new(ArcSwapOption::new(tree.tip())),
+        Arc::new(ArcSwapOption::new(Some(Arc::new(applied_tip.clone())))),
+        Arc::new(RwLock::new(tree)),
+        Arc::new(applied.set),
+        coin_stats,
+        Arc::new(crate::events::ChainEventPublisher::detached(0)),
+    );
+    let head = Arc::new(FaultHead::default());
+    head.commit(
+        None,
+        &DurableHead {
+            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 17,
+            height: applied_tip.height,
+            tip: applied_tip.hash,
+            chain_tx_count: applied_tip.chain_tx_count.to_wire(),
+            body_extent: None,
+            undo_extent: None,
+        },
+        &CommitRecords::default(),
+    )?;
+    active.durable_head = head.clone();
+    let pinned = AssumeUtxoData {
+        height: snapshot.height,
+        block_hash: snapshot.tip_hash,
+        hash_serialized: snapshot.set.lock_stable_view().hash_serialized_3()?,
+        chain_tx_count: stats.tx_count,
+    };
+    let mut encoded = Vec::new();
+    write_snapshot_observed(
+        &snapshot.set,
+        &pinned.block_hash,
+        pinned.height,
+        &mut encoded,
+        (),
+    )?;
+    Ok(Fixture {
+        head,
+        active: Arc::new(active),
+        blocks,
+        pinned,
+        snapshot: encoded,
+        stats,
+    })
+}
+
+#[test]
+fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult {
+    let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x2000_ffff)?;
+    let before = fixture
+        .active
+        .applied_tip_snapshot()
+        .ok_or("applied tip missing")?;
+    let before_head = fixture.active.durable_head.load()?;
+    let before_stats = fixture.active.coin_stats.snapshot();
+    let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
+    let mut child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        fixture.blocks[2].block_hash(),
+        3,
+    )?;
+    child.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1f7f_ffff);
+    child.header.nonce = 0;
+    bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut child)?;
+    {
+        let mut tree = fixture.active.block_tree.write();
+        tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+        let best = tree.tip().ok_or("best header missing")?;
+        let base_id = tree
+            .lookup(fixture.pinned.block_hash)
+            .ok_or("base missing")?;
+        let base = tree.node(base_id)?;
+        assert!(base.height > before.height);
+        assert!(base.chainwork < before.chainwork);
+        assert!(best.chainwork > before.chainwork);
+        assert_eq!(
+            tree.node_at_height_from(best.tip_id, base.height),
+            Some(base_id)
+        );
+    }
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let loaded = fixture.load()?;
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+    assert!(matches!(result, Err(AssumeUtxoError::ActivationBehindTip)));
+    assert_eq!(fixture.active.durable_head.load()?, before_head);
+    assert_eq!(
+        fixture.active.applied_tip_snapshot().as_deref(),
+        Some(before.as_ref())
+    );
+    assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
+    assert_eq!(
+        fixture.active.utxo.lock_stable_view().hash_serialized_3()?,
+        before_coins
+    );
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert!(!fixture.active.is_closed_for_recovery());
+    Ok(())
+}
+
+#[test]
+fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
+    let fixture = snapshot_work_fixture(1, 0x2000_ffff, 2, 0x207f_ffff)?;
+    let before = fixture
+        .active
+        .applied_tip_snapshot()
+        .ok_or("applied tip missing")?;
+    let before_head = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or("durable head missing")?;
+    {
+        let tree = fixture.active.block_tree.read();
+        let base = tree
+            .node_by_hash(fixture.pinned.block_hash)
+            .ok_or("base missing")?;
+        assert!(base.height < before.height);
+        assert!(base.chainwork > before.chainwork);
+        assert_eq!(tree.tip().ok_or("best header missing")?.hash, base.hash);
+    }
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    fixture.activate(&manager)?;
+    let applied = fixture
+        .active
+        .applied_tip_snapshot()
+        .ok_or("snapshot tip missing")?;
+    let head = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or("snapshot head missing")?;
+    assert_eq!(head.commit_id, before_head.commit_id + 1);
+    assert_eq!(head.height, fixture.pinned.height);
+    assert_eq!(head.tip, fixture.pinned.block_hash);
+    assert_eq!(head.chain_tx_count, fixture.pinned.chain_tx_count);
+    assert_eq!((applied.height, applied.hash), (head.height, head.tip));
+    assert!(applied.chainwork > before.chainwork);
+    assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
+    assert_eq!(
+        fixture.active.utxo.lock_stable_view().hash_serialized_3()?,
+        fixture.pinned.hash_serialized
+    );
+    assert!(fixture.active.role().is_assumed_active());
+    Ok(())
+}
+
+#[test]
+fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> TestResult {
+    let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x207f_ffff)?;
+    let applied = fixture
+        .active
+        .applied_tip_snapshot()
+        .ok_or("applied tip missing")?;
+    let prior = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or("durable head missing")?;
+    // Same height and work, different committed identity: do not treat it as
+    // an ordinary applied tip merely because the numeric work is available.
+    let unsettled = DurableHead {
+        commit_id: prior.commit_id + 1,
+        tip: fixture.blocks[1].block_hash().0,
+        ..prior
+    };
+    fixture
+        .head
+        .commit(Some(&prior), &unsettled, &CommitRecords::default())?;
+    assert_ne!(unsettled.tip, applied.hash);
+    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let loaded = fixture.load()?;
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+    assert!(
+        matches!(result, Err(AssumeUtxoError::SnapshotTipNotSettled {
+        durable_tip: Some(durable), applied_tip: Some(current),
+    }) if durable == unsettled.tip && current == applied.hash)
+    );
+    assert!(fixture.active.is_closed_for_recovery());
+    assert_eq!(fixture.active.durable_head.load()?, Some(unsettled));
+    assert_eq!(
+        fixture.active.applied_tip_snapshot().as_deref(),
+        Some(applied.as_ref())
+    );
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    Ok(())
+}
+
 #[test]
 fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResult {
     let fixture = Fixture::new()?;
@@ -656,7 +1186,7 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
             loaded.set,
             fixture.stats.clone(),
             &fixture.pinned,
-            |_, _| {
+            |_, _, _| {
                 let (sent, received) = std::sync::mpsc::sync_channel(1);
                 scope.spawn(move || {
                     let progress =
