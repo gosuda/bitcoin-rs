@@ -76,8 +76,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. The shared inbound channel is bounded once for the node, and each connection's unsolicited share of it is bounded separately; a body the download window asked that connection for is always admitted (`docs/contracts/p2p-wire.md` `P2P-07`). |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel, except while the node is in initial block download: unsolicited transaction bodies are then dropped before ingress, without a misbehavior score or disconnect (Core 31.1 `net_processing.cpp:4713-4716`). Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | ignored | No address gossip: Core answers with an `addr` burst. Deviation: silent. |
-| `addr` / `addrv2` | ignored | Decoded (bound: 1 000 entries, Core `MAX_ADDR_TO_SEND`); never gossiped onward. |
+| `getaddr` | served | At most 32 retained IP addresses, once per full-relay connection. Book-disabled test/embedding connections remain silent. |
+| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. |
 | `feefilter` | ignored | BIP133. We never send one and do not enforce a peer's. Core filters relay by it. |
 | `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. Inbound announcements also publish compact-fetch eligibility. |
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
@@ -168,12 +168,122 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
-4. **Address management**: absent. There is no address store, no feeler
-   connection policy, no `getaddr` response, and no addr/addrv2 gossip.
-   Outbound peer discovery runs through DNS-seed bootstrap (on by default:
-   `run_dns_peer_maintenance`, `crates/p2p/src/service.rs`, seeds from
-   `Network::dns_seeds`), the configured `--connect` peers, and the
-   `addnode` RPC.
+4. **Address management**: one P2P-owned `AddressBook` retains canonical
+   endpoints, their original source and health, and up to eight distinct New
+   bucket references. IPv4-mapped IPv6 aliases are canonicalized at every book
+   endpoint boundary, including attempt/success, refresh, connected exclusion,
+   and pending claim/release/counting. Other linked IPv6 forms retain their
+   distinct endpoint identity; only their netgroup classification links IPv4. Lookup tables are derived indexes, not another persisted
+   peer store. Placement follows Core 31.1 `GetNewBucket`, `GetTriedBucket` and
+   `GetBucketPosition`: SHA256d with the persisted 256-bit secret, Core vector
+   framing, endpoint wire bytes, and separate New/Tried position domains. There
+   are 1,024 New and 256 Tried buckets of 64 positions. One source group can
+   reach at most 64 New buckets; a destination group reaches at most eight
+   Tried buckets. The former 64-endpoint/source quota and public position hash
+   are removed. IP grouping includes linked IPv4 /16, ordinary IPv6 /32,
+   Hurricane Electric /36 and Core's local/unroutable group. New DNS sources use
+   the first ten SHA256 bytes of the seed name as Core Internal identities.
+
+   `AddSingle` ordering governs time/service updates, probabilistic additional
+   references (1/2^existing-reference-count), and occupied-slot replacement.
+   Gossip applies a two-hour time penalty, except a source's self-announcement;
+   DNS applies none. An IsTerrible incumbent or one redundant reference of a
+   healthy multiply referenced incumbent may yield a New slot to a fresh
+   endpoint. Clearing a slot removes one reference; only the final New
+   reference deletes the endpoint. Local pending ownership protects final
+   endpoint deletion, not every redundant slot. Success promotes to a vacant
+   Tried slot and removes all New references. A Tried collision retains the
+   successful newcomer in New until the collision-probe follow-up.
+
+   The shared IsTerrible predicate first protects attempts within 60 seconds,
+   then checks future timestamps beyond ten minutes, age over 30 days, three
+   never-success failures, or ten failures with success older than seven days.
+   There is no periodic age/failure purge. Replacement cleanup happens at an
+   actual New-slot admission; fresh getaddr samples filter IsTerrible. Failed,
+   stale or clock-shifted knowledge remains selectable without DNS input.
+   Attempt health is recorded only after an actual TCP attempt, on success or
+   failure. Local ban/activity/cancellation refusal and failed thread creation
+   do not age a peer. Failures count only once per global Good epoch and only
+   with Core's persistent-outbound-netgroup connectivity gate, derived from
+   `max_peer_connections`. Established manual and handshaking outbound sessions
+   count; inbound and cancelled sessions do not. Manual attempts never count a
+   failure or own an automatic claim. Good from any non-inbound handshake
+   updates the epoch; known peers reset failures and record success/recent try,
+   while unknown manual peers are not inserted. Good does not overwrite
+   advertised last-seen time. Native periodic refresh applies only to ready
+   automatic full-relay peers, at intervals over 20 minutes; block-relay peers
+   never refresh an advertised timestamp but still count for DNS recovery.
+   This periodic lifecycle differs from Core's FinalizeNode Connected update.
+   Last-try/count-attempt/global-Good times are runtime-only.
+
+   Selection chooses New/Tried once with equal probability when both eligible
+   tables exist, then samples a bucket and circular start position. Conditioning
+   on nonempty eligible buckets removes empty retries without changing that
+   distribution. Acceptance uses Core GetChance: 0.01 for attempts within ten
+   minutes, multiplied by 0.66^min(failures,8), with a 1.2 factor after rejection.
+   The minimum weight guarantees acceptance within 45 occupied proposals;
+   there is no deterministic rank winner or hard failure delay. Empty or wholly
+   excluded books return immediately. Policy callbacks run outside the book
+   lock; current membership/health/pending constraints are evaluated after it
+   is reacquired. Exact endpoint exclusion includes inbound; whole-group
+   exclusion uses outbound/pending only. This conditions on local ban/connection
+   exclusions, rather than duplicating Core net.cpp's outer 100-candidate loop.
+
+   Explicit native boundaries remain: ingress rejects future (>10-minute) and
+   older-than-30-day reports, whereas Core's wire caller normalizes some bad
+   timestamps before Add. Existing native port/routability admission is retained
+   (`addrman.rs::routable`), including its narrower accepted IPv6 ranges and
+   reserved IPv4 exclusions; exact group/hash vectors do not claim that every
+   Core-routable address is admitted. Only existing IP transports are supported.
+   DNS remains
+   bounded bootstrap input (64 results per seed pass), not a second address
+   owner. Books with at least 64 records get 60 seconds to connect before a
+   remaining ready-outbound deficit permits DNS recovery; smaller books query
+   immediately. Each path makes at most one seed pass per 60 seconds.
+   Full-relay gossip allowance is 32 entries, replenished one per ten seconds.
+   Getaddr is answered once per inbound full-relay connection, never outbound.
+   Its shared at-most-32-entry sample stays byte-stable for 24 hours across
+   reconnects and discoveries, then rotates and applies IsTerrible filtering.
+   This differs from Core's randomized 21–27-hour cache and response sizing.
+   Non-IP addrv2 families are ignored; block-relay-only peers neither learn nor
+   serve addresses. These boundaries are not a claim of complete Core peer
+   lifecycle equivalence.
+
+   The fixed indexes occupy 327,680 bytes; endpoint count is bounded at 81,920,
+   with at most eight New bucket IDs each and at most 65,536 occupied New slots.
+   On the tested 64-bit target Candidate is 128 bytes and Source is 24 bytes,
+   excluding allocator/index/vector overhead. Fixed-width serialized fields
+   have a conservative 512-byte/record bound (315-byte max-width fixture), so
+   record separators plus bounded header/checksum remain below the 64 MiB file
+   ceiling. Reads bound both bytes and record/reference sequences. These are
+   representation/work bounds, not RSS or performance measurements.
+
+   Schema v5 persists the secret, source, health and New membership in one
+   checksummed snapshot. Same-schema restart restores every reference. The
+   known v1 format is validated using its original 4,096-record/64-source/slot
+   rules before migration. The actual source bytes are copied to an exclusive,
+   content-named `.v1-<sha256>.bak` and file/directory-synced before v5 can replace
+   the book. Re-bucketing is deterministic, prioritizes proven/recent successes,
+   logs retained/demoted/dropped counts, and preserves the original backup.
+   Legacy DNS retained only a u64 hash: its labelled deterministic source
+   namespace does not claim to recover the original seed name or Core hash.
+   A backup failure allows in-memory recovery but disables writes for the run.
+   Unknown child v2/v3/v4 or other schemas remain preserved/read-only here;
+   their actual ASMap/anchor owners provide later migrations.
+
+   Filenames remain scoped to actual P2P magic: `peers.dat` becomes
+   `peers-<8 hexadecimal magic digits>.dat`, including custom/drynet magics.
+   A valid scoped book wins; same-magic legacy-base import retains the base,
+   and a valid foreign-magic base is left untouched. Corrupt/unknown/unreadable
+   files disable publication while in-memory discovery continues. Publication
+   retains exclusive random temporary creation with bounded collisions, file
+   sync, atomic installation and the storage owner's directory-sync policy.
+   First installation cannot overwrite a newly appeared destination. Saves
+   retain the captured revision only after durable success, outside the state
+   lock; concurrent later changes remain dirty. Periodic saves occur every
+   15 minutes and shutdown/explicit barriers remain immediate. ASMap grouping,
+   tried-collision probing and restart anchors remain stacked follow-ups under
+   #1387; the final combined stack requires its own acceptance checks.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.

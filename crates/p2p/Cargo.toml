@@ -24,6 +24,7 @@ bitcoin-rs-chain.workspace = true
 bitcoin-rs-chainstate = { workspace = true, default-features = false }
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin.workspace = true
 bytes.workspace = true
 crossbeam-channel.workspace = true
@@ -35,13 +36,15 @@ metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 proptest.workspace = true
-serde_json.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "write_message"
