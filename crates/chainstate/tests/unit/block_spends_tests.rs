@@ -432,27 +432,89 @@ fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Res
 
 #[test]
 fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalikes() -> Result {
-    let f = fixture(0)?;
-    let mut cb = coinbase(1);
-    cb.outputs.push(TxOut {
-        value: Amount::from_sat(0),
-        script_pubkey: Script::from_bytes(
-            [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0xff; 32]].concat(),
-        ),
-    });
-    let block = mined_block_with_prev_hash(f.blocks[0].block_hash(), 1, vec![cb])?;
-    f.bodies
-        .persist_block_body(1, hash(&block), &consensus_bytes(&block))?;
-    // Isolate the retained-body boundary under both deployment contexts.
-    // This fixture does not claim that regtest admits a pre-activation block.
-    let record =
-        f.chain
-            .read_block_spends(hash(&block), 1, false, Err(HistoryUnavailable::Missing))?;
-    assert_eq!(record.block, block);
-    assert!(matches!(record.spent, Err(HistoryUnavailable::Missing)));
+    use bitcoin_rs_chain::NodeStatus;
+    for (network, active) in [(Network::Mainnet, false), (Network::Regtest, true)] {
+        let mut chain = handles(network, Arc::new(UtxoSet::new()));
+        let bodies = Arc::new(Bodies::default());
+        chain.block_body_store = Some(bodies.clone());
+        let genesis = network.genesis_block();
+        chain.apply_block(&genesis, None)?;
+        let mut cb = coinbase(1);
+        cb.outputs.push(TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: Script::from_bytes(
+                [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0xff; 32]].concat(),
+            ),
+        });
+        let block = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![cb])?;
+        // This is a synthetic retained-body query; header insertion does not
+        // claim mainnet PoW or block admission. Activation comes from the real
+        // network's deployment owner at the queried header's height.
+        chain
+            .block_tree
+            .write()
+            .insert_header(block.header, NodeStatus::HeaderValid)?;
+        bodies.persist_block_body(1, hash(&block), &consensus_bytes(&block))?;
+        let record = chain.block_spends(hash(&block), tip(&chain)?);
+        if active {
+            assert!(matches!(record, Err(BlockSpendsError::Corrupt(_))));
+        } else {
+            let record = record?;
+            assert_eq!(record.block, block);
+            assert!(matches!(record.spent, Err(HistoryUnavailable::Missing)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -> Result {
+    use bitcoin_rs_chain::NodeStatus;
+    let mut chain = handles(Network::Mainnet, Arc::new(UtxoSet::new()));
+    let bodies = Arc::new(Bodies::default());
+    chain.block_body_store = Some(bodies.clone());
+    let genesis = Network::Mainnet.genesis_block();
+    chain.apply_block(&genesis, None)?;
+    let block = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase(1)])?;
+    let id = {
+        let mut tree = chain.block_tree.write();
+        let id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+        // Keep a distinct, longer header branch indexed so the queried node
+        // is truly off-header-chain, even after its synthetic height changes.
+        let mut competing = block.header;
+        competing.nonce = competing.nonce.wrapping_add(1);
+        let sibling = tree.insert_header(competing, NodeStatus::HeaderValid)?;
+        competing.prev_blockhash = tree.node(sibling)?.hash.into();
+        let competing_tip = tree.insert_header(competing, NodeStatus::HeaderValid)?;
+        assert_eq!(tree.tip_id(), Some(competing_tip));
+        // The query owner refuses over two million off-header-chain ancestor
+        // IDs before traversal/allocation. A synthetic height isolates this
+        // refusal without constructing millions of headers or claiming a
+        // consensus-valid chain.
+        tree.node_mut(id)?.height = 2_000_000;
+        id
+    };
     assert!(matches!(
-        f.chain
-            .read_block_spends(hash(&block), 1, true, Err(HistoryUnavailable::Missing),),
+        bitcoin_rs_chain::deployment_statuses(&chain.block_tree.read(), Network::Mainnet, Some(id)),
+        Err(bitcoin_rs_chain::DeploymentQueryError::Budget { .. })
+    ));
+    // Certification has no ancestor at the requested height. Missing bodies
+    // must keep their typed failure without attempting deployment history.
+    assert!(matches!(
+        chain.block_spends(hash(&block), tip(&chain)?),
+        Err(BlockSpendsError::History(HistoryUnavailable::Missing))
+    ));
+    bodies.persist_block_body(2_000_000, hash(&block), &consensus_bytes(&block))?;
+    assert!(matches!(
+        chain.block_spends(hash(&block), tip(&chain)?),
+        Err(BlockSpendsError::ResourceLimit)
+    ));
+    // Within the work budget, malformed ancestry is an integrity failure,
+    // not resource exhaustion or ordinary unavailable history.
+    chain.block_tree.write().node_mut(id)?.height = 2;
+    bodies.persist_block_body(2, hash(&block), &consensus_bytes(&block))?;
+    assert!(matches!(
+        chain.block_spends(hash(&block), tip(&chain)?),
         Err(BlockSpendsError::Corrupt(_))
     ));
     Ok(())

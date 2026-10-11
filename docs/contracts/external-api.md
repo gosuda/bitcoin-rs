@@ -137,8 +137,11 @@
   4,000,000 bytes, undo copies to 64 MiB, decoded inverse counts by the
   authenticated block, and conservative projected response expansion to
   64 MiB. Certification shares a 4,096-parent-hop budget, reusing the tree's
-  trusted height index after joining its prefix. Budget refusal is explicit;
-  these are resource bounds, not throughput or global-RSS claims.
+  trusted height index after joining its prefix. Retained-body witness checks
+  use the existing bounded deployment query: an off-header-chain BIP9 read
+  captures at most 2,000,000 ancestor IDs (at most 8 MB); missing bodies do not
+  trigger deployment work. Both budget failures are explicit resource limits;
+  these bounds are not throughput or global-RSS claims.
 - Existing storage boundaries provide bounded reads with safe unsupported
   defaults, never an unbounded fallback. Fjall checks its value, redb its
   read guard, and RocksDB its pinned value before the owned copy; backend
