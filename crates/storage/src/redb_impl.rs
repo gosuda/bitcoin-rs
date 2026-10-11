@@ -217,6 +217,23 @@ impl RedbStore {
 }
 
 impl KvStore for RedbStore {
+    fn get_bounded(
+        &self,
+        cf: ColumnFamily,
+        key: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        let table = txn
+            .open_table(table_for(cf))
+            .map_err(StorageError::backend)?;
+        table
+            .get(key)
+            .map_err(StorageError::backend)?
+            .map(|value| crate::error::copy_bounded(value.value(), max_bytes))
+            .transpose()
+    }
+
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         let table = read_txn

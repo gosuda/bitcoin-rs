@@ -69,6 +69,10 @@
   remain supported. `scantxoutset` is a bounded and cancellable domain
   query, not wallet access to a live mutable map.
 
+- Verbose `getrawtransaction` uses the shared `tx_render::transaction_json`
+  projection, preserving unsigned transaction versions across mempool,
+  explicit-block, and txindex lookups. Inactive explicit blocks report zero
+  confirmations and omit time fields; mempool replies omit chain fields.
 - Core script JSON has one projection owner in `tx_render.rs`: decimal short
   pushes, malformed-instruction markers, checksummed inferred descriptors,
   and optional address/hex fields. Transaction inputs alone decode defined
@@ -92,6 +96,59 @@
   in `overhaul_process_harness::script_decode_cases` covers script classes,
   invalid encodings, wrappers, descriptor checksums, parameters, network
   addresses, and shared RPC/REST/UTXO projections.
+
+#### Retained block inputs
+
+- `getblock` verbosity 2/3 and `/rest/spenttxouts` use the same read-only
+  `utxo::contract::BlockUndoSource`, implemented by the chainstate owner.
+  RPC captures one `AppliedView` for confirmations/next-block linkage and
+  passes its hash into the owner. A moved applied hash, durable receipt
+  (including archive-only commits), or expired retention lease refuses the
+  response. There is no new availability store or generation counter.
+- Successful undo is complete and input-ordered. Same-block inputs come from
+  earlier transactions in the authenticated body; native net undo supplies
+  external inputs. BIP30 overwritten-output restores are not input rows.
+  No present-day UTXO lookup or invented coin is used. The native version-1
+  undo format and its mutation/recovery path are unchanged.
+- A retained body with uncertified or pruned undo can be returned without
+  fee/prevout fields by `getblock`; REST reports undo unavailable. Missing or
+  unreadable *expected* undo remains a typed error, never an empty success.
+  A missing body under a granted lease retains `HistoryUnavailable::Missing`
+  and is transient (REST 503). Pruned bodies/undo stay unavailable. Genesis
+  has one empty spent-output row without requiring an undo record; getblock
+  still requires its real retained body even when REST can return that row.
+- REST binary/hex encode a CompactSize transaction count, then each input
+  count and ordinary serialized TxOuts; they never expose disk undo encoding.
+  JSON rows contain value/scriptPubKey. Verbosity 3 adds generated/height to
+  per-input prevouts; verbosity 2 gains fees without prevouts. Coinbase fee
+  and prevout fields stay omitted. Transaction JSON uses the shared wire
+  projection (including unsigned high-bit versions), since the pinned verbose
+  DTO cannot represent that complete integer range. Header versions and
+  raw/txid payload shapes retain their existing semantics. Stale block
+  headers omit the active competing branch's successor hash, matching Core.
+- This remains a declared deviation: after a later branch receipt replaces
+  the retained undo extent, older stale rows lack current certification and
+  their undo fields are omitted even if raw rows remain. Snapshot history
+  is unavailable until its archive receipt certifies it. Transient absence
+  and explicit resource limits can return retry responses unlike Core.
+  `/rest/block` retains its separate projection without undo fields.
+- Full block REST rendering, spent outputs, and detailed getblock responses
+  share two materialization permits. The owner bounds body copies to
+  4,000,000 bytes, undo copies to 64 MiB, decoded inverse counts by the
+  authenticated block, and conservative projected response expansion to
+  64 MiB. Certification shares a 4,096-parent-hop budget, reusing the tree's
+  trusted height index after joining its prefix. Retained-body witness checks
+  use the existing bounded deployment query: an off-header-chain BIP9 read
+  captures at most 2,000,000 ancestor IDs (at most 8 MB); missing bodies do not
+  trigger deployment work. Both budget failures are explicit resource limits;
+  these bounds are not throughput or global-RSS claims.
+- Existing storage boundaries provide bounded reads with safe unsupported
+  defaults, never an unbounded fallback. Fjall checks its value, redb its
+  read guard, and RocksDB its pinned value before the owned copy; backend
+  internal pages, caches, decompression, or pinning allocation are outside
+  that copy bound. Block reads bound the locator and frame length before
+  allocation. Unsupported custom stores must implement the bounded reads
+  before serving this capability.
 
 #### Native deployment reporting
 
@@ -128,9 +185,9 @@
   everything-is-JSON-RPC error handler spans the dialects.
 - Formats are `json` (`application/json`), `hex` (`text/plain`), and
   `bin` (`application/octet-stream`). A disabled gateway and an unknown
-  path return 404. Malformed parameters return 400. A well-formed but
-  unknown block hash returns an empty 200, matching the pinned Core
-  behavior.
+  path return 404. Malformed parameters return 400. Unknown hashes follow
+  the specific route: headers return an empty 200, spent outputs return 404,
+  and deployment queries return 400.
 
 - `/rest/getutxos` GET URI input and POST binary/hex input share one
   authoritative UTXO/mempool lookup. POST reads a bool and canonical
@@ -665,12 +722,12 @@ its lifecycle-protected admission recheck before activation.
 Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
 cleanup does not reset the accepted head or modify source artifact contents.
 
-The node enters the existing mempool generation fence and refuses activation
-while transactions remain in the mempool. Refusal settles the fence and preserves
-those transactions, fee deltas, and chainstate. With an empty pool, it activates
-through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
-consumers. Successful return certifies the durable snapshot anchor and consumer
-settlement. Settlement failure closes admission for recovery and is an error,
+Activation requires an empty mempool and retains operator fee prioritisation.
+Its native orphan reconsideration policy, bounds, and mempool settlement rules
+are owned by [MPL-04](mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
+The node activates through `AssumeUtxoManager` and reconciles its consumers.
+Successful return certifies the durable snapshot anchor and consumer settlement.
+Settlement failure closes admission for recovery and is an error,
 even if the anchor committed. Headers through the base must already be known.
 The installation boundary, under chain-transition exclusion, rejects an invalid
 base or a base outside the current best-work header ancestry before publishing
@@ -824,6 +881,14 @@ evidence does not establish mainnet memory or throughput qualifications.
 - **Typed embedding surface**: Direct in-process application API as an alternative to localhost JSON-RPC daemon boundary is tracked under #145 (open).
 
 ## Proven by
+
+- Retained block inputs: `e2e/tests/block_spends.rs` compares actual pinned Core
+  processes for full v2/v3 JSON, unsigned transaction versions, REST formats,
+  same-block inputs, disconnects, later forks, pruning, genesis, and restart.
+  `crates/chainstate/tests/unit/block_spends_tests.rs` covers durable receipts,
+  archive progress, lease expiry, missing/corrupt records, and ancestry bounds;
+  `crates/storage/tests/bounded_value_read.rs` covers borrowed/pinned copy
+  limits and unsupported defaults across the supported storage engines.
 
 - `API-33`: `e2e/tests/assumeutxo.rs` covers a freshly Core-produced portable
   snapshot, both chainstate roles, restart/finalization, non-UTF-8 symlink

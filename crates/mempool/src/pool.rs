@@ -605,8 +605,8 @@ impl Mempool {
     /// keeps the recorded confirmations and re-arms only the re-admitted
     /// entries — so chain recovery cannot silently discard fee history.
     ///
-    /// Production uses this only through the gateway's fenced snapshot
-    /// replacement. Ordinary block and reorg paths preserve fee history.
+    /// This is an explicit wholesale reset for standalone pools and fixtures.
+    /// Ordinary block, reorg, and snapshot paths preserve fee history.
     pub fn clear(&mut self) -> MutationResult {
         // Every entry leaves the pool here, so this is the same retire funnel
         // Core walks during a bulk clear: fire `mempool:removed` per entry

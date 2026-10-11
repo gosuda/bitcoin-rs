@@ -76,6 +76,14 @@ pub enum UndoCodecError {
         /// Bytes remaining when the count was read.
         available: usize,
     },
+    /// A query record claims more changes than its authenticated block can produce.
+    #[error("undo record claims {count} entries, exceeding the block-derived limit {limit}")]
+    BlockCountLimit {
+        /// Claimed count.
+        count: u32,
+        /// Maximum count derived from the requested block.
+        limit: usize,
+    },
     /// The coinbase flag was neither 0 nor 1.
     #[error("undo record coinbase flag {found} is not 0 or 1")]
     InvalidCoinbase {
@@ -118,6 +126,17 @@ pub(crate) fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
 
 /// Decodes a record, rejecting any that is not for `expected_hash`.
 pub(crate) fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, UndoCodecError> {
+    decode_bounded(bytes, expected_hash, usize::MAX, usize::MAX)
+}
+
+/// Query decoding shares the exact persisted codec while bounding allocations
+/// by the authenticated block's maximum inverse changes.
+pub(crate) fn decode_bounded(
+    bytes: &[u8],
+    expected_hash: Hash256,
+    max_restores: usize,
+    max_removes: usize,
+) -> Result<UndoBatch, UndoCodecError> {
     // A restore is at least an outpoint, a minimal TxOut, a flag, and a height.
     const MIN_RESTORE_BYTES: usize = 36 + 9 + 1 + 4;
     const MIN_REMOVE_BYTES: usize = 36;
@@ -141,6 +160,12 @@ pub(crate) fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, 
     }
 
     let restore_count = cursor.take_count(MIN_RESTORE_BYTES)?;
+    if usize::try_from(restore_count).unwrap_or(usize::MAX) > max_restores {
+        return Err(UndoCodecError::BlockCountLimit {
+            count: restore_count,
+            limit: max_restores,
+        });
+    }
     let mut restores = Vec::with_capacity(bounded_capacity(restore_count));
     let mut seen = HashSet::with_capacity(bounded_capacity(restore_count));
     for _ in 0..restore_count {
@@ -157,6 +182,12 @@ pub(crate) fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, 
     }
 
     let remove_count = cursor.take_count(MIN_REMOVE_BYTES)?;
+    if usize::try_from(remove_count).unwrap_or(usize::MAX) > max_removes {
+        return Err(UndoCodecError::BlockCountLimit {
+            count: remove_count,
+            limit: max_removes,
+        });
+    }
     let mut removes = Vec::with_capacity(bounded_capacity(remove_count));
     // `seen` deliberately carries over: a block cannot both restore and remove
     // the same outpoint, so an appearance in both halves is corruption too.

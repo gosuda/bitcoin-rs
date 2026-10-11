@@ -230,10 +230,19 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   Retained-history *authority* is not chainstate's:
   `bitcoin-rs-storage::pruning` owns the `RetentionRegistry`, the executed
   frontier, and prune reserve/commit, and node composition seeds that one
-  registry and distributes it. Chainstate receives only
-  [`bitcoin_rs_storage::MandatoryRetention`], which can acquire and release
-  the pins a transition re-reads and reports what is already gone; it has no
-  prune, commit, or shutdown path and is not a broker for the registry.
+  registry and distributes it. Chainstate receives
+  [`bitcoin_rs_storage::MandatoryRetention`] for transition pins and the
+  existing bounded `HistoryAccess` role for optional block-input queries.
+  Both originate from that same registry; neither can prune, commit, or shut
+  down retention, and chainstate is not a broker for the registry.
+- `BlockUndoSource` is implemented directly by `Chainstate`; RPC holds only
+  that read trait. A query captures the caller's applied hash, full durable
+  receipt, and storage-owned history lease under the transition domain.
+  Bounded body/undo reads and projection run outside tree/write/transition
+  locks, followed by exact receipt, applied-hash, and lease revalidation.
+  Historical snapshot prefixes need durably archived validation progress;
+  retained bytes alone never establish validation. The current undo extent
+  can certify a disconnected branch until a later receipt replaces it.
 - `Chainstate::begin_transition` and `TransitionLock::into_transition` are the
   only constructors of a `ChainTransition`. Reorg planning that must abort
   without mutating takes `lock_transition` first and promotes the lock with
@@ -496,11 +505,10 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   the snapshot archive, then replays the certified foreground suffix to the head.
   A checkpoint remains an accelerator, including after finalized history is pruned.
   Activation detaches the old checkpoint journal; anchored recovery does not replay
-  that journal across the snapshot jump. Node activation fences mempool admission
-  and refuses a nonempty mempool before invoking the manager; refusal settles the
-  fence without changing transactions, fee deltas, or lifecycle state. Successful
-  activation clears stale empty-pool/orphan bookkeeping and wakes index/mining consumers. It does not manufacture
-  per-block ZMQ events for imported history. Historical undo makes below-base reorgs
+  that journal across the snapshot jump. Node-owned mempool reconciliation follows
+  [MPL-04](mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
+  Activation wakes index/mining consumers without emitting per-block ZMQ events
+  for imported history. Historical undo makes below-base reorgs
   possible after finalization; crossing below the base removes the snapshot anchor
   in the disconnect's authoritative batch.
 
@@ -595,7 +603,8 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
     synthetic chainstate/RPC constructors must be absent.
   - `chainstate_facade_exposes_no_production_raw_mutation_handles`: compiles an
     isolated Cargo consumer without dev-feature unification. Read operations
-    must compile; raw mutation handles, reader write/publication methods,
+    and `BlockUndoSource` reads must compile; raw mutation handles, undo writes,
+    retention acquisition, reader write/publication methods,
     mutable tip-cell access through a read guard, and `SyncChain` fixture
     methods must fail with the intended compiler diagnostics. Removing an
     obsolete accessor or private field remains allowed, and the deleted

@@ -110,14 +110,6 @@ pub(crate) struct OrphanPool {
 }
 
 impl OrphanPool {
-    /// Drops all residency and retry claims while preserving admission limits.
-    pub(crate) fn clear(&mut self) {
-        let identities: Vec<_> = self.entries.keys().copied().collect();
-        for identity in identities {
-            self.remove(identity);
-        }
-    }
-
     pub(crate) fn new(quota: usize) -> Self {
         Self::with_limits(
             quota,
@@ -288,6 +280,20 @@ impl OrphanPool {
                     .collect()
             })
             .unwrap_or_default();
+        for (wtxid, announcer) in claims {
+            self.mark_ready(wtxid, announcer);
+        }
+    }
+
+    /// Schedules one reconsideration for every currently resident witness identity.
+    /// Existing residency limits bound the temporary list, and `mark_ready` merges
+    /// it with pending work without duplicating a body or resetting its lifetime.
+    pub(crate) fn mark_all_ready(&mut self) {
+        let claims: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(wtxid, held)| Some((*wtxid, Self::select_announcer(&held.announcers)?)))
+            .collect();
         for (wtxid, announcer) in claims {
             self.mark_ready(wtxid, announcer);
         }

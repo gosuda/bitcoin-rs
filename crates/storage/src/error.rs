@@ -28,3 +28,32 @@ impl StorageError {
         Self::Backend(error.to_string())
     }
 }
+
+/// Failure of an explicitly bounded owned-value read.
+#[derive(Debug, thiserror::Error)]
+pub enum BoundedReadError {
+    /// The backend does not provide a pre-copy bound; no unbounded fallback ran.
+    #[error("bounded value reads are unavailable for this store")]
+    Unsupported,
+    /// The stored value exceeded the requested owned-copy limit.
+    #[error("stored value has {size} bytes, exceeding the {limit}-byte read limit")]
+    Limit {
+        /// Stored value length observed before copying.
+        size: usize,
+        /// Maximum owned value length requested.
+        limit: usize,
+    },
+    /// The underlying read failed.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+pub(crate) fn copy_bounded(bytes: &[u8], limit: usize) -> Result<Vec<u8>, BoundedReadError> {
+    if bytes.len() > limit {
+        return Err(BoundedReadError::Limit {
+            size: bytes.len(),
+            limit,
+        });
+    }
+    Ok(bytes.to_vec())
+}

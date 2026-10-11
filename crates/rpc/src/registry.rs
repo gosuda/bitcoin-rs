@@ -151,7 +151,7 @@ declare_rows! {
     "getblockcount", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockcount);
     "getblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockhash);
     "getbestblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getbestblockhash);
-    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Response is the pinned corepc v31 verbose contract; verbosity 3 serves the verbosity-2 shape because no prevout source exists — Core returns prevouts at verbosity 3 (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblock);
+    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", Some(chain::getblock);
     "getblockheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockheader);
     "getblockstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockstats);
     "verifychain", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Levels 3 and 4 omit Core's block disconnect and reconnect checks; level 3 behaves as level 2 and level 4 does not replay the UTXO set (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::verifychain);
@@ -220,7 +220,7 @@ declare_rows! {
     "getdescriptoractivity", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No wallet/scan index to serve it.", "n/a", None;
     "getmempoolcluster", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Cluster mempool tracking not implemented.", "n/a", None;
     "importmempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool import not implemented.", "n/a", None;
-    "loadtxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented.", "0.12.0", Some(chain::loadtxoutset);
+    "loadtxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Preserves fee prioritisation and queues bounded native orphan rechecks. Malformed input returns -22. See API-33 and the mempool owner docs/contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing. dumptxoutset export remains unimplemented.", "0.12.0", Some(chain::loadtxoutset);
     "preciousblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual block-preference surface.", "n/a", None;
     "reconsiderblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual reorg-control surface.", "n/a", None;
     "savemempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool dump/reload persistence not implemented.", "n/a", None;
@@ -313,7 +313,7 @@ declare_rows! {
     // -- REST (Core StartREST registration order) --------------------
     "/rest/tx/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/notxdetails/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
-    "/rest/block/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
+    "/rest/block/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Full transaction projection omits undo fees and prevouts; the shared undo read capability is used by spenttxouts and getblock verbosity 2/3.", "0.4.0", None;
     "/rest/blockpart/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "bin/hex only; JSON rejected, matching Core's /rest/blockpart (bitcoin-core/src/rest.cpp rest_block_part).", "0.4.0", None;
     "/rest/chaininfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/mempool/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
@@ -322,7 +322,7 @@ declare_rows! {
     "/rest/deploymentinfo/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.4.0", None;
     "/rest/deploymentinfo", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
-    "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs).", "0.4.0", None;
+    "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Serves retained certified undo in Core bin/hex/json formats. Older uncertified stale rows remain unavailable; transient retained-body absence and resource budgets return retry responses. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", None;
     "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;
 
     // -- ZMQ topics --------------------------------------------------

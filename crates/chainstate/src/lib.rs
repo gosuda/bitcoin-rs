@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use window::{PublishMode, apply_window_admitted};
 
+mod block_spends;
 mod connect;
 mod disconnect;
 mod durable;
@@ -457,6 +458,8 @@ pub struct Chainstate {
     /// and required readers pin old-branch bodies here so pruning cannot
     /// delete data an active transition still re-reads (#655, `RCV-08`).
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
+    /// Optional history reads share storage's registry and bounded lease policy.
+    pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
     /// Process-wide initial-block-download latch owned by the chainstate.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     /// Operational role of this chainstate instance.
@@ -499,6 +502,8 @@ pub struct ChainstateParts {
     pub capture_block_bytes: bool,
     /// The mandatory retained-history capability storage/pruning granted.
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    /// Read role from the same storage retention registry as `retention`.
+    pub history: bitcoin_rs_storage::pruning::HistoryAccess,
     /// Operational role of this chainstate instance.
     pub role: ChainstateRole,
 }
@@ -624,6 +629,7 @@ impl Chainstate {
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
             retention: parts.retention,
+            history: parts.history,
             ibd,
             role: Arc::new(RwLock::new(parts.role)),
         }
@@ -667,15 +673,15 @@ impl Chainstate {
             self.fail_closed_for_recovery();
         })?;
         let applied = self.applied_tip_snapshot();
-        if prior.map(|head| (head.tip, head.height, head.chain_tx_count))
-            != applied
-                .as_ref()
-                .map(|tip| (tip.hash, tip.height, tip.chain_tx_count.to_wire()))
-        {
+        let durable_tip = prior.map(|head| (head.tip, head.height, head.chain_tx_count));
+        let applied_tip = applied
+            .as_ref()
+            .map(|tip| (tip.hash, tip.height, tip.chain_tx_count.to_wire()));
+        if durable_tip != applied_tip {
             self.fail_closed_for_recovery();
             return Err(AssumeUtxoError::SnapshotTipNotSettled {
-                durable_tip: prior.map(|head| head.tip),
-                applied_tip: applied.as_ref().map(|tip| tip.hash),
+                durable_tip,
+                applied_tip,
             });
         }
         // Height cannot order unequal-difficulty forks. Require strictly
@@ -840,6 +846,7 @@ impl Chainstate {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: self.retention.clone(),
+            history: self.history.clone(),
             ibd,
             role: Arc::new(RwLock::new(ChainstateRole::Historical {
                 base_height,
@@ -1168,6 +1175,7 @@ impl Chainstate {
             TipReader::new(Arc::clone(&applied_tip)),
             BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
+        let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
         Self {
             network,
             chain_tip,
@@ -1191,7 +1199,13 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
-            retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
+            retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+                retention,
+                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
+                    bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+                ),
+            ),
             role: Arc::new(RwLock::new(ChainstateRole::Ordinary)),
             ibd,
         }

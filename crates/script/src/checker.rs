@@ -185,12 +185,12 @@ impl<'a> TxSignatureChecker<'a> {
         Ok(verified)
     }
 
-    /// Verifies a Schnorr signature against the BIP342 tapscript sighash.
-    /// Key-path spends do not go through the checker.
+    /// Verifies a Schnorr signature against the BIP341/BIP342 sighash.
+    /// Key-path and tapscript checks share signature-size and hashtype rules.
     ///
-    /// `leaf_hash` is the tapscript leaf hash. `codesep_pos` is the position
-    /// of the last `OP_CODESEPARATOR` (or `CODESEPARATOR_POSITION` when none
-    /// executed).
+    /// `leaf_hash` is absent for key-path spends, or the tapscript leaf hash.
+    /// `codesep_pos` is the position of the last `OP_CODESEPARATOR` (or
+    /// `CODESEPARATOR_POSITION` when none executed).
     ///
     /// Returns `Ok(true)` when valid, `Ok(false)` when the signature is empty
     /// (tapscript empty-sig convention), and `Err` for size/hashtype/verification

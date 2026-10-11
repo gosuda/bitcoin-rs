@@ -214,6 +214,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            history: storage.bounded_history(),
             role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
         let derived_index_open_spec =

@@ -2,9 +2,9 @@
 //!
 //! Every conversion between this node's native primitives and the
 //! `bitcoin`/`corepc-types` vocabulary crosses the RPC boundary here, by
-//! consensus-byte round trip or explicit field mapping. Handlers build
-//! `corepc_types::v31` values and emit them through [`typed_to_sonic`], or use
-//! the shared `tx_render` projection when a pinned DTO cannot express the wire value.
+//! consensus-byte round trip or explicit field mapping. Representable typed
+//! fields use `corepc_types::v31` and [`typed_to_sonic`]. Verbose
+//! `getrawtransaction` uses the shared [`crate::tx_render`] projection.
 //!
 //! Address strings, `asm`, and `desc` are wire-format strings that must match
 //! Bitcoin Core byte-for-byte; they ride the sanctioned rust-bitcoin seam

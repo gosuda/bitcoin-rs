@@ -677,8 +677,9 @@ impl MempoolGateway {
         self.lifecycle.lock().orphans.maintain(time, &live_peers)
     }
 
-    /// Called for every committed connect/disconnect, including ones with no
-    /// pool mutation, while the caller still holds its chain transition.
+    /// Called for committed connect/disconnect, including ones with no pool
+    /// mutation. The caller keeps the chain-change generation fenced until
+    /// consumers settle.
     pub fn chain_changed(&self, available_parents: &[Txid]) {
         let _pool = self.pool.read();
         let mut lifecycle = self.lifecycle.lock();
@@ -686,6 +687,18 @@ impl MempoolGateway {
         for parent in available_parents {
             lifecycle.orphans.parent_ready(*parent);
         }
+    }
+
+    /// Records a committed snapshot replacement while admission remains fenced.
+    /// A snapshot can supply inputs for any resident orphan. Schedule one bounded
+    /// reconsideration through the existing ready set; normal retries validate and
+    /// admit only after the chain-change guard settles. This is native snapshot
+    /// policy, not Bitcoin Core's reject-cache-only active-tip notification.
+    pub fn snapshot_changed(&self) {
+        let _pool = self.pool.read();
+        let mut lifecycle = self.lifecycle.lock();
+        lifecycle.clear_rejects();
+        lifecycle.orphans.mark_all_ready();
     }
 
     /// Inventory membership includes resident orphans and recent peer rejects.

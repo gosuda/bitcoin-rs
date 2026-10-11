@@ -141,11 +141,11 @@ impl NodeStorage {
         bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&self.retention))
     }
 
-    /// The bounded optional-history capability for a derived index.
+    /// The bounded optional-history capability for index and block-input reads.
     ///
     /// A stalled optional consumer is bounded by the reorg margin, so it
     /// never competes with the mandatory window chainstate pins into.
-    pub(super) fn index_history(&self) -> bitcoin_rs_storage::pruning::HistoryAccess {
+    pub(super) fn bounded_history(&self) -> bitcoin_rs_storage::pruning::HistoryAccess {
         bitcoin_rs_storage::pruning::HistoryAccess::new(
             Arc::clone(&self.retention),
             bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(

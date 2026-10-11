@@ -281,6 +281,21 @@ fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>
 fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResult {
     let fixture = Fixture::new()?;
     let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    // Authenticate the candidate before changing header selection. Invoke the
+    // final installation owner directly so a manager-only precheck cannot
+    // replace its guarded best-header admission rule.
+    let loaded = fixture.load()?;
+    assert_eq!(
+        (loaded.tip_hash, loaded.height),
+        (fixture.pinned.block_hash, fixture.pinned.height)
+    );
+    let (commitment, verified_stats) = loaded.set.with_stable_view(|view| {
+        Ok::<_, bitcoin_rs_utxo::UtxoError>((
+            view.hash_serialized_3_at_height(fixture.pinned.height)?,
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
+        ))
+    })?;
+    assert_eq!(commitment, fixture.pinned.hash_serialized);
     let fork = competing_snapshot_headers()?;
     let fork_root = {
         let mut tree = fixture.active.block_tree.write();
@@ -298,8 +313,14 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     };
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-    let loaded = fixture.load()?;
-    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+    let persisted = AtomicBool::new(false);
+    let result =
+        fixture
+            .active
+            .install_snapshot(loaded.set, verified_stats, &fixture.pinned, |_, _, _| {
+                persisted.store(true, Ordering::Relaxed);
+                Ok(())
+            });
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -310,6 +331,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
             && base_height == fixture.pinned.height
             && best == fork[2].block_hash().0
     ));
+    assert!(!persisted.load(Ordering::Relaxed));
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(manager.historical_chainstate().is_none());
     assert!(fixture.head.load()?.is_none());
@@ -382,67 +404,6 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
         }) if base_hash == fixture.pinned.block_hash
             && base_height == fixture.pinned.height
             && best == harder.block_hash().0
-    ));
-    assert!(!persisted.load(Ordering::Relaxed));
-    assert!(fixture.head.load()?.is_none());
-    assert!(fixture.active.applied_tip_snapshot().is_none());
-    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
-    assert!(!fixture.active.is_closed_for_recovery());
-    Ok(())
-}
-
-#[test]
-fn snapshot_rechecks_best_headers_after_waiting_for_transition() -> TestResult {
-    let fixture = Fixture::new()?;
-    let loaded = fixture.load()?;
-    let fork = competing_snapshot_headers()?;
-    let persisted = AtomicBool::new(false);
-    let result = std::thread::scope(|scope| -> Result<_, Box<dyn std::error::Error>> {
-        let transition = fixture.active.chain_transition.lock();
-        assert_eq!(
-            fixture
-                .active
-                .block_tree
-                .read()
-                .tip()
-                .ok_or("best header missing")?
-                .hash,
-            fixture.pinned.block_hash
-        );
-        let (sent, received) = std::sync::mpsc::sync_channel(1);
-        let active = &fixture.active;
-        let pinned = &fixture.pinned;
-        let stats = fixture.stats.clone();
-        let persist_called = &persisted;
-        let worker = scope.spawn(move || {
-            let _ = sent.send(());
-            active.install_snapshot(loaded.set, stats, pinned, |_, _, _| {
-                persist_called.store(true, Ordering::Relaxed);
-                Ok(())
-            })
-        });
-        received.recv_timeout(std::time::Duration::from_secs(5))?;
-        // The candidate was prepared against the pinned best tip. Change the
-        // header authority while its final transition admission is excluded.
-        {
-            let mut tree = fixture.active.block_tree.write();
-            for block in &fork {
-                tree.insert_header(block.header, NodeStatus::HeaderValid)?;
-            }
-        }
-        assert!(!persisted.load(Ordering::Relaxed));
-        drop(transition);
-        worker.join().map_err(|_| "snapshot worker panicked".into())
-    })?;
-    assert!(matches!(
-        result,
-        Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
-            base_hash,
-            base_height,
-            best_header: Some(best),
-        }) if base_hash == fixture.pinned.block_hash
-            && base_height == fixture.pinned.height
-            && best == fork[2].block_hash().0
     ));
     assert!(!persisted.load(Ordering::Relaxed));
     assert!(fixture.head.load()?.is_none());
@@ -703,42 +664,49 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
 
 #[test]
 fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> TestResult {
-    let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x207f_ffff)?;
-    let applied = fixture
-        .active
-        .applied_tip_snapshot()
-        .ok_or("applied tip missing")?;
-    let prior = fixture
-        .active
-        .durable_head
-        .load()?
-        .ok_or("durable head missing")?;
-    // Same height and work, different committed identity: do not treat it as
-    // an ordinary applied tip merely because the numeric work is available.
-    let unsettled = DurableHead {
-        commit_id: prior.commit_id + 1,
-        tip: fixture.blocks[1].block_hash().0,
-        ..prior
-    };
-    fixture
-        .head
-        .commit(Some(&prior), &unsettled, &CommitRecords::default())?;
-    assert_ne!(unsettled.tip, applied.hash);
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
-    let loaded = fixture.load()?;
-    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
-    assert!(
-        matches!(result, Err(AssumeUtxoError::SnapshotTipNotSettled {
-        durable_tip: Some(durable), applied_tip: Some(current),
-    }) if durable == unsettled.tip && current == applied.hash)
-    );
-    assert!(fixture.active.is_closed_for_recovery());
-    assert_eq!(fixture.active.durable_head.load()?, Some(unsettled));
-    assert_eq!(
-        fixture.active.applied_tip_snapshot().as_deref(),
-        Some(applied.as_ref())
-    );
-    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    // Isolate identity, height and count mismatches, including equal hashes.
+    for (change_hash, height_delta, count_delta) in [(true, 0, 0), (false, 1, 0), (false, 0, 1)] {
+        let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x207f_ffff)?;
+        let applied = fixture
+            .active
+            .applied_tip_snapshot()
+            .ok_or("applied tip missing")?;
+        let prior = fixture
+            .active
+            .durable_head
+            .load()?
+            .ok_or("durable head missing")?;
+        let unsettled = DurableHead {
+            commit_id: prior.commit_id + 1,
+            tip: if change_hash {
+                fixture.blocks[1].block_hash().0
+            } else {
+                prior.tip
+            },
+            height: prior.height + height_delta,
+            chain_tx_count: prior.chain_tx_count + count_delta,
+            ..prior
+        };
+        fixture
+            .head
+            .commit(Some(&prior), &unsettled, &CommitRecords::default())?;
+        let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+        let loaded = fixture.load()?;
+        let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
+        assert!(
+            matches!(result, Err(AssumeUtxoError::SnapshotTipNotSettled {
+            durable_tip: Some(durable), applied_tip: Some(current),
+        }) if durable == (unsettled.tip, unsettled.height, unsettled.chain_tx_count)
+            && current == (applied.hash, applied.height, applied.chain_tx_count.to_wire()))
+        );
+        assert!(fixture.active.is_closed_for_recovery());
+        assert_eq!(fixture.active.durable_head.load()?, Some(unsettled));
+        assert_eq!(
+            fixture.active.applied_tip_snapshot().as_deref(),
+            Some(applied.as_ref())
+        );
+        assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    }
     Ok(())
 }
 

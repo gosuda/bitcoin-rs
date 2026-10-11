@@ -16,7 +16,7 @@ pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget
 
 pub use column_families::ColumnFamily;
 
-pub use error::StorageError;
+pub use error::{BoundedReadError, StorageError};
 
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;

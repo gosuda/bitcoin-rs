@@ -168,6 +168,20 @@ pub trait KvStore: Send + Sync + 'static {
     /// Returns the value for `key` in `cf`, if present.
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
+    /// Copies a value only after its borrowed/pinned length fits `max_bytes`.
+    ///
+    /// This bounds the returned owned copy, not engine-internal page reads,
+    /// cache allocation, or decompression. Unsupported implementations must
+    /// refuse without calling unbounded `get`.
+    fn get_bounded(
+        &self,
+        _cf: ColumnFamily,
+        _key: &[u8],
+        _max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        Err(crate::BoundedReadError::Unsupported)
+    }
+
     /// Iterates matching key-value pairs in key order.
     fn iter_prefix<'a>(
         &'a self,

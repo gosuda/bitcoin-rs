@@ -103,6 +103,18 @@ pub trait BlockBodyStore: Send + Sync {
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError>;
+    /// Reads a body only after its stored length fits the owned-copy bound.
+    /// Unsupported implementations refuse without calling metadata or the
+    /// unbounded body reader. Backend-internal reads are not an owned-copy bound.
+    fn load_block_body_bounded(
+        &self,
+        _height: u32,
+        _hash: Hash256,
+        _max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        Err(crate::BoundedReadError::Unsupported)
+    }
+
     /// Starts a body-read session.
     fn reader(&self) -> Result<Box<dyn BlockBodyReader + '_>, StorageError> {
         Ok(Box::new(DirectBlockBodyReader { store: self }))
@@ -326,6 +338,35 @@ impl<S: KvStore> IndexedBlockBodyStore<S> {
 }
 
 impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
+    fn load_block_body_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        let key = crate::pruning::block_body_key(height, hash);
+        let raw_position = self.index.get_bounded(
+            crate::pruning::BLOCK_DATA_CF,
+            &key,
+            BlockFilePosition::ENCODED_LEN,
+        )?;
+        let Some(position) = decode_body_position(height, raw_position.as_deref())? else {
+            return Ok(None);
+        };
+        let size = usize::try_from(position.len).unwrap_or(usize::MAX);
+        if size > max_bytes {
+            return Err(crate::BoundedReadError::Limit {
+                size,
+                limit: max_bytes,
+            });
+        }
+        // The flat-file reader validates the frame's length against this
+        // checked position before allocating the body buffer.
+        self.files
+            .load(position, height, *hash.as_byte_array())
+            .map_err(Into::into)
+    }
+
     fn load_staged_body(
         &self,
         height: u32,

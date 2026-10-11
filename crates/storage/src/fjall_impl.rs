@@ -179,6 +179,19 @@ impl FjallStore {
 }
 
 impl KvStore for FjallStore {
+    fn get_bounded(
+        &self,
+        cf: ColumnFamily,
+        key: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        self.keyspace(cf)?
+            .get(key)
+            .map_err(StorageError::backend)?
+            .map(|value| crate::error::copy_bounded(&value, max_bytes))
+            .transpose()
+    }
+
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.keyspace(cf)?
             .get(key)
