@@ -25,7 +25,7 @@ pub(crate) struct TransactionChainContext {
     pub block_hash: BlockHash,
     /// Confirmations on the applied chain, or `0` when the named block is inactive.
     pub confirmations: i64,
-    /// Confirming block time.
+    /// Confirming block time, emitted only with positive confirmations.
     pub block_time: u64,
     /// Whether the confirming block is on the applied chain.
     ///
@@ -59,6 +59,13 @@ fn btc_amount_parts(negative: bool, magnitude: u64) -> Value {
         Ok(value) => value,
         Err(error) => panic!("formatted BTC amount was invalid JSON: {error}"),
     }
+}
+
+/// Core transaction versions expose all 32 wire bits as an unsigned number.
+/// Native transaction and signed block-header representations stay unchanged.
+#[must_use]
+pub(crate) const fn wire_transaction_version(version: i32) -> u32 {
+    u32::from_le_bytes(version.to_le_bytes())
 }
 
 /// Render one transaction in Bitcoin Core's verbose object shape.
@@ -98,7 +105,7 @@ pub(crate) fn transaction_json(
     let mut value = json!({
         "txid": txid,
         "hash": hash,
-        "version": u32::from_le_bytes(tx.version.to_le_bytes()),
+        "version": wire_transaction_version(tx.version),
         "size": size,
         "vsize": vsize,
         "weight": weight,
@@ -110,8 +117,10 @@ pub(crate) fn transaction_json(
     if let Some(chain) = chain {
         let _ = value.insert("blockhash", json!(chain.block_hash.to_string()));
         let _ = value.insert("confirmations", json!(chain.confirmations));
-        let _ = value.insert("time", json!(chain.block_time));
-        let _ = value.insert("blocktime", json!(chain.block_time));
+        if chain.confirmations > 0 {
+            let _ = value.insert("time", json!(chain.block_time));
+            let _ = value.insert("blocktime", json!(chain.block_time));
+        }
         if let Some(in_active_chain) = chain.in_active_chain {
             let _ = value.insert("in_active_chain", json!(in_active_chain));
         }
@@ -476,6 +485,9 @@ mod tests {
         };
         let value = transaction_json(&sample_tx(), Network::Regtest, Some(chain));
         assert!(value.get("in_active_chain").is_none());
+        for field in ["time", "blocktime"] {
+            assert_eq!(value.get(field).and_then(Value::as_u64), Some(9));
+        }
         assert_eq!(
             value
                 .get("confirmations")
@@ -493,6 +505,12 @@ mod tests {
             in_active_chain: Some(false),
         };
         let value = transaction_json(&sample_tx(), Network::Regtest, Some(chain));
+        for field in ["time", "blocktime"] {
+            assert!(
+                value.get(field).is_none(),
+                "inactive {field} must be absent"
+            );
+        }
         assert_eq!(
             value
                 .get("in_active_chain")

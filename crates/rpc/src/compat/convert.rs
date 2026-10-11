@@ -3,19 +3,18 @@
 //! Every conversion between this node's native primitives and the
 //! `bitcoin`/`corepc-types` vocabulary crosses the RPC boundary here, by
 //! consensus-byte round trip or explicit field mapping. Handlers build
-//! `corepc_types::v31` values and emit them through [`typed_to_sonic`]; they
-//! never hand-assemble response JSON.
+//! `corepc_types::v31` values and emit them through [`typed_to_sonic`], or use
+//! the shared `tx_render` projection when a pinned DTO cannot express the wire value.
 //!
 //! Address strings, `asm`, and `desc` are wire-format strings that must match
 //! Bitcoin Core byte-for-byte; they ride the sanctioned rust-bitcoin seam
 //! (`Script` formatting, `Address` rendering) at this boundary only.
 
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 use bitcoin::Address;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_primitives::{CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_primitives::{CompactTarget, Network, Tx};
 use bitcoin_rs_script::{
     is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_push_only, multisig_key_count,
     witness_program,
@@ -300,15 +299,6 @@ pub(crate) fn script_pub_key_typed(
     sonic_rs::from_value(&tx_render::script_pub_key_json(script, network)).map_err(RpcError::from)
 }
 
-/// Input script object (`asm` + `hex`).
-#[must_use]
-fn script_sig_typed(script: &[u8]) -> corepc_types::ScriptSig {
-    corepc_types::ScriptSig {
-        asm: tx_render::script_asm(script, true),
-        hex: script.to_lower_hex_string(),
-    }
-}
-
 /// The coinbase transaction object carried by verbose block responses.
 ///
 /// Takes the block's `txs.first()` directly. Returns `None` when the block
@@ -325,149 +315,6 @@ pub(crate) fn coinbase_transaction_typed(
         sequence: input.sequence.to_consensus(),
         coinbase: input.script_sig.to_lower_hex_string(),
         witness: input.witness.first().map(DisplayHex::to_lower_hex_string),
-    })
-}
-
-/// Confirmed-chain context attached to a verbose transaction projection.
-#[derive(Debug)]
-pub(crate) struct VerboseTxChain {
-    /// Confirming block hash.
-    pub block_hash: String,
-    /// Confirmations on the applied chain.
-    pub confirmations: u64,
-    /// Confirming block time (reported only with positive confirmations).
-    pub time: u64,
-    /// Whether the confirming block is on the applied chain.
-    pub in_active_chain: Option<bool>,
-}
-
-/// Projects one native transaction into Core's verbose wire shape
-/// (`getrawtransaction` verbosity >= 1 and verbose block entries).
-pub(crate) fn raw_transaction_verbose(
-    tx: &Tx,
-    network: Network,
-    chain: Option<VerboseTxChain>,
-) -> Result<corepc_types::v31::GetRawTransactionVerbose, RpcError> {
-    let coinbase = tx_render::is_coinbase(tx);
-    let inputs = tx
-        .inputs
-        .iter()
-        .map(|input| raw_input_typed(input, coinbase))
-        .collect::<Vec<_>>();
-    let outputs = tx
-        .outputs
-        .iter()
-        .enumerate()
-        .map(|(index, output)| raw_output_typed(output, index, network))
-        .collect::<Result<Vec<_>, _>>()?;
-    let (block_hash, confirmations, transaction_time, block_time, in_active_chain) =
-        chain.map_or((None, None, None, None, None), |chain| {
-            let time = (chain.confirmations > 0).then_some(chain.time);
-            (
-                Some(chain.block_hash),
-                Some(chain.confirmations),
-                time,
-                time,
-                chain.in_active_chain,
-            )
-        });
-    Ok(corepc_types::v31::GetRawTransactionVerbose {
-        in_active_chain,
-        hex: consensus_bytes(tx).to_lower_hex_string(),
-        txid: tx.txid().to_string(),
-        hash: tx.wtxid().to_string(),
-        size: u64::try_from(tx.total_size()).unwrap_or(u64::MAX),
-        vsize: tx.vsize(),
-        weight: tx.weight(),
-        version: tx.version,
-        lock_time: tx.lock_time.to_consensus(),
-        inputs,
-        outputs,
-        block_hash,
-        confirmations,
-        transaction_time,
-        block_time,
-    })
-}
-
-/// Projects one native transaction into Core's `decoderawtransaction` shape.
-///
-/// The response body is the `psbt`-level `RawTransaction` that `corepc_types`
-/// re-exports from `v17`; `v31` re-exports the `DecodeRawTransaction` wrapper
-/// and the input/output component types but not the bare body name, so the
-/// body is named at its only public path. Same struct, same wire shape.
-pub(crate) fn raw_transaction(
-    tx: &Tx,
-    network: Network,
-) -> Result<corepc_types::v17::RawTransaction, RpcError> {
-    let coinbase = tx_render::is_coinbase(tx);
-    let inputs = tx
-        .inputs
-        .iter()
-        .map(|input| raw_input_typed(input, coinbase))
-        .collect::<Vec<_>>();
-    let outputs = tx
-        .outputs
-        .iter()
-        .enumerate()
-        .map(|(index, output)| raw_output_typed(output, index, network))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(corepc_types::v17::RawTransaction {
-        txid: tx.txid().to_string(),
-        hash: tx.wtxid().to_string(),
-        size: u64::try_from(tx.total_size()).unwrap_or(u64::MAX),
-        vsize: tx.vsize(),
-        weight: tx.weight(),
-        version: tx.version,
-        lock_time: tx.lock_time.to_consensus(),
-        inputs,
-        outputs,
-    })
-}
-
-/// Projects one transaction input, coinbase-shaped when flagged.
-fn raw_input_typed(input: &TxIn, coinbase: bool) -> corepc_types::v31::RawTransactionInput {
-    let txin_witness = (!input.witness.is_empty()).then(|| {
-        input
-            .witness
-            .iter()
-            .map(DisplayHex::to_lower_hex_string)
-            .collect::<Vec<_>>()
-    });
-    if coinbase {
-        return corepc_types::v31::RawTransactionInput {
-            coinbase: Some(input.script_sig.to_lower_hex_string()),
-            txid: None,
-            vout: None,
-            script_sig: None,
-            txin_witness,
-            sequence: input.sequence.to_consensus(),
-        };
-    }
-    // Field copies come before any `&self` method: `OutPoint` is
-    // `#[repr(packed)]` (consensus wire layout), so field references would be
-    // unaligned.
-    let (prev_txid, prev_vout) = (input.previous_output.txid, input.previous_output.vout);
-    corepc_types::v31::RawTransactionInput {
-        coinbase: None,
-        txid: Some(prev_txid.to_string()),
-        vout: Some(prev_vout),
-        script_sig: Some(script_sig_typed(&input.script_sig)),
-        txin_witness,
-        sequence: input.sequence.to_consensus(),
-    }
-}
-
-/// Projects one transaction output at its zero-based index.
-fn raw_output_typed(
-    output: &TxOut,
-    index: usize,
-    network: Network,
-) -> Result<corepc_types::v31::RawTransactionOutput, RpcError> {
-    Ok(corepc_types::v31::RawTransactionOutput {
-        value: sat_to_btc(output.value.to_sat()),
-        index: u64::try_from(index).unwrap_or(u64::MAX),
-        script_pubkey: script_pub_key_typed(&output.script_pubkey, network)?,
     })
 }
 

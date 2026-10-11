@@ -14,11 +14,9 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{
-    self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
-};
+use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
@@ -157,20 +155,18 @@ fn render_raw_transaction(
             record.hash.into(),
             record.height,
         );
-        VerboseTxChain {
-            block_hash: record.hash.to_string(),
-            confirmations: u64::try_from(confirmations).unwrap_or(0),
-            time: u64::from(record.time),
+        crate::tx_render::TransactionChainContext {
+            block_hash: record.hash,
+            confirmations: confirmations.max(0),
+            block_time: u64::from(record.time),
             in_active_chain: explicit_block.then_some(confirmations > 0),
         }
     });
-    // Core omits unavailable optional fields. The upstream response type
-    // serializes None as null, so use the existing omission-aware boundary.
-    typed_to_sonic_omitting_nulls(&convert::raw_transaction_verbose(
+    Ok(crate::tx_render::transaction_json(
         tx,
         ctx.chain.chain_network,
         chain,
-    )?)
+    ))
 }
 
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -223,7 +219,7 @@ fn txout_typed(
     coinbase: bool,
     best_block: Hash256,
 ) -> Result<Value, RpcError> {
-    typed_to_sonic(&v31::GetTxOut {
+    typed_to_sonic_omitting_nulls(&v31::GetTxOut {
         best_block: best_block.to_string(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
@@ -555,10 +551,11 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
-    typed_to_sonic(&v31::DecodeRawTransaction(convert::raw_transaction(
-        &tx,
-        ctx.chain.chain_network,
-    )?))
+    let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
+    if let Some(object) = value.as_object_mut() {
+        object.remove(&"hex");
+    }
+    Ok(value)
 }
 
 const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
@@ -986,11 +983,12 @@ mod tests {
         ctx.indexes.derived_index = Some(Arc::new(FailingQuery));
         let ctx = Arc::new(ctx);
         let genesis = fixture_genesis();
-        let coinbase = genesis
+        let mut coinbase = genesis
             .txs
             .first()
             .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
             .clone();
+        coinbase.version = -1;
         let txid = coinbase.txid();
         {
             let mut pool = ctx.mempool.gateway.pool().write();
@@ -1004,6 +1002,21 @@ mod tests {
 
         let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
+        for verbosity in [json!(true), json!(1), json!(2)] {
+            let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), verbosity]))?;
+            assert_eq!(verbose["version"].as_u64(), Some(4_294_967_295));
+            assert_eq!(verbose["hex"].as_str(), Some(expected.as_str()));
+            for field in [
+                "blockhash",
+                "confirmations",
+                "time",
+                "blocktime",
+                "in_active_chain",
+                "fee",
+            ] {
+                assert!(verbose.get(field).is_none(), "mempool omits {field}");
+            }
+        }
         Ok(())
     }
 
@@ -1161,7 +1174,9 @@ mod tests {
             }
         }
 
-        let genesis = fixture_genesis();
+        let mut genesis = fixture_genesis();
+        genesis.txs[0].version = i32::MIN;
+        genesis.header.merkle_root = genesis.txs[0].txid().0;
         let Some(coinbase) = genesis.txs.first().cloned() else {
             panic!("genesis has no transactions");
         };
@@ -1188,6 +1203,13 @@ mod tests {
         let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), true]))
             .expect("verbose txindex lookup");
         assert!(verbose.get("in_active_chain").is_none());
+        assert_eq!(verbose["version"].as_u64(), Some(2_147_483_648));
+        for field in ["time", "blocktime"] {
+            assert_eq!(
+                verbose[field].as_u64(),
+                Some(u64::from(genesis.header.time))
+            );
+        }
         assert_eq!(
             verbose.get("confirmations").and_then(Value::as_u64),
             Some(1)

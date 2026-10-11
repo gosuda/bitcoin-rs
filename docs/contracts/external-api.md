@@ -56,8 +56,12 @@
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision. Shared transaction JSON
   interprets raw version bits as Core's unsigned 32-bit value and raw output
-  amounts as signed 64-bit values; native transaction representations and
-  consensus checks are unchanged.
+  amounts as signed 64-bit values. `decoderawtransaction`, verbose
+  `getrawtransaction` and verbose block transaction entries reuse that owner;
+  block `coinbase_tx.version` uses the same unsigned conversion, while block
+  header versions keep their signed interpretation. Raw transaction chain
+  times appear only for positive confirmations. Native transaction
+  representations, consensus checks and undo availability are unchanged.
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
