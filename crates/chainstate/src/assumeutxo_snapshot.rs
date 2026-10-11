@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
 use cap_std::fs::Dir;
 
 use anyhow::{Context as _, Result, bail};
@@ -189,24 +189,45 @@ pub(super) fn cleanup_reservations(data_dir: &Path, network: Network) -> Result<
             else {
                 continue;
             };
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true).write(true).follow(FollowSymlinks::No);
-            let mut file = directory.open_with(name, &options)?.into_std();
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(std::fs::TryLockError::WouldBlock) => continue,
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
-            if recognized_reservation(&mut file, kind, network, pinned)? {
-                directory.remove_file(name)?;
-                changed = true;
-            }
+            changed |= reclaim_reservation(&directory, name, kind, network, pinned)?;
         }
         if changed {
             sync_dir(&directory)?;
         }
     }
     Ok(())
+}
+
+/// Reclaims one already-selected reservation, retaining its lock through unlink.
+fn reclaim_reservation(
+    directory: &Dir,
+    name: &str,
+    kind: ReservationKind,
+    network: Network,
+    pinned: &AssumeUtxoData,
+) -> std::io::Result<bool> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .follow(FollowSymlinks::No)
+        .nonblock(true);
+    let mut file = directory.open_with(name, &options)?.into_std();
+    // Directory-entry type is only a precheck. Validate the opened inode
+    // before locking or reading; a substituted FIFO must never wait for data.
+    if !file.metadata()?.is_file() {
+        return Ok(false);
+    }
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+    }
+    if !recognized_reservation(&mut file, kind, network, pinned)? {
+        return Ok(false);
+    }
+    directory.remove_file(name)?;
+    Ok(true)
 }
 
 /// Stage durable coins before the root can name them. Uncommitted files never
@@ -357,6 +378,65 @@ mod tests {
             (),
         )?;
         Ok((native, loaded.anchor))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_replacement_after_entry_check_is_preserved_without_blocking() -> Result<()> {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let (_, pinned) = native_fixture()?;
+        let archive = archive_directory(dir.path(), pinned.block_hash)?;
+        let name = ".headers.dat.1234.5.tmp";
+        archive.write(
+            name,
+            consensus_bytes(&Network::Regtest.genesis_block().header),
+        )?;
+        let entry = archive.entries()?.next().context("reservation entry")??;
+        assert!(entry.file_type()?.is_file());
+        // Deterministically occupy the actual enumeration/open race boundary.
+        archive.remove_file(name)?;
+        let path = dir
+            .path()
+            .join(DIRECTORY)
+            .join(pinned.block_hash.to_string())
+            .join(name);
+        let created = std::process::Command::new("mkfifo").arg(&path).status()?;
+        assert!(created.success(), "create isolated Unix FIFO");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker_directory = archive.try_clone()?;
+        let worker = std::thread::spawn(move || {
+            let result = reclaim_reservation(
+                &worker_directory,
+                name,
+                ReservationKind::Headers,
+                Network::Regtest,
+                pinned,
+            );
+            let _ = sender.send(result);
+        });
+        let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        let rescue = if observed.is_err() {
+            // Unblock a regressed reader before reporting failure. O_RDWR plus
+            // NONBLOCK prevents this rescue from introducing another FIFO wait.
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true).write(true).follow(FollowSymlinks::No);
+            cap_fs_ext::OpenOptionsSyncExt::nonblock(&mut options, true);
+            let mut file = archive.open_with(name, &options)?;
+            file.write_all(&[0_u8; 80])?;
+            Some(file)
+        } else {
+            None
+        };
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("cleanup worker panicked"))?;
+        // Keep queued rescue bytes alive even if the worker started late.
+        drop(rescue);
+        assert!(!observed.context("cleanup blocked on substituted FIFO")??);
+        assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());
+        Ok(())
     }
 
     #[test]

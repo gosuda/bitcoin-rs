@@ -479,9 +479,13 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   temporary reservation is file-locked before writing and stays locked through
   rename and directory sync. Before publishing a recovered manager, cleanup
   probes that lock and reclaims only exact generated reservation names in
-  compiled base directories whose native header identifies the expected archive.
-  Live writers, unknown names/formats, unidentifiable fragments, symlinks and
-  final archives are preserved. Cleanup failure retains extra files for retry;
+  compiled base directories. Coin reservations must contain native-v4 metadata
+  matching the pinned base; header reservations are recognized only by the
+  network's genesis-header prefix, not by validating a complete header archive.
+  Files are opened without following symlinks, using `O_NONBLOCK` on Unix.
+  The opened descriptor must identify a regular file before locking or reading.
+  Live writers, special files, unknown names/formats, unidentifiable fragments,
+  symlinks and final archives are preserved. Cleanup failure retains extra files for retry;
   it cannot reset the accepted head or truncate an operator artifact. Startup
   admits the current schema,
   validates the root's network pin, and restores a compatible checkpoint or verifies
