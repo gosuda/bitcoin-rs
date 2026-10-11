@@ -1,0 +1,25 @@
+[package]
+name = "bitcoin-rs-snapshot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Offline inspection and pinned-state verification of Bitcoin Core snapshots"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-utxo.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

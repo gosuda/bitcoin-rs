@@ -413,6 +413,41 @@ impl<'a> Projection<'a> {
         })
     }
 
+    pub(super) fn confirmed_history(
+        &self,
+        script_hash: ScriptHash,
+    ) -> Result<Vec<ScriptHistoryRecord>, Response> {
+        let index = self
+            .ctx
+            .indexes
+            .script_index
+            .as_ref()
+            .ok_or_else(|| service_unavailable("script index is disabled"))?;
+        let mut history = index.confirmed_history(script_hash).map_err(query_error)?;
+        history.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.txid.cmp(&left.txid))
+        });
+        history.dedup_by_key(|record| record.txid);
+        Ok(history)
+    }
+
+    pub(super) fn mempool_activity_for(
+        &self,
+        script_hash: ScriptHash,
+    ) -> Result<Vec<Arc<Tx>>, Response> {
+        let index = self
+            .ctx
+            .indexes
+            .script_index
+            .as_ref()
+            .ok_or_else(|| service_unavailable("script index is disabled"))?;
+        let confirmed_unspent = index.unspent_outputs(script_hash).map_err(query_error)?;
+        self.mempool_activity(script_hash, &confirmed_unspent)
+    }
+
     /// PRE: `script_hash` and the script index identify one script.
     /// POST: Capture the unspent pool overlay under one read guard.
     /// POST: Release the guard before building statuses and output strings.

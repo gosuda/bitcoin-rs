@@ -54,7 +54,7 @@ cannot drift:
 ```sh
 ./scripts/ci-pr.sh fmt            # format check
 ./scripts/ci-pr.sh clippy         # three kernel-free all-target profiles
-./scripts/ci-pr.sh test-crates    # consensus, node, rpc profiles (fixture-free)
+./scripts/ci-pr.sh test-crates    # per-crate profiles, including checked-in fixtures
 ./scripts/ci-pr.sh test-binary    # binary profile (rocksdb,fjall,redb)
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass
 ./scripts/ci-pr.sh test           # every test lane in sequence, smallest first

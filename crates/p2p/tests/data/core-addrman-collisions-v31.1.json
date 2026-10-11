@@ -1,0 +1,4196 @@
+{
+  "provenance": {
+    "reference": "Bitcoin Core v31.1",
+    "source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+    "source_clean": true,
+    "source_sha256": {
+      "src/addrman.cpp": "f3016b40aed19a173106ff4e4f32b95b34ecf69d2218959c74272fe7cce643c0",
+      "src/addrman_impl.h": "783f7a3a399f5a3a852bfa670d21650153c2087a9011984f0225222fe53b9cd6",
+      "src/netaddress.cpp": "743d1f336bf35ff4506a9bce8fc534031a304b0b86f4566c5b1260e19876b3ad",
+      "src/netaddress.h": "f05257c296d6999ebb6e1d7a049176bbb87f6febaa015b0100c52e504b8cb27e",
+      "src/netgroup.cpp": "278fe5951b7f65b8098995c06b75805e835db6e09bc234609b28a7057c215add",
+      "src/netgroup.h": "93ed52cd206f8f89265dc8d1db13a1c6f59d9741828d40b7ac0a825dcacc3cc1",
+      "src/hash.h": "4aefc1de4e594f88d6318a2d40daf3dbffb7f2271fe32b0ea23b99688e33c255",
+      "src/serialize.h": "87a273aa8cb9aeea82cd8038bb85284a5782c8abc35f8c826eb60f1a01e06775",
+      "src/random.h": "5459198b3ae7962176537041ae01a8f74f7fa0a02e5b363ce378e6f5ac7ac430",
+      "src/random.cpp": "36c7f0204674539fa86d78766cd0f074420a1c46578a054bc1f0ac1c0b62a090",
+      "src/util/time.cpp": "029853fc5068eb2c9ce8a93af9f2e9ef829ea7655bc959bd1d13159fb0edc487",
+      "src/crypto/sha256.cpp": "31130079f338477ab4e0ddb923a7846bc66b6bdcc814ac6225f462f6aef85755",
+      "src/crypto/sha3.cpp": "9c35767f2110d8d0df4b1dc4d8c9e1f138639781759bb2ce2214366470685983",
+      "src/crypto/chacha20.cpp": "c412e83b29f088bd11e200a0c0355e7ac4caf816dbacf9d6757a48ff4f889c55",
+      "src/crypto/sha512.cpp": "5935740854905fb3731c41db55d594a638f5526535e26a32da9c453a7273d4de",
+      "src/crypto/siphash.cpp": "538471bc7ff7d26a9df8742483cfaf5cec206331a6b78f04f519a4a2321ac07d",
+      "src/util/asmap.cpp": "eae5e8b1dfdda52d39d907ebe00fac76300f00bd5ddf01657a0c1dabf942f66f",
+      "src/util/strencodings.cpp": "e7b53609dbb5d0d025a77ae7db749c084e0c75d798cba6f4456aea0be026804f",
+      "src/logging.cpp": "1c04605e4d3a9c9633e02770cde36fef8b174e46092799fb6fff99eba76e95ce",
+      "src/util/check.cpp": "09cb9274ac9e3bc7fad7c99ccb6986dcd57909cdaf9305b8e5f639f92b0c8d43",
+      "src/clientversion.cpp": "c4b38f790251528ddcfa94034ebc9b4fa10f8a6a15ce3ed03f64f00318017b31",
+      "src/uint256.cpp": "9a94f447c78b095b738c81b0517ba02618d87319dd1d25158a31fc236a5b4d42",
+      "src/util/threadnames.cpp": "9b35b0af788edcae968981b719f42c3bae1b5ee8786db737c8cea9d399ce66d9",
+      "src/support/cleanse.cpp": "e5c85c9c419a0f98c83e9c646a1b22fa9a364fb336b1f271af5e0ab45ff9230b",
+      "src/support/lockedpool.cpp": "7d074ea1811fa10b4692ed0b852117b2ea8a28a44bbae621e72426f3993df3e2",
+      "src/randomenv.cpp": "c62f01b7328d50c229d7cecf4fd35c497c74a508ddb4d50f2b4e8c554b5d2b2f",
+      "src/util/fs.cpp": "32c071567c29fbba42d15fe0e7066a8f47c517e8901ba15f5aa0c2376bc0745a",
+      "src/test/addrman_tests.cpp": "055e67fbffd2fe978bce7a911324a2e5643a8643b6d6fb6978724d60a335ed34",
+      "cmake/bitcoin-build-config.h.in": "e3f32d5c843dc9f2b3e6a791dcf1ef4c4ac373518ec7b85d736aa2bcc189fde5",
+      "src/net.cpp": "7c06727994e2b3ae706c432e7d6b65159f6d946237397ab418f1f4262af3506f"
+    },
+    "compiler": "g++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "compile_flags": "-std=c++20 -O1 -g0 -ffunction-sections -fdata-sections -Wl,--gc-sections",
+    "configuration": "Generated from the pinned cmake/bitcoin-build-config.h.in using pinned31.1 metadata and already measured Linux platform feature flags. Full upstream CMake configure was blocked by absent Boost package; standalone drivers compile actual unmodified Core sources. No candidate or replacement addrman algorithm is linked.",
+    "generated_config_sha256": "e795caf911f1ac025a338cf35620a7015d36423ef2c065aa73b17b52afea5ef4",
+    "build_script": "tests/support/regenerate-core-addrman.sh",
+    "configure_script": "tests/support/core-addrman-configure.cmake"
+  },
+  "driver": "tests/support/core-addrman-collision-driver.cpp",
+  "driver_sha256": "6479123bb9e021c39bf102b9988a880cd72fd7f91ed4f616680c3c1762e58785",
+  "oracle_sha256": "1ab517c14c9680befd0ebdea6973cd482d581e05a749e93f7dbf2ac778a3f3c4",
+  "raw_output_sha256": "a06f5741694acb1d4f14424fa641717ca9fee5bf0017928e3d4b469bcc81f04c",
+  "build_script": "tests/support/regenerate-core-addrman.sh",
+  "scope": "Unmodified Core AddrManImpl actual Good/Good_, ResolveCollisions, SelectTriedCollision, Select(new_only), MakeTried, Attempt_ and ClearNew. No candidate owner or pending guard code.",
+  "fixture_setup": "Existing AddrManDeterministic friend seam configures deterministic secret/random seeds. Vacant-slot defensive fixture inserts one valid New identity into the queue; missing fixture removes its New references via real ClearNew. All subsequent tested transitions call actual Core methods, and CheckAddrman passes every snapshot.",
+  "external_connection_boundary": "The already-connected case explicitly assumes AlreadyConnectedToAddress=true as in pinned net.cpp2825-2834, calls real Good(incumbent), then real Select(new_only), then ResolveCollisions. It does not link networking or infer TCP/pending status.",
+  "repeat_output_identical": true,
+  "timing_cases": [
+    {
+      "input": {
+        "timing": "success14399-protects",
+        "success_age": 14399,
+        "try_age": 61,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "success14399-protects-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699985601,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "success14399-protects-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999939
+      },
+      "after": {
+        "case": "success14399-protects-after",
+        "queue": 0,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699985601,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "success14400-attempt61-replaces",
+        "success_age": 14400,
+        "try_age": 61,
+        "challenger_age": 30
+      },
+      "before": {
+        "case": "success14400-attempt61-replaces-before",
+        "queue": 1,
+        "last_good": 1699999970,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699985600,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699999970,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "success14400-attempt61-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999939
+      },
+      "after": {
+        "case": "success14400-attempt61-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699985600,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "success14401-attempt61-replaces",
+        "success_age": 14401,
+        "try_age": 61,
+        "challenger_age": 30
+      },
+      "before": {
+        "case": "success14401-attempt61-replaces-before",
+        "queue": 1,
+        "last_good": 1699999970,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699985599,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699999970,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "success14401-attempt61-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999939
+      },
+      "after": {
+        "case": "success14401-attempt61-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699985599,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt59-waits",
+        "success_age": 20000,
+        "try_age": 59,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "attempt59-waits-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999941,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt59-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999941
+      },
+      "after": {
+        "case": "attempt59-waits-after",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999941,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt60-waits",
+        "success_age": 20000,
+        "try_age": 60,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "attempt60-waits-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999940,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt60-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999940
+      },
+      "after": {
+        "case": "attempt60-waits-after",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999940,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt61-replaces",
+        "success_age": 20000,
+        "try_age": 61,
+        "challenger_age": 30
+      },
+      "before": {
+        "case": "attempt61-replaces-before",
+        "queue": 1,
+        "last_good": 1699999970,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699999970,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt61-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699999939
+      },
+      "after": {
+        "case": "attempt61-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699999939,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt14399-replaces",
+        "success_age": 20000,
+        "try_age": 14399,
+        "challenger_age": 30
+      },
+      "before": {
+        "case": "attempt14399-replaces-before",
+        "queue": 1,
+        "last_good": 1699999970,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985601,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699999970,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt14399-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699985601
+      },
+      "after": {
+        "case": "attempt14399-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985601,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt14400-window2399-waits",
+        "success_age": 20000,
+        "try_age": 14400,
+        "challenger_age": 2399
+      },
+      "before": {
+        "case": "attempt14400-window2399-waits-before",
+        "queue": 1,
+        "last_good": 1699997601,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997601,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt14400-window2399-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699985600
+      },
+      "after": {
+        "case": "attempt14400-window2399-waits-after",
+        "queue": 1,
+        "last_good": 1699997601,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997601,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt14400-window2400-waits",
+        "success_age": 20000,
+        "try_age": 14400,
+        "challenger_age": 2400
+      },
+      "before": {
+        "case": "attempt14400-window2400-waits-before",
+        "queue": 1,
+        "last_good": 1699997600,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997600,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt14400-window2400-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699985600
+      },
+      "after": {
+        "case": "attempt14400-window2400-waits-after",
+        "queue": 1,
+        "last_good": 1699997600,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997600,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt14400-window2401-replaces",
+        "success_age": 20000,
+        "try_age": 14400,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "attempt14400-window2401-replaces-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt14400-window2401-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699985600
+      },
+      "after": {
+        "case": "attempt14400-window2401-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985600,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "attempt14401-window2401-replaces",
+        "success_age": 20000,
+        "try_age": 14401,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "attempt14401-window2401-replaces-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985599,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "attempt14401-window2401-replaces-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699985599
+      },
+      "after": {
+        "case": "attempt14401-window2401-replaces-after",
+        "queue": 0,
+        "last_good": 1700000000,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 0,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699985599,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": [
+            [
+              191,
+              59
+            ]
+          ]
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 1,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000000,
+          "last_try": 1700000000,
+          "attempts": 0,
+          "primary_source": "2.2.2.2",
+          "new_slots": []
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "future-incumbent-success-protects",
+        "success_age": -1,
+        "try_age": -1,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "future-incumbent-success-protects-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000001,
+          "last_try": 1700000001,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "future-incumbent-success-protects-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1700000001
+      },
+      "after": {
+        "case": "future-incumbent-success-protects-after",
+        "queue": 0,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1700000001,
+          "last_try": 1700000001,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "future-incumbent-attempt-waits",
+        "success_age": 20000,
+        "try_age": -1,
+        "challenger_age": 2401
+      },
+      "before": {
+        "case": "future-incumbent-attempt-waits-before",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1700000001,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "future-incumbent-attempt-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1700000001
+      },
+      "after": {
+        "case": "future-incumbent-attempt-waits-after",
+        "queue": 1,
+        "last_good": 1699997599,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1700000001,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1699997599,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "timing": "future-challenger-success-waits",
+        "success_age": 20000,
+        "try_age": 20000,
+        "challenger_age": -1
+      },
+      "before": {
+        "case": "future-challenger-success-waits-before",
+        "queue": 1,
+        "last_good": 1700000001,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699980000,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1700000001,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      },
+      "selected": {
+        "case": "future-challenger-success-waits-select",
+        "selected": "8.8.8.8:8333",
+        "last_try": 1699980000
+      },
+      "after": {
+        "case": "future-challenger-success-waits-after",
+        "queue": 1,
+        "last_good": 1700000001,
+        "records": 2,
+        "new_count": 1,
+        "tried_count": 1,
+        "incumbent": {
+          "endpoint": "8.8.8.8:8333",
+          "present": true,
+          "tried": true,
+          "refs": 0,
+          "random_position": 0,
+          "table_refs": 0,
+          "seen": 1699900000,
+          "last_success": 1699980000,
+          "last_try": 1699980000,
+          "attempts": 0,
+          "primary_source": "1.1.1.1",
+          "new_slots": []
+        },
+        "challenger": {
+          "endpoint": "8.8.8.8:412",
+          "present": true,
+          "tried": false,
+          "refs": 1,
+          "random_position": 1,
+          "table_refs": 1,
+          "seen": 1699900000,
+          "last_success": 1700000001,
+          "last_try": 1699999995,
+          "attempts": 1,
+          "primary_source": "2.2.2.2",
+          "new_slots": [
+            [
+              863,
+              23
+            ]
+          ]
+        }
+      }
+    }
+  ],
+  "rows": [
+    {
+      "fixture": "hash-int32-1",
+      "now": 1700000000,
+      "tried_bucket": 82,
+      "tried_position": 29,
+      "incumbent": "8.8.8.8:8333",
+      "colliders": [
+        "8.8.8.8:412",
+        "8.8.8.8:1343",
+        "8.8.8.8:1735",
+        "8.8.8.8:2112",
+        "8.8.8.8:2435",
+        "8.8.8.8:2533",
+        "8.8.8.8:2701",
+        "8.8.8.8:3107",
+        "8.8.8.8:5018",
+        "8.8.8.8:5236",
+        "8.8.8.8:6979",
+        "8.8.8.8:9118"
+      ]
+    },
+    {
+      "timing": "success14399-protects",
+      "success_age": 14399,
+      "try_age": 61,
+      "challenger_age": 2401
+    },
+    {
+      "case": "success14399-protects-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699985601,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "success14399-protects-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999939
+    },
+    {
+      "case": "success14399-protects-after",
+      "queue": 0,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699985601,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "success14400-attempt61-replaces",
+      "success_age": 14400,
+      "try_age": 61,
+      "challenger_age": 30
+    },
+    {
+      "case": "success14400-attempt61-replaces-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699985600,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "success14400-attempt61-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999939
+    },
+    {
+      "case": "success14400-attempt61-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699985600,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "success14401-attempt61-replaces",
+      "success_age": 14401,
+      "try_age": 61,
+      "challenger_age": 30
+    },
+    {
+      "case": "success14401-attempt61-replaces-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699985599,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "success14401-attempt61-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999939
+    },
+    {
+      "case": "success14401-attempt61-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699985599,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "attempt59-waits",
+      "success_age": 20000,
+      "try_age": 59,
+      "challenger_age": 2401
+    },
+    {
+      "case": "attempt59-waits-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999941,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt59-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999941
+    },
+    {
+      "case": "attempt59-waits-after",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999941,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "attempt60-waits",
+      "success_age": 20000,
+      "try_age": 60,
+      "challenger_age": 2401
+    },
+    {
+      "case": "attempt60-waits-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999940,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt60-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999940
+    },
+    {
+      "case": "attempt60-waits-after",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999940,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "attempt61-replaces",
+      "success_age": 20000,
+      "try_age": 61,
+      "challenger_age": 30
+    },
+    {
+      "case": "attempt61-replaces-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt61-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699999939
+    },
+    {
+      "case": "attempt61-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "attempt14399-replaces",
+      "success_age": 20000,
+      "try_age": 14399,
+      "challenger_age": 30
+    },
+    {
+      "case": "attempt14399-replaces-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985601,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt14399-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699985601
+    },
+    {
+      "case": "attempt14399-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985601,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "attempt14400-window2399-waits",
+      "success_age": 20000,
+      "try_age": 14400,
+      "challenger_age": 2399
+    },
+    {
+      "case": "attempt14400-window2399-waits-before",
+      "queue": 1,
+      "last_good": 1699997601,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997601,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt14400-window2399-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699985600
+    },
+    {
+      "case": "attempt14400-window2399-waits-after",
+      "queue": 1,
+      "last_good": 1699997601,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997601,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "attempt14400-window2400-waits",
+      "success_age": 20000,
+      "try_age": 14400,
+      "challenger_age": 2400
+    },
+    {
+      "case": "attempt14400-window2400-waits-before",
+      "queue": 1,
+      "last_good": 1699997600,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997600,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt14400-window2400-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699985600
+    },
+    {
+      "case": "attempt14400-window2400-waits-after",
+      "queue": 1,
+      "last_good": 1699997600,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997600,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "attempt14400-window2401-replaces",
+      "success_age": 20000,
+      "try_age": 14400,
+      "challenger_age": 2401
+    },
+    {
+      "case": "attempt14400-window2401-replaces-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt14400-window2401-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699985600
+    },
+    {
+      "case": "attempt14400-window2401-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985600,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "attempt14401-window2401-replaces",
+      "success_age": 20000,
+      "try_age": 14401,
+      "challenger_age": 2401
+    },
+    {
+      "case": "attempt14401-window2401-replaces-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985599,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "attempt14401-window2401-replaces-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699985599
+    },
+    {
+      "case": "attempt14401-window2401-replaces-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699985599,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "timing": "future-incumbent-success-protects",
+      "success_age": -1,
+      "try_age": -1,
+      "challenger_age": 2401
+    },
+    {
+      "case": "future-incumbent-success-protects-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000001,
+        "last_try": 1700000001,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "future-incumbent-success-protects-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1700000001
+    },
+    {
+      "case": "future-incumbent-success-protects-after",
+      "queue": 0,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000001,
+        "last_try": 1700000001,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "future-incumbent-attempt-waits",
+      "success_age": 20000,
+      "try_age": -1,
+      "challenger_age": 2401
+    },
+    {
+      "case": "future-incumbent-attempt-waits-before",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1700000001,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "future-incumbent-attempt-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1700000001
+    },
+    {
+      "case": "future-incumbent-attempt-waits-after",
+      "queue": 1,
+      "last_good": 1699997599,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1700000001,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699997599,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "timing": "future-challenger-success-waits",
+      "success_age": 20000,
+      "try_age": 20000,
+      "challenger_age": -1
+    },
+    {
+      "case": "future-challenger-success-waits-before",
+      "queue": 1,
+      "last_good": 1700000001,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1700000001,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "future-challenger-success-waits-select",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699980000
+    },
+    {
+      "case": "future-challenger-success-waits-after",
+      "queue": 1,
+      "last_good": 1700000001,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1700000001,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "repeat-good-refreshes-window",
+      "queue": 1,
+      "last_good": 1699999999,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999999,
+        "last_try": 1699999999,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "good-false-explicit-bypass",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999999,
+        "last_try": 1699999999,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "case": "demotion-deletes-victim-last-ref-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 8,
+        "random_position": 2,
+        "table_refs": 8,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            26,
+            5
+          ],
+          [
+            148,
+            34
+          ],
+          [
+            388,
+            57
+          ],
+          [
+            414,
+            37
+          ],
+          [
+            831,
+            49
+          ],
+          [
+            863,
+            23
+          ],
+          [
+            879,
+            30
+          ],
+          [
+            949,
+            3
+          ]
+        ]
+      },
+      "victim": {
+        "endpoint": "8.8.9.89:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 0,
+        "last_try": 0,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      }
+    },
+    {
+      "case": "demotion-deletes-victim-last-ref-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      },
+      "victim": {
+        "endpoint": "8.8.9.89:8333",
+        "present": false
+      }
+    },
+    {
+      "case": "demotion-preserves-victim-other-ref-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 8,
+        "random_position": 2,
+        "table_refs": 8,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            26,
+            5
+          ],
+          [
+            148,
+            34
+          ],
+          [
+            388,
+            57
+          ],
+          [
+            414,
+            37
+          ],
+          [
+            831,
+            49
+          ],
+          [
+            863,
+            23
+          ],
+          [
+            879,
+            30
+          ],
+          [
+            949,
+            3
+          ]
+        ]
+      },
+      "victim": {
+        "endpoint": "8.8.9.89:8333",
+        "present": true,
+        "tried": false,
+        "refs": 2,
+        "random_position": 1,
+        "table_refs": 2,
+        "seen": 1699900000,
+        "last_success": 0,
+        "last_try": 0,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            120,
+            60
+          ],
+          [
+            191,
+            59
+          ]
+        ]
+      }
+    },
+    {
+      "case": "demotion-preserves-victim-other-ref-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 2,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      },
+      "victim": {
+        "endpoint": "8.8.9.89:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 0,
+        "last_try": 0,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            120,
+            60
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-1",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.2.1.1",
+        "new_slots": [
+          [
+            823,
+            26
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-2",
+      "queue": 2,
+      "last_good": 1699999970,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:1343",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 2,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.3.1.1",
+        "new_slots": [
+          [
+            923,
+            40
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-3",
+      "queue": 3,
+      "last_good": 1699999970,
+      "records": 4,
+      "new_count": 3,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:1735",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 3,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.4.1.1",
+        "new_slots": [
+          [
+            388,
+            57
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-4",
+      "queue": 4,
+      "last_good": 1699999970,
+      "records": 5,
+      "new_count": 4,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:2112",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 4,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.5.1.1",
+        "new_slots": [
+          [
+            414,
+            21
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-5",
+      "queue": 5,
+      "last_good": 1699999970,
+      "records": 6,
+      "new_count": 5,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:2435",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 5,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.6.1.1",
+        "new_slots": [
+          [
+            879,
+            56
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-6",
+      "queue": 6,
+      "last_good": 1699999970,
+      "records": 7,
+      "new_count": 6,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:2533",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 6,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.7.1.1",
+        "new_slots": [
+          [
+            949,
+            20
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-7",
+      "queue": 7,
+      "last_good": 1699999970,
+      "records": 8,
+      "new_count": 7,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:2701",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 7,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.8.1.1",
+        "new_slots": [
+          [
+            148,
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-8",
+      "queue": 8,
+      "last_good": 1699999970,
+      "records": 9,
+      "new_count": 8,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:3107",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 8,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.9.1.1",
+        "new_slots": [
+          [
+            831,
+            18
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-9",
+      "queue": 9,
+      "last_good": 1699999970,
+      "records": 10,
+      "new_count": 9,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:5018",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 9,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.10.1.1",
+        "new_slots": [
+          [
+            26,
+            18
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-10",
+      "queue": 10,
+      "last_good": 1699999970,
+      "records": 11,
+      "new_count": 10,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:5236",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 10,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.11.1.1",
+        "new_slots": [
+          [
+            138,
+            51
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue-add-11",
+      "queue": 10,
+      "last_good": 1699999970,
+      "records": 12,
+      "new_count": 11,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:6979",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 11,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "1.12.1.1",
+        "new_slots": [
+          [
+            175,
+            62
+          ]
+        ]
+      }
+    },
+    {
+      "case": "queue10-select-incumbent",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699980000
+    },
+    {
+      "case": "queue10-repeat-duplicate",
+      "queue": 10,
+      "last_good": 1700000000,
+      "records": 12,
+      "new_count": 11,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "1.2.1.1",
+        "new_slots": [
+          [
+            823,
+            26
+          ]
+        ]
+      }
+    },
+    {
+      "case": "vacant-slot-before",
+      "queue": 1,
+      "last_good": 1,
+      "records": 1,
+      "new_count": 1,
+      "tried_count": 0,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": false
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 0,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "vacant-slot-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 1,
+      "new_count": 0,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": false
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "case": "missing-challenger-resolve-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 1,
+      "new_count": 0,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": false
+      }
+    },
+    {
+      "case": "missing-challenger-resolve-after",
+      "queue": 0,
+      "last_good": 1699999970,
+      "records": 1,
+      "new_count": 0,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": false
+      }
+    },
+    {
+      "case": "missing-challenger-select-before",
+      "queue": 1,
+      "last_good": 1699999970,
+      "records": 1,
+      "new_count": 0,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": false
+      }
+    },
+    {
+      "case": "missing-challenger-select-result",
+      "selected": "[::]:0",
+      "last_try": 0
+    },
+    {
+      "case": "missing-challenger-select-after",
+      "queue": 0,
+      "last_good": 1699999970,
+      "records": 1,
+      "new_count": 0,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": false
+      }
+    },
+    {
+      "case": "already-promoted-before",
+      "queue": 1,
+      "last_good": 1699999999,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699999999,
+        "last_try": 1699999999,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "case": "already-promoted-after",
+      "queue": 0,
+      "last_good": 1699999999,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699980000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699999999,
+        "last_try": 1699999999,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      }
+    },
+    {
+      "case": "two-collision-selection",
+      "draws": 1024,
+      "first_count": 510,
+      "second_count": 514,
+      "first": "8.8.8.8:8333",
+      "second": "8.8.8.8:8334"
+    },
+    {
+      "case": "already-connected-collision-selection",
+      "selected": "8.8.8.8:8333",
+      "last_try": 1699998766
+    },
+    {
+      "case": "already-connected-after-good",
+      "queue": 1,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "already-connected-new-selection",
+      "selected": "8.8.8.8:412",
+      "last_try": 1699999970
+    },
+    {
+      "case": "already-connected-after-resolve",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 2,
+      "new_count": 1,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999970,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "case": "creation-order-fixture",
+      "created_first": "8.8.8.8:412",
+      "first_creation_id": 1,
+      "created_second": "8.8.8.8:1343",
+      "second_creation_id": 2,
+      "good_call_order": [
+        "8.8.8.8:1343",
+        "8.8.8.8:412"
+      ],
+      "core_collision_iteration": [
+        "8.8.8.8:412",
+        "8.8.8.8:1343"
+      ]
+    },
+    {
+      "case": "creation-order-before",
+      "queue": 2,
+      "last_good": 1699999970,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      },
+      "second_challenger": {
+        "endpoint": "8.8.8.8:1343",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 2,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "3.3.3.3",
+        "new_slots": [
+          [
+            120,
+            55
+          ]
+        ]
+      }
+    },
+    {
+      "case": "creation-order-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      },
+      "second_challenger": {
+        "endpoint": "8.8.8.8:1343",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 2,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "3.3.3.3",
+        "new_slots": [
+          [
+            120,
+            55
+          ]
+        ]
+      }
+    }
+  ],
+  "prior_v2_rows_byte_identical": true,
+  "creation_order_case": {
+    "ordering": {
+      "case": "creation-order-fixture",
+      "created_first": "8.8.8.8:412",
+      "first_creation_id": 1,
+      "created_second": "8.8.8.8:1343",
+      "second_creation_id": 2,
+      "good_call_order": [
+        "8.8.8.8:1343",
+        "8.8.8.8:412"
+      ],
+      "core_collision_iteration": [
+        "8.8.8.8:412",
+        "8.8.8.8:1343"
+      ]
+    },
+    "before": {
+      "case": "creation-order-before",
+      "queue": 2,
+      "last_good": 1699999970,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 0,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": []
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 1,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "2.2.2.2",
+        "new_slots": [
+          [
+            863,
+            23
+          ]
+        ]
+      },
+      "second_challenger": {
+        "endpoint": "8.8.8.8:1343",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 2,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "3.3.3.3",
+        "new_slots": [
+          [
+            120,
+            55
+          ]
+        ]
+      }
+    },
+    "after": {
+      "case": "creation-order-after",
+      "queue": 0,
+      "last_good": 1700000000,
+      "records": 3,
+      "new_count": 2,
+      "tried_count": 1,
+      "incumbent": {
+        "endpoint": "8.8.8.8:8333",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 0,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699980000,
+        "last_try": 1699999939,
+        "attempts": 0,
+        "primary_source": "1.1.1.1",
+        "new_slots": [
+          [
+            191,
+            59
+          ]
+        ]
+      },
+      "challenger": {
+        "endpoint": "8.8.8.8:412",
+        "present": true,
+        "tried": true,
+        "refs": 0,
+        "random_position": 1,
+        "table_refs": 0,
+        "seen": 1699900000,
+        "last_success": 1700000000,
+        "last_try": 1700000000,
+        "attempts": 0,
+        "primary_source": "2.2.2.2",
+        "new_slots": []
+      },
+      "second_challenger": {
+        "endpoint": "8.8.8.8:1343",
+        "present": true,
+        "tried": false,
+        "refs": 1,
+        "random_position": 2,
+        "table_refs": 1,
+        "seen": 1699900000,
+        "last_success": 1699999970,
+        "last_try": 1699999995,
+        "attempts": 1,
+        "primary_source": "3.3.3.3",
+        "new_slots": [
+          [
+            120,
+            55
+          ]
+        ]
+      }
+    }
+  }
+}
