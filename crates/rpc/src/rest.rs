@@ -563,40 +563,28 @@ fn getutxos_response(
     }
 }
 
-/// Core `/rest/deploymentinfo[/<blockhash>].json` (JSON only).
-///
-/// No RPC handler exists for this surface, so the projection is Core-shaped
-/// from applied-chain facts with an empty `deployments` map.
+/// Core deployment transport over the same native projection as JSON-RPC.
 fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (hash_text, format) = split_format(suffix);
     if format != Some("json") {
         return format_not_found("json");
     }
-    let object = if hash_text.is_empty() {
-        // Hash and height describe one publication; the explicit-hash branch
-        // reports a named block and needs no applied tip at all.
+    let hash = if hash_text.is_empty() {
         let view = ctx.chain.applied_view();
         release_applied_capture();
-        json!({
-            "hash": view.hash(ctx.chain.chain_network).to_string_be(),
-            "height": view.height(),
-            "deployments": {}
-        })
+        view.hash(ctx.chain.chain_network)
     } else {
         let hash_text = hash_text.strip_prefix('/').unwrap_or(hash_text);
         let Ok(hash) = Hash256::from_str(hash_text) else {
             return bad_request(format!("Invalid hash: {hash_text}"));
         };
-        let Some(record) = ctx.chain.record_for_hash(hash) else {
-            return bad_request("Block not found");
-        };
-        json!({
-            "hash": hash.to_string_be(),
-            "height": record.height,
-            "deployments": {}
-        })
+        hash
     };
-    text_response("application/json", sonic_bytes(&object))
+    match crate::handlers::deployment::at_hash(ctx, hash) {
+        Ok(object) => text_response("application/json", sonic_bytes(&object)),
+        Err(RpcError::InvalidAddressOrKey(_)) => bad_request("Block not found"),
+        Err(error) => service_unavailable(error.to_string()),
+    }
 }
 
 /// Core `/rest/blockhashbyheight/<height>.<ext>`.
@@ -2172,7 +2160,12 @@ mod tests {
         arm_rival(&ctx);
         let response = route(&ctx, "/rest/deploymentinfo.json", "", true);
         let value: Value = sonic_rs::from_slice(&response.body).expect("deploymentinfo JSON");
-        assert_eq!(value.get("deployments"), Some(&json!({})));
+        assert!(
+            value
+                .get("deployments")
+                .and_then(Value::as_object)
+                .is_some_and(|deployments| !deployments.is_empty())
+        );
         assert_eq!(
             value.get("height").and_then(Value::as_u64),
             Some(u64::from(applied_height)),
