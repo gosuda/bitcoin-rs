@@ -274,12 +274,52 @@ pub enum PeerError {
     /// Payload checksum did not match the header checksum.
     #[error("invalid payload checksum")]
     BadChecksum,
-    /// The finite-state machine rejected the message in the current state.
+    /// A connection-local operational or non-punitive policy condition ended processing.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
+    /// A complete remote message violated a structural or handshake rule.
+    #[error("remote protocol violation: {0}")]
+    Misbehavior(&'static str),
+    /// Non-I/O failure from the inbound decoder, distinguished from local encoding.
+    #[error("invalid inbound message: {0}")]
+    Incoming(#[source] Box<Self>),
+    /// Automatic dialing is temporarily avoided after a prior remote violation.
+    #[error("discouraged destination {0}")]
+    DiscouragedDestination(std::net::IpAddr),
     /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
     BannedDestination(std::net::IpAddr),
+}
+
+impl PeerError {
+    pub(crate) fn inbound(error: Self) -> Self {
+        match error {
+            Self::Io(_) => error,
+            _ => Self::Incoming(Box::new(error)),
+        }
+    }
+
+    /// Only explicitly attributed remote failures can affect reconnect policy.
+    pub(crate) const fn is_misbehavior(&self) -> bool {
+        matches!(self, Self::Misbehavior(_) | Self::Incoming(_))
+    }
+
+    /// Protected peers may discard a fully consumed bad message. Header errors
+    /// leave an unread payload, so the transport still closes without punishment.
+    pub(crate) fn recoverable_for_protected(&self) -> bool {
+        match self {
+            Self::Misbehavior(_) => true,
+            Self::Incoming(error) => matches!(
+                error.as_ref(),
+                Self::BadChecksum
+                    | Self::Encode(_)
+                    | Self::Varint(_)
+                    | Self::NativeDecode(_)
+                    | Self::Misbehavior(_)
+            ),
+            _ => false,
+        }
+    }
 }
 
 /// Writes every byte in `slices` with `write_vectored`, advancing through
@@ -568,7 +608,7 @@ fn decode_addr(payload: &[u8]) -> Result<Vec<(u32, bitcoin::p2p::Address)>, Peer
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_ADDR_MESSAGE_COUNT {
-        return Err(PeerError::Protocol("addr count too large"));
+        return Err(PeerError::Misbehavior("addr count too large"));
     }
     let mut addresses = Vec::with_capacity(capacity);
     for _ in 0..count {
@@ -577,7 +617,7 @@ fn decode_addr(payload: &[u8]) -> Result<Vec<(u32, bitcoin::p2p::Address)>, Peer
         )?);
     }
     if !reader.is_empty() {
-        return Err(PeerError::Protocol("trailing bytes after addr payload"));
+        return Err(PeerError::Misbehavior("trailing bytes after addr payload"));
     }
     Ok(addresses)
 }
@@ -587,14 +627,16 @@ fn decode_addrv2(payload: &[u8]) -> Result<Vec<AddrV2Message>, PeerError> {
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_ADDR_MESSAGE_COUNT {
-        return Err(PeerError::Protocol("addrv2 count too large"));
+        return Err(PeerError::Misbehavior("addrv2 count too large"));
     }
     let mut addresses = Vec::with_capacity(capacity);
     for _ in 0..count {
         addresses.push(AddrV2Message::consensus_decode(&mut reader)?);
     }
     if !reader.is_empty() {
-        return Err(PeerError::Protocol("trailing bytes after addrv2 payload"));
+        return Err(PeerError::Misbehavior(
+            "trailing bytes after addrv2 payload",
+        ));
     }
     Ok(addresses)
 }
@@ -604,14 +646,14 @@ fn decode_inventory(payload: &[u8]) -> Result<Vec<Inventory>, PeerError> {
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_INV_PER_MSG {
-        return Err(PeerError::Protocol("inventory count too large"));
+        return Err(PeerError::Misbehavior("inventory count too large"));
     }
     let mut inventory = Vec::with_capacity(capacity);
     for _ in 0..count {
         inventory.push(Inventory::consensus_decode(&mut reader)?);
     }
     if !reader.is_empty() {
-        return Err(PeerError::Protocol(
+        return Err(PeerError::Misbehavior(
             "trailing bytes after inventory payload",
         ));
     }
@@ -645,7 +687,7 @@ fn decode_locator_payload(
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_LOCATOR_HASHES {
-        return Err(PeerError::Protocol(match command {
+        return Err(PeerError::Misbehavior(match command {
             "getblocks" => "getblocks locator too large",
             "getheaders" => "getheaders locator too large",
             _ => "locator too large",
@@ -658,7 +700,7 @@ fn decode_locator_payload(
     }
     let stop_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
     if !reader.is_empty() {
-        return Err(PeerError::Protocol(match command {
+        return Err(PeerError::Misbehavior(match command {
             "getblocks" => "trailing bytes after getblocks payload",
             "getheaders" => "trailing bytes after getheaders payload",
             _ => "trailing bytes after locator payload",
@@ -674,7 +716,7 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
     reader = &reader[consumed..];
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_HEADERS_MESSAGE_COUNT {
-        return Err(PeerError::Protocol("headers count too large"));
+        return Err(PeerError::Misbehavior("headers count too large"));
     }
     let mut headers = Vec::with_capacity(capacity);
     for _ in 0..count {
@@ -682,11 +724,13 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
         let (tx_count, consumed) = bitcoin_rs_primitives::varint::decode(reader)?;
         reader = &reader[consumed..];
         if tx_count != 0 {
-            return Err(PeerError::Protocol("headers entry carried transactions"));
+            return Err(PeerError::Misbehavior("headers entry carried transactions"));
         }
     }
     if !reader.is_empty() {
-        return Err(PeerError::Protocol("trailing bytes after headers payload"));
+        return Err(PeerError::Misbehavior(
+            "trailing bytes after headers payload",
+        ));
     }
     Ok(headers)
 }
@@ -695,7 +739,7 @@ fn empty_payload(payload: &[u8], message: Message) -> Result<Message, PeerError>
     if payload.is_empty() {
         Ok(message)
     } else {
-        Err(PeerError::Protocol("expected empty payload"))
+        Err(PeerError::Misbehavior("expected empty payload"))
     }
 }
 

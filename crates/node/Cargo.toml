@@ -88,6 +88,9 @@ rayon.workspace = true
 sha2.workspace = true
 cap-std.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }

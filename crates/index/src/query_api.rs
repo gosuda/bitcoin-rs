@@ -128,6 +128,13 @@ pub trait ScriptIndexQuery: Send + Sync {
         &self,
         script_hash: ScriptHash,
     ) -> Result<ScriptIndexSnapshot, TxQueryError>;
+    /// Returns confirmed history records from one storage snapshot.
+    fn confirmed_history(
+        &self,
+        script_hash: ScriptHash,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        Ok(self.history_snapshot(script_hash)?.history)
+    }
     /// Returns the confirmed transaction spending `outpoint`, if any.
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError>;
 }

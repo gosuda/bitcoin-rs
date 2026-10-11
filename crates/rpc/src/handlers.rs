@@ -9,6 +9,7 @@ use crate::context::Context;
 use crate::error::RpcError;
 
 pub(crate) mod chain;
+pub(crate) mod deployment;
 pub(crate) mod mempool;
 pub(crate) mod mining;
 pub(crate) mod network;
@@ -490,6 +491,51 @@ mod registry_tests {
             .expect_err("unknown name");
         assert_eq!(error.code(), -8);
         assert_eq!(error.to_string(), "Unknown named parameter extra");
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn creation_version_and_excess_arguments_are_not_ignored() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!([[], {}, 0, false, 1]),
+            json!({"args": [[], {}, 0, false, 1]}),
+            json!({"inputs": [], "outputs": {}, "locktime": 0, "replaceable": false, "version": 1}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("createrawtransaction", &params)
+                    .expect("version is supported"),
+                json!("01000000000000000000"),
+            );
+        }
+        for params in [
+            json!([[], {}, 0, false]),
+            json!([[], {}, 0, false, null]),
+            json!({"args": [[], {}, 0, false, null]}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("createrawtransaction", &params)
+                    .expect("default version"),
+                json!("02000000000000000000"),
+            );
+        }
+        for params in [
+            json!([[], {}, 0, false, 1, null]),
+            json!({"args": [[], {}, 0, false, 1, null]}),
+            json!([[], {}, 0, false, 1, 0]),
+            json!({"args": [[], {}, 0, false, 1, 0]}),
+        ] {
+            let error = handler
+                .dispatch("createrawtransaction", &params)
+                .expect_err("unsupported sixth argument must not be ignored");
+            assert_eq!(error.code(), -1);
+            assert_eq!(
+                error.to_string(),
+                "createrawtransaction: incorrect number of parameters"
+            );
+        }
     }
 
     #[test]

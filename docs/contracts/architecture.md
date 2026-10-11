@@ -17,7 +17,7 @@ Owners:
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint` | Runtime assembly, lifecycle, and offline tooling |
+| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint`, `snapshot` | Runtime assembly, lifecycle, and offline tooling |
 | 3: Surface | `rpc` | External protocol boundaries |
 | 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
@@ -60,7 +60,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     outcomes for scheduling, retry and peer policy through `SyncChain`.
   - In Layer 4, the footprint package is an offline Linux
     filesystem utility with no node/runtime-workspace or storage-engine
-    dependencies.
+    dependencies. `bitcoin-rs-snapshot` is an offline Core-file inspector and
+    verifier consuming the shared primitives/UTXO codec; it does not compose
+    a node, P2P service, RPC server, mempool, or mining runtime.
     `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
     surfaces only; it declares no internal dependencies and no workspace
@@ -390,7 +392,11 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   caller-supplied digests and snapshot trailers do not establish trust. This is Core's
   `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
   active tip; it is independently checked during historical finalization. The base
-  header must already exist at the pinned height. Coin statistics are rebuilt from
+  header must already exist at the pinned height, be valid, and be an ancestor
+  of the current best-work header tip. The installer rechecks these facts under
+  transition exclusion before the lifecycle commit. The snapshot base must carry
+  strictly more cumulative work than the settled active tip; height alone does
+  not order competing branches. Coin statistics are rebuilt from
   the imported coins, and the resolved header supplies chainwork. Installation and
   role changes serialize with chain transitions; failed validation publishes nothing.
 - **Compiled mainnet anchors and provenance**:
@@ -403,12 +409,12 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   counts are owned by `crates/primitives/src/network.rs`. These anchor additions
   leave the project's broader Bitcoin Core compatibility baseline unchanged.
 - **Snapshot format and interoperability evidence**:
-  The current file activation API reads native bitcoin-rs v4 snapshots. Bitcoin
-  Core portable v2 import, `loadtxoutset`, `getchainstates`, and real-process
-  lifecycle interoperability remain tracked in
-  [#1390](https://github.com/gosuda/bitcoin-rs/issues/1390). Compiled anchor support
-  does not establish hosted snapshot availability or successful Core-to-bitcoin-rs
-  process interoperability; each requires separate evidence.
+  The embedding file activation API reads native bitcoin-rs v4 snapshots.
+  `loadtxoutset` uses the shared Core portable v2 reader and existing activation
+  owner; `getchainstates` projects that owner's lifecycle (`API-33`). Process
+  coverage uses a genuine Core-produced regtest-200 artifact. Compiled mainnet
+  anchors alone do not establish hosted artifact availability, mainnet
+  interoperability, or memory/throughput qualifications.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target
@@ -473,13 +479,27 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 - **Durable activation and recovery**:
   Immutable coin and header archives are synced before the active head commits the
   pinned base and lifecycle status. That head is the only activation authority;
-  orphan import files do not activate a snapshot. Startup admits the current schema,
+  orphan import files do not activate a snapshot. Each exclusively created
+  temporary reservation is file-locked before writing and stays locked through
+  rename and directory sync. Before publishing a recovered manager, cleanup
+  probes that lock and reclaims only exact generated reservation names in
+  compiled base directories. Coin reservations must contain native-v4 metadata
+  matching the pinned base; header reservations are recognized only by the
+  network's genesis-header prefix, not by validating a complete header archive.
+  Files are opened without following symlinks, using `O_NONBLOCK` on Unix.
+  The opened descriptor must identify a regular file before locking or reading.
+  Live writers, special files, unknown names/formats, unidentifiable fragments,
+  symlinks and final archives are preserved. Cleanup failure retains extra files for retry;
+  it cannot reset the accepted head or truncate an operator artifact. Startup
+  admits the current schema,
   validates the root's network pin, and restores a compatible checkpoint or verifies
   the snapshot archive, then replays the certified foreground suffix to the head.
   A checkpoint remains an accelerator, including after finalized history is pruned.
   Activation detaches the old checkpoint journal; anchored recovery does not replay
-  that journal across the snapshot jump. Node activation fences mempool admission,
-  clears old transactions, and wakes index/mining consumers. It does not manufacture
+  that journal across the snapshot jump. Node activation fences mempool admission
+  and refuses a nonempty mempool before invoking the manager; refusal settles the
+  fence without changing transactions, fee deltas, or lifecycle state. Successful
+  activation clears stale empty-pool/orphan bookkeeping and wakes index/mining consumers. It does not manufacture
   per-block ZMQ events for imported history. Historical undo makes below-base reorgs
   possible after finalization; crossing below the base removes the snapshot anchor
   in the disconnect's authoritative batch.

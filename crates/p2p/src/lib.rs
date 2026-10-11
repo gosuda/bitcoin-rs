@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Persistent, bounded peer discovery and automatic address selection.
+pub(crate) mod addrman;
 /// Outbound block announcements: headers-first, high-bandwidth compact, inv fallback.
 pub mod block_announce;
 /// Out-of-order inbound block staging bounded by the download window budget.
@@ -29,6 +31,7 @@ pub(crate) mod inbound;
 pub mod inv;
 /// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
+pub(crate) mod netgroup;
 
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
@@ -47,6 +50,8 @@ pub(crate) mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// Connection-bound transaction request and relay policy.
+pub(crate) mod tx_policy;
 /// Bounded transaction announcements and their peer relay worker.
 pub(crate) mod tx_relay;
 /// Bitcoin P2P wire codec.
@@ -87,3 +92,6 @@ pub use wire::{Message, PeerError};
 pub use wtxid::WtxidRelayState;
 
 pub use download_window::default_sync_budget;
+
+/// Bounded automatic reconnect avoidance; manual bans retain their owner.
+pub mod discouragement;

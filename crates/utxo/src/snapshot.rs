@@ -162,16 +162,23 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     })
 }
 
-/// Strictly decodes a complete v4 snapshot for a chainstate checkpoint.
-pub fn read_snapshot_strict_v4(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> {
-    read_snapshot_strict_v4_observed(reader, ()).map(|(snapshot, ())| snapshot)
+/// Parsed native-v4 header identity; this does not validate the coin body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSnapshotMetadata {
+    /// Snapshot base block identity.
+    pub tip_hash: Hash256,
+    /// Snapshot base height.
+    pub height: u32,
+    /// Declared transaction-level records, not output count.
+    pub record_count: u64,
 }
 
-/// Strictly decodes a complete v4 snapshot while observing each inserted coin.
-pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
+/// Reads the fixed native-v4 header through the same parser as checkpoint load.
+/// Intended for bounded identification; callers must not treat it as full
+/// snapshot verification or as a trust anchor.
+pub fn read_snapshot_metadata_v4(
     reader: &mut impl Read,
-    mut observer: O,
-) -> Result<(SnapshotLoad, O), UtxoError> {
+) -> Result<NativeSnapshotMetadata, UtxoError> {
     let header_bytes = read_array::<{ core::mem::size_of::<SnapshotHeader>() }>(reader)?;
     let magic = read_u32(&header_bytes, 0);
     if magic != SNAPSHOT_MAGIC {
@@ -185,6 +192,28 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     tip_hash.copy_from_slice(&header_bytes[8..40]);
     let height = read_u32(&header_bytes, 40);
     let record_count = read_u64(&header_bytes, 44);
+    Ok(NativeSnapshotMetadata {
+        tip_hash: Hash256::from_le_bytes(&tip_hash),
+        height,
+        record_count,
+    })
+}
+
+/// Strictly decodes a complete v4 snapshot for a chainstate checkpoint.
+pub fn read_snapshot_strict_v4(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> {
+    read_snapshot_strict_v4_observed(reader, ()).map(|(snapshot, ())| snapshot)
+}
+
+/// Strictly decodes a complete v4 snapshot while observing each inserted coin.
+pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
+    reader: &mut impl Read,
+    mut observer: O,
+) -> Result<(SnapshotLoad, O), UtxoError> {
+    let NativeSnapshotMetadata {
+        tip_hash,
+        height,
+        record_count,
+    } = read_snapshot_metadata_v4(reader)?;
     let record_count_usize =
         usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
             count: record_count,
@@ -229,7 +258,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     Ok((
         SnapshotLoad {
             set,
-            tip_hash: Hash256::from_le_bytes(&tip_hash),
+            tip_hash,
             height,
             muhash_trailer,
         },
