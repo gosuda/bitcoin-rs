@@ -21,6 +21,13 @@ docs/rpc-reference.md text eol=lf
 # text-looking seeds must survive checkout unconverted.
 fuzz/corpus/** -text
 
+# Binary fixtures embedded with `include_bytes!`. A fixture without a NUL byte
+# is detected as text, so autocrlf inserts a CR before every 0x0a byte and the
+# tests reading it fail on Windows checkouts only (addrman-historical-v2.dat,
+# addrman-historical-v4-anchors.dat).
+*.dat -text
+*.raw -text
+
 # The corpus manifest is generated JSON — text that must stay LF even
 # though the directory above it is pinned binary.
 fuzz/corpus/manifest.json text eol=lf
