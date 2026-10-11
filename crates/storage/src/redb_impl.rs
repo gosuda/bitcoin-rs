@@ -661,6 +661,16 @@ impl KvSnapshot for RedbSnapshot {
     ) -> Result<crate::PrefixScan, StorageError> {
         scan_prefix(&self.read_txn, table_for(cf), prefix, limit)
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        scan_prefix_from(&self.read_txn, table_for(cf), prefix, start, limit)
+    }
 }
 
 struct RedbTxIndexSnapshot {
@@ -709,6 +719,81 @@ impl KvSnapshot for RedbTxIndexSnapshot {
     ) -> Result<crate::PrefixScan, StorageError> {
         scan_txindex_prefix(&self.read_txn, cf, prefix, limit)
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        match cf {
+            ColumnFamily::TxConfirmed => fixed_value_prefix_scan_from(
+                &self.read_txn,
+                TXINDEX_TX_CONFIRMED,
+                TXINDEX_TX_CONFIRMED_VALUES,
+                prefix,
+                start,
+                limit,
+            ),
+            ColumnFamily::Funding => fixed_value_prefix_scan_from(
+                &self.read_txn,
+                TXINDEX_FUNDING,
+                TXINDEX_FUNDING_VALUES,
+                prefix,
+                start,
+                limit,
+            ),
+            ColumnFamily::Spending => fixed_value_prefix_scan_from(
+                &self.read_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                prefix,
+                start,
+                limit,
+            ),
+            ColumnFamily::UtxoMeta => {
+                scan_prefix_from(&self.read_txn, TXINDEX_META, prefix, start, limit)
+            }
+            _ => self.scan_prefix_bounded(cf, prefix, limit),
+        }
+    }
+}
+
+fn scan_prefix_from(
+    read_txn: &redb::ReadTransaction,
+    table_def: ByteTable,
+    prefix: &[u8],
+    start: &[u8],
+    limit: crate::PrefixScanLimit,
+) -> Result<crate::PrefixScan, StorageError> {
+    let table = read_txn
+        .open_table(table_def)
+        .map_err(StorageError::backend)?;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for item in table.range(start..).map_err(StorageError::backend)? {
+        let (key, value) = item.map_err(StorageError::backend)?;
+        if !key.value().starts_with(prefix) {
+            break;
+        }
+        if !crate::trait_::push_bounded_row(
+            &mut rows,
+            &mut bytes,
+            key.value(),
+            value.value(),
+            limit,
+        ) {
+            return Ok(crate::PrefixScan {
+                rows,
+                complete: false,
+            });
+        }
+    }
+    Ok(crate::PrefixScan {
+        rows,
+        complete: true,
+    })
 }
 
 fn scan_prefix(
@@ -973,6 +1058,50 @@ fn fixed_value_prefix_scan(
     {
         let (key, _) = item.map_err(StorageError::backend)?;
         let key = key.value();
+        let value = values
+            .get(key)
+            .map_err(StorageError::backend)?
+            .map_or_else(Vec::new, |bytes| bytes.value().to_vec());
+        if !crate::trait_::push_bounded_row(&mut rows, &mut bytes, key, &value, limit) {
+            return Ok(crate::PrefixScan {
+                rows,
+                complete: false,
+            });
+        }
+    }
+    Ok(crate::PrefixScan {
+        rows,
+        complete: true,
+    })
+}
+
+fn fixed_value_prefix_scan_from(
+    read_txn: &ReadTransaction,
+    main_def: FixedTable<12>,
+    value_def: TxIndexValueTable,
+    prefix: &[u8],
+    start: &[u8],
+    limit: crate::PrefixScanLimit,
+) -> Result<crate::PrefixScan, StorageError> {
+    let start = fixed_key::<12>(start)?;
+    let (_, end) = fixed_prefix_bounds::<12>(prefix)?;
+    let main = read_txn
+        .open_table(main_def)
+        .map_err(StorageError::backend)?;
+    let values = read_txn
+        .open_table(value_def)
+        .map_err(StorageError::backend)?;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for item in main
+        .range::<&[u8; 12]>(&start..=&end)
+        .map_err(StorageError::backend)?
+    {
+        let (key, _) = item.map_err(StorageError::backend)?;
+        let key = key.value();
+        if !key.starts_with(prefix) {
+            break;
+        }
         let value = values
             .get(key)
             .map_err(StorageError::backend)?

@@ -126,10 +126,6 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
-
     // Direct keys at heights 1 and 256: both produce a funding row with the
     // same 8-byte prefix; only the height suffix differs. `commit_block`
     // cannot write a gapped height, so these tests own the keys themselves.
@@ -141,6 +137,9 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(2, 0), script)],
     };
+    put_funding_row(&store, scripthash, 1, block_at_1.txs[0].txid())?;
+    put_funding_row(&store, scripthash, 256, block_at_256.txs[0].txid())?;
+    let indexer = Indexer::new(store);
 
     // --- Part A: iter_funding_rows returns BE byte order, hence numeric ---
 
@@ -151,8 +150,8 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     // [0x00, 0x00, 0x01, 0x00]. BE byte order puts 1 before 256.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256],
-        "BE byte order matches numeric height order"
+        vec![256, 1],
+        "inverted BE byte order is newest first"
     );
 
     // --- Part B: resolve_script_history sorts by numeric height ---
@@ -187,10 +186,6 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn s
     let script = vec![0x51, 0x03];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
-
     let block_at_1 = Block {
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(5, 0), script.clone())],
@@ -199,6 +194,9 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn s
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(6, 0), script)],
     };
+    put_funding_row(&store, scripthash, 1, block_at_1.txs[0].txid())?;
+    put_funding_row(&store, scripthash, 256, block_at_256.txs[0].txid())?;
+    let indexer = Indexer::new(store);
 
     let source = MultiHeightSource {
         blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
@@ -256,7 +254,12 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
             u32::try_from(offset)?,
             u32::try_from(block.txs[0].total_size())?,
         );
-        put_funding_row_positions(&store, scripthash, height, &[position])?;
+        put_funding_row_positions(
+            &store,
+            scripthash,
+            height,
+            &[(block.txs[0].txid(), position)],
+        )?;
     }
     let indexer = Indexer::new(store);
 

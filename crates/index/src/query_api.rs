@@ -75,6 +75,16 @@ pub struct ScriptHistoryRecord {
     pub height: u32,
 }
 
+/// One bounded newest-first confirmed-history page.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScriptHistoryPage {
+    /// At most the caller-requested number of unique transaction ids.
+    pub records: Vec<ScriptHistoryRecord>,
+    /// Whether the supplied cursor was an exact active-history occurrence.
+    /// A false value preserves API-09 by returning the first page.
+    pub cursor_found: bool,
+}
+
 /// One confirmed transaction spending an indexed outpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpendingRecord {
@@ -134,6 +144,31 @@ pub trait ScriptIndexQuery: Send + Sync {
         script_hash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         Ok(self.history_snapshot(script_hash)?.history)
+    }
+    /// Returns a bounded newest-first page after `cursor`.
+    fn confirmed_history_page(
+        &self,
+        script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let mut history = self.confirmed_history(script_hash)?;
+        history.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.txid.cmp(&left.txid))
+        });
+        history.dedup_by_key(|record| record.txid);
+        let start = cursor.and_then(|txid| history.iter().position(|record| record.txid == txid));
+        Ok(ScriptHistoryPage {
+            records: history
+                .into_iter()
+                .skip(start.map_or(0, |index| index + 1))
+                .take(limit)
+                .collect(),
+            cursor_found: cursor.is_none() || start.is_some(),
+        })
     }
     /// Returns the confirmed transaction spending `outpoint`, if any.
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError>;

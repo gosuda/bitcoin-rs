@@ -289,8 +289,10 @@
 - `/txs/chain[/<last_seen_txid>]` reads are bounded to the requested page
   (up to 25 items): confirmation status, block metadata, and transaction
   projections are hydrated only for the selected page slice, never for the entire
-  confirmed history. Unselected older blocks being pruned or absent does not fail
-  earlier pages.
+  confirmed history. The durable scan seeks from the cursor's active occurrence;
+  pre-BIP34 duplicate transaction ids select the newest matching occurrence and
+  are emitted once across page traversal. Unselected older blocks being pruned or
+  absent does not fail earlier pages.
 - `/txs/chain` queries decouple from unspent queries: they do not enumerate
   `ScriptLive` UTXOs or query mempool state.
 - Sentinel `last == Some("")` (`/txs/mempool`) queries resolve mempool activity

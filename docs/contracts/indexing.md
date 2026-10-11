@@ -84,16 +84,19 @@ Readers resolve each locator against the authoritative UTXO set and exact-check
 the full script. Deletes are exact point deletes, so a prefix collision cannot
 remove another script's output.
 
-`ScriptHistory` persists funding rows (`ScriptHashRow`) keyed by
-`(script_hash_prefix, height)` and spending rows (`SpendingPrefixRow`) keyed by
-`(outpoint_prefix, height)`. Because spending rows index the spent outpoint rather
-than the original script hash, spend discovery for a script requires first
-discovering all funding outpoints for that script. As a result, confirmed history
-queries (`confirmed_history`) must discover all funding outputs across the script's
-history before resolving spends; reverse-chronological scanning directly at the
-storage level cannot be bounded to an initial page without omitting spends of
-older funding outputs. However, `confirmed_history` avoids allocating or retaining
-unneeded funding record lists when callers only require history records.
+`ScriptHistory` format 6 persists both funding and spending occurrences in the
+`Funding` family, keyed by `(script_hash_prefix, inverted_height_be)`. Each value
+retains the full script hash, full transaction id, transaction byte position,
+and funding/spending flags. Values are ordered by transaction position; a
+transaction that both spends and funds the script is one occurrence with both
+flags. Full identities filter compact-prefix collisions without a block read.
+`Spending` remains the minimal outpoint-to-spender locator for outspend queries.
+A newest-first page starts at an engine seek key and does not issue an outpoint
+scan per funded output.
+
+The writer derives an input's script from an output created earlier in the same
+block or from authoritative UTXO undo. Missing spent-script evidence fails the
+history transition closed; no secondary coin set is introduced.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -142,8 +145,8 @@ unneeded funding record lists when callers only require history records.
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
   `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
-  durability marker only (row-format 5: big-endian heights, 43-byte live rows,
-  6-byte positions — format owned by
+  durability marker only (row-format 6: newest-first unified ScriptHistory,
+  43-byte live rows, and 6-byte positions — format owned by
   `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
   and recovery full-resets the store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
@@ -215,9 +218,10 @@ unneeded funding record lists when callers only require history records.
   branch block pruned before rollback completed), the worker resets the
   affected capability watermark and initiates a fresh rebuild from the active
   chain.
-- A missing or unreadable undo record is fatal only for `ScriptLive`. The
-  worker resets that capability and reseeds from the authoritative UTXO view;
-  `TxLookup` and `ScriptHistory` continue their body-only rollback.
+- A missing or unreadable undo record is fatal for `ScriptHistory`, because a
+  block body does not contain the script of a spent previous output; the worker
+  fails closed instead of publishing incomplete history. For `ScriptLive` alone,
+  it resets that capability and reseeds from the authoritative UTXO view.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
   rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
   and the watermark stamp are ordinary fenced writes (reset, revision, and

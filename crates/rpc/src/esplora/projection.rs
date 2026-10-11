@@ -413,9 +413,11 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn confirmed_history(
+    pub(super) fn confirmed_history_page(
         &self,
         script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, Response> {
         let index = self
             .ctx
@@ -423,15 +425,10 @@ impl<'a> Projection<'a> {
             .script_index
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
-        let mut history = index.confirmed_history(script_hash).map_err(query_error)?;
-        history.sort_by(|left, right| {
-            right
-                .height
-                .cmp(&left.height)
-                .then_with(|| right.txid.cmp(&left.txid))
-        });
-        history.dedup_by_key(|record| record.txid);
-        Ok(history)
+        Ok(index
+            .confirmed_history_page(script_hash, cursor, limit)
+            .map_err(query_error)?
+            .records)
     }
 
     pub(super) fn mempool_activity_for(

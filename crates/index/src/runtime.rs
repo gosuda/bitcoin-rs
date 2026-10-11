@@ -37,8 +37,8 @@ use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use crate::query_api::{
-    DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
 };
 
 use bitcoin_rs_storage::{
@@ -208,6 +208,16 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         let engine = self.load_engine()?;
         engine.confirmed_history(scripthash)
+    }
+
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.confirmed_history_page(scripthash, cursor, limit)
     }
 
     fn unspent_outputs(

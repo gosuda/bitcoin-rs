@@ -335,4 +335,34 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
                 }),
         ))
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let handle = self.db.cf_handle(cf)?;
+        let prefix = prefix.to_vec();
+        let iterator = self.snapshot.iterator_cf_opt(
+            handle,
+            ReadOptions::default(),
+            IteratorMode::From(start, Direction::Forward),
+        );
+        crate::trait_::collect_bounded(
+            Box::new(
+                iterator
+                    .map(|item| {
+                        item.map(|(key, value)| (key.to_vec(), value.to_vec()))
+                            .map_err(StorageError::backend)
+                    })
+                    .take_while(move |item| match item {
+                        Ok((key, _)) => key.starts_with(&prefix),
+                        Err(_) => true,
+                    }),
+            ),
+            limit,
+        )
+    }
 }

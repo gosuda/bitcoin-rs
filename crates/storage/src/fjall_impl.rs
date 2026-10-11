@@ -307,4 +307,32 @@ impl KvSnapshot for FjallSnapshot<'_> {
             });
         Ok(Box::new(iterator))
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        use core::ops::Bound;
+        let prefix = prefix.to_vec();
+        let iterator = self
+            .snapshot
+            .range::<&[u8], _>(
+                self.store.keyspace(cf)?,
+                (Bound::Included(start), Bound::<&[u8]>::Unbounded),
+            )
+            .map(|guard| {
+                guard
+                    .into_inner()
+                    .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                    .map_err(StorageError::backend)
+            })
+            .take_while(move |item| match item {
+                Ok((key, _)) => key.starts_with(&prefix),
+                Err(_) => true,
+            });
+        crate::trait_::collect_bounded(Box::new(iterator), limit)
+    }
 }

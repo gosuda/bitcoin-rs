@@ -30,6 +30,18 @@ pub(crate) const fn decode_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
+/// Encodes a script-history height so lexicographic order is newest first.
+#[must_use]
+pub(crate) const fn encode_history_height(height: u32) -> [u8; HEIGHT_SIZE] {
+    (!height).to_be_bytes()
+}
+
+/// Decodes a newest-first script-history height.
+#[must_use]
+pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+    !u32::from_be_bytes(bytes)
+}
+
 const fn encode_u24_le(value: u32) -> [u8; 3] {
     let bytes = value.to_le_bytes();
     [bytes[0], bytes[1], bytes[2]]
@@ -415,6 +427,58 @@ impl TxPositionValue {
             return None;
         }
         <[TxPosition]>::ref_from_bytes(value).ok()
+    }
+}
+
+/// One exact transaction occurrence in a script-history height row.
+///
+/// Values retain full identities so compact key-prefix collisions are filtered
+/// without loading a block. Funding and spending in the same transaction are
+/// represented by one occurrence with both flag bits set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScriptHistoryOccurrence {
+    pub(crate) scripthash: ScriptHash,
+    pub(crate) txid: [u8; 32],
+    pub(crate) position: TxPosition,
+    pub(crate) flags: u8,
+}
+
+impl ScriptHistoryOccurrence {
+    pub(crate) const FUNDING: u8 = 0b01;
+    pub(crate) const SPENDING: u8 = 0b10;
+    const SIZE: usize = 32 + 32 + TX_POSITION_SIZE + 1;
+
+    pub(crate) fn encode_all(entries: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(entries.len().saturating_mul(Self::SIZE));
+        for entry in entries {
+            out.extend_from_slice(&entry.scripthash.to_byte_array());
+            out.extend_from_slice(&entry.txid);
+            out.extend_from_slice(entry.position.as_bytes());
+            out.push(entry.flags);
+        }
+        out
+    }
+
+    pub(crate) fn decode_all(value: &[u8]) -> Option<Vec<Self>> {
+        let (chunks, remainder) = value.as_chunks::<{ Self::SIZE }>();
+        if chunks.is_empty() || !remainder.is_empty() {
+            return None;
+        }
+        chunks
+            .iter()
+            .map(|chunk| {
+                let scripthash = ScriptHash::from_byte_array(chunk[..32].try_into().ok()?);
+                let txid = chunk[32..64].try_into().ok()?;
+                let position = TxPosition::read_from_bytes(&chunk[64..70]).ok()?;
+                let flags = chunk[70];
+                (flags != 0 && flags & !(Self::FUNDING | Self::SPENDING) == 0).then_some(Self {
+                    scripthash,
+                    txid,
+                    position,
+                    flags,
+                })
+            })
+            .collect()
     }
 }
 

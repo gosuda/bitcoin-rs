@@ -23,24 +23,36 @@ impl ScriptHistoryEntry {
 impl<S: KvStore> Indexer<S> {
     /// Resolves confirmed script-history entries for `scripthash` via `source`.
     ///
-    /// Walks every funding row for the scripthash, fetches each block, and
-    /// yields a `ScriptHistoryEntry::confirmed` per transaction with an output
-    /// matching the full 32-byte scripthash, so the lossy 8-byte prefix is
-    /// exact-resolved here. Heights the source cannot resolve are skipped.
+    /// Walks unified history rows and filters their retained full 32-byte
+    /// script identity. The source argument remains for API compatibility;
+    /// format 6 does not need block reads to enumerate exact transaction ids.
     /// Entries are sorted by ascending height as a contract guarantee.
     pub fn resolve_script_history<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,
-        source: &B,
+        _source: &B,
     ) -> Result<Vec<crate::ScriptHistoryEntry>, IndexError> {
         let rows = self.iter_funding_rows_with_values(scripthash)?;
         let mut entries = Vec::new();
         for (row, value) in &rows {
             let height = row.height();
-            match positioned_history(scripthash, height, value, source) {
-                Some(found) => entries.extend(found),
-                None => scan_height_history(scripthash, height, source, &mut entries),
-            }
+            let occurrences =
+                crate::types::ScriptHistoryOccurrence::decode_all(value).ok_or_else(|| {
+                    bitcoin_rs_storage::StorageError::IncompatibleData(
+                        "malformed unified script-history row".into(),
+                    )
+                })?;
+            entries.extend(
+                occurrences
+                    .into_iter()
+                    .filter(|entry| entry.scripthash == scripthash)
+                    .map(|entry| {
+                        crate::ScriptHistoryEntry::confirmed(
+                            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&entry.txid)),
+                            height,
+                        )
+                    }),
+            );
         }
         entries.sort_by_key(|entry| entry.height);
         Ok(entries)
@@ -62,9 +74,34 @@ impl<S: KvStore> Indexer<S> {
         let mut outputs = Vec::new();
         for (row, value) in &rows {
             let height = row.height();
-            match positioned_unspent_outputs(scripthash, height, value, source) {
-                Some(found) => outputs.extend(found),
-                None => scan_height_unspent_outputs(scripthash, height, source, &mut outputs),
+            let occurrences =
+                crate::types::ScriptHistoryOccurrence::decode_all(value).ok_or_else(|| {
+                    bitcoin_rs_storage::StorageError::IncompatibleData(
+                        "malformed unified script-history row".into(),
+                    )
+                })?;
+            for occurrence in occurrences {
+                if occurrence.scripthash != scripthash
+                    || occurrence.flags & crate::types::ScriptHistoryOccurrence::FUNDING == 0
+                {
+                    continue;
+                }
+                let expected = Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                    &occurrence.txid,
+                ));
+                let tx = transaction_at(height, occurrence.position, source)
+                    .filter(|tx| tx.txid() == expected)
+                    .or_else(|| {
+                        source
+                            .block_at_height(height)?
+                            .txs
+                            .into_iter()
+                            .find(|tx| tx.txid() == expected)
+                    });
+                let Some(tx) = tx else {
+                    continue;
+                };
+                append_matching_outputs(&tx, scripthash, height, &mut outputs);
             }
         }
         outputs.sort_by_key(|&(_, _, _, height)| height);
@@ -149,84 +186,7 @@ fn transaction_at<B: BlockSource + ?Sized>(
     deserialize::<Tx>(&bytes).ok()
 }
 
-/// Resolves one funding row's history entries from its positions.
-///
 /// Returns `None` — meaning "scan this height instead" — if **any** position
-/// fails to resolve to a transaction funding `scripthash`. Skipping a failed
-/// position and keeping the rest is what would turn a partial result into a
-/// silently complete-looking one; see [`crate::types::TxPositionValue`].
-fn positioned_history<B: BlockSource + ?Sized>(
-    scripthash: crate::ScriptHash,
-    height: u32,
-    value: &[u8],
-    source: &B,
-) -> Option<Vec<crate::ScriptHistoryEntry>> {
-    let positions = crate::types::TxPositionValue::decode(value)?;
-    let mut entries = Vec::with_capacity(positions.len());
-    for position in positions {
-        let tx = transaction_at(height, *position, source)?;
-        if !funds_scripthash(&tx, scripthash) {
-            return None;
-        }
-        entries.push(crate::ScriptHistoryEntry::confirmed(tx.txid(), height));
-    }
-    Some(entries)
-}
-
-/// Appends the history entries a full scan of `height` produces.
-fn scan_height_history<B: BlockSource + ?Sized>(
-    scripthash: crate::ScriptHash,
-    height: u32,
-    source: &B,
-    entries: &mut Vec<crate::ScriptHistoryEntry>,
-) {
-    let Some(block) = source.block_at_height(height) else {
-        return;
-    };
-    for tx in &block.txs {
-        if funds_scripthash(tx, scripthash) {
-            entries.push(crate::ScriptHistoryEntry::confirmed(tx.txid(), height));
-        }
-    }
-}
-
-/// Resolves one funding row's unspent-output candidates from its positions.
-///
-/// Same all-or-scan rule as [`positioned_history`].
-fn positioned_unspent_outputs<B: BlockSource + ?Sized>(
-    scripthash: crate::ScriptHash,
-    height: u32,
-    value: &[u8],
-    source: &B,
-) -> Option<Vec<(Txid, u32, u64, u32)>> {
-    let positions = crate::types::TxPositionValue::decode(value)?;
-    let mut outputs = Vec::new();
-    for position in positions {
-        let tx = transaction_at(height, *position, source)?;
-        let before = outputs.len();
-        append_matching_outputs(&tx, scripthash, height, &mut outputs);
-        if outputs.len() == before {
-            return None;
-        }
-    }
-    Some(outputs)
-}
-
-/// Appends the unspent-output candidates a full scan of `height` produces.
-fn scan_height_unspent_outputs<B: BlockSource + ?Sized>(
-    scripthash: crate::ScriptHash,
-    height: u32,
-    source: &B,
-    outputs: &mut Vec<(Txid, u32, u64, u32)>,
-) {
-    let Some(block) = source.block_at_height(height) else {
-        return;
-    };
-    for tx in &block.txs {
-        append_matching_outputs(tx, scripthash, height, outputs);
-    }
-}
-
 /// Appends `(txid, vout, value, height)` for every output of `tx` matching
 /// `scripthash`, computing the txid only once a match is found.
 fn append_matching_outputs(
@@ -246,12 +206,6 @@ fn append_matching_outputs(
         let txid = *computed_txid.get_or_insert_with(|| tx.txid());
         outputs.push((txid, vout, output.value.to_sat(), height));
     }
-}
-
-fn funds_scripthash(tx: &Tx, scripthash: crate::ScriptHash) -> bool {
-    tx.outputs
-        .iter()
-        .any(|output| crate::ScriptHash::from_script_bytes(&output.script_pubkey) == scripthash)
 }
 
 /// Provides block lookups for resolving lossy index prefixes to full identities.

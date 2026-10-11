@@ -6,12 +6,13 @@ use super::{
     prepared::PreparedBlock,
     rows::LiveOp,
     rows::PendingRows,
-    rows::PositionedRow,
+    rows::{PositionedHistory, PositionedRow},
     write::IndexWriter,
 };
 use crate::{
-    types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::SpendingPrefixRow,
-    types::TxidRow, types::U24_MAX, types::encode_height,
+    types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::ScriptHistoryOccurrence,
+    types::SpendingPrefixRow, types::TxidRow, types::U24_MAX, types::encode_height,
+    types::encode_history_height,
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
 use bitcoin_rs_storage::KvStore;
@@ -60,6 +61,10 @@ pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
 /// row the capabilities select, and the returned header is the body's exact
 /// 80-byte prefix.
 /// INVARIANT: A rejected parse contributes no rows.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one parse pass owns every correlated block row"
+)]
 fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
@@ -79,6 +84,8 @@ fn pending_rows_for_block_with_header(
     rows.header_rows.push(header_row);
     let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
     let mut live_spent: Vec<([u8; 32], u32)> = Vec::new();
+    let mut block_outputs: hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>> =
+        hashbrown::HashMap::new();
 
     for tx in parsed.transactions() {
         let span = tx.span();
@@ -88,6 +95,8 @@ fn pending_rows_for_block_with_header(
             });
         }
         let position = crate::types::TxPosition::new(span.start(), span.len());
+        let txid = tx.txid();
+        let txid_bytes = *txid.as_bytes();
 
         // A live output's row needs the transaction id, and that id is only
         // computed when something needs it, so the outputs of one transaction
@@ -112,6 +121,35 @@ fn pending_rows_for_block_with_header(
                     row: SpendingPrefixRow::row_parts(prevout_txid, vout, height_bytes),
                     position,
                 });
+                let mut previous_txid = [0_u8; 32];
+                previous_txid.copy_from_slice(prevout_txid);
+                let scripthash = match block_outputs.get(&(previous_txid, vout)).copied() {
+                    Some(scripthash) => scripthash,
+                    None => Some(
+                        spent_scripts
+                            .script_bytes(&previous_txid, vout)
+                            .map(ScriptHash::from_script_bytes)
+                            .ok_or(IndexError::MissingSpentCoin {
+                                txid: previous_txid,
+                                vout,
+                                height,
+                            })?,
+                    ),
+                };
+                if let Some(scripthash) = scripthash {
+                    rows.funding_rows.push(PositionedHistory {
+                        row: HashPrefixRow {
+                            prefix: scripthash.prefix(),
+                            height: encode_history_height(height),
+                        },
+                        occurrence: ScriptHistoryOccurrence {
+                            scripthash,
+                            txid: txid_bytes,
+                            position,
+                            flags: ScriptHistoryOccurrence::SPENDING,
+                        },
+                    });
+                }
             }
             if capabilities.contains(IndexCapability::ScriptLive) {
                 let mut txid = [0_u8; 32];
@@ -124,14 +162,28 @@ fn pending_rows_for_block_with_header(
             let script = tx
                 .span_bytes(output.script_pubkey())
                 .unwrap_or_else(|| unreachable!("output span belongs to the parsed image"));
+            if capabilities.contains(IndexCapability::ScriptHistory)
+                && let Ok(vout) = u32::try_from(index)
+            {
+                block_outputs.insert(
+                    (txid_bytes, vout),
+                    (!is_op_return_script(script)).then(|| ScriptHash::from_script_bytes(script)),
+                );
+            }
             if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script)
             {
-                rows.funding_rows.push(PositionedRow {
+                let scripthash = ScriptHash::from_script_bytes(script);
+                rows.funding_rows.push(PositionedHistory {
                     row: HashPrefixRow {
-                        prefix: ScriptHash::from_script_bytes(script).prefix(),
-                        height: height_bytes,
+                        prefix: scripthash.prefix(),
+                        height: encode_history_height(height),
                     },
-                    position,
+                    occurrence: ScriptHistoryOccurrence {
+                        scripthash,
+                        txid: txid_bytes,
+                        position,
+                        flags: ScriptHistoryOccurrence::FUNDING,
+                    },
                 });
             }
             // Genesis is exempt: its coinbase output never entered the UTXO
@@ -145,7 +197,6 @@ fn pending_rows_for_block_with_header(
         }
 
         if capabilities.contains(IndexCapability::TxLookup) || !pending_live.is_empty() {
-            let txid = tx.txid();
             for (vout, scripthash) in pending_live {
                 live_created.push((*txid.as_bytes(), vout, scripthash));
             }

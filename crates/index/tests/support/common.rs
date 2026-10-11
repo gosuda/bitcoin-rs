@@ -8,9 +8,9 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::types::TxPosition;
 use bitcoin_rs_index::{
-    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
+    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, SpendingPrefixRow,
 };
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
@@ -165,12 +165,9 @@ pub(crate) fn put_funding_row(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
+    txid: bitcoin_rs_primitives::Txid,
 ) -> Result<(), StorageError> {
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
-    )
+    put_funding_row_positions(store, scripthash, height, &[(txid, TxPosition::new(1, 1))])
 }
 
 /// Writes one funding-row key at `height` carrying `positions`.
@@ -182,20 +179,25 @@ pub(crate) fn put_funding_row_positions(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
-    positions: &[TxPosition],
+    occurrences: &[(bitcoin_rs_primitives::Txid, TxPosition)],
 ) -> Result<(), StorageError> {
     // An empty slice encodes an empty value — indistinguishable from
     // `put_funding_row`'s scan-path marker, so the positioned read would
     // silently not be exercised.
     assert!(
-        !positions.is_empty(),
+        !occurrences.is_empty(),
         "a funding row exists only because at least one transaction produced it"
     );
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &TxPositionValue::encode(positions),
-    )
+    let mut key = Vec::from(scripthash.prefix());
+    key.extend_from_slice(&(!height).to_be_bytes());
+    let mut value = Vec::with_capacity(occurrences.len() * 71);
+    for (txid, position) in occurrences {
+        value.extend_from_slice(&scripthash.to_byte_array());
+        value.extend_from_slice(txid.as_bytes());
+        value.extend_from_slice(zerocopy::IntoBytes::as_bytes(position));
+        value.push(1);
+    }
+    store.put(ColumnFamily::Funding, &key, &value)
 }
 
 /// Writes one spending-row key at `height` with an empty value.

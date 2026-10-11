@@ -4,10 +4,10 @@ use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
 
 use super::{
-    IndexError, IndexRowCounts, LiveOp, PendingRows, PositionedRow, apply_live_ops, delete_rows,
-    distinct_row_count, for_each_row_group, put_rows,
+    IndexError, IndexRowCounts, LiveOp, PendingRows, PositionedHistory, PositionedRow,
+    apply_live_ops, delete_rows, distinct_row_count, for_each_row_group, put_rows,
 };
-use crate::types::{HashPrefixRow, ScriptHash, ScriptLiveRow, TxPosition};
+use crate::types::{HashPrefixRow, ScriptHash, ScriptHistoryOccurrence, ScriptLiveRow, TxPosition};
 
 /// Reads the target family of one recorded operation.
 fn op_cf(op: &BatchOp) -> ColumnFamily {
@@ -39,6 +39,21 @@ fn positioned_rows() -> Vec<PositionedRow> {
             position: TxPosition::new(81, 10),
         },
     ]
+}
+
+fn positioned_history() -> Vec<PositionedHistory> {
+    positioned_rows()
+        .into_iter()
+        .map(|entry| PositionedHistory {
+            row: entry.row,
+            occurrence: ScriptHistoryOccurrence {
+                scripthash: ScriptHash::from_byte_array([3; 32]),
+                txid: [entry.position.offset().to_le_bytes()[0]; 32],
+                position: entry.position,
+                flags: ScriptHistoryOccurrence::FUNDING,
+            },
+        })
+        .collect()
 }
 
 // Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical bytes
@@ -82,7 +97,7 @@ fn groups_preserve_distinct_keys_and_numeric_positions() {
 fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(), IndexError> {
     let mut rows = PendingRows {
         txid_rows: positioned_rows(),
-        funding_rows: positioned_rows(),
+        funding_rows: positioned_history(),
         spending_rows: positioned_rows(),
         header_rows: vec![[1; crate::types::HEADER_ROW_SIZE]],
         live_ops: Vec::new(),

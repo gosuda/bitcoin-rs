@@ -33,8 +33,9 @@ pub use index::{
     ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use query_api::{
-    DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryRecord,
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryPage,
+    ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord,
+    TxQueryError,
 };
 pub use types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow, ScriptLiveRow,

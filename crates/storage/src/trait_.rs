@@ -309,6 +309,26 @@ pub trait KvSnapshot: Send + Sync {
     ) -> Result<PrefixScan, StorageError> {
         collect_bounded(self.iter_prefix(cf, prefix)?, limit)
     }
+
+    /// Collects matching rows beginning at the inclusive full-key seek point.
+    /// Backends should override this to turn cursor pagination into an engine
+    /// seek; the default preserves correctness for test stores.
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        let start = start.to_vec();
+        collect_bounded(
+            Box::new(
+                self.iter_prefix(cf, prefix)?
+                    .skip_while(move |item| matches!(item, Ok((key, _)) if key < &start)),
+            ),
+            limit,
+        )
+    }
 }
 
 pub(crate) fn push_bounded_row(
@@ -332,7 +352,10 @@ pub(crate) fn push_bounded_row(
     true
 }
 
-fn collect_bounded(iter: KvIter<'_>, limit: PrefixScanLimit) -> Result<PrefixScan, StorageError> {
+pub(crate) fn collect_bounded(
+    iter: KvIter<'_>,
+    limit: PrefixScanLimit,
+) -> Result<PrefixScan, StorageError> {
     let mut rows = Vec::new();
     let mut bytes = 0;
     for item in iter {

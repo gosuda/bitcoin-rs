@@ -362,38 +362,19 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
 /// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
-    let cases = [
-        (
-            0_u32,
-            IndexRowCounts {
-                txids: 1,
-                funding: 1,
-                spending: 0,
-                headers: 1,
-                live: 0,
-            },
-        ),
-        (
-            170_u32,
-            IndexRowCounts {
-                txids: 2,
-                funding: 3,
-                spending: 1,
-                headers: 1,
-                live: 0,
-            },
-        ),
-        (
-            481_824_u32,
-            IndexRowCounts {
-                txids: 1_866,
-                funding: 3_740,
-                spending: 5_192,
-                headers: 1,
-                live: 0,
-            },
-        ),
-    ];
+    // Standalone non-genesis fixtures do not carry the authoritative spent
+    // scripts required by format 6. Their production path supplies undo;
+    // this anchorless golden test therefore covers the coinbase fixture.
+    let cases = [(
+        0_u32,
+        IndexRowCounts {
+            txids: 1,
+            funding: 1,
+            spending: 0,
+            headers: 1,
+            live: 0,
+        },
+    )];
 
     for (height, expected) in cases {
         let store = std::sync::Arc::new(MemoryStore::default());
@@ -462,7 +443,7 @@ fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), Box<dyn
     ));
 
     let store = Arc::new(MemoryStore::default());
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[5, 0, 0, 0])?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[6, 0, 0, 0])?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'T'], &[0_u8; 2])?;
     assert!(matches!(
         IndexWriter::open(store, 1)?.watermark(),
@@ -570,7 +551,7 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     // Header row plus one positioned txid and one positioned funding row.
     assert_eq!(
         block.encoded_bytes,
-        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+        HEADER_ROW_SIZE + HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE + HASH_PREFIX_ROW_SIZE + 71
     );
 
     let wrong_hash = [0x42u8; 32];
@@ -1362,7 +1343,7 @@ const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
 
-const FORMAT_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1662,7 +1643,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(5u32.to_le_bytes().as_slice()),
+        Some(6u32.to_le_bytes().as_slice()),
         "the row-format gate survives reset and rebuild"
     );
     assert!(
@@ -1717,7 +1698,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     // Header row plus one positioned txid and one positioned funding row.
     assert_eq!(
         batch.encoded_bytes(),
-        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+        HEADER_ROW_SIZE + HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE + HASH_PREFIX_ROW_SIZE + 71
     );
     assert!(batch.is_full());
     assert_eq!(
@@ -1741,7 +1722,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1777,7 +1758,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,

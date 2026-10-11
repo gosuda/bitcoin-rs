@@ -118,16 +118,11 @@ fn witness_script(seed: u64) -> Vec<u8> {
 }
 
 fn filler_tx(seed: u64) -> Tx {
-    let mut txid_bytes = [0_u8; 32];
-    fill_bytes(seed, &mut txid_bytes);
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
-                vout: u32::try_from(seed & 0x3).unwrap_or(0),
-            },
+            previous_output: OutPoint::null(),
             script_sig: Vec::new().into(),
             sequence: Sequence::MAX,
             witness: Vec::new().into(),
@@ -147,20 +142,12 @@ fn filler_tx(seed: u64) -> Tx {
 
 /// The transaction the resolvers are asked to find. Pays `target_script` so it
 /// is reachable through a funding row.
-fn target_tx(height: u32, target_script: &[u8]) -> Tx {
-    let mut txid_bytes = [0_u8; 32];
-    fill_bytes(
-        u64::from(height).wrapping_mul(0x9e37_79b9_7f4a_7c15),
-        &mut txid_bytes,
-    );
+fn target_tx(_height: u32, target_script: &[u8]) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
-                vout: 0,
-            },
+            previous_output: OutPoint::null(),
             script_sig: Vec::new().into(),
             sequence: Sequence::MAX,
             witness: Vec::new().into(),

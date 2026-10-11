@@ -196,6 +196,10 @@ impl Worker {
     /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission path owns lease and batch state"
+    )]
     pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
@@ -235,18 +239,26 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let anchors = if capabilities.contains(IndexCapability::ScriptLive) {
+        let needs_spent_scripts = capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive);
+        let anchors = if needs_spent_scripts {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
                     Ok(anchor) => anchors.push(anchor),
-                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
+                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. })
+                        if !capabilities.contains(IndexCapability::ScriptHistory) =>
+                    {
                         *pending = None;
                         self.writer
                             .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                             .map_err(DerivedIndexWorkerError::Index)?;
                         tracing::warn!(error = %error, "rebuilding ScriptLive after pruned undo");
                         return Ok(ChunkAction::Stalled);
+                    }
+                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
+                        tracing::error!(error = %error, "ScriptHistory requires retained spent-script undo");
+                        return Err(error);
                     }
                     Err(error) => return Err(error),
                 }

@@ -7,10 +7,10 @@ use super::{
     DerivedIndexInfo, DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities,
     IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint,
     PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT,
-    QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan,
-    TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
-    record_at_height,
+    QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx,
+    TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid,
+    deserialize, record_at_height,
 };
 
 mod scripts;
@@ -123,6 +123,18 @@ impl QueryBudget {
         })
     }
 
+    pub(super) fn next_page_scan_limit(
+        &mut self,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<PrefixScanLimit, TxQueryError> {
+        let limit = self.next_scan_limit()?;
+        Ok(PrefixScanLimit {
+            max_rows: limit.max_rows.min(max_rows),
+            max_bytes: limit.max_bytes.min(max_bytes),
+        })
+    }
+
     pub(super) fn accept_scan(
         &mut self,
         scan: TxIndexScan,
@@ -147,6 +159,14 @@ impl QueryBudget {
         }
         self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
         Ok(scan.rows)
+    }
+
+    pub(super) fn accept_page_scan(
+        &mut self,
+        scan: TxIndexScan,
+    ) -> Result<(Vec<TxIndexScanRow>, bool), TxQueryError> {
+        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        Ok((scan.rows, scan.complete))
     }
 
     fn charge_scan(&mut self, rows: usize, encoded_bytes: usize) -> Result<(), TxQueryError> {
@@ -508,7 +528,34 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
-                self.confirmed_history_for(snapshot, tip, budget, scripthash, floors.script_history)
+                Self::confirmed_history_for(
+                    snapshot,
+                    tip,
+                    budget,
+                    scripthash,
+                    floors.script_history,
+                )
+            },
+        )
+    }
+
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        self.with_snapshot(
+            IndexCapabilities::HISTORICAL,
+            |snapshot, _tip, budget, floors| {
+                Self::confirmed_history_page_for(
+                    snapshot,
+                    budget,
+                    scripthash,
+                    cursor,
+                    limit,
+                    floors.script_history,
+                )
             },
         )
     }
