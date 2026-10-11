@@ -285,6 +285,20 @@ impl OrphanPool {
         }
     }
 
+    /// Schedules one reconsideration for every currently resident witness identity.
+    /// Existing residency limits bound the temporary list, and `mark_ready` merges
+    /// it with pending work without duplicating a body or resetting its lifetime.
+    pub(crate) fn mark_all_ready(&mut self) {
+        let claims: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(wtxid, held)| Some((*wtxid, Self::select_announcer(&held.announcers)?)))
+            .collect();
+        for (wtxid, announcer) in claims {
+            self.mark_ready(wtxid, announcer);
+        }
+    }
+
     /// Claim one bounded snapshot. Bodies remain resident across transient
     /// failures.
     pub(crate) fn take_ready(&mut self) -> Vec<(HeldOrphan, PeerToken)> {

@@ -105,8 +105,14 @@ state (`crates/mempool/src/orphan.rs`).
   fence. A populated pool is refused and the fence is settled without removing
   transactions or operator fee deltas. Successful activation retains the existing
   pool, prioritisation overlays (including absent txids), fee history, and orphans.
-  The existing `chain_changed` path invalidates chain-bound reject entries before
-  the fence settles; activation emits no fabricated transaction removals. Neither
+  The gateway's `snapshot_changed` event invalidates chain-bound reject entries
+  and marks each resident witness identity ready once. Existing orphan residency
+  limits bound that pass, and the existing ready-identity set coalesces pending
+  work. No retry claim is consumed while the generation is odd; after settlement,
+  the normal retry driver checks the current coins, policy and announcer before
+  admission. Still-missing entries remain held without self-rescheduling. This
+  snapshot-wide wakeup is native policy; Core's tip notification only resets its
+  rejection filters. Activation emits no fabricated transaction removals. Neither
   snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,

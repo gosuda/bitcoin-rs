@@ -629,8 +629,14 @@ those transactions, fee deltas, and chainstate. With an empty pool, it activates
 through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
 consumers. Successful activation retains operator fee prioritisation, including
 entries for transactions absent from the pool, as Core does when moving the
-existing mempool to the new chainstate. Successful return certifies the durable snapshot anchor and consumer
-settlement. Settlement failure closes admission for recovery and is an error,
+existing mempool to the new chainstate. As a native policy, snapshot activation
+also marks each resident orphan ready once through the existing bounded retry
+machinery. Already queued identities are coalesced. Revalidation and admission
+use the current chain view after the generation fence settles; still-missing
+orphans remain held until another ordinary retry trigger. This differs from
+[Core 31.1's tip notification](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/node/txdownloadman_impl.cpp#L92-L109),
+which resets rejection filters without this snapshot-wide wakeup.
+Successful return certifies the durable snapshot anchor and consumer settlement. Settlement failure closes admission for recovery and is an error,
 even if the anchor committed. Headers through the base must already be known.
 The installation boundary, under chain-transition exclusion, rejects an invalid
 base or a base outside the current best-work header ancestry before publishing
