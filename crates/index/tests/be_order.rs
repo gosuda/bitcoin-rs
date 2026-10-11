@@ -161,12 +161,12 @@ fn funding_keys_sort_newest_first_and_history_sorts_by_height()
     let entries = indexer.resolve_script_history(scripthash, &source)?;
 
     assert_eq!(entries.len(), 2, "two confirmed entries");
-    // Entries must be in numeric height order: 1 before 256, matching the
-    // underlying KV iteration order.
+    // Entries must be in ascending numeric height order: 1 before 256,
+    // even though format-6 history rows iterate newest first.
     assert_eq!(
         entries.iter().map(|e| e.height).collect::<Vec<_>>(),
         vec![1, 256],
-        "resolve_script_history must sort by numeric height, matching BE iteration order"
+        "resolve_script_history must return ascending numeric heights"
     );
 
     // The first entry's txid must come from the height-1 block.
