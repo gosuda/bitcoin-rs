@@ -11,7 +11,7 @@ use sonic_rs::Value;
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{chain, mempool, mining, network, tx, util};
+use crate::handlers::{chain, deployment, mempool, mining, network, tx, util};
 use crate::manifest::{CORE_VERSION, Entry, NO_WALLET, Status, SurfaceKind};
 
 /// Signature of one dispatch arm.
@@ -149,16 +149,16 @@ declare_rows! {
     // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
-    // -- JSON-RPC: Core surface not exposed (blockchain/control) -----
+    // -- JSON-RPC: additional Core blockchain/control surfaces ------
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
     "getblockfilter", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "BIP157/158 compact block filters and the filter index are not implemented.", "n/a", None;
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
-    "getchainstates", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented.", "n/a", None;
-    "getdeploymentinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists).", "n/a", None;
+    "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs.", "0.12.0", Some(chain::getchainstates);
+    "getdeploymentinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.12.0", Some(deployment::getdeploymentinfo);
     "getdescriptoractivity", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No wallet/scan index to serve it.", "n/a", None;
     "getmempoolcluster", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Cluster mempool tracking not implemented.", "n/a", None;
     "importmempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool import not implemented.", "n/a", None;
-    "loadtxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot load (assumeutxo) not implemented.", "n/a", None;
+    "loadtxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented.", "0.12.0", Some(chain::loadtxoutset);
     "preciousblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual block-preference surface.", "n/a", None;
     "reconsiderblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual reorg-control surface.", "n/a", None;
     "savemempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool dump/reload persistence not implemented.", "n/a", None;
@@ -257,8 +257,8 @@ declare_rows! {
     "/rest/mempool/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/headers/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs).", "0.4.0", None;
     "/rest/getutxos", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "GET and bounded canonical binary/hex POST share UTXO and mempool lookup. Intentionally corrects Core 31.1 POST string-length-prefix decoding; rejects mixed inputs, JSON bodies and trailing data. POST limit: 2048 bytes, 15 outpoints.", "0.4.0", None;
-    "/rest/deploymentinfo/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
-    "/rest/deploymentinfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
+    "/rest/deploymentinfo/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.4.0", None;
+    "/rest/deploymentinfo", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs).", "0.4.0", None;
     "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;

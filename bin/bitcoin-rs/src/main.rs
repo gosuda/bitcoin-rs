@@ -41,6 +41,35 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn asmap_path_uses_the_existing_configuration_precedence() {
+        let config = resolved(
+            &[
+                "bitcoin-rs",
+                "--network",
+                "regtest",
+                "--asmap",
+                "/tmp/cli-asmap",
+            ],
+            &[("BITCOIN_RS_ASMAP", "/tmp/environment-asmap")],
+        );
+        assert_eq!(
+            config.p2p.asmap,
+            Some(std::path::PathBuf::from("/tmp/cli-asmap"))
+        );
+        let config = load_file(
+            "--config",
+            "network = \"regtest\"\nasmap = \"/tmp/toml-asmap\"\n",
+            &[],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid config: {error}"));
+        assert_eq!(
+            config.p2p.asmap,
+            Some(std::path::PathBuf::from("/tmp/toml-asmap"))
+        );
+    }
+
+    #[test]
     fn measurement_options_are_not_node_options() {
         use clap::Parser as _;
         for option in [

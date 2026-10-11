@@ -183,6 +183,7 @@ impl<S: Read> Peer<S> {
         crate::wire::read_message_with(&mut self.stream, self.magic, |command, payload| {
             crate::net_trace::inbound_message(net_trace, command, payload);
         })
+        .map_err(PeerError::inbound)
     }
 }
 
@@ -216,11 +217,11 @@ impl DnsResolver for SystemDnsResolver {
     }
 }
 
-/// Authoritative p2p activity switch behind `setnetworkactive`.
+/// Read-only view of the service activity switch behind `setnetworkactive`.
 ///
-/// Mirrors Core's `CConnman::fNetworkActive`: flipping the flag never
-/// disconnects existing peers; it only stops new inbound accepts and new
-/// outbound dials while inactive.
+/// The service changes this flag through `PeerTable`, serialized with socket
+/// admission. Disabling cancels admitted leases and prevents new registration;
+/// connection owners tear down their sockets. Enabling permits fresh admission.
 #[derive(Debug, Clone)]
 pub struct NetworkActivity {
     active: Arc<AtomicBool>,

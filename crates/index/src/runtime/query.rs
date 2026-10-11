@@ -501,6 +501,18 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         )
     }
 
+    fn confirmed_history(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        self.with_snapshot(
+            IndexCapabilities::SCRIPT_HISTORY,
+            |snapshot, tip, budget, floors| {
+                self.confirmed_history_for(snapshot, tip, budget, scripthash, floors.script_history)
+            },
+        )
+    }
+
     fn unspent_outputs(
         &self,
         scripthash: ScriptHash,

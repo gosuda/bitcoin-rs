@@ -70,6 +70,7 @@ struct RpcChainControl {
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
+    snapshots: Arc<crate::snapshot::SnapshotControl>,
 }
 
 fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
@@ -81,6 +82,25 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
 }
 
 impl ChainControl for RpcChainControl {
+    fn load_txoutset(
+        &self,
+        path: &std::path::Path,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::SnapshotImport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        self.snapshots.import(path).map_err(Into::into)
+    }
+
+    fn chainstates(
+        &self,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::ChainstatesInfo,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        self.snapshots.chainstates()
+    }
+
     fn invalidate_block(
         &self,
         hash: bitcoin_rs_primitives::Hash256,
@@ -125,6 +145,7 @@ fn bind_rpc(
                 handles: chainstate,
                 followers: state.chain_followers(),
                 sync: state.sync(),
+                snapshots: Arc::clone(&state.snapshots),
             })),
             rollback_warnings: Some(state.recovery_reporter()),
         },

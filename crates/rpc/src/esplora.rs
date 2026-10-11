@@ -5,8 +5,7 @@
     clippy::needless_borrow,
     clippy::needless_pass_by_value,
     clippy::redundant_closure_for_method_calls,
-    clippy::significant_drop_in_scrutinee,
-    clippy::unnecessary_semicolon
+    clippy::significant_drop_in_scrutinee
 )]
 
 mod backend;
@@ -479,6 +478,57 @@ mod tests {
                 history: self.history.clone(),
                 funding: self.funding.clone(),
             })
+        }
+
+        fn confirmed_history(
+            &self,
+            _script_hash: ScriptHash,
+        ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+            Ok(self.history.clone())
+        }
+
+        fn spender(
+            &self,
+            _outpoint: OutPoint,
+        ) -> Result<Option<crate::context::SpendingRecord>, TxQueryError> {
+            Ok(None)
+        }
+    }
+
+    struct MonitoredScriptIndex {
+        history: Vec<ScriptHistoryRecord>,
+        funding: Vec<ScriptIndexRecord>,
+        unspent: Vec<ScriptIndexRecord>,
+        unspent_calls: Arc<AtomicUsize>,
+        history_calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::context::ScriptIndexQuery for MonitoredScriptIndex {
+        fn unspent_outputs(
+            &self,
+            _script_hash: ScriptHash,
+        ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+            self.unspent_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.unspent.clone())
+        }
+
+        fn history_snapshot(
+            &self,
+            _script_hash: ScriptHash,
+        ) -> Result<crate::context::ScriptIndexSnapshot, TxQueryError> {
+            self.history_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(crate::context::ScriptIndexSnapshot {
+                history: self.history.clone(),
+                funding: self.funding.clone(),
+            })
+        }
+
+        fn confirmed_history(
+            &self,
+            _script_hash: ScriptHash,
+        ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+            self.history_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.history.clone())
         }
 
         fn spender(
@@ -1622,6 +1672,332 @@ mod tests {
         assert_eq!(restarted.status, 200);
         assert_eq!(restarted.body, first.body);
         assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
+        let target = vec![0x51];
+        let script_hash = ScriptHash::new(&target);
+        let transactions = (1_u64..=30)
+            .map(|value| {
+                transaction(
+                    None,
+                    TxOut {
+                        value: Amount::from_sat(value),
+                        script_pubkey: target.clone().into(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let history_records = transactions
+            .iter()
+            .enumerate()
+            .map(|(index, tx)| ScriptHistoryRecord {
+                txid: tx.txid(),
+                height: u32::try_from(index + 1).expect("height"),
+            })
+            .collect::<Vec<_>>();
+        let unspent_record = ScriptIndexRecord {
+            txid: transactions[0].txid(),
+            height: 1,
+            value: 1,
+            vout: 0,
+        };
+
+        let unspent_calls = Arc::new(AtomicUsize::new(0));
+        let history_calls = Arc::new(AtomicUsize::new(0));
+        let tx_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut ctx = Context::new();
+        for record in &history_records {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
+        }
+        ctx.indexes.script_index = Some(Arc::new(MonitoredScriptIndex {
+            history: history_records.clone(),
+            funding: vec![unspent_record],
+            unspent: vec![unspent_record],
+            unspent_calls: Arc::clone(&unspent_calls),
+            history_calls: Arc::clone(&history_calls),
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions,
+            calls: Arc::clone(&tx_calls),
+        }));
+
+        // Insert an unconfirmed transaction paying target into mempool.
+        let mempool_tx = Arc::new(transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(999),
+                script_pubkey: target.into(),
+            },
+        ));
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(mempool_tx, 100, 100, 0, 0, 0))
+            .expect("insert mempool entry");
+
+        // 1. Fetching chain history must NOT call unspent_outputs (ScriptLive scan).
+        let chain_resp = history(&ctx, script_hash, None, false);
+        assert_eq!(chain_resp.status, 200);
+        let chain_val: Value = serde_json::from_slice(&chain_resp.body).expect("chain json");
+        assert_eq!(chain_val.as_array().map(Vec::len), Some(CHAIN_PAGE));
+        assert_eq!(
+            unspent_calls.load(Ordering::Relaxed),
+            0,
+            "chain history must not enumerate ScriptLive unspent outputs"
+        );
+        assert_eq!(history_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(tx_calls.load(Ordering::Relaxed), CHAIN_PAGE);
+        // All transactions returned are confirmed.
+        assert!(
+            chain_val
+                .as_array()
+                .expect("page")
+                .iter()
+                .all(|tx| tx["status"]["confirmed"] == true)
+        );
+
+        // 2. Fetching page 2 with cursor also does not call unspent_outputs.
+        let cursor = history_records[5].txid.to_string();
+        let chain_page2 = history(&ctx, script_hash, Some(&cursor), false);
+        assert_eq!(chain_page2.status, 200);
+        assert_eq!(
+            unspent_calls.load(Ordering::Relaxed),
+            0,
+            "chain page 2 must not enumerate ScriptLive"
+        );
+
+        // 3. Mempool-only route with sentinel "" does NOT call confirmed history.
+        let mempool_resp = history(&ctx, script_hash, Some(""), false);
+        assert_eq!(mempool_resp.status, 200);
+        let mempool_val: Value = serde_json::from_slice(&mempool_resp.body).expect("mempool json");
+        assert_eq!(mempool_val.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            history_calls.load(Ordering::Relaxed),
+            2,
+            "mempool-only query must not invoke confirmed history (still 2 from chain queries)"
+        );
+
+        // 4. Wallet-facing UTXO query retains its semantics and calls unspent_outputs.
+        let utxo_resp = Projection::new(&ctx)
+            .script_utxos(script_hash)
+            .expect("utxos");
+        assert_eq!(
+            unspent_calls.load(Ordering::Relaxed),
+            2, // 1 from mempool_activity_for above, 1 from script_utxos
+            "utxo endpoint retains ScriptLive scan"
+        );
+        assert_eq!(utxo_resp.len(), 2); // 1 confirmed + 1 mempool
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
+        let target = vec![0x51];
+        let script_hash = ScriptHash::new(&target);
+        // 60 transactions: 3 transactions per height across heights 1..=20.
+        let mut transactions = Vec::with_capacity(60);
+        let mut history_records = Vec::with_capacity(60);
+        for height in 1_u32..=20 {
+            for vout_val in 1_u64..=3 {
+                let tx = transaction(
+                    None,
+                    TxOut {
+                        value: Amount::from_sat(u64::from(height) * 10 + vout_val),
+                        script_pubkey: target.clone().into(),
+                    },
+                );
+                history_records.push(ScriptHistoryRecord {
+                    txid: tx.txid(),
+                    height,
+                });
+                transactions.push(tx);
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+
+        // Simulate pruned/missing blocks: only add blocks for heights 12..=20.
+        // Heights 1..=11 are absent initially.
+        for height in 12_u32..=20 {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    height,
+                    BlockHash::default(),
+                ));
+        }
+
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: history_records.clone(),
+            funding: Vec::new(),
+            unspent: Vec::new(),
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions,
+            calls: Arc::clone(&calls),
+        }));
+
+        // Page 1 (first 25): transactions from heights 20 down to 12.
+        // Even though blocks for heights 1..=11 are missing from ctx.chain,
+        // Page 1 succeeds because confirmation resolution is truly bounded to the requested page!
+        let page1 = history(&ctx, script_hash, None, false);
+        assert_eq!(
+            page1.status, 200,
+            "Page 1 must succeed even when unselected past blocks are pruned"
+        );
+        let page1_vals: Value = serde_json::from_slice(&page1.body).expect("page1 json");
+        assert_eq!(page1_vals.as_array().map(Vec::len), Some(CHAIN_PAGE));
+        assert_eq!(calls.load(Ordering::Relaxed), 25);
+
+        // Re-populate all blocks 1..=20 in ascending order so subsequent pages can resolve.
+        ctx.chain.blocks.write().clear();
+        for height in 1_u32..=20 {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    height,
+                    BlockHash::default(),
+                ));
+        }
+
+        // Full multi-page traversal:
+        // Page 1: 25 items
+        let page1_txids: Vec<String> = page1_vals
+            .as_array()
+            .expect("page1 json array")
+            .iter()
+            .map(|tx| tx["txid"].as_str().expect("txid str").to_owned())
+            .collect();
+        let cursor1 = page1_txids.last().expect("page1 last txid").clone();
+
+        // Page 2: next 25 items
+        let page2 = history(&ctx, script_hash, Some(&cursor1), false);
+        assert_eq!(page2.status, 200);
+        let page2_vals: Value = serde_json::from_slice(&page2.body).expect("page2 json");
+        assert_eq!(page2_vals.as_array().map(Vec::len), Some(CHAIN_PAGE));
+        let page2_txids: Vec<String> = page2_vals
+            .as_array()
+            .expect("page2 json array")
+            .iter()
+            .map(|tx| tx["txid"].as_str().expect("txid str").to_owned())
+            .collect();
+        let cursor2 = page2_txids.last().expect("page2 last txid").clone();
+
+        // Page 3: remaining 10 items (60 - 50 = 10)
+        let page3 = history(&ctx, script_hash, Some(&cursor2), false);
+        assert_eq!(page3.status, 200);
+        let page3_vals: Value = serde_json::from_slice(&page3.body).expect("page3 json");
+        assert_eq!(page3_vals.as_array().map(Vec::len), Some(10));
+        let page3_txids: Vec<String> = page3_vals
+            .as_array()
+            .expect("page3 json array")
+            .iter()
+            .map(|tx| tx["txid"].as_str().expect("txid str").to_owned())
+            .collect();
+        let cursor3 = page3_txids.last().expect("page3 last txid").clone();
+
+        // Page 4: empty final page
+        let page4 = history(&ctx, script_hash, Some(&cursor3), false);
+        assert_eq!(page4.status, 200);
+        assert_eq!(page4.body, b"[]");
+
+        // Verify complete and stable traversal:
+        // Total 60 distinct transactions returned across pages 1, 2, 3.
+        let mut all_traversed = Vec::new();
+        all_traversed.extend(page1_txids);
+        all_traversed.extend(page2_txids);
+        all_traversed.extend(page3_txids);
+        assert_eq!(all_traversed.len(), 60);
+
+        let mut deduped = all_traversed.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            60,
+            "stable pagination must contain 0 duplicates"
+        );
+
+        // Verify API-09 cursor restart rules:
+        for invalid_cursor in [
+            "00".repeat(32),
+            "not-a-txid".to_owned(),
+            cursor1.to_uppercase(),
+            format!("0x{cursor1}"),
+        ] {
+            let restarted = history(&ctx, script_hash, Some(&invalid_cursor), false);
+            assert_eq!(restarted.status, 200, "cursor: {invalid_cursor}");
+            assert_eq!(
+                restarted.body, page1.body,
+                "noncanonical/unknown cursor must restart from page 1"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_history_deduplicates_multiple_outputs_in_same_transaction() {
+        let target = vec![0x51];
+        let script_hash = ScriptHash::new(&target);
+        // Single transaction with 3 outputs paying target.
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: null_outpoint(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![
+                TxOut {
+                    value: Amount::from_sat(100),
+                    script_pubkey: target.clone().into(),
+                },
+                TxOut {
+                    value: Amount::from_sat(200),
+                    script_pubkey: target.clone().into(),
+                },
+                TxOut {
+                    value: Amount::from_sat(300),
+                    script_pubkey: target.into(),
+                },
+            ],
+            lock_time: LockTime::ZERO,
+        };
+        let txid = tx.txid();
+        let records = vec![
+            ScriptHistoryRecord { txid, height: 10 },
+            ScriptHistoryRecord { txid, height: 10 },
+            ScriptHistoryRecord { txid, height: 10 },
+        ];
+        let mut ctx = Context::new();
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                10,
+                BlockHash::default(),
+            ));
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: records,
+            funding: Vec::new(),
+            unspent: Vec::new(),
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: vec![tx],
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        let response = history(&ctx, script_hash, None, false);
+        assert_eq!(response.status, 200);
+        let val: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(val.as_array().map(Vec::len), Some(1));
+        assert_eq!(val[0]["txid"], txid.to_string());
     }
 
     #[test]

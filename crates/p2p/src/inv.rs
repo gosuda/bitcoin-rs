@@ -2,6 +2,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_mempool::PeerToken;
 use bitcoin_rs_primitives::{Hash256, Txid};
 
+#[cfg(test)]
 use crate::wire::Message;
 
 /// Maximum inventory vectors accepted in one message.
@@ -42,16 +43,10 @@ pub fn request_missing_parents(
         return false;
     }
     request_witness(&mut items, witness);
-    // Capability metadata belongs to the same connection as the token. The
-    // table rechecks that identity and pins it through the nonblocking enqueue,
-    // so a replacement cannot inherit either the request or its service choice.
-    // Bytes already in flight may still finish on a retiring socket.
-    if peers.send(connection, Message::GetData(items)).is_err() {
-        tracing::debug!(peer_addr = %source.addr, "orphan parent getdata not sent");
-        false
-    } else {
-        true
-    }
+    // The request owner retains alternate sources and shares the same cap as
+    // ordinary inv downloads. A retiring connection cannot target its successor.
+    let retained = peers.request_parent_transactions(connection, &items);
+    retained && !lease.is_cancelled()
 }
 
 /// Applies BIP144's witness request flag to transaction vectors without

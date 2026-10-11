@@ -33,6 +33,9 @@ use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
 
+/// Canonical subnet type shared by every process-input surface.
+pub use bitcoin_rs_p2p::IpSubnet;
+
 /// Parses a network selection spelling.
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
     NetworkSelection::from_str(value)
@@ -123,6 +126,23 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     value
         .split(',')
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
+        .collect()
+}
+
+/// Parses an operator discouragement-exemption subnet.
+pub fn parse_noban_subnet(
+    value: &str,
+) -> std::result::Result<bitcoin_rs_p2p::IpSubnet, bitcoin_rs_p2p::SubnetParseError> {
+    value.parse()
+}
+
+fn parse_noban_list(value: &str) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|part| parse_noban_subnet(part.trim()).map_err(Into::into))
         .collect()
 }
 
@@ -500,6 +520,18 @@ macro_rules! option_rows {
                         cli[#[arg(long = "dns-seeds-enabled")]]
                         env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
                         toml native("dns_seeds_enabled")
+                    }
+                    /// Optional Bitcoin Core `ASMap` file for network diversity.
+                    asmap as asmap: Option<PathBuf> {
+                        cli[#[arg(long = "asmap")]]
+                        env["BITCOIN_RS_ASMAP", parse_path]
+                        toml native("asmap")
+                    }
+                    /// Subnets exempt from automatic discouragement; explicit bans still apply.
+                    noban_subnets as p2p_noban: Option<Vec<$crate::options::IpSubnet>> {
+                        cli[#[arg(long = "p2p-noban", value_delimiter = ',', value_parser = $crate::options::parse_noban_subnet)]]
+                        env["BITCOIN_RS_P2P_NOBAN", parse_noban_list]
+                        toml each("p2p_noban", parse_noban_subnet)
                     }
                     /// Fixed outbound peer endpoints.
                     connect as connect: Option<Vec<String>> {

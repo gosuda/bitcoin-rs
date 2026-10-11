@@ -75,7 +75,7 @@ surface = "Peer lifecycle and address management"
 core_reference = "Bitcoin Core 31.1 net behavior"
 status = "partially compatible"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind (one lane)"
-evidence = "externally observed: handshake, relay, serving, disconnect behavior and chain identity via the live Core lane (docs/contracts/core-differential.md CORE-02/CORE-03). Deliberately absent address-management behavior: no address store or gossip and no getaddr response (docs/policies/p2p-compatibility.md section 7 deviation ledger). Proactive block announcements are implemented and tracked in their own row; their CORE-05 external qualification remains pending a retained main-workflow run. Peer-visible restart behavior is owned by internal tests (docs/contracts/p2p-wire.md)."
+evidence = "externally observed: handshake, relay, serving, disconnect behavior and chain identity via the live Core lane (docs/contracts/core-differential.md CORE-02/CORE-03). The P2P owner persists peer knowledge, learns bounded addr/addrv2 gossip and serves a cached getaddr response only to inbound full-relay peers. The actual daemon restart regression reconnects to learned peers with DNS disabled (bin/bitcoin-rs/tests/addrman_restart_e2e.rs). AddrMan algorithm evidence and remaining differences are owned by docs/policies/p2p-compatibility.md section 7; full Core compatibility is not claimed. Proactive block announcements are implemented and tracked in their own row; their CORE-05 external qualification remains pending a retained main-workflow run. Peer-visible restart behavior is owned by internal tests (docs/contracts/p2p-wire.md)."
 
 [[row]]
 surface = "JSON-RPC"
