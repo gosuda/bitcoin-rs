@@ -193,7 +193,52 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    reference deletes the endpoint. Local pending ownership protects final
    endpoint deletion, not every redundant slot. Success promotes to a vacant
    Tried slot and removes all New references. A Tried collision retains the
-   successful newcomer in New until the collision-probe follow-up.
+   successful newcomer in New and enters a runtime-only set of at most ten
+   distinct challengers, including multiple challengers for the same slot.
+   Runtime-only creation IDs preserve Core's collision ordering across record
+   swaps; no ID or collision set is added to the durable format.
+   Core `ResolveCollisions` protects an incumbent successful within four hours;
+   an attempt within four hours permits replacement only after more than 60
+   seconds. Otherwise a challenger waiting more than 40 minutes can replace an
+   untested incumbent. Exact boundaries use the existing health timestamps,
+   not worker errors or a separate completion tracker. Replacement calls the
+   same Good(false) health transition, clears all challenger New references,
+   and demotes the incumbent to one original-source New reference. Only the
+   collided destination New reference is cleared; identity disappears only
+   at zero references. Pending final-reference victims defer the entire
+   transition before health or table changes. Local active/manual/pending
+   endpoints remain protected. Resolver policy snapshots cover at most twenty
+   endpoints and run outside the state lock before current state is rechecked.
+   Collision choice samples the shared RNG; feeler scheduling uses Core's
+   Poisson interval with a two-minute mean, observed on the service tick. Selecting an already TCP-connected
+   incumbent records Good and falls back to the existing New-only sampler;
+   queued/inflight work alone never certifies Good. Feeler targets require stored
+   NETWORK or NETWORK_LIMITED service advertisement. DNS records retain unknown
+   service bits and use ordinary selection until a handshake supplies them.
+   Ordinary candidate selection, restart-anchor admission, automatic dispatch
+   and the final pre-TCP check share the existing desirable-service predicate:
+   NETWORK plus WITNESS, or LIMITED plus WITNESS while approximate local tip
+   depth is below 144. Selection rechecks current record metadata after its
+   unlocked policy callback. Manual dials and feelers bypass this metadata
+   prefilter; ordinary received VERSION validation remains in place.
+
+   Accepted VERSION metadata overwrites the one stored service field before
+   ordinary service rejection, without marking Good, changing health times or
+   promoting membership. This field is an optional u64: unknown DNS metadata
+   is `None`; an observed zero-bit claim is `Some(0)`. Gossip ORs service bits
+   into the same field; zero-bit gossip preserves an existing unknown value.
+   Direct VERSION zero and a fresh IP-sourced zero advertisement remain known
+   zero. DNS without an advertisement preserves every known value. No second
+   last-VERSION or fitness flag is introduced. Only genuine unknown DNS metadata can bootstrap
+   ordinary selection; an accepted NONE VERSION is excluded immediately even
+   without Good, through DNS refresh and restart. A successful NONE feeler
+   still remains Good/Tried and is excluded from ordinary dialing. Native DNS
+   does not claim Core's service-filtered x9 discovery.
+   Feelers finish on a valid VERSION through the existing native parser/FSM,
+   without readiness or sync work. This does not claim Core's inherited minimum
+   protocol floor or connman-wide inbound self-nonce validation; ordinary
+   handshake validation is unchanged. Collision state starts empty
+   after restart. The former immediate failed-worker eviction path is removed.
 
    The shared IsTerrible predicate first protects attempts within 60 seconds,
    then checks future timestamps beyond ten minutes, age over 30 days, three
@@ -206,12 +251,12 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    do not age a peer. Failures count only once per global Good epoch and only
    with Core's persistent-outbound-netgroup connectivity gate, derived from
    `max_peer_connections`. Established manual and handshaking outbound sessions
-   count; inbound and cancelled sessions do not. Manual attempts never count a
+   count; inbound, transient feelers and cancelled sessions do not. Manual attempts never count a
    failure or own an automatic claim. Good from any non-inbound handshake
    updates the epoch; known peers reset failures and record success/recent try,
    while unknown manual peers are not inserted. Good does not overwrite
    advertised last-seen time. Native periodic refresh applies only to ready
-   automatic full-relay peers, at intervals over 20 minutes; block-relay peers
+   automatic full-relay peers, excluding feelers, at intervals over 20 minutes; block-relay peers
    never refresh an advertised timestamp but still count for DNS recovery.
    This periodic lifecycle differs from Core's FinalizeNode Connected update.
    Last-try/count-attempt/global-Good times are runtime-only.
@@ -251,7 +296,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    The fixed indexes occupy 327,680 bytes; endpoint count is bounded at 81,920,
    with at most eight New bucket IDs each and at most 65,536 occupied New slots.
-   On the tested 64-bit target Candidate is 128 bytes and Source is 24 bytes,
+   On the tested 64-bit target Candidate is 144 bytes and Source is 24 bytes,
    excluding allocator/index/vector overhead. Fixed-width serialized fields
    have a conservative 512-byte/record bound (315-byte max-width fixture), so
    record separators plus bounded header/checksum remain below the 64 MiB file
@@ -271,10 +316,23 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    and migration backup creation; restoring the map recovers the untouched
    book. Intentionally omitting the map permits backed-up prefix migration.
 
-   Schema v6 persists the secret, original source, health, map identity and
-   New membership in one checksummed snapshot. Same-map restart restores every
-   reference; v5-to-v6 with no map also preserves all references exactly.
-   Known v1/v2/v3 formats and the strict v5 prefix format are migration sources.
+   Schema v8 persists the secret, original source, health, map identity,
+   New membership and at most two anchors in one checksummed snapshot. Services
+   is a required field: JSON null means unknown DNS metadata, while numeric zero
+   means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
+   original source with no prior Good. Missing or invalid fields fail closed.
+   Same-map restart restores every reference; same-classifier v5/v6/v7-to-v8
+   upgrades preserve all references and anchors exactly. Known v1–v7 formats,
+   including genuine v3 files carrying anchors, are strict migration sources.
+   Their service fields must be numeric u64; old null or missing fields remain
+   invalid. Historical DNS zero/no-Good records cannot reveal whether zero was
+   actually observed. Decoding infers only that ambiguous case as unknown in
+   memory, where it may retry; its next accepted VERSION records the observation
+   precisely. Exact-byte backup gates publication of the upgraded file, not
+   in-memory discovery. If backup fails, the original file remains untouched and
+   the in-memory book runs with persistence disabled. IP zero and every
+   prior-Good zero stay known. No source, success or failure value is rewritten
+   to manufacture evidence.
    The v1 reader retains its original 4,096-record/64-source/slot checks;
    historical ASMap layouts validate source/record shape before re-bucketing.
    The actual source bytes are copied to an exclusive content-named
@@ -285,13 +343,14 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    counts. Historic DNS u64 hashes retain a labelled legacy namespace; no
    recovered seed name or Core hash is invented. Operational attempt/Good
    times reset; advertised time, success and failures remain intact. A backup
-   failure allows memory discovery but disables writes. Unknown anchor v4,
-   historical v3 carrying anchors and other unknown shapes remain read-only
-   until their actual anchor owner provides a migration.
+   failure allows memory discovery but disables writes. Unknown versions or
+   fields remain read-only. Retained anchors keep their original confirmation
+   time and remain a unique successful-record subset; regrouping prunes anchors
+   only when their endpoint is actually removed.
 
    Actual Core group/placement evidence includes 224 ASMap rows and official
    Tried236/New795 anchors. Migration fixtures were emitted by the original
-   v2/v3/v5 writers; the v5 fixture pins all eight retained references. These
+   v1/v2/v3/v4/v5/v6/v7 writers; v5/v6/v7 fixtures pin all eight retained references. These
    are specific algorithm/persistence checks, not full peer-lifecycle parity.
 
    Filenames remain scoped to actual P2P magic: `peers.dat` becomes
@@ -304,9 +363,20 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    First installation cannot overwrite a newly appeared destination. Saves
    retain the captured revision only after durable success, outside the state
    lock; concurrent later changes remain dirty. Periodic saves occur every
-   15 minutes and shutdown/explicit barriers remain immediate. Tried-collision
-   probing and restart anchors remain stacked follow-ups under
-   #1387; the final combined stack requires its own acceptance checks.
+   15 minutes and shutdown/explicit barriers remain immediate.
+
+   Restart anchors come only from automatic block-relay peers that supplied
+   accepted chain evidence, with the existing seven-day age limit. On the first
+   active-network maintenance tick they
+   are removed from the durable snapshot before any endpoint is exposed for
+   dialing. Failed/read-only publication exposes no anchors. Their original
+   confirmation metadata moves into the existing pending reservation; queued
+   reservations consume a normal outbound slot, while feelers do not. Accepted
+   worker dispatch consumes an anchor at most once, independently of actual TCP
+   health accounting. Never-dispatched reservations return before shutdown save
+   with the original confirmation time, without replacing newer demonstrated
+   anchors. Dispatched attempts never return merely because connection fails.
+   A stale queue item cannot dispatch after its reservation was returned.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.

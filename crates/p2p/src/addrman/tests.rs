@@ -15,7 +15,7 @@ fn unproven_addresses_need_a_successful_outbound_handshake() {
     assert!(!book.state.lock().stored.records[0].tried);
     book.queued(addr(1));
     book.attempted(addr(1), true, 10_001);
-    assert_eq!(book.select(&[], &[], 10_002, |_| true), None);
+    assert_eq!(book.select(&[], &[], 10_002, u64::MAX, |_| true), None);
     book.succeeded(addr(1), 9, 10_003);
     assert!(book.state.lock().stored.records[0].tried);
     assert_eq!(book.state.lock().stored.records[0].failures, 0);
@@ -28,19 +28,30 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
         book.learn_peer(addr(200).ip(), &[(addr(n), 9, 10_000)], 10_000);
     }
     assert!(book.len() <= 199);
-    let picked = book.select(&[], &[], 10_000, |_| true).expect("candidate");
+    let picked = book
+        .select(&[], &[], 10_000, u64::MAX, |_| true)
+        .expect("candidate");
     book.queued(picked);
-    assert_ne!(book.select(&[], &[], 10_000, |_| true), Some(picked));
-    assert_eq!(book.select(&[], &[], 10_000, |_| false), None);
+    assert_ne!(
+        book.select(&[], &[], 10_000, u64::MAX, |_| true),
+        Some(picked)
+    );
+    assert_eq!(book.select(&[], &[], 10_000, u64::MAX, |_| false), None);
     book.unqueue(picked);
     let same_group = SocketAddr::new(picked.ip(), 8334);
     assert_ne!(
-        book.select(&[], &[same_group], 10_000, |_| true),
+        book.select(&[], &[same_group], 10_000, u64::MAX, |_| true),
         Some(picked)
     );
     // Inbound connections suppress the exact endpoint but never its group.
-    assert!(book.select(&[same_group], &[], 10_000, |_| true).is_some());
-    assert_ne!(book.select(&[picked], &[], 10_000, |_| true), Some(picked));
+    assert!(
+        book.select(&[same_group], &[], 10_000, u64::MAX, |_| true)
+            .is_some()
+    );
+    assert_ne!(
+        book.select(&[picked], &[], 10_000, u64::MAX, |_| true),
+        Some(picked)
+    );
     assert!(book.gossip(10_000).len() <= MAX_GOSSIP);
 }
 
@@ -355,13 +366,13 @@ fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
     assert_eq!(book.pending_count_excluding(&[]), 1);
     assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
     assert_eq!(
-        book.select(&[], &[], 10_100, |_| true),
+        book.select(&[], &[], 10_100, u64::MAX, |_| true),
         None,
         "in-flight groups stay exclusive beyond retry time"
     );
     book.unqueue(addr(1));
     assert!(
-        book.select(&[], &[], 10_100, |_| true)
+        book.select(&[], &[], 10_100, u64::MAX, |_| true)
             .is_some_and(|a| a == addr(1) || a == candidate)
     );
 }
@@ -392,7 +403,7 @@ fn refs(manager: &Manager, addr: SocketAddr) -> usize {
 }
 fn add_ref(manager: &mut Manager, addr: SocketAddr, source: &Source, seen: u64) {
     for _ in 0..4096 {
-        if manager.learn(addr, 9, source.clone(), seen, EPOCH, 0) {
+        if manager.learn(addr, Some(9), source.clone(), seen, EPOCH, 0) {
             return;
         }
     }
@@ -505,8 +516,9 @@ fn health_matches_71_actual_core_boundaries_and_probabilities() {
     .expect("Core health");
     for row in data["rows"].as_array().expect("rows") {
         let entry = Candidate {
+            creation_id: 0,
             addr: target(),
-            services: 9,
+            services: Some(9),
             source: source(1),
             last_seen: row["seen"].as_u64().expect("seen"),
             last_success: row["last_success"].as_u64().expect("success"),
@@ -533,9 +545,9 @@ fn health_matches_71_actual_core_boundaries_and_probabilities() {
 fn corroboration_ref_cap_dirty_membership_and_promotion_follow_core() {
     let book = oracle_book();
     let mut manager = book.state.lock();
-    assert!(manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0));
+    assert!(manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0));
     let revision = manager.revision;
-    assert!(!manager.learn(target(), 9, source(1), EPOCH - 999, EPOCH, 0));
+    assert!(!manager.learn(target(), Some(9), source(1), EPOCH - 999, EPOCH, 0));
     assert_eq!(refs(&manager, target()), 1);
     for n in 2..=8 {
         add_ref(&mut manager, target(), &source(n), EPOCH - 999);
@@ -544,7 +556,7 @@ fn corroboration_ref_cap_dirty_membership_and_promotion_follow_core() {
     assert!(manager.revision > revision);
     assert_eq!(manager.stored.records.len(), 1);
     for n in 9..=10 {
-        assert!(!manager.learn(target(), 9, source(n), EPOCH - 999, EPOCH, 0));
+        assert!(!manager.learn(target(), Some(9), source(n), EPOCH - 999, EPOCH, 0));
     }
     assert_indexes(&manager);
     assert!(manager.promote(target()));
@@ -552,8 +564,8 @@ fn corroboration_ref_cap_dirty_membership_and_promotion_follow_core() {
     assert!(manager.stored.records[0].tried);
     manager.stored.records[0].last_success = EPOCH;
     assert_indexes(&manager);
-    assert!(!manager.learn(target(), 32, source(10), EPOCH - 999, EPOCH, 0));
-    assert_eq!(manager.stored.records[0].services, 41);
+    assert!(!manager.learn(target(), Some(32), source(10), EPOCH - 999, EPOCH, 0));
+    assert_eq!(manager.stored.records[0].services, Some(41));
 }
 
 #[test]
@@ -562,17 +574,17 @@ fn new_collision_removes_only_one_reference_and_preserves_pending_identity() {
     for extra_ref in [false, true] {
         let book = oracle_book();
         let mut manager = book.state.lock();
-        manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
+        manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
         assert_eq!(manager.new_slot(target(), 191), 191 * 64 + 59);
         assert_eq!(manager.new_slot(other, 191), 191 * 64 + 59);
-        manager.pending.insert(target());
+        manager.pending.insert(target(), PendingClaim::Dial);
         if extra_ref {
             add_ref(&mut manager, target(), &source(2), EPOCH - 999);
         }
         manager.stored.records[0].failures = 3;
         manager.stored.records[0].last_attempt = EPOCH - 60;
         assert_eq!(
-            manager.learn(other, 9, source(1), EPOCH - 1000, EPOCH, 0),
+            manager.learn(other, Some(9), source(1), EPOCH - 1000, EPOCH, 0),
             extra_ref
         );
         assert_eq!(refs(&manager, target()), 1);
@@ -580,11 +592,11 @@ fn new_collision_removes_only_one_reference_and_preserves_pending_identity() {
         if !extra_ref {
             manager.stored.records[0].last_attempt = EPOCH - 61;
             assert!(
-                !manager.learn(other, 9, source(1), EPOCH - 1000, EPOCH, 0),
+                !manager.learn(other, Some(9), source(1), EPOCH - 1000, EPOCH, 0),
                 "pending final identity survives"
             );
             manager.pending.remove(&target());
-            assert!(manager.learn(other, 9, source(1), EPOCH - 1000, EPOCH, 0));
+            assert!(manager.learn(other, Some(9), source(1), EPOCH - 1000, EPOCH, 0));
             assert!(!manager.by_addr.contains_key(&target()));
             assert_indexes(&manager);
         }
@@ -597,7 +609,7 @@ fn global_good_epoch_limits_failures_and_good_keeps_advertised_time() {
     {
         book.state
             .lock()
-            .learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
+            .learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     }
     book.attempted(target(), true, EPOCH);
     book.unqueue(target());
@@ -622,22 +634,22 @@ fn global_good_epoch_limits_failures_and_good_keeps_advertised_time() {
 fn gossip_time_penalty_and_source_self_exception_follow_core() {
     let book = oracle_book();
     let mut manager = book.state.lock();
-    manager.learn(target(), 9, source(1), EPOCH, EPOCH, 7200);
+    manager.learn(target(), Some(9), source(1), EPOCH, EPOCH, 7200);
     assert_eq!(manager.stored.records[0].last_seen, EPOCH - 7200);
-    assert!(!manager.learn(target(), 9, source(2), EPOCH + 3601, EPOCH + 3601, 0));
+    assert!(!manager.learn(target(), Some(9), source(2), EPOCH + 3601, EPOCH + 3601, 0));
     assert_eq!(
         manager.stored.records[0].last_seen,
         EPOCH + 3601,
         "time update before freshness test"
     );
     let local: SocketAddr = "9.9.9.9:8333".parse().expect("addr");
-    manager.learn(local, 9, Source::Ip(local.ip()), EPOCH, EPOCH, 7200);
+    manager.learn(local, Some(9), Source::Ip(local.ip()), EPOCH, EPOCH, 7200);
     assert_eq!(
         manager.stored.records[*manager.by_addr.get(&local).expect("self")].last_seen,
         EPOCH
     );
     let floor: SocketAddr = "11.11.11.11:8333".parse().expect("addr");
-    manager.learn(floor, 9, source(3), 100, 100, 7200);
+    manager.learn(floor, Some(9), source(3), 100, 100, 7200);
     assert_eq!(
         manager.stored.records[*manager.by_addr.get(&floor).expect("floor")].last_seen,
         0
@@ -650,7 +662,7 @@ fn policy_callbacks_run_unlocked_and_selection_rechecks_pending() {
     book.learn_dns("seed", &[target()], EPOCH);
     let mut calls = 0;
     assert_eq!(
-        book.select(&[], &[], EPOCH, |addr| {
+        book.select(&[], &[], EPOCH, u64::MAX, |addr| {
             calls += 1;
             assert!(book.state.try_lock().is_some());
             book.queued(addr);
@@ -661,13 +673,16 @@ fn policy_callbacks_run_unlocked_and_selection_rechecks_pending() {
     assert_eq!(calls, 1);
     book.unqueue(target());
     let before = book.state.lock().rng.clone().next_u64();
-    assert_eq!(book.select(&[], &[], EPOCH, |_| false), None);
+    assert_eq!(book.select(&[], &[], EPOCH, u64::MAX, |_| false), None);
     assert_eq!(
         book.state.lock().rng.clone().next_u64(),
         before,
         "all excluded consumes no random proposals"
     );
-    assert_eq!(book.select(&[], &[], EPOCH, |_| true), Some(target()));
+    assert_eq!(
+        book.select(&[], &[], EPOCH, u64::MAX, |_| true),
+        Some(target())
+    );
 }
 
 #[test]
@@ -675,16 +690,16 @@ fn one_source_flood_is_bucket_bounded_and_retains_legitimate_peers() {
     let book = oracle_book();
     let mut manager = book.state.lock();
     let retained: SocketAddr = "9.9.9.9:8333".parse().expect("peer");
-    manager.learn(retained, 9, source(2), EPOCH, EPOCH, 0);
+    manager.learn(retained, Some(9), source(2), EPOCH, EPOCH, 0);
     let proven: SocketAddr = "7.7.7.7:8333".parse().expect("peer");
-    manager.learn(proven, 9, source(3), EPOCH, EPOCH, 0);
+    manager.learn(proven, Some(9), source(3), EPOCH, EPOCH, 0);
     let proven_index = *manager.by_addr.get(&proven).expect("known");
     manager.stored.records[proven_index].last_success = EPOCH;
     manager.promote(proven);
     for index in 0..32_768_u32 {
         let bytes = index.to_be_bytes();
         let peer = SocketAddr::from(([8, bytes[2], bytes[3], 1], 8333));
-        manager.learn(peer, 0, source(1), EPOCH, EPOCH, 0);
+        manager.learn(peer, Some(0), source(1), EPOCH, EPOCH, 0);
     }
     let malicious: Vec<_> = manager
         .stored
@@ -707,7 +722,7 @@ fn one_source_flood_is_bucket_bounded_and_retains_legitimate_peers() {
     let accepted = (1..=255).any(|n| {
         manager.learn(
             SocketAddr::from(([11, n, 1, 1], 8333)),
-            9,
+            Some(9),
             source(4),
             EPOCH,
             EPOCH,
@@ -746,7 +761,7 @@ fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
         let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert_eq!(restored.len(), 1);
         assert_eq!(
-            restored.select(&[], &[], EPOCH, |_| true),
+            restored.select(&[], &[], EPOCH, u64::MAX, |_| true),
             Some(target()),
             "failed knowledge still selectable with DNS off"
         );
@@ -821,7 +836,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
     {
         let mut manager = book.state.lock();
         manager.rng = StdRng::seed_from_u64(5);
-        manager.learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
+        manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
         for n in 2..=8 {
             let origin = Source::Ip(Ipv4Addr::new(n, 1, 1, 1).into());
             let before = refs(&manager, target());
@@ -829,7 +844,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
                 break;
             } // Colliding source buckets do not manufacture a reference.
             for _ in 0..4096 {
-                if manager.learn(target(), 9, origin.clone(), EPOCH - 999, EPOCH, 0) {
+                if manager.learn(target(), Some(9), origin.clone(), EPOCH - 999, EPOCH, 0) {
                     break;
                 }
             }
@@ -878,7 +893,7 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
     for origin in [source(1), Source::dns("seed")] {
         let book = oracle_book();
         let mut manager = book.state.lock();
-        manager.learn(target(), 9, origin.clone(), EPOCH, EPOCH, 0);
+        manager.learn(target(), Some(9), origin.clone(), EPOCH, EPOCH, 0);
         let bucket = usize::from(manager.stored.records[0].new_buckets[0]);
         let slot = manager.new_slot(target(), bucket);
         let other = (1..=65535)
@@ -903,14 +918,14 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
         }
         assert!(!manager.learn(
             SocketAddr::from(([0, 0, 0, 0], 0)),
-            9,
+            Some(9),
             origin.clone(),
             EPOCH,
             EPOCH,
             0
         ));
         assert_eq!(manager.stored.records.len(), 1);
-        assert!(manager.learn(other, 9, origin, EPOCH, EPOCH, 0));
+        assert!(manager.learn(other, Some(9), origin, EPOCH, EPOCH, 0));
         assert!(!manager.by_addr.contains_key(&target()));
         assert_indexes(&manager);
     }
@@ -919,11 +934,12 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
 #[test]
 fn capacity_and_file_budget_have_explicit_bounded_representations() {
     let entry = Candidate {
+        creation_id: 0,
         addr: "2fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
             .parse::<IpAddr>()
             .map(|ip| SocketAddr::new(ip, u16::MAX))
             .expect("IP"),
-        services: u64::MAX,
+        services: Some(u64::MAX),
         source: Source::Internal([255; 10]),
         last_seen: u64::MAX,
         last_success: u64::MAX,
@@ -955,7 +971,7 @@ fn noncounted_manual_or_offline_attempt_updates_try_without_claim_or_failure() {
     let book = oracle_book();
     book.state
         .lock()
-        .learn(target(), 9, source(1), EPOCH - 1000, EPOCH, 0);
+        .learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     book.state.lock().stored.records[0].failures = 2;
     book.attempted(target(), false, EPOCH);
     let manager = book.state.lock();
@@ -1034,33 +1050,33 @@ fn assert_core_operation(manager: &Manager, case: &str, accepted: Option<bool>) 
 fn all_24_addsingle_attempt_good_observations_match_actual_core() {
     let book = oracle_book();
     let mut manager = book.state.lock();
-    let accepted = manager.learn(target(), 0, source(1), EPOCH - 1000, EPOCH, 0);
+    let accepted = manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
     assert_core_operation(&manager, "first", Some(accepted));
     force_reference_draw(&mut manager, true);
-    let accepted = manager.learn(target(), 0, source(1), EPOCH - 999, EPOCH, 0);
+    let accepted = manager.learn(target(), Some(0), source(1), EPOCH - 999, EPOCH, 0);
     assert_core_operation(&manager, "same-source-repeat", Some(accepted));
     force_reference_draw(&mut manager, false);
-    let accepted = manager.learn(target(), 0, source(2), EPOCH - 999, EPOCH, 0);
+    let accepted = manager.learn(target(), Some(0), source(2), EPOCH - 999, EPOCH, 0);
     assert_core_operation(&manager, "other-source-rng-refused", Some(accepted));
     for n in 2..=10 {
         force_reference_draw(&mut manager, true);
-        let accepted = manager.learn(target(), 0, source(n), EPOCH - 999, EPOCH, 0);
+        let accepted = manager.learn(target(), Some(0), source(n), EPOCH - 999, EPOCH, 0);
         assert_core_operation(&manager, &format!("source-{n}"), Some(accepted));
     }
     drop(manager);
     let other = "8.8.9.89:8333".parse().expect("collider");
     let book = oracle_book();
     let mut manager = book.state.lock();
-    manager.learn(target(), 0, source(1), EPOCH - 1000, EPOCH, 0);
-    let accepted = manager.learn(other, 0, source(1), EPOCH - 1000, EPOCH, 0);
+    manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
+    let accepted = manager.learn(other, Some(0), source(1), EPOCH - 1000, EPOCH, 0);
     assert_core_operation(
         &manager,
         "healthy-single-reference-collision",
         Some(accepted),
     );
     force_reference_draw(&mut manager, true);
-    manager.learn(target(), 0, source(2), EPOCH - 999, EPOCH, 0);
-    let accepted = manager.learn(other, 0, source(1), EPOCH - 1000, EPOCH, 0);
+    manager.learn(target(), Some(0), source(2), EPOCH - 999, EPOCH, 0);
+    let accepted = manager.learn(other, Some(0), source(1), EPOCH - 1000, EPOCH, 0);
     assert_core_operation(
         &manager,
         "fresh-replaces-redundant-reference",
@@ -1073,33 +1089,33 @@ fn all_24_addsingle_attempt_good_observations_match_actual_core() {
     ] {
         let book = oracle_book();
         let mut manager = book.state.lock();
-        manager.learn(target(), 0, source(1), EPOCH - 1000, EPOCH, 0);
+        manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
         manager.stored.records[0].failures = 3;
         manager.stored.records[0].last_attempt = EPOCH - age;
-        let accepted = manager.learn(other, 0, source(1), EPOCH - 1000, EPOCH, 0);
+        let accepted = manager.learn(other, Some(0), source(1), EPOCH - 1000, EPOCH, 0);
         assert_core_operation(&manager, case, Some(accepted));
     }
     let book = oracle_book();
     let mut manager = book.state.lock();
-    manager.learn(target(), 0, source(1), EPOCH - 10000, EPOCH, 0);
+    manager.learn(target(), Some(0), source(1), EPOCH - 10000, EPOCH, 0);
     force_reference_draw(&mut manager, true);
-    let accepted = manager.learn(target(), 0, source(2), EPOCH - 1000, EPOCH, 0);
+    let accepted = manager.learn(target(), Some(0), source(2), EPOCH - 1000, EPOCH, 0);
     assert_core_operation(
         &manager,
         "time-update-zero-penalty-precedes-reference",
         Some(accepted),
     );
     force_reference_draw(&mut manager, true);
-    let accepted = manager.learn(target(), 0, source(2), EPOCH, EPOCH, 7200);
+    let accepted = manager.learn(target(), Some(0), source(2), EPOCH, EPOCH, 7200);
     assert_core_operation(&manager, "time-penalty-still-new-info", Some(accepted));
     drop(manager);
     let book = oracle_book();
     book.state
         .lock()
-        .learn(target(), 0, source(1), EPOCH - 1000, EPOCH, 0);
+        .learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
     book.succeeded(target(), 0, EPOCH);
     let mut manager = book.state.lock();
-    let accepted = manager.learn(target(), 0, source(2), EPOCH - 999, EPOCH, 0);
+    let accepted = manager.learn(target(), Some(0), source(2), EPOCH - 999, EPOCH, 0);
     assert_core_operation(&manager, "tried-rejects-new-reference", Some(accepted));
     drop(manager);
     actual_core_attempt_good_sequence();
@@ -1110,10 +1126,10 @@ fn actual_core_attempt_good_sequence() {
     let other: SocketAddr = "9.9.9.9:8333".parse().expect("peer");
     {
         let mut manager = book.state.lock();
-        manager.learn(target(), 0, source(1), EPOCH - 1000, EPOCH, 0);
+        manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
         manager.learn(
             other,
-            0,
+            Some(0),
             Source::Ip("2.2.2.2".parse().expect("source")),
             EPOCH - 1000,
             EPOCH,
@@ -1167,7 +1183,7 @@ fn ring_manager(second_port: u16) -> (Manager, SocketAddr, SocketAddr) {
             row["address"].as_str().expect("ip").parse().expect("ip"),
             port,
         );
-        assert!(manager.learn(peer, 9, source(1), EPOCH, EPOCH, 0));
+        assert!(manager.learn(peer, Some(9), source(1), EPOCH, EPOCH, 0));
         let bucket = usize::try_from(row["new_bucket"].as_u64().expect("bucket")).expect("bucket");
         assert_eq!(
             manager.new_slot(peer, bucket) % 64,
@@ -1335,7 +1351,7 @@ fn mapped_alias_manual_health_and_refresh_use_the_known_core_identity() {
                 entry.failures,
                 entry.services
             ),
-            (EPOCH + 1, EPOCH + 1, 0, 73)
+            (EPOCH + 1, EPOCH + 1, 0, Some(73))
         );
         assert_eq!(
             entry.last_seen,
@@ -1359,7 +1375,7 @@ fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
     assert_eq!(book.pending_count_excluding(&[]), 1);
     assert_eq!(book.pending_count_excluding(&[alias]), 0);
     assert_eq!(book.pending_count_excluding(&[target()]), 0);
-    assert_eq!(book.select(&[], &[], EPOCH, |_| true), None);
+    assert_eq!(book.select(&[], &[], EPOCH, u64::MAX, |_| true), None);
     book.attempted(alias, false, EPOCH);
     book.succeeded(alias, 9, EPOCH + 1);
     assert_eq!(
@@ -1372,7 +1388,10 @@ fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
     book.queued(alias);
     book.unqueue(target());
     assert_eq!(book.pending_count_excluding(&[]), 0);
-    assert_eq!(book.select(&[], &[], EPOCH + 2, |_| true), Some(target()));
+    assert_eq!(
+        book.select(&[], &[], EPOCH + 2, u64::MAX, |_| true),
+        Some(target())
+    );
 }
 
 #[test]
@@ -1380,15 +1399,15 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
     let alias = core_mapped_alias();
     let book = oracle_book();
     book.learn_dns("seed", &[target()], EPOCH);
-    assert_eq!(book.select(&[alias], &[], EPOCH, |_| true), None);
+    assert_eq!(book.select(&[alias], &[], EPOCH, u64::MAX, |_| true), None);
     let different_port = SocketAddr::new(alias.ip(), 8334);
     assert_eq!(
-        book.select(&[different_port], &[], EPOCH, |_| true),
+        book.select(&[different_port], &[], EPOCH, u64::MAX, |_| true),
         Some(target()),
         "inbound exclusion remains exact endpoint only"
     );
     assert_eq!(
-        book.select(&[], &[different_port], EPOCH, |_| true),
+        book.select(&[], &[different_port], EPOCH, u64::MAX, |_| true),
         None,
         "outbound diversity still excludes the group"
     );
@@ -1397,10 +1416,19 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         .expect("different IPv6 transport endpoint");
     assert_ne!(endpoint_key(linked), endpoint_key(target()));
     assert_eq!(
-        book.select(&[linked], &[], EPOCH, |_| true),
+        book.select(&[linked], &[], EPOCH, u64::MAX, |_| true),
         Some(target()),
         "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
     );
 }
 #[path = "asmap_tests.rs"]
 mod asmap_tests;
+
+#[path = "probe_tests.rs"]
+mod probe_tests;
+
+#[path = "eligibility_tests.rs"]
+mod eligibility_tests;
+
+#[path = "services_tests.rs"]
+mod services_tests;

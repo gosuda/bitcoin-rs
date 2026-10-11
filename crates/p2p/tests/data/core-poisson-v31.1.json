@@ -1,0 +1,135 @@
+{
+  "reference": "Bitcoin Core v31.1",
+  "source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+  "scope": "Actual unmodified random.cpp MakeExponentiallyDistributed and random.h RandomMixin::rand_exp_duration(mean=120000000us); only rand64 input is supplied by a deterministic fixture, not an algorithm stub.",
+  "source_sha256": {
+    "src/random.cpp": "36c7f0204674539fa86d78766cd0f074420a1c46578a054bc1f0ac1c0b62a090",
+    "src/random.h": "5459198b3ae7962176537041ae01a8f74f7fa0a02e5b363ce378e6f5ac7ac430"
+  },
+  "driver": "tests/support/core-addrman-poisson-driver.cpp",
+  "driver_sha256": "23c7c573a5c35689d0d41dc4a9b60caefa0cc70fba151a767e27b2e20819be11",
+  "oracle_sha256": "efa3e66f9ff3b90a93af51ca04749c6201ee54b57fa0804c311e833a1624410e",
+  "build_script": "tests/support/regenerate-core-addrman.sh",
+  "config_sha256": "e795caf911f1ac025a338cf35620a7015d36423ef2c065aa73b17b52afea5ef4",
+  "raw_output_sha256": "7cb31c0bbb1b655741aa5d884b4001f161ecfa38c21ccd028919b15a47dcaec3",
+  "repeat_output_identical": true,
+  "rows": [
+    {
+      "uniform": 0,
+      "uniform_hex": "0000000000000000",
+      "mean_us": 120000000,
+      "unscaled": 0,
+      "unscaled_bits_hex": "0000000000000000",
+      "delay_us": 0,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 1,
+      "uniform_hex": "0000000000000001",
+      "mean_us": 120000000,
+      "unscaled": 0,
+      "unscaled_bits_hex": "0000000000000000",
+      "delay_us": 0,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 2047,
+      "uniform_hex": "00000000000007ff",
+      "mean_us": 120000000,
+      "unscaled": 0,
+      "unscaled_bits_hex": "0000000000000000",
+      "delay_us": 0,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 2048,
+      "uniform_hex": "0000000000000800",
+      "mean_us": 120000000,
+      "unscaled": 1.1102230246251565e-16,
+      "unscaled_bits_hex": "3ca0000000000000",
+      "delay_us": 0,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 4294967296,
+      "uniform_hex": "0000000100000000",
+      "mean_us": 120000000,
+      "unscaled": 2.328306436809747e-10,
+      "unscaled_bits_hex": "3df0000000080000",
+      "delay_us": 0,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 4611686018427387904,
+      "uniform_hex": "4000000000000000",
+      "mean_us": 120000000,
+      "unscaled": 0.2876820724517809,
+      "unscaled_bits_hex": "3fd269621134db92",
+      "delay_us": 34521849,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 9223372036854775808,
+      "uniform_hex": "8000000000000000",
+      "mean_us": 120000000,
+      "unscaled": 0.6931471805599453,
+      "unscaled_bits_hex": "3fe62e42fefa39ef",
+      "delay_us": 83177662,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 13835058055282163712,
+      "uniform_hex": "c000000000000000",
+      "mean_us": 120000000,
+      "unscaled": 1.3862943611198906,
+      "unscaled_bits_hex": "3ff62e42fefa39ef",
+      "delay_us": 166355323,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 1311768467463790320,
+      "uniform_hex": "123456789abcdef0",
+      "mean_us": 120000000,
+      "unscaled": 0.07376615023960903,
+      "unscaled_bits_hex": "3fb2e256a2d4b8b4",
+      "delay_us": 8851938,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 6148914691236517205,
+      "uniform_hex": "5555555555555555",
+      "mean_us": 120000000,
+      "unscaled": 0.4054651081081643,
+      "unscaled_bits_hex": "3fd9f323ecbf984a",
+      "delay_us": 48655813,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 16045690984503098046,
+      "uniform_hex": "deadbeefcafebabe",
+      "mean_us": 120000000,
+      "unscaled": 2.0389804536593603,
+      "unscaled_bits_hex": "40004fd4fbed339a",
+      "delay_us": 244677654,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 18446744073709549568,
+      "uniform_hex": "fffffffffffff800",
+      "mean_us": 120000000,
+      "unscaled": 36.7368005696771,
+      "unscaled_bits_hex": "40425e4f7b2737fa",
+      "delay_us": 4408416068,
+      "rand64_calls": 1
+    },
+    {
+      "uniform": 18446744073709551615,
+      "uniform_hex": "ffffffffffffffff",
+      "mean_us": 120000000,
+      "unscaled": 36.7368005696771,
+      "unscaled_bits_hex": "40425e4f7b2737fa",
+      "delay_us": 4408416068,
+      "rand64_calls": 1
+    }
+  ]
+}

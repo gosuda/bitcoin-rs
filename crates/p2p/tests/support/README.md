@@ -34,3 +34,21 @@ in `core-addrman-asmap-v31.1.json` include exact map bytes/hashes, ASN0 fallback
 linked IPv4 endpoint distinctions, Internal sources and two fixed secrets.
 The reproduction script also writes `asmap.tsv`; the binary maps remain the
 existing #1477 fixtures and the official map in the pinned Core source tree.
+
+`core-addrman-collision-driver.cpp` additionally links the same unmodified Core
+translation units to exercise Good_, MakeTried, ResolveCollisions and collision
+selection. `core-addrman-collisions-v31.1.json` contains 93 direct output records:
+14 timer/future-clock scenarios, health resets, all-reference promotion,
+original-source demotion, single-reference deletion, queue bound10, defensive
+queue cleanup, two-incumbent selection, creation-order resolution despite reversed Good order,
+and the external already-connected
+Good(old) then New selection boundary from net.cpp. The connected assumption is
+supplied by the driver; it does not pretend to exercise an actual TCP session.
+Core CheckAddrman is asserted after each snapshot. Tests compare durable/health
+and reference outputs; Core's private random-vector positions are provenance,
+not a requirement on Rust's different endpoint index representation.
+
+`core-addrman-poisson-driver.cpp` supplies thirteen fixed `rand64` values to the
+actual Core RandomMixin and exponential distribution implementation. The
+`core-poisson-v31.1.json` fixture pins the two-minute mean, integer microsecond
+rounding, endpoints and representative quantiles used by the service scheduler.
