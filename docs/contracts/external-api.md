@@ -249,11 +249,13 @@
     Esplora cursor semantics. Cursor values
    are the exact lowercase `txid` display text: malformed, noncanonical
    (including uppercase or prefixed), unknown, and missing cursors restart from
-   the beginning; a valid known cursor strictly excludes that transaction and
-   earlier entries. Historical confirmation heights for duplicate transactions
+   the beginning; a valid known cursor excludes the newest matching occurrence
+   and entries preceding it. Historical confirmation heights for duplicate transactions
    (such as BIP30 duplicate coinbases) are preserved as distinct occurrences in
-   script history and summary counts; cursor pagination advances past all
-   occurrences of the cursor txid to ensure forward progression without cycles.
+   script history and summary counts. Continuing after the newest match preserves
+   intervening transactions and older duplicate confirmations. A txid-only cursor
+   cannot distinguish confirmation heights: if an older duplicate terminates a
+   page, using its txid again repeats the continuation after the newer occurrence.
   A richer internal revision token stays
   internal or is a documented extension. Lag, reorg, or a disabled
   capability returns the declared unavailable response, never an empty

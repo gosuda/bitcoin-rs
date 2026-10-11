@@ -2778,21 +2778,16 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn bip30_duplicate_coinbase_esplora_history_and_paging_91812_91842() {
-        use bitcoin::hex::FromHex;
+    fn make_bip30_ctx(
+        expected_txid: Txid,
+        script_pubkey: Vec<u8>,
+        earlier: (u32, &str),
+        later: (u32, &str),
+    ) -> (Context, ScriptHash, String) {
         use core::str::FromStr as _;
 
-        // Mainnet BIP30 case 1: duplicate coinbase at heights 91,812 and 91,842.
-        let txid_str = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599";
-        let expected_txid = Txid::from_str(txid_str).expect("txid parses");
-        let hash_91812_str = "00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f";
-        let hash_91842_str = "00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec";
-        let script_pubkey = Vec::from_hex(
-            "41046896ecfc449cb8560594eb7f413f199deb9b4e5d947a142e7dc7d2de0b811b8e204833ea2a2fd9d4c7b153a8ca7661d0a0b7fc981df1f42f55d64b26b3da1e9cac",
-        )
-        .expect("script parses");
+        let (h_earlier, hash_earlier_str) = earlier;
+        let (h_later, hash_later_str) = later;
         let script_hash = ScriptHash::new(&script_pubkey);
         let script_hash_hex = script_hash.to_byte_array().to_lower_hex_string();
 
@@ -2801,7 +2796,7 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: null_outpoint(),
                 script_sig: Script::from_bytes(
-                    Vec::from_hex("0456720e1b00").expect("scriptsig hex"),
+                    bitcoin::hex::FromHex::from_hex("0456720e1b00").expect("scriptsig hex"),
                 ),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
@@ -2817,48 +2812,69 @@ mod tests {
         let mut ctx = Context::new();
         ctx.chain
             .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                91_812,
-                BlockHash::from_str(hash_91812_str).expect("blockhash parses"),
+                h_earlier,
+                BlockHash::from_str(hash_earlier_str).expect("blockhash parses"),
             ));
         ctx.chain
             .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                91_842,
-                BlockHash::from_str(hash_91842_str).expect("blockhash parses"),
+                h_later,
+                BlockHash::from_str(hash_later_str).expect("blockhash parses"),
             ));
 
         ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: vec![
                 ScriptHistoryRecord {
                     txid: expected_txid,
-                    height: 91_812,
+                    height: h_earlier,
                 },
                 ScriptHistoryRecord {
                     txid: expected_txid,
-                    height: 91_842,
+                    height: h_later,
                 },
             ],
             funding: vec![
                 ScriptIndexRecord {
                     txid: expected_txid,
-                    height: 91_812,
+                    height: h_earlier,
                     value: 5_000_000_000,
                     vout: 0,
                 },
                 ScriptIndexRecord {
                     txid: expected_txid,
-                    height: 91_842,
+                    height: h_later,
                     value: 5_000_000_000,
                     vout: 0,
                 },
             ],
             unspent: vec![ScriptIndexRecord {
                 txid: expected_txid,
-                height: 91_842,
+                height: h_later,
                 value: 5_000_000_000,
                 vout: 0,
             }],
         }));
         ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(tx)));
+        (ctx, script_hash, script_hash_hex)
+    }
+
+    // Synthetic fixture testing RPC projections and cursor mechanics for
+    // BIP30 duplicate coinbases; this does not establish real-index discovery or
+    // parity with an external Esplora implementation.
+    fn assert_bip30_duplicate_coinbase(
+        txid_str: &str,
+        script_pubkey_hex: &str,
+        earlier: (u32, &str),
+        later: (u32, &str),
+    ) {
+        use bitcoin::hex::FromHex;
+        use core::str::FromStr as _;
+
+        let (h_earlier, hash_earlier_str) = earlier;
+        let (h_later, hash_later_str) = later;
+        let expected_txid = Txid::from_str(txid_str).expect("txid parses");
+        let script_pubkey = Vec::from_hex(script_pubkey_hex).expect("script parses");
+        let (ctx, script_hash, script_hash_hex) =
+            make_bip30_ctx(expected_txid, script_pubkey, earlier, later);
 
         let projection = Projection::new(&ctx);
         let activity = projection
@@ -2876,8 +2892,8 @@ mod tests {
             .confirmed_history(script_hash)
             .expect("confirmed history resolves");
         assert_eq!(history_records.len(), 2);
-        assert_eq!(history_records[0].height, 91_842);
-        assert_eq!(history_records[1].height, 91_812);
+        assert_eq!(history_records[0].height, h_later);
+        assert_eq!(history_records[1].height, h_earlier);
 
         let handler = Handler::new(Arc::new(ctx));
 
@@ -2892,6 +2908,24 @@ mod tests {
             10_000_000_000_u64
         );
 
+        // /scripthash/:hash/txs/summary checks: per-transaction rows carry height-specific values
+        let summary_rows_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/summary"),
+            "",
+        );
+        assert_eq!(summary_rows_resp.status, 200);
+        let summary_rows_json: Value =
+            serde_json::from_slice(&summary_rows_resp.body).expect("summary rows json");
+        let summary_rows_arr = summary_rows_json.as_array().expect("array of summary rows");
+        assert_eq!(summary_rows_arr.len(), 2);
+        assert_eq!(summary_rows_arr[0]["txid"], txid_str);
+        assert_eq!(summary_rows_arr[0]["height"], h_later);
+        assert_eq!(summary_rows_arr[0]["value"], 5_000_000_000_u64);
+        assert_eq!(summary_rows_arr[1]["txid"], txid_str);
+        assert_eq!(summary_rows_arr[1]["height"], h_earlier);
+        assert_eq!(summary_rows_arr[1]["value"], 5_000_000_000_u64);
+
         // /scripthash/:hash/txs and /txs/chain: returns both historical occurrences
         let chain_resp = route(
             &handler,
@@ -2903,162 +2937,340 @@ mod tests {
         let chain_arr = chain_json.as_array().expect("array of txs");
         assert_eq!(chain_arr.len(), 2);
         assert_eq!(chain_arr[0]["txid"], txid_str);
-        assert_eq!(chain_arr[0]["status"]["block_height"], 91_842);
-        assert_eq!(chain_arr[0]["status"]["block_hash"], hash_91842_str);
+        assert_eq!(chain_arr[0]["status"]["block_height"], h_later);
+        assert_eq!(chain_arr[0]["status"]["block_hash"], hash_later_str);
         assert_eq!(chain_arr[1]["txid"], txid_str);
-        assert_eq!(chain_arr[1]["status"]["block_height"], 91_812);
-        assert_eq!(chain_arr[1]["status"]["block_hash"], hash_91812_str);
+        assert_eq!(chain_arr[1]["status"]["block_height"], h_earlier);
+        assert_eq!(chain_arr[1]["status"]["block_hash"], hash_earlier_str);
 
-        // Cursor pagination with the duplicate txid advances past all occurrences
-        // without looping
+        // API-09: cursor advances past the first (newest) occurrence, returning the older occurrence
         let page2_resp = route(
             &handler,
             &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_str}"),
             "",
         );
         assert_eq!(page2_resp.status, 200);
-        assert_eq!(page2_resp.body, b"[]");
+        let page2_json: Value = serde_json::from_slice(&page2_resp.body).expect("page 2 json");
+        let page2_arr = page2_json.as_array().expect("array");
+        assert_eq!(page2_arr.len(), 1);
+        assert_eq!(page2_arr[0]["txid"], txid_str);
+        assert_eq!(page2_arr[0]["status"]["block_height"], h_earlier);
+        // The route receives only a txid, so the older occurrence cannot select
+        // a different continuation. Keep this ambiguity explicit and deterministic.
+        let repeated = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_str}"),
+            "",
+        );
+        assert_eq!(repeated.status, 200);
+        assert_eq!(repeated.body, page2_resp.body);
+    }
+
+    #[test]
+    fn bip30_duplicate_coinbase_esplora_history_and_paging_91812_91842() {
+        assert_bip30_duplicate_coinbase(
+            "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599",
+            "41046896ecfc449cb8560594eb7f413f199deb9b4e5d947a142e7dc7d2de0b811b8e204833ea2a2fd9d4c7b153a8ca7661d0a0b7fc981df1f42f55d64b26b3da1e9cac",
+            (
+                91_812,
+                "00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f",
+            ),
+            (
+                91_842,
+                "00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec",
+            ),
+        );
+    }
+
+    #[test]
+    fn bip30_duplicate_coinbase_esplora_history_and_paging_91722_91880() {
+        assert_bip30_duplicate_coinbase(
+            "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468",
+            "4104124b212f5416598a92ccec88819105179dcb2550d571842601492718273fe0f2179a9695096bff94cd99dcccdea7cd9bd943bfca8fea649cac963411979a33e9ac",
+            (
+                91_722,
+                "00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e",
+            ),
+            (
+                91_880,
+                "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721",
+            ),
+        );
     }
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn bip30_duplicate_coinbase_esplora_history_and_paging_91722_91880() {
-        use bitcoin::hex::FromHex;
-        use core::str::FromStr as _;
-
-        // Mainnet BIP30 case 2: duplicate coinbase at heights 91,722 and 91,880.
-        let txid_str = "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468";
-        let expected_txid = Txid::from_str(txid_str).expect("txid parses");
-        let hash_91722_str = "00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e";
-        let hash_91880_str = "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721";
-        let script_pubkey = Vec::from_hex(
-            "4104124b212f5416598a92ccec88819105179dcb2550d571842601492718273fe0f2179a9695096bff94cd99dcccdea7cd9bd943bfca8fea649cac963411979a33e9ac",
-        )
-        .expect("script parses");
-        let script_hash = ScriptHash::new(&script_pubkey);
+    fn chain_history_pagination_duplicate_txid_interleaved_at_page_boundary() {
+        let target = vec![0x51];
+        let script_hash = ScriptHash::new(&target);
         let script_hash_hex = script_hash.to_byte_array().to_lower_hex_string();
 
-        let tx = Tx {
-            version: 1,
-            inputs: vec![TxIn {
-                previous_output: null_outpoint(),
-                script_sig: Script::from_bytes(
-                    Vec::from_hex("0456720e1b00").expect("scriptsig hex"),
-                ),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(5_000_000_000),
-                script_pubkey: script_pubkey.into(),
-            }],
-            lock_time: LockTime::ZERO,
-        };
-        assert_eq!(tx.txid(), expected_txid);
+        let mut transactions = Vec::new();
+        let mut history_records = Vec::new();
+
+        // 24 filler transactions at heights 124 down to 101: items 0..23 on Page 1.
+        for height in (101_u32..=124).rev() {
+            let tx = transaction(
+                None,
+                TxOut {
+                    value: Amount::from_sat(u64::from(height)),
+                    script_pubkey: target.clone().into(),
+                },
+            );
+            history_records.push(ScriptHistoryRecord {
+                txid: tx.txid(),
+                height,
+            });
+            transactions.push(tx);
+        }
+
+        // Duplicate txid A (shared by two confirmations at heights 100 and 98):
+        let tx_a = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(500),
+                script_pubkey: target.clone().into(),
+            },
+        );
+        let txid_a = tx_a.txid();
+        let txid_a_str = txid_a.to_string();
+
+        // Item 24 (25th item, the exact boundary of Page 1): A(newer) at height 100.
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_a,
+            height: 100,
+        });
+
+        // Item 25 (26th item, first item of Page 2): unrelated transaction B at height 99.
+        let tx_b = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(600),
+                script_pubkey: target.clone().into(),
+            },
+        );
+        let txid_b = tx_b.txid();
+        let txid_b_str = txid_b.to_string();
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_b,
+            height: 99,
+        });
+        transactions.push(tx_b);
+
+        // Item 26 (27th item): A(older) at height 98.
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_a,
+            height: 98,
+        });
+        transactions.push(tx_a);
+
+        // Item 27 (28th item): unrelated transaction C at height 97.
+        let tx_c = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(700),
+                script_pubkey: target.into(),
+            },
+        );
+        let txid_c = tx_c.txid();
+        let txid_c_str = txid_c.to_string();
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_c,
+            height: 97,
+        });
+        transactions.push(tx_c);
 
         let mut ctx = Context::new();
-        ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                91_722,
-                BlockHash::from_str(hash_91722_str).expect("blockhash parses"),
-            ));
-        ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                91_880,
-                BlockHash::from_str(hash_91880_str).expect("blockhash parses"),
-            ));
+        for height in 97_u32..=124 {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    height,
+                    BlockHash::default(),
+                ));
+        }
 
         ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
-            history: vec![
-                ScriptHistoryRecord {
-                    txid: expected_txid,
-                    height: 91_722,
-                },
-                ScriptHistoryRecord {
-                    txid: expected_txid,
-                    height: 91_880,
-                },
-            ],
-            funding: vec![
-                ScriptIndexRecord {
-                    txid: expected_txid,
-                    height: 91_722,
-                    value: 5_000_000_000,
-                    vout: 0,
-                },
-                ScriptIndexRecord {
-                    txid: expected_txid,
-                    height: 91_880,
-                    value: 5_000_000_000,
-                    vout: 0,
-                },
-            ],
-            unspent: vec![ScriptIndexRecord {
-                txid: expected_txid,
-                height: 91_880,
-                value: 5_000_000_000,
-                vout: 0,
-            }],
+            history: history_records,
+            funding: Vec::new(),
+            unspent: Vec::new(),
         }));
-        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(tx)));
-
-        let projection = Projection::new(&ctx);
-        let activity = projection
-            .script_activity(script_hash)
-            .expect("activity resolves");
-        assert_eq!(activity.confirmed.len(), 2);
-        let stats = activity.chain_stats();
-        assert_eq!(stats.tx_count, 2);
-        assert_eq!(stats.funded_txo_count, 2);
-        assert_eq!(stats.funded_txo_sum, 10_000_000_000);
-        assert_eq!(stats.spent_txo_count, 1);
-        assert_eq!(stats.spent_txo_sum, 5_000_000_000);
-
-        let history_records = projection
-            .confirmed_history(script_hash)
-            .expect("confirmed history resolves");
-        assert_eq!(history_records.len(), 2);
-        assert_eq!(history_records[0].height, 91_880);
-        assert_eq!(history_records[1].height, 91_722);
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
 
         let handler = Handler::new(Arc::new(ctx));
 
-        // /scripthash/:hash summary check
-        let summary_resp = route(&handler, &format!("/scripthash/{script_hash_hex}"), "");
-        assert_eq!(summary_resp.status, 200);
-        let summary_json: Value = serde_json::from_slice(&summary_resp.body).expect("summary json");
-        assert_eq!(summary_json["chain_stats"]["tx_count"], 2);
-        assert_eq!(summary_json["chain_stats"]["funded_txo_count"], 2);
-        assert_eq!(
-            summary_json["chain_stats"]["funded_txo_sum"],
-            10_000_000_000_u64
-        );
-
-        // /scripthash/:hash/txs and /txs/chain: returns both historical occurrences
-        let chain_resp = route(
+        // 1. Request Page 1: returns exactly 25 items ending with A(newer) at height 100.
+        let page1_resp = route(
             &handler,
             &format!("/scripthash/{script_hash_hex}/txs/chain"),
             "",
         );
-        assert_eq!(chain_resp.status, 200);
-        let chain_json: Value = serde_json::from_slice(&chain_resp.body).expect("chain json");
-        let chain_arr = chain_json.as_array().expect("array of txs");
-        assert_eq!(chain_arr.len(), 2);
-        assert_eq!(chain_arr[0]["txid"], txid_str);
-        assert_eq!(chain_arr[0]["status"]["block_height"], 91_880);
-        assert_eq!(chain_arr[0]["status"]["block_hash"], hash_91880_str);
-        assert_eq!(chain_arr[1]["txid"], txid_str);
-        assert_eq!(chain_arr[1]["status"]["block_height"], 91_722);
-        assert_eq!(chain_arr[1]["status"]["block_hash"], hash_91722_str);
+        assert_eq!(page1_resp.status, 200);
+        let page1_json: Value = serde_json::from_slice(&page1_resp.body).expect("page1 json");
+        let page1_arr = page1_json.as_array().expect("page1 array");
+        assert_eq!(page1_arr.len(), CHAIN_PAGE);
+        assert_eq!(page1_arr[CHAIN_PAGE - 1]["txid"], txid_a_str);
+        assert_eq!(page1_arr[CHAIN_PAGE - 1]["status"]["block_height"], 100);
 
-        // Cursor pagination with the duplicate txid advances past all occurrences
-        // without looping
+        // 2. Request Page 2 using cursor txid_a:
+        // Position-based cursor advances past A(newer) at index 24.
+        // It must return B (height 99), A(older) (height 98), and C (height 97).
+        // Neither unrelated B nor older A is skipped!
         let page2_resp = route(
             &handler,
-            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_str}"),
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_a_str}"),
             "",
         );
         assert_eq!(page2_resp.status, 200);
-        assert_eq!(page2_resp.body, b"[]");
+        let page2_json: Value = serde_json::from_slice(&page2_resp.body).expect("page2 json");
+        let page2_arr = page2_json.as_array().expect("page2 array");
+        assert_eq!(page2_arr.len(), 3);
+        assert_eq!(
+            page2_arr[0]["txid"], txid_b_str,
+            "Interleaved B must not be skipped"
+        );
+        assert_eq!(page2_arr[0]["status"]["block_height"], 99);
+        assert_eq!(
+            page2_arr[1]["txid"], txid_a_str,
+            "Older occurrence A must be returned"
+        );
+        assert_eq!(page2_arr[1]["status"]["block_height"], 98);
+        assert_eq!(
+            page2_arr[2]["txid"], txid_c_str,
+            "Subsequent C must be returned"
+        );
+        assert_eq!(page2_arr[2]["status"]["block_height"], 97);
+
+        // 3. Requesting after B advances past B, returning A(older) and C.
+        let from_b_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_b_str}"),
+            "",
+        );
+        assert_eq!(from_b_resp.status, 200);
+        let from_b_json: Value = serde_json::from_slice(&from_b_resp.body).expect("from b json");
+        let from_b_arr = from_b_json.as_array().expect("from b array");
+        assert_eq!(from_b_arr.len(), 2);
+        assert_eq!(from_b_arr[0]["txid"], txid_a_str);
+        assert_eq!(from_b_arr[0]["status"]["block_height"], 98);
+        assert_eq!(from_b_arr[1]["txid"], txid_c_str);
+        assert_eq!(from_b_arr[1]["status"]["block_height"], 97);
+    }
+
+    #[test]
+    fn chain_history_pagination_duplicate_txid_adjacent_straddling_page_boundary() {
+        let target = vec![0x51];
+        let script_hash = ScriptHash::new(&target);
+        let script_hash_hex = script_hash.to_byte_array().to_lower_hex_string();
+
+        let mut transactions = Vec::new();
+        let mut history_records = Vec::new();
+
+        // 24 filler transactions at heights 124 down to 101: items 0..23 on Page 1.
+        for height in (101_u32..=124).rev() {
+            let tx = transaction(
+                None,
+                TxOut {
+                    value: Amount::from_sat(u64::from(height)),
+                    script_pubkey: target.clone().into(),
+                },
+            );
+            history_records.push(ScriptHistoryRecord {
+                txid: tx.txid(),
+                height,
+            });
+            transactions.push(tx);
+        }
+
+        // Duplicate txid A (no intervening transaction between 100 and 98):
+        let tx_a = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(500),
+                script_pubkey: target.clone().into(),
+            },
+        );
+        let txid_a = tx_a.txid();
+        let txid_a_str = txid_a.to_string();
+
+        // Item 24 (25th item, end of Page 1): A(newer) at height 100.
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_a,
+            height: 100,
+        });
+
+        // Item 25 (26th item, start of Page 2): A(older) at height 98.
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_a,
+            height: 98,
+        });
+        transactions.push(tx_a);
+
+        // Item 26 (27th item): subsequent transaction C at height 97.
+        let tx_c = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(700),
+                script_pubkey: target.into(),
+            },
+        );
+        let txid_c = tx_c.txid();
+        let txid_c_str = txid_c.to_string();
+        history_records.push(ScriptHistoryRecord {
+            txid: txid_c,
+            height: 97,
+        });
+        transactions.push(tx_c);
+
+        let mut ctx = Context::new();
+        for height in 97_u32..=124 {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    height,
+                    BlockHash::default(),
+                ));
+        }
+
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: history_records,
+            funding: Vec::new(),
+            unspent: Vec::new(),
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        let handler = Handler::new(Arc::new(ctx));
+
+        // Page 1 ends at A(newer)
+        let page1_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain"),
+            "",
+        );
+        assert_eq!(page1_resp.status, 200);
+        let page1_json: Value = serde_json::from_slice(&page1_resp.body).expect("page1 json");
+        assert_eq!(page1_json.as_array().expect("array").len(), CHAIN_PAGE);
+
+        // Page 2 using cursor txid_a: advances past A(newer) to return adjacent A(older) and C
+        let page2_resp = route(
+            &handler,
+            &format!("/scripthash/{script_hash_hex}/txs/chain/{txid_a_str}"),
+            "",
+        );
+        assert_eq!(page2_resp.status, 200);
+        let page2_json: Value = serde_json::from_slice(&page2_resp.body).expect("page2 json");
+        let page2_arr = page2_json.as_array().expect("page2 array");
+        assert_eq!(page2_arr.len(), 2);
+        assert_eq!(
+            page2_arr[0]["txid"], txid_a_str,
+            "Adjacent older A must not be omitted when straddling page boundary"
+        );
+        assert_eq!(page2_arr[0]["status"]["block_height"], 98);
+        assert_eq!(page2_arr[1]["txid"], txid_c_str);
+        assert_eq!(page2_arr[1]["status"]["block_height"], 97);
     }
 }

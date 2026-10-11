@@ -682,12 +682,13 @@ pub(super) fn history(
     };
     // API-09: only an exact known lowercase txid advances the page. Unknown
     // or noncanonical cursors restart, including links made stale by a reorg.
-    // Use rposition to advance past all occurrences of the cursor txid (such as
-    // consensus-valid duplicate coinbases), strictly excluding that transaction.
+    // A txid-only cursor identifies the newest matching occurrence. Continuing
+    // there preserves intervening records; an older duplicate used as a cursor
+    // cannot be distinguished and repeats the same continuation.
     let start = last.and_then(|x| {
         records
             .iter()
-            .rposition(|entry| entry.txid.to_string() == x)
+            .position(|entry| entry.txid.to_string() == x)
             .map(|n| n + 1)
     });
     let chain = match records
@@ -715,9 +716,9 @@ pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Respo
         Ok(activity) => activity,
         Err(response) => return response,
     };
-    let mut funded = std::collections::BTreeMap::<Txid, u64>::new();
+    let mut funded = std::collections::BTreeMap::<(Txid, u32), u64>::new();
     for row in &activity.confirmed_funding {
-        let total = funded.entry(row.txid).or_default();
+        let total = funded.entry((row.txid, row.height)).or_default();
         *total = total.saturating_add(row.value);
     }
     json_ok(
@@ -726,7 +727,10 @@ pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Respo
             .into_iter()
             .map(|entry| AddressTransactionSummary {
                 txid: entry.record.txid.to_string(),
-                value: funded.get(&entry.record.txid).copied().unwrap_or_default(),
+                value: funded
+                    .get(&(entry.record.txid, entry.record.height))
+                    .copied()
+                    .unwrap_or_default(),
                 height: entry.confirmation.height,
                 time: entry.confirmation.time,
             })
