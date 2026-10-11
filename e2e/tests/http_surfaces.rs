@@ -46,11 +46,18 @@ fn rpc_protocol_error_codes() -> Result<()> {
     }))?;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
-    // Registered-but-unimplemented methods answer the same code.
+    // Wallet methods are not exposed by this wallet-free node.
     let unimplemented = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 2, "method": "waitforblock", "params": []
+        "jsonrpc": "2.0", "id": 2, "method": "getwalletinfo", "params": []
     }))?;
     assert_eq!(unimplemented["error"]["code"], json!(-32601));
+
+    // API-34: waitforblock is implemented; missing its required hash returns
+    // Core's usage error rather than method-not-found (and does not wait).
+    let missing_hash = node.rpc_raw(&json!({
+        "jsonrpc": "2.0", "id": 4, "method": "waitforblock", "params": []
+    }))?;
+    assert_eq!(missing_hash["error"]["code"], json!(-1));
 
     // A JSON parse failure maps to HTTP 500 plus a -32700 body, as in Core.
     let malformed = node.http("POST", "/", b"{not json", true)?;
