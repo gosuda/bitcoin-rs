@@ -242,6 +242,7 @@ fn dispatch_collect(
             Ok(())
         },
         &mut |_| {},
+        &mut |items| collected.borrow_mut().push(Message::GetData(items)),
     )?;
     Ok(collected.into_inner())
 }

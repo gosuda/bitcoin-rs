@@ -214,6 +214,9 @@ pub struct RelayOutcome {
 
 /// Consumer seam for the relay worker.
 pub trait RelaySink: Send + Sync {
+    /// Advances time-based transaction download policy.
+    fn poll(&self, _gateway: &MempoolGateway) {}
+
     /// Announces `txid` as a transaction `inv` to every connected peer except
     /// the one identified by `exclude` (if any).
     fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome;
@@ -241,9 +244,14 @@ impl PeerRelaySink {
 }
 
 impl RelaySink for PeerRelaySink {
+    fn poll(&self, gateway: &MempoolGateway) {
+        self.peers.poll_transaction_requests(gateway);
+    }
+
     fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome {
         use bitcoin::p2p::message_blockdata::Inventory;
 
+        self.peers.forget_known_transaction(txid, wtxid);
         let mut outcome = RelayOutcome::default();
         self.peers.for_each_ready_lease(|addr, lease, info| {
             if !lease.role().relays_transactions() {
@@ -352,6 +360,12 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {
             while !shutdown.load() {
+                {
+                    let Some(gateway) = gateway.upgrade() else {
+                        break;
+                    };
+                    sink.poll(&gateway);
+                }
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
                         let Some(gateway) = gateway.upgrade() else {

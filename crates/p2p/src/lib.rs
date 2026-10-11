@@ -50,6 +50,8 @@ pub(crate) mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// Connection-bound transaction request and relay policy.
+pub(crate) mod tx_policy;
 /// Bounded transaction announcements and their peer relay worker.
 pub(crate) mod tx_relay;
 /// Bitcoin P2P wire codec.

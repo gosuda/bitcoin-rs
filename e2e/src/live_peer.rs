@@ -72,6 +72,17 @@ impl LivePeer {
     /// pre-bootstrap-rejected batch); `0` keeps the wire quiet so a lone
     /// `getheaders` can only be the staged-header recovery send.
     pub fn connect_with_height(node: &ProcessNode, name: &str, start_height: i32) -> Result<Self> {
+        Self::connect_with_wtxid_relay(node, name, start_height, true)
+    }
+
+    /// Handshake with an explicit BIP339 profile for mixed txid/wtxid peers.
+    /// Existing callers advertise wtxid relay through `connect_with_height`.
+    pub fn connect_with_wtxid_relay(
+        node: &ProcessNode,
+        name: &str,
+        start_height: i32,
+        wtxid_relay: bool,
+    ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
@@ -124,7 +135,9 @@ impl LivePeer {
             match peer.recv(deadline)? {
                 NetworkMessage::Version(_) if !received_version => {
                     received_version = true;
-                    peer.send(NetworkMessage::WtxidRelay, deadline)?;
+                    if wtxid_relay {
+                        peer.send(NetworkMessage::WtxidRelay, deadline)?;
+                    }
                     peer.send(NetworkMessage::Verack, deadline)?;
                 }
                 NetworkMessage::Verack if received_version => return Ok(peer),

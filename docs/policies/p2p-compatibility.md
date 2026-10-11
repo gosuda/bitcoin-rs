@@ -67,9 +67,9 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only. No latency telemetry is kept. |
 | `pong` | ignored | No ping RTT accounting exists; the pong body is unused. |
-| `inv` | Transaction vectors are answered with `getdata` for the ones the node does not already hold. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
+| `inv` | Missing transaction vectors enter the connection-bound transaction request owner; only the selected eligible source receives `getdata`. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
 | `getdata` | `MSG_BLOCK` streams stripped stored blocks from the applied chain or an eligible stale branch; `MSG_WITNESS_BLOCK` preserves the stored witness serialization (BIP144). For full-relay peers, transaction inventory is served from the mempool, or from the orphan map only for a `MSG_WTX` item whose exact wtxid is resident. For block-relay-only peers, the listener removes transaction vectors before dispatch and drops transaction-only requests without a response. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. A `MSG_CMPCT_BLOCK` item is answered with a `cmpctblock` only while the block is within 5 of the applied tip; a deeper one is served as the whole witness-bearing `block`, as Core does (`net_processing.cpp:2705-2721`). Misses among dispatched inventory resolve to one trailing `notfound`. Bound: 50 000 vectors. |
-| `notfound` | ignored | Decoded with the same inventory bound. |
+| `notfound` | transaction fallback | A matching transaction request releases only its actual source and promptly considers retained alternatives; unrelated or unsolicited responses cannot release another connection's ownership. Block entries remain ignored. Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink / outbound | Forwarded to the node's header-sync pipeline. Newly committed active tips are announced via BIP130 `headers` (up to 8 headers, Core `MAX_BLOCKS_TO_ANNOUNCE`) to peers that negotiated `sendheaders` and can anchor on active chain history. Bound: ≤ 2 000 headers per message. |
@@ -424,11 +424,55 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 12. **Inbound admission**: bitcoin-rs refuses an inbound socket once the live inbound count reaches `max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots` (default `200 - 8 - 2 = 190`, `net.h:1124-1127`), closing the stream before a handshake lease exists (`crates/p2p/src/listener.rs`, `PeerTable::try_register_inbound`). Core derives the same remainder and then scores an eviction (`AttemptToEvictConnection`, `net.cpp:1695-1735`) to make room. The eviction scoring is deliberately not implemented: no bitcoin-rs sync path depends on being able to displace an inbound peer, the resource-exhaustion defect closes at the admission boundary, and adding a second peer-selection policy would need an acceptance requirement it does not have. The operator-visible consequence is that the 191st inbound connection is refused rather than replacing a chosen peer.
 13. **Outbound service gate**: an outbound peer that does not advertise the desirable set is disconnected right after its `version`, before it is published as usable, exactly as Core's `HasAllDesirableServiceFlags` check does (`net_processing.cpp:1857-1872`, applied to an outbound connection at `:3864-3871`). The desirable set is `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks (`NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`). Inbound peers are not service-checked, as in Core.
 14. **Limited peers and block download**: a connection without `NODE_NETWORK` is never asked for block bodies while the node is in initial block download, and after it only for the last 288 blocks of that peer's own chain (`net_processing.cpp:6521`, `NODE_NETWORK_LIMITED_MIN_BLOCKS` at `:159`, window applied at `:1637`). The rule reads the node's single `InitialBlockDownload` latch and applies to request, fan-out, probe, and hedge selection alike; header requests stay open to such a peer.
-15. **Transaction request tracker** (TXR-01–05, TXR-07): absent. On an
-   announced transaction, bitcoin-rs immediately requests it from every
-   announcing peer that supplies the announcement; it has no Core-style
-   per-peer in-flight request tracker or cap and does not retry a transaction
-   after `notfound`.
+15. **Transaction download scheduling bounds**: one P2P owner tracks
+   txid and wtxid announcements, with 5,000 retained announcements and 100
+   in-flight requests per connection, a 60-second request lifetime, and
+   two-second non-preferred, txid-while-wtxid-peers-exist, and overloaded
+   source delays (Core `node/txdownloadman_impl.cpp:198-221`). An outbound
+   eligible source wins over inbound candidates. Matching `notfound`,
+   disconnect and expiry release ownership and make remaining announcers
+   immediately eligible; unsolicited `notfound` cannot release another
+   source's request. Admission completion releases only the delivering source; alternate witnesses
+   remain eligible until mempool/orphan/reject state retires the matching
+   identity. Accepted bodies retire both identities. A paced 100-ms pass checks
+   at most 1,024 retained identities against known state and at most 1,024 ready
+   request identities before sending. The ordered request owner supplies the
+   resumable cursors for both sweeps and ready batches, so reannounced lower
+   keys cannot starve older tail requests. These traversals still use that map;
+   a separate derived set of candidate references serves only bounded admission.
+   Every selected identity is checked even if its periodic sweep turn has not arrived. Gateway
+   reads happen without policy/table locks; eligible candidates are rechecked
+   before reserving and enqueueing under one owner lock. Only transaction inv
+   wakes periodic policy work from the wire: ping, headers and unrelated traffic
+   perform no gateway census. Matching notfound, disconnect and admission results
+   use scoped immediate checks, preserving prompt fallback between periodic ticks.
+   TX/WTX announcements carrying identical 32-byte hashes share one download
+   ownership domain, including source preference and failure fallback (Core
+   `txrequest.cpp` `ByPeer`/`ByTxHash`). Known/reject checks retain their inventory
+   type. Different raw hashes remain independent until a body proves their
+   txid/wtxid relationship; no persistent alias map or second body cache is added. Additional
+   native resource policy: at most 100,000 total announcements and eight sources
+   per raw 32-byte hash shared by TX/WTX. At either limit a preferred arrival may
+   replace one non-preferred, non-owner candidate with the largest existing
+   numeric priority. A full hash must replace within that hash; that one removal
+   also frees a global slot when both caps are full. Current owners and preferred
+   candidates are protected. Ordinary arrivals or fully protected limits are
+   refused, as are duplicates and sources already at their 5,000-entry cap,
+   without eviction or punishment. Core does not have these global/hash caps;
+   this replacement rule is native resource policy, not Core contributor fairness.
+   One derived ordered set holds at most 100,000 fixed-size references
+   (priority, typed identity, connection ID), never announcement/owner copies.
+   Admission uses a constant number of lookups and scans of candidate groups,
+   each bounded by eight entries. Global victim selection uses the ordered index
+   with logarithmic updates; there is no per-announcement full-table scan or lazy
+   stale entry.
+   Orphan-parent requests share the owner and limits but preserve their
+   existing immediate source retry rather than Core's parent delay. A parent
+   already announced by that source is expedited without another announcement
+   or a second in-flight owner; ordinary duplicate inv cannot bypass its delay.
+   A newly retained parent reports success even when replacing a weak candidate
+   leaves the total announcement count unchanged.
+   These hard caps are resource-policy bounds, not measured throughput claims.
 16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
    queued transaction as an immediate single-item `inv`; Core batches and
    delays relay through its trickle scheduling.

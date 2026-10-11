@@ -379,6 +379,9 @@ fn serve_connection(
         if wiring.stop.load(Ordering::Relaxed) {
             return;
         }
+        wiring
+            .peer_table
+            .poll_transaction_requests(gateway.as_ref());
         match read_message(&mut peer.stream, magic) {
             Ok((message, _raw)) => {
                 if let Message::Tx(tx) = message {
@@ -404,6 +407,14 @@ fn serve_connection(
                     // The harness has no block sync: block inventory is
                     // announced to nothing here.
                     &mut |_| {},
+                    &mut |items| {
+                        wiring
+                            .peer_table
+                            .announce_transactions(lease.source(peer_addr), &items);
+                        wiring
+                            .peer_table
+                            .poll_transaction_requests(gateway.as_ref());
+                    },
                 );
             }
             Err(PeerError::Io(error))
@@ -928,5 +939,127 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
         "recent-rejects must suppress the follow-up getdata"
     );
 
+    Ok(())
+}
+
+/// A malformed witness does not prove its txid is unavailable. The gateway
+/// rejects only that wtxid; P2P must retain the honest txid announcer.
+#[test]
+fn rejected_witness_keeps_an_honest_transaction_source() -> anyhow::Result<()> {
+    if let Some(reason) = loopback_skip() {
+        tracing::warn!(%reason, "skipping tx ingress e2e");
+        return Ok(());
+    }
+    let harness = Harness::build(0xB1)?;
+    let parent = parent_txid(0xB2);
+    let witness_script = vec![0x51];
+    let mut locking_script = vec![0x00, 0x20];
+    locking_script
+        .extend_from_slice(bitcoin::hashes::sha256::Hash::hash(&witness_script).as_byte_array());
+    fund_utxo_script(&harness.state, parent, 50_000, locking_script)?;
+    let mut valid = spending_tx(parent, 40_000);
+    valid.inputs[0].witness = Witness::from_stack(vec![witness_script]);
+    let mut invalid = valid.clone();
+    invalid.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
+    let txid = valid.txid();
+    let invalid_wtxid = invalid.wtxid();
+    assert_eq!(invalid.txid(), txid);
+    assert_ne!(invalid_wtxid, valid.wtxid());
+
+    write_frame(&harness.source.dialer, harness.magic, &tx_inv(&txid))?;
+    wait_for_tx_getdata(
+        &harness.source.dialer,
+        harness.magic,
+        &txid,
+        OBSERVE_TIMEOUT,
+    )?;
+    write_frame(&harness.bystander.dialer, harness.magic, &tx_inv(&txid))?;
+    write_frame(
+        &harness.bystander.dialer,
+        harness.magic,
+        &Message::Ping(771),
+    )?;
+    let frames = collect_frames(
+        &harness.bystander.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
+    assert!(
+        frames.contains(&Message::Pong(771)),
+        "alternate announcement was processed"
+    );
+    assert!(
+        !requests_tx(&frames, &txid),
+        "one source still owns the request"
+    );
+    write_frame(&harness.source.dialer, harness.magic, &Message::Tx(invalid))?;
+    wait_until(OBSERVE_TIMEOUT, || {
+        harness.gateway.have_tx(invalid_wtxid.0, true)
+    })?;
+    assert!(
+        !harness.gateway.have_tx(txid.0, false),
+        "witness rejection must not reject the txid"
+    );
+    wait_for_tx_getdata(
+        &harness.bystander.dialer,
+        harness.magic,
+        &txid,
+        OBSERVE_TIMEOUT,
+    )?;
+    write_frame(
+        &harness.bystander.dialer,
+        harness.magic,
+        &Message::Tx(valid),
+    )?;
+    wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
+    Ok(())
+}
+
+#[test]
+fn orphan_parent_reuses_the_completed_childs_announcement_slot() -> anyhow::Result<()> {
+    if let Some(reason) = loopback_skip() {
+        tracing::warn!(%reason, "skipping tx ingress e2e");
+        return Ok(());
+    }
+    let harness = Harness::build(0xC1)?;
+    // A wtxid-relay connection keeps filler txid candidates delayed while
+    // the ready child's admission releases its request slot.
+    let _witness_peer = harness.connect_peer("witness-delay", true)?;
+    let parent = parent_txid(0xC2);
+    let child = spending_tx(parent, 40_000);
+    let child_txid = child.txid();
+    write_frame(&harness.source.dialer, harness.magic, &tx_inv(&child_txid))?;
+    wait_for_tx_getdata(
+        &harness.source.dialer,
+        harness.magic,
+        &child_txid,
+        OBSERVE_TIMEOUT,
+    )?;
+    let filler = (0u32..4_999)
+        .map(|index| {
+            let mut hash = [0xC3; 32];
+            hash[..4].copy_from_slice(&index.to_le_bytes());
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(hash))
+        })
+        .collect();
+    write_frame(&harness.source.dialer, harness.magic, &Message::Inv(filler))?;
+    write_frame(&harness.source.dialer, harness.magic, &Message::Ping(772))?;
+    let frames = collect_frames(
+        &harness.source.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
+    assert!(
+        frames.contains(&Message::Pong(772)),
+        "all 5,000 announcements were processed"
+    );
+    write_frame(&harness.source.dialer, harness.magic, &Message::Tx(child))?;
+    wait_for_tx_getdata(
+        &harness.source.dialer,
+        harness.magic,
+        &parent,
+        OBSERVE_TIMEOUT,
+    )?;
+    assert!(!harness.tx_in_mempool(&child_txid));
     Ok(())
 }

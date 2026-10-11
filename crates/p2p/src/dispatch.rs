@@ -205,6 +205,7 @@ pub fn dispatch_inbound<S>(
             Ok(())
         },
         &mut |_| {},
+        &mut |items| responses.borrow_mut().push(Message::GetData(items)),
     )?;
     Ok(responses.into_inner())
 }
@@ -227,12 +228,16 @@ pub fn dispatch_inbound<S>(
 /// the `inv` arm requests no transaction-typed vector and every other arm
 /// is unchanged. The gate is evaluated lazily per `inv` message.
 ///
+/// `announce_tx` receives missing transaction vectors for the shared request
+/// owner; dispatch never chooses a download source.
+///
 /// `announce_block` receives the hash of every `MSG_BLOCK` and
 /// `MSG_WITNESS_BLOCK` vector of an `inv`.
 /// PRE: `announce_block` belongs to the connection that `peer` wraps.
 /// POST: block inventory reaches `announce_block` and never a `getdata`.
 /// INVARIANT: block bodies are requested only by header sync and the
 /// download window (Core 31.1 `net_processing.cpp:4370-4410`).
+#[expect(clippy::too_many_arguments, reason = "independent protocol sinks")]
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -242,6 +247,7 @@ pub fn dispatch_inbound_full<S>(
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     announce_block: &mut dyn FnMut(Hash256),
+    announce_tx: &mut dyn FnMut(Vec<Inventory>),
 ) -> Result<(), PeerError> {
     match message {
         Message::Version(_) => {
@@ -284,7 +290,7 @@ pub fn dispatch_inbound_full<S>(
                     version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
                 });
                 request_witness(&mut requested, witness);
-                send(Message::GetData(requested))?;
+                announce_tx(requested);
             }
         }
         Message::GetHeaders(request) => {
@@ -691,6 +697,7 @@ mod tests {
                 Ok(())
             },
             &mut |_| {},
+            &mut |items| collected.borrow_mut().push(Message::GetData(items)),
         )?;
         Ok(collected.into_inner())
     }
@@ -987,6 +994,7 @@ mod tests {
                 Ok(())
             },
             &mut |_| {},
+            &mut |items| collected.borrow_mut().push(Message::GetData(items)),
         )?;
 
         assert_eq!(chain.observed.load(Ordering::Relaxed), 1);
@@ -1144,6 +1152,7 @@ mod tests {
                 Ok(())
             },
             &mut |_| {},
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1199,6 +1208,7 @@ mod tests {
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
             &mut |_| {},
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1246,6 +1256,7 @@ mod tests {
                     .send(message)
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
+            &mut |_| {},
             &mut |_| {},
         );
 
@@ -1858,6 +1869,7 @@ mod tests {
                 Ok(())
             },
             &mut |hash| announced.push(hash),
+            &mut |items| collected.borrow_mut().push(Message::GetData(items)),
         )
         .expect("dispatch must succeed");
         (collected.into_inner(), announced)
