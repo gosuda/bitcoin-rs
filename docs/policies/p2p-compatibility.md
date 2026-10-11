@@ -474,8 +474,14 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    leaves the total announcement count unchanged.
    These hard caps are resource-policy bounds, not measured throughput claims.
 16. **Inventory timing and bounds** (TXR-09): transaction identities are
-   queued under the same P2P owner as downloads. Independent exponential
-   deadlines use Core's 5-second inbound and 2-second outbound means, with an
+   queued under the same P2P owner as downloads. Inbound connections share an
+   exponential deadline by remote IP network class and actual local bind IP
+   and port, matching Core's key for supported IP transports; outbound
+   connections have independent deadlines. Remote addresses, source ports,
+   netgroups, and ASNs do not split a shared clock. The shared map lasts for
+   the policy owner's lifetime, keyed only by local endpoints and network
+   classes, so disconnecting and reconnecting cannot redraw a future deadline.
+   Deadlines use Core's 5-second inbound and 2-second outbound means, with an
    additional 30-second maximum delay. Each tick orders queued parents before
    children and prefers higher-fee eligible entries, then sends at most
    `min(1000, 70 + 5 * (pending / 1000))` inventory vectors, matching Core's

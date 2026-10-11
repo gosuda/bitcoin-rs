@@ -107,6 +107,10 @@ pub(crate) struct TxPolicy {
     /// Requests and candidate vectors remain the sole announcement authority.
     evictable: BTreeSet<EvictionKey>,
     relay: HashMap<PeerSource, relay::RelayPeer>,
+    /// Shared by remote network class and actual local bind endpoint, never
+    /// remote host or connection. Retained across disconnects for this owner's
+    /// lifetime so reconnecting cannot redraw an unexpired inbound clock.
+    inbound_inv: HashMap<relay::InboundClockKey, Instant>,
 }
 
 impl TxPolicy {

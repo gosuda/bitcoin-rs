@@ -1,6 +1,7 @@
 //! Fee-aware queued inventory, contained in the transaction policy owner.
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::Hash as _;
@@ -10,7 +11,8 @@ use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_primitives::{Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
-use super::Identity;
+use super::{Identity, TxPolicy};
+use crate::netgroup::{NetworkClass, canonical_ip, network_class};
 use crate::{Message, PeerSource, PeerTable, RelayOutcome, RelayRequest};
 
 const MAX_PENDING_PER_PEER: usize = 5_000;
@@ -19,6 +21,26 @@ const MAX_KNOWN: usize = 5_000;
 const MAX_BATCH: usize = 1_000;
 const INVENTORY_TARGET: usize = 70;
 const MAX_MONEY: u64 = 2_100_000_000_000_000;
+
+/// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus
+/// bound address bytes and port. Socket scope/flow and the remote address/port
+/// are not part of this identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct InboundClockKey {
+    network: NetworkClass,
+    bind_ip: IpAddr,
+    bind_port: u16,
+}
+
+impl InboundClockKey {
+    fn new(remote: IpAddr, bind: SocketAddr) -> Self {
+        Self {
+            network: network_class(remote),
+            bind_ip: canonical_ip(bind.ip()),
+            bind_port: bind.port(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct RelayPeer {
@@ -75,13 +97,26 @@ fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
 }
 
 impl RelayPeer {
-    fn new(now: Instant, inbound: bool, rng: &mut impl RngCore) -> Self {
+    fn new(
+        now: Instant,
+        inbound: Option<InboundClockKey>,
+        clocks: &mut HashMap<InboundClockKey, Instant>,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        // Joining an existing key adopts its clock, even if already due.
+        // Admission must not postpone a cycle that existing peers can send.
+        let next_inv = match inbound {
+            Some(key) => *clocks
+                .entry(key)
+                .or_insert_with(|| next_inv(now, true, rng)),
+            None => next_inv(now, false, rng),
+        };
         Self {
             pending: HashMap::new(),
             known: HashSet::new(),
             known_order: VecDeque::new(),
             fee_filter: 0,
-            next_inv: next_inv(now, inbound, rng),
+            next_inv,
             next_filter: now,
             last_filter: None,
             sent_ibd_filter: false,
@@ -164,10 +199,16 @@ impl PeerTable {
                 continue;
             }
             outcome.attempted += 1;
-            let peer = policy
-                .relay
+            let inbound = session
+                .lease
+                .is_inbound()
+                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+            let TxPolicy {
+                relay, inbound_inv, ..
+            } = &mut *policy;
+            let peer = relay
                 .entry(session.lease.source(session.addr))
-                .or_insert_with(|| RelayPeer::new(now, session.lease.is_inbound(), rng));
+                .or_insert_with(|| RelayPeer::new(now, inbound, inbound_inv, rng));
             if request.source == Some(session.lease.node_id()) {
                 peer.note_known(Identity::Txid(request.txid.0));
                 peer.note_known(Identity::Wtxid(request.wtxid.0));
@@ -207,11 +248,19 @@ impl PeerTable {
         if !session.lease.role().relays_transactions() {
             return;
         }
+        let Some(info) = &session.info else { return };
+        let inbound = session
+            .lease
+            .is_inbound()
+            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
         let mut policy = self.tx_policy.lock();
-        let peer = policy.relay.entry(source).or_insert_with(|| {
-            RelayPeer::new(Instant::now(), session.lease.is_inbound(), &mut rng)
-        });
+        let TxPolicy {
+            relay, inbound_inv, ..
+        } = &mut *policy;
+        let peer = relay
+            .entry(source)
+            .or_insert_with(|| RelayPeer::new(Instant::now(), inbound, inbound_inv, &mut rng));
         for item in items {
             if let Some(identity) = Identity::from_inventory(*item) {
                 peer.note_known(identity);
@@ -236,12 +285,19 @@ impl PeerTable {
         if !session.lease.role().relays_transactions() {
             return;
         }
+        let Some(info) = &session.info else { return };
+        let inbound = session
+            .lease
+            .is_inbound()
+            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
-        self.tx_policy
-            .lock()
-            .relay
+        let mut policy = self.tx_policy.lock();
+        let TxPolicy {
+            relay, inbound_inv, ..
+        } = &mut *policy;
+        relay
             .entry(source)
-            .or_insert_with(|| RelayPeer::new(Instant::now(), session.lease.is_inbound(), &mut rng))
+            .or_insert_with(|| RelayPeer::new(Instant::now(), inbound, inbound_inv, &mut rng))
             .fee_filter = rate;
     }
 
@@ -278,12 +334,18 @@ impl PeerTable {
                 continue;
             }
             let source = session.lease.source(session.addr);
+            let inbound = session
+                .lease
+                .is_inbound()
+                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
             let requests = {
                 let mut policy = self.tx_policy.lock();
-                let peer = policy
-                    .relay
+                let TxPolicy {
+                    relay, inbound_inv, ..
+                } = &mut *policy;
+                let peer = relay
                     .entry(source)
-                    .or_insert_with(|| RelayPeer::new(now, session.lease.is_inbound(), rng));
+                    .or_insert_with(|| RelayPeer::new(now, inbound, inbound_inv, rng));
                 if info.version >= 70_013 && minimum <= MAX_MONEY {
                     if let Some(rate) = peer.filter_due(now, floor, minimum, ibd, rng) {
                         let message = Message::FeeFilter(i64::try_from(rate).unwrap_or(i64::MAX));
@@ -295,7 +357,18 @@ impl PeerTable {
                 if now < peer.next_inv {
                     continue;
                 }
-                peer.next_inv = next_inv(now, session.lease.is_inbound(), rng);
+                peer.next_inv = match inbound {
+                    Some(key) => {
+                        let shared = inbound_inv.entry(key).or_insert(now);
+                        if *shared <= now {
+                            *shared = next_inv(now, true, rng);
+                        }
+                        // Each due peer remains eligible this cycle, even if
+                        // an earlier sibling already advanced the shared clock.
+                        *shared
+                    }
+                    None => next_inv(now, false, rng),
+                };
                 if !info.relay_transactions {
                     peer.pending.clear();
                     continue;
@@ -511,6 +584,19 @@ mod tests {
         role: crate::PeerRole,
         ready: bool,
     ) -> (PeerSource, Receiver<Message>) {
+        let addr = ([127, 0, 0, 1], port).into();
+        connect_at(table, addr, addr, inbound, wtxid, role, ready)
+    }
+
+    fn connect_at(
+        table: &PeerTable,
+        addr: SocketAddr,
+        bind: SocketAddr,
+        inbound: bool,
+        wtxid: bool,
+        role: crate::PeerRole,
+        ready: bool,
+    ) -> (PeerSource, Receiver<Message>) {
         let (sender, receiver) = bounded(1024);
         let lease = if role == crate::PeerRole::BlockRelayOnly {
             crate::PeerLease::new_block_relay(sender)
@@ -519,7 +605,6 @@ mod tests {
         } else {
             crate::PeerLease::new(sender)
         };
-        let addr = ([127, 0, 0, 1], port).into();
         let source = lease.source(addr);
         table.register(addr, lease.clone());
         if ready {
@@ -531,7 +616,7 @@ mod tests {
             );
             let mut info = crate::PeerInfo::outbound_from_version(
                 addr,
-                addr,
+                bind,
                 &version,
                 0,
                 0,
@@ -552,6 +637,264 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    struct CountingRng {
+        inner: bitcoin::secp256k1::rand::rngs::mock::StepRng,
+        draws: usize,
+    }
+
+    impl CountingRng {
+        fn new() -> Self {
+            Self {
+                inner: bitcoin::secp256k1::rand::rngs::mock::StepRng::new(1 << 31, 1 << 24),
+                draws: 0,
+            }
+        }
+    }
+
+    impl RngCore for CountingRng {
+        fn next_u32(&mut self) -> u32 {
+            self.draws += 1;
+            self.inner.next_u32()
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.draws += 1;
+            self.inner.next_u64()
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.draws += 1;
+            self.inner.fill_bytes(dest);
+        }
+
+        fn try_fill_bytes(
+            &mut self,
+            dest: &mut [u8],
+        ) -> Result<(), bitcoin::secp256k1::rand::Error> {
+            self.draws += 1;
+            self.inner.try_fill_bytes(dest)
+        }
+    }
+
+    fn clock_peer(
+        table: &PeerTable,
+        remote: &str,
+        bind: &str,
+        inbound: bool,
+    ) -> (PeerSource, Receiver<Message>) {
+        let connected = connect_at(
+            table,
+            remote
+                .parse()
+                .unwrap_or_else(|error| panic!("remote fixture: {error}")),
+            bind.parse()
+                .unwrap_or_else(|error| panic!("bind fixture: {error}")),
+            inbound,
+            false,
+            crate::PeerRole::FullRelay,
+            true,
+        );
+        let source = connected.0;
+        let lease = table
+            .lease(source.addr)
+            .unwrap_or_else(|| panic!("clock fixture lease"));
+        let mut info = table
+            .info_of(source.addr)
+            .unwrap_or_else(|| panic!("clock fixture info"));
+        // A pre-BIP133 peer isolates inventory clock draws from fee-filter
+        // refreshes without substituting the scheduler under test.
+        info.version = 70_012;
+        table.publish_info(source.addr, &lease, info);
+        connected
+    }
+
+    fn clock(table: &PeerTable, source: PeerSource) -> Instant {
+        table.tx_policy.lock().relay[&source].next_inv
+    }
+
+    #[test]
+    fn inbound_clock_key_uses_network_class_and_canonical_bind_endpoint() {
+        // Core v31.1 net.cpp's inbound key uses GetNetClass, GetAddrBytes and
+        // GetPort. IPv4 mapped bind bytes are identical; scope/flow are absent.
+        let key = |remote: &str, bind: &str| {
+            InboundClockKey::new(
+                remote
+                    .parse()
+                    .unwrap_or_else(|error| panic!("remote: {error}")),
+                bind.parse().unwrap_or_else(|error| panic!("bind: {error}")),
+            )
+        };
+        let ipv4 = key("8.8.8.8", "10.0.0.1:8333");
+        for remote in ["9.9.9.9", "::ffff:8.8.8.8", "64:ff9b::808:808"] {
+            assert_eq!(ipv4, key(remote, "[::ffff:10.0.0.1]:8333"));
+        }
+        assert_ne!(ipv4, key("2001:4860:4860::8888", "10.0.0.1:8333"));
+        assert_ne!(ipv4, key("127.0.0.1", "10.0.0.1:8333"));
+        assert_ne!(ipv4, key("8.8.8.8", "10.0.0.2:8333"));
+        assert_ne!(ipv4, key("8.8.8.8", "10.0.0.1:18333"));
+        let plain: std::net::Ipv6Addr = "fe80::1"
+            .parse()
+            .unwrap_or_else(|error| panic!("IPv6: {error}"));
+        let bind = SocketAddr::V6(std::net::SocketAddrV6::new(plain, 8333, 123, 456));
+        assert_eq!(
+            key("8.8.8.8", "[fe80::1]:8333"),
+            InboundClockKey::new(([8, 8, 8, 8]).into(), bind),
+        );
+    }
+
+    #[test]
+    fn inbound_peers_share_cycles_without_suppressing_due_siblings() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = CountingRng::new();
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        let request = insert(&gateway, &transaction(1, None), 1_000);
+        table.queue_transaction_relay(request, now, &mut rng);
+        assert_eq!(rng.draws, 1, "one initial draw for the shared key");
+        let due = clock(&table, a);
+        assert_eq!(due, clock(&table, b));
+        table.poll_transaction_relay(&gateway, now, false, &mut rng);
+        assert!(inventory(&a_rx).is_empty() && inventory(&b_rx).is_empty());
+        // Joining an already-due key must not postpone existing siblings.
+        let (c, c_rx) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true);
+        let draws = rng.draws;
+        table.queue_transaction_relay(request, due, &mut rng);
+        assert_eq!(rng.draws, draws);
+        assert_eq!(clock(&table, c), due);
+        table.poll_transaction_relay(&gateway, due, false, &mut rng);
+        assert_eq!(
+            rng.draws,
+            draws + 1,
+            "one next-cycle draw, not one per peer"
+        );
+        for receiver in [&a_rx, &b_rx, &c_rx] {
+            assert_eq!(inventory(receiver).len(), 1);
+        }
+        let next = clock(&table, a);
+        assert!(next > due);
+        assert_eq!(next, clock(&table, b));
+        assert_eq!(next, clock(&table, c));
+        table.poll_transaction_relay(&gateway, due, false, &mut rng);
+        assert_eq!(rng.draws, draws + 1);
+        for receiver in [&a_rx, &b_rx, &c_rx] {
+            assert_eq!(inventory(receiver), Vec::<Inventory>::new());
+        }
+    }
+
+    #[test]
+    fn inbound_future_clock_survives_all_creation_paths_and_reconnects() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = CountingRng::new();
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let request = insert(&gateway, &transaction(1, None), 1_000);
+        table.queue_transaction_relay(request, now, &mut rng);
+        let due = clock(&table, a);
+        let (b, _) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        table.receive_fee_filter(b, 1_000);
+        let (c, _) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true);
+        table.note_transaction_inventory(c, &[]);
+        let (d, _) = clock_peer(&table, "8.8.4.4:4000", "10.0.0.1:8333", true);
+        table.poll_transaction_relay(&gateway, now, false, &mut rng);
+        for source in [a, b, c, d] {
+            assert_eq!(clock(&table, source), due);
+        }
+        let draws = rng.draws;
+        table.queue_transaction_relay(request, now, &mut rng);
+        assert_eq!(rng.draws, draws, "admission leaves the shared clock alone");
+        assert!(table.disconnect_source(a));
+        table.poll_transaction_relay(&gateway, now, false, &mut rng);
+        assert_eq!(
+            clock(&table, b),
+            due,
+            "disconnecting a sibling preserves the clock"
+        );
+        for source in [b, c, d] {
+            assert!(table.disconnect_source(source));
+        }
+        table.poll_transaction_relay(&gateway, now, false, &mut rng);
+        assert!(table.tx_policy.lock().relay.is_empty());
+        let (replacement, rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        table.queue_transaction_relay(request, now, &mut rng);
+        assert_ne!(a, replacement);
+        assert_eq!(clock(&table, replacement), due);
+        assert_eq!(
+            rng.draws, draws,
+            "reconnecting does not redraw a live clock"
+        );
+        assert_eq!(table.tx_policy.lock().inbound_inv.len(), 1);
+        table.poll_transaction_relay(&gateway, due, false, &mut rng);
+        assert_eq!(inventory(&rx).len(), 1);
+        assert!(
+            inventory(&a_rx).is_empty(),
+            "old lease never receives inventory"
+        );
+    }
+
+    #[test]
+    fn empty_inbound_ticks_advance_the_shared_clock_without_admissions() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = CountingRng::new();
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        table.poll_transaction_relay(&gateway, now, false, &mut rng);
+        let due = clock(&table, a);
+        let draws = rng.draws;
+        table.poll_transaction_relay(&gateway, due, false, &mut rng);
+        assert_eq!(rng.draws, draws + 1);
+        let next = clock(&table, a);
+        assert!(next > due);
+        assert_eq!(next, clock(&table, b));
+        let request = insert(&gateway, &transaction(1, None), 1_000);
+        table.queue_transaction_relay(request, due, &mut rng);
+        table.poll_transaction_relay(&gateway, due, false, &mut rng);
+        assert_eq!(rng.draws, draws + 1);
+        assert!(inventory(&a_rx).is_empty() && inventory(&b_rx).is_empty());
+        table.poll_transaction_relay(&gateway, next, false, &mut rng);
+        assert_eq!(inventory(&a_rx).len(), 1);
+        assert_eq!(inventory(&b_rx).len(), 1);
+    }
+
+    #[test]
+    fn different_inbound_keys_and_outbound_peers_sample_independently() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = CountingRng::new();
+        let mut sources = Vec::new();
+        for (remote, bind, inbound) in [
+            ("8.8.8.8:1000", "10.0.0.1:8333", true),
+            ("9.9.9.9:2000", "10.0.0.1:8333", true),
+            ("[2001:4860:4860::8888]:3000", "10.0.0.1:8333", true),
+            ("127.0.0.1:4000", "10.0.0.1:8333", true),
+            ("8.8.4.4:5000", "10.0.0.2:8333", true),
+            ("1.1.1.1:6000", "10.0.0.1:18333", true),
+            ("8.8.8.8:7000", "10.0.0.1:8333", false),
+            ("8.8.8.8:8000", "10.0.0.1:8333", false),
+        ] {
+            sources.push(clock_peer(&table, remote, bind, inbound).0);
+        }
+        let request = insert(&gateway, &transaction(1, None), 1_000);
+        table.queue_transaction_relay(request, now, &mut rng);
+        assert_eq!(table.tx_policy.lock().inbound_inv.len(), 5);
+        assert_eq!(rng.draws, 7, "five inbound keys plus two outbound clocks");
+        assert_eq!(clock(&table, sources[0]), clock(&table, sources[1]));
+        let deadlines = sources
+            .iter()
+            .map(|source| clock(&table, *source))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            deadlines.len(),
+            7,
+            "distinct controlled draws remain independent"
+        );
     }
 
     #[test]
@@ -713,7 +1056,7 @@ mod tests {
         );
         assert!(dropped > 0);
         drop(policy);
-        let mut peer = RelayPeer::new(now, false, &mut rng);
+        let mut peer = RelayPeer::new(now, None, &mut HashMap::new(), &mut rng);
         for marker in 0u32..5_001 {
             let mut bytes = [0; 32];
             bytes[..4].copy_from_slice(&marker.to_le_bytes());
@@ -769,7 +1112,7 @@ mod tests {
             "Core 1.1-spaced bucket boundaries"
         );
         assert!((0..100).all(|_| rounded_filter(500, 1000, &mut rng) >= 1000));
-        let mut peer = RelayPeer::new(now, true, &mut rng);
+        let mut peer = RelayPeer::new(now, None, &mut HashMap::new(), &mut rng);
         assert!(peer.filter_due(now, 1500, 1000, false, &mut rng).is_some());
         let scheduled = peer.next_filter;
         assert!(peer.filter_due(now, 1501, 1000, false, &mut rng).is_none());

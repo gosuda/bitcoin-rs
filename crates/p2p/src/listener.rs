@@ -3331,6 +3331,7 @@ mod writer_shutdown_tests {
                 addr: peer_addr,
                 version: 70_016,
                 wtxid_relay: false,
+                relay_transactions: true,
                 compact_block_relay: false,
                 send_headers: false,
                 services: 9,
