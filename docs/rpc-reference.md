@@ -41,7 +41,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/minimum_fee_filter/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
+| `getchainstates` | 0.12.0 | Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. |
 | `getdeploymentinfo` | 0.12.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
+| `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Malformed input returns -22. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. dumptxoutset export remains unimplemented. |
 
 ### Implemented (unverified)
 
@@ -107,11 +109,9 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
 | `getblockfilter` | n/a | BIP157/158 compact block filters and the filter index are not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
-| `getchainstates` | n/a | Not implemented. |
 | `getdescriptoractivity` | n/a | No wallet/scan index to serve it. |
 | `getmempoolcluster` | n/a | Cluster mempool tracking not implemented. |
 | `importmempool` | n/a | Mempool import not implemented. |
-| `loadtxoutset` | n/a | UTXO snapshot load (assumeutxo) not implemented. |
 | `preciousblock` | n/a | No manual block-preference surface. |
 | `reconsiderblock` | n/a | No manual reorg-control surface. |
 | `savemempool` | n/a | Mempool dump/reload persistence not implemented. |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 23, Implemented (unverified) 58, Extension 2, Disabled 0, Unimplemented 92 - total 175.
+Row counts: Supported 0, Deviation 25, Implemented (unverified) 58, Extension 2, Disabled 0, Unimplemented 90 - total 175.

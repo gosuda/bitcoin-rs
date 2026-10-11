@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-33` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior;
 [Proven by](#proven-by) separates existing tests from planned comparisons.
 
@@ -606,12 +606,89 @@ owned by [wallet-facing.md](wallet-facing.md).
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.
 
+### `API-33`: Core snapshot import and lifecycle reporting
+
+`loadtxoutset(path)` synchronously reads an unmodified Bitcoin Core v2
+`dumptxoutset` file. Positional `[path]` and named `{ "path": path }` parameters
+are accepted. Relative paths resolve below the configured node datadir.
+The input must be a regular file outside the node's `assumeutxo` recovery
+namespace. The shared UTXO codec applies its finite resource limits and resolves
+height, commitment, and cumulative transaction count only from the compiled
+network anchor matching the header's base block hash. The complete decoded
+state must reproduce `hash_serialized_3`; a parsed header is not authentication.
+Only one file import per node may materialize a UTXO set at a time. Both the
+portable RPC and native-v4 embedding entry claim that same permit and reject
+an existing activation before opening or decoding input. The manager retains
+its lifecycle-protected admission recheck before activation.
+Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
+cleanup does not reset the accepted head or modify source artifact contents.
+
+The node enters the existing mempool generation fence and refuses activation
+while transactions remain in the mempool. Refusal settles the fence and preserves
+those transactions, fee deltas, and chainstate. With an empty pool, it activates
+through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
+consumers. Successful return certifies the durable snapshot anchor and consumer
+settlement. Settlement failure closes admission for recovery and is an error,
+even if the anchor committed. Headers through the base must already be known.
+The installation boundary, under chain-transition exclusion, rejects an invalid
+base or a base outside the current best-work header ancestry before publishing
+the lifecycle record. Repeated activation, missing headers, an existing
+full-revalidation requirement, and a base without strictly greater cumulative
+work than the settled active tip are also rejected. Height alone does not rank
+competing branches. Equal work is refused; the native header tree does not
+model Core's block-availability sequence/pointer tie-breaker, so this condition
+is not full Core comparator parity. Existing native v4 checkpoints
+remain internal recovery artifacts and are not accepted by this RPC.
+
+The result contains `coins_loaded` (unspent **outputs**, not txid records),
+`tip_hash`, `base_height`, and a UTF-8 display of the absolute input `path`.
+The path is rendered before activation; non-UTF-8 filesystem bytes are replaced
+only in this JSON display. Path/open failures return -8, malformed codec/trust
+failures -22, and underlying read-I/O, lifecycle, storage or settlement failures
+-32603. These explicit error-code deviations are not a full Core RPC parity
+claim. Historical validation continues through the existing P2P scheduler.
+
+`getchainstates()` attempts lifecycle exclusion before capturing both roles.
+If activation or historical lifecycle work owns it, the query reports typed
+unavailability (`-32603`) instead of waiting or inventing a partial role set.
+This is an availability deviation: Core can report its prior committed roles
+while staging a snapshot. Ordinary active-chain transition exclusion can still
+wait; this is not a claim that every query is nonblocking. The established
+embedding summary retains its blocking contract. Successful reports share one
+capture owner under lifecycle and active transition exclusion.
+`headers` is the best admitted header height; the
+historical role, when present, is first and the active role last. Each reports
+`blocks`, `bestblockhash`, `validated`, and `verificationprogress` when a known
+cumulative transaction count permits the existing transaction-based estimate.
+Unknown progress, including a missing applied tip, is omitted rather than
+replaced with a height fraction.
+The historical role contains coins validated from genesis and reports
+`validated: true`; the assumed active role reports false until finalization.
+`snapshot_blockhash` identifies the compiled base for a snapshot-derived active
+role, including after finalization or while a failed assumed role is still
+observable before shutdown. Core's difficulty and cache-allocation
+fields are omitted because this projection does not expose corresponding
+owner facts. Role state and progress survive restart through the durable head
+and the existing checkpoint/replay contract.
+
+`dumptxoutset` export remains unimplemented and is a separate producer feature.
+The process contract is exercised by `e2e/tests/assumeutxo.rs`, using an actual
+Core 31.1 dump of the deterministic, compiled regtest 200-height pin. Regtest
+evidence does not establish mainnet memory or throughput qualifications.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
 - **Typed embedding surface**: Direct in-process application API as an alternative to localhost JSON-RPC daemon boundary is tracked under #145 (open).
 
 ## Proven by
+
+- `API-33`: `e2e/tests/assumeutxo.rs` covers a freshly Core-produced portable
+  snapshot, both chainstate roles, restart/finalization, non-UTF-8 symlink
+  targets, corrupt recovery, and orphan cleanup while preserving source hard
+  links. Node snapshot tests cover lifecycle provenance and bounded FIFO
+  rejection; chainstate snapshot tests cover unknown progress and live-writer
+  exclusion during cleanup.
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
   `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:
