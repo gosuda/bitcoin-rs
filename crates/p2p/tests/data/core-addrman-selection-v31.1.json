@@ -1,0 +1,652 @@
+{
+  "reference": "Bitcoin Core31.1 source9be056a8a72b624dae9623b2f7bded92c2a21c91",
+  "scope": "Independent source/formula oracle; no candidate execution and no Core process claim",
+  "health": [
+    {
+      "name": "baseline",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 0
+      },
+      "terrible": false
+    },
+    {
+      "name": "future600",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000600,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 0
+      },
+      "terrible": false
+    },
+    {
+      "name": "future601",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000601,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 0
+      },
+      "terrible": true
+    },
+    {
+      "name": "age30d",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1697408000,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 0
+      },
+      "terrible": false
+    },
+    {
+      "name": "age30dplus1",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1697407999,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 0
+      },
+      "terrible": true
+    },
+    {
+      "name": "never_success2",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 2
+      },
+      "terrible": false
+    },
+    {
+      "name": "never_success3",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 0,
+        "attempts": 3
+      },
+      "terrible": true
+    },
+    {
+      "name": "recent60protectsall",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000601,
+        "last_try": 1699999940,
+        "last_success": 0,
+        "attempts": 255
+      },
+      "terrible": false
+    },
+    {
+      "name": "recent61doesnotprotect",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000601,
+        "last_try": 1699999939,
+        "last_success": 0,
+        "attempts": 255
+      },
+      "terrible": true
+    },
+    {
+      "name": "futuretryprotects",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1697407999,
+        "last_try": 1700010000,
+        "last_success": 0,
+        "attempts": 255
+      },
+      "terrible": false
+    },
+    {
+      "name": "success7d10",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 1699395200,
+        "attempts": 10
+      },
+      "terrible": false
+    },
+    {
+      "name": "success7dplus1_9",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 1699395199,
+        "attempts": 9
+      },
+      "terrible": false
+    },
+    {
+      "name": "success7dplus1_10",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 1699395199,
+        "attempts": 10
+      },
+      "terrible": true
+    },
+    {
+      "name": "recent_success_stale_seen",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1697407999,
+        "last_try": 1699999399,
+        "last_success": 1699999939,
+        "attempts": 0
+      },
+      "terrible": true
+    },
+    {
+      "name": "future_success_no_age_failure",
+      "fields": {
+        "now": 1700000000,
+        "seen": 1700000000,
+        "last_try": 1699999399,
+        "last_success": 1700010000,
+        "attempts": 10
+      },
+      "terrible": false
+    }
+  ],
+  "weights": [
+    {
+      "age_since_try": 59,
+      "attempts": 0,
+      "chance": 0.01,
+      "exact": "1/100"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 1,
+      "chance": 0.0066,
+      "exact": "33/5000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 2,
+      "chance": 0.004356,
+      "exact": "1089/250000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 3,
+      "chance": 0.00287496,
+      "exact": "35937/12500000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 7,
+      "chance": 0.0005455160701056,
+      "exact": "42618442977/78125000000000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 8,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 9,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 59,
+      "attempts": 255,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 0,
+      "chance": 0.01,
+      "exact": "1/100"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 1,
+      "chance": 0.0066,
+      "exact": "33/5000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 2,
+      "chance": 0.004356,
+      "exact": "1089/250000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 3,
+      "chance": 0.00287496,
+      "exact": "35937/12500000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 7,
+      "chance": 0.0005455160701056,
+      "exact": "42618442977/78125000000000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 8,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 9,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 60,
+      "attempts": 255,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 0,
+      "chance": 0.01,
+      "exact": "1/100"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 1,
+      "chance": 0.0066,
+      "exact": "33/5000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 2,
+      "chance": 0.004356,
+      "exact": "1089/250000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 3,
+      "chance": 0.00287496,
+      "exact": "35937/12500000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 7,
+      "chance": 0.0005455160701056,
+      "exact": "42618442977/78125000000000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 8,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 9,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 61,
+      "attempts": 255,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 0,
+      "chance": 0.01,
+      "exact": "1/100"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 1,
+      "chance": 0.0066,
+      "exact": "33/5000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 2,
+      "chance": 0.004356,
+      "exact": "1089/250000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 3,
+      "chance": 0.00287496,
+      "exact": "35937/12500000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 7,
+      "chance": 0.0005455160701056,
+      "exact": "42618442977/78125000000000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 8,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 9,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 599,
+      "attempts": 255,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 0,
+      "chance": 1.0,
+      "exact": "1"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 1,
+      "chance": 0.66,
+      "exact": "33/50"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 2,
+      "chance": 0.4356,
+      "exact": "1089/2500"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 3,
+      "chance": 0.287496,
+      "exact": "35937/125000"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 7,
+      "chance": 0.05455160701056,
+      "exact": "42618442977/781250000000"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 8,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 9,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": 600,
+      "attempts": 255,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 0,
+      "chance": 1.0,
+      "exact": "1"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 1,
+      "chance": 0.66,
+      "exact": "33/50"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 2,
+      "chance": 0.4356,
+      "exact": "1089/2500"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 3,
+      "chance": 0.287496,
+      "exact": "35937/125000"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 7,
+      "chance": 0.05455160701056,
+      "exact": "42618442977/781250000000"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 8,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 9,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": 601,
+      "attempts": 255,
+      "chance": 0.0360040606269696,
+      "exact": "1406408618241/39062500000000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 0,
+      "chance": 0.01,
+      "exact": "1/100"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 1,
+      "chance": 0.0066,
+      "exact": "33/5000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 2,
+      "chance": 0.004356,
+      "exact": "1089/250000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 3,
+      "chance": 0.00287496,
+      "exact": "35937/12500000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 7,
+      "chance": 0.0005455160701056,
+      "exact": "42618442977/78125000000000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 8,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 9,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    },
+    {
+      "age_since_try": -10000,
+      "attempts": 255,
+      "chance": 0.000360040606269696,
+      "exact": "1406408618241/3906250000000000"
+    }
+  ],
+  "mixtures": [
+    {
+      "name": "one_failure",
+      "expected_fraction": 0.40594076805906026,
+      "saturation_proposal": 4,
+      "static_normalized_fraction_wrong": 0.39759036144578314,
+      "samples": [
+        {
+          "seed": 5238,
+          "bad": 53237,
+          "total": 131072,
+          "fraction": 0.40616607666015625,
+          "max_proposals": 4
+        },
+        {
+          "seed": 12545,
+          "bad": 53346,
+          "total": 131072,
+          "fraction": 0.4069976806640625,
+          "max_proposals": 4
+        },
+        {
+          "seed": 24301,
+          "bad": 53142,
+          "total": 131072,
+          "fraction": 0.4054412841796875,
+          "max_proposals": 4
+        }
+      ]
+    },
+    {
+      "name": "eight_failures",
+      "expected_fraction": 0.041976231546868116,
+      "saturation_proposal": 20,
+      "static_normalized_fraction_wrong": 0.03475281805862869,
+      "samples": [
+        {
+          "seed": 5238,
+          "bad": 5538,
+          "total": 131072,
+          "fraction": 0.0422515869140625,
+          "max_proposals": 14
+        },
+        {
+          "seed": 12545,
+          "bad": 5456,
+          "total": 131072,
+          "fraction": 0.0416259765625,
+          "max_proposals": 14
+        },
+        {
+          "seed": 24301,
+          "bad": 5519,
+          "total": 131072,
+          "fraction": 0.04210662841796875,
+          "max_proposals": 15
+        }
+      ]
+    },
+    {
+      "name": "recent_only",
+      "expected_fraction": 0.012243934076447947,
+      "saturation_proposal": 27,
+      "static_normalized_fraction_wrong": 0.009900990099009901,
+      "samples": [
+        {
+          "seed": 5238,
+          "bad": 1640,
+          "total": 131072,
+          "fraction": 0.01251220703125,
+          "max_proposals": 15
+        },
+        {
+          "seed": 12545,
+          "bad": 1574,
+          "total": 131072,
+          "fraction": 0.0120086669921875,
+          "max_proposals": 14
+        },
+        {
+          "seed": 24301,
+          "bad": 1614,
+          "total": 131072,
+          "fraction": 0.0123138427734375,
+          "max_proposals": 15
+        }
+      ]
+    },
+    {
+      "name": "recent_eight",
+      "expected_fraction": 0.0004497045042604613,
+      "saturation_proposal": 45,
+      "static_normalized_fraction_wrong": 0.0003599110236865248,
+      "samples": [
+        {
+          "seed": 5238,
+          "bad": 63,
+          "total": 131072,
+          "fraction": 0.00048065185546875,
+          "max_proposals": 18
+        },
+        {
+          "seed": 12545,
+          "bad": 53,
+          "total": 131072,
+          "fraction": 0.00040435791015625,
+          "max_proposals": 16
+        },
+        {
+          "seed": 24301,
+          "bad": 58,
+          "total": 131072,
+          "fraction": 0.0004425048828125,
+          "max_proposals": 16
+        }
+      ]
+    }
+  ],
+  "spatial": [
+    {
+      "name": "adjacent",
+      "slot_counts": {
+        "0": 63,
+        "1": 1
+      },
+      "total_starts": 64
+    },
+    {
+      "name": "opposite",
+      "slot_counts": {
+        "0": 32,
+        "32": 32
+      },
+      "total_starts": 64
+    },
+    {
+      "name": "one",
+      "slot_counts": {
+        "17": 64
+      },
+      "total_starts": 64
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-33` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior;
 [Proven by](#proven-by) separates existing tests from planned comparisons.
 
@@ -47,11 +47,21 @@
   (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
   (not connected), `-10` (initial download), `-22` (deserialization),
   and `-25` plus `-26` (submission).
+- `createrawtransaction` currently consumes only `inputs`, `outputs`,
+  `locktime` and `replaceable`: transaction version stays 2 and replaceable
+  defaults to false. A named `version` is unknown (`-8`); a supplied fifth
+  positional or `args`-prefix entry, including null, is refused (`-32602`).
+  Duplicate, collision and unknown-name validation precedes this method-owned
+  arity check. The registry declares this transaction-creation deviation.
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision. Shared transaction JSON
   interprets raw version bits as Core's unsigned 32-bit value and raw output
-  amounts as signed 64-bit values; native transaction representations and
-  consensus checks are unchanged.
+  amounts as signed 64-bit values. `decoderawtransaction`, verbose
+  `getrawtransaction` and verbose block transaction entries reuse that owner;
+  block `coinbase_tx.version` uses the same unsigned conversion, while block
+  header versions keep their signed interpretation. Raw transaction chain
+  times appear only for positive confirmations. Native transaction
+  representations, consensus checks and undo availability are unchanged.
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
@@ -93,6 +103,11 @@
   output maps are omitted on encoding. An encoding copy preserves parsed/caller
   metadata for decode, analyze and join. Already
   decoded CompactSize types/subtypes and BIP373 fields receive Core checks.
+  Global XPUB uniqueness uses Core public-key/chain-code identity. MuSig2
+  absent/all-zero leaf aliases retain the first wire value after validation
+  of every original entry, and encode without a zero-leaf suffix. Encoding
+  programmatic maps uses their library serialization order and preserves the
+  caller's metadata.
 - PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
   maps to 10,000, and retained map entries to 100,000. Creators can check
   counts before map allocation. Serialized bytes are checked before library
@@ -147,6 +162,33 @@
   transaction IDs, output positions and paired entry order. Metadata and
   scalar fields remain compared; repeated calls exercise independent shuffles.
 
+#### Native deployment reporting
+
+- `getdeploymentinfo` and `/rest/deploymentinfo` share one typed projection
+  of `chain::deployment_statuses` and consensus `verify_flags`. The default
+  hash is captured from one applied publication; explicit hashes select any
+  known header ancestry, including a side branch or header without a body.
+- `active` describes enforcement for the next block. BIP9 `status`, `since`,
+  and signalling describe the queried block; `status_next` describes its
+  successor. Script flags describe the queried block itself. Unavailable
+  optional fields are omitted, never rendered as null.
+- Header-chain lookups reuse the existing height index. An off-header-chain
+  BIP9 query captures at most 2,000,000 ancestor IDs once (at most 8 MB), then
+  uses direct height lookup with the existing BIP9 state machine/cache.
+  Larger side histories return RPC -1 / REST 503 instead of unbounded
+  repeated parent walks. This is a work bound, not a performance claim.
+- This is a declared Core deviation, not a consensus change: native CSV and
+  Segwit use historical BIP9 on mainnet/testnet3; native Taproot uses a fixed
+  height; testdummy is not configured. Fixed activation heights on regtest
+  and Segwit on testnet4/signet differ from Core 31.1. Historical script flags
+  report the native validation flags, including its BIP16 exceptions, rather
+  than Core 31.1's retroactive WITNESS/TAPROOT flags. No RPC-local activation
+  table substitutes for those owners. Full deployment parity remains open.
+- Unknown RPC hashes return -5; malformed hashes return -8. REST keeps its
+  JSON-only format and 400 malformed/unknown-hash responses. Excess argument
+  counts retain the local JSON-RPC parameter-shape error instead of Core's
+  method-help message.
+
 ### `API-03`: REST dialect
 
 
@@ -158,6 +200,26 @@
   path return 404. Malformed parameters return 400. A well-formed but
   unknown block hash returns an empty 200, matching the pinned Core
   behavior.
+
+- `/rest/getutxos` GET URI input and POST binary/hex input share one
+  authoritative UTXO/mempool lookup. POST reads a bool and canonical
+  CompactSize outpoint vector directly, limited to 15 outpoints and a
+  2048-byte wire body before allocation. JSON bodies, mixed input sources,
+  malformed/trailing data and oversized requests fail with HTTP 400.
+  Empty serialized vectors are valid; URI requests still require outpoints.
+- Plain coin reads capture tip and coins under the existing stable chain
+  read role. Mixed reads retain one pool view and reject a changed/odd
+  chain generation. Rendering happens after guards are dropped. Pool-created
+  outputs use Core REST's `MEMPOOL_HEIGHT` value, 2147483647.
+- The canonical POST decoder intentionally corrects Core 31.1's incoming
+  string-length-prefix bug; the registry retains `Deviation`. Independent
+  wire fixtures and same-tip Core GET establish intended response bytes;
+  Core POST's measured different answer is an explicit known gap.
+- Evidence: `rest::tests::getutxos_post_canonical_wire_and_input_boundaries`,
+  `getutxos_post_uses_the_existing_applied_view_and_generation_fence`,
+  `getutxos_plain_read_waits_for_the_chain_transition`,
+  `server::tests::getutxos_post_preserves_http_security_and_limits`, and
+  `bin/bitcoin-rs/tests/rest_getutxos_process.rs`.
 
 ### `API-04`: ZMQ notification contract
 
@@ -293,6 +355,16 @@
   internal or is a documented extension. Lag, reorg, or a disabled
   capability returns the declared unavailable response, never an empty
   successful history.
+- `/txs/chain[/<last_seen_txid>]` reads are bounded to the requested page
+  (up to 25 items): confirmation status, block metadata, and transaction
+  projections are hydrated only for the selected page slice, never for the entire
+  confirmed history. Unselected older blocks being pruned or absent does not fail
+  earlier pages.
+- `/txs/chain` queries decouple from unspent queries: they do not enumerate
+  `ScriptLive` UTXOs or query mempool state.
+- Sentinel `last == Some("")` (`/txs/mempool`) queries resolve mempool activity
+  directly from mempool locators without scanning confirmed history or taking
+  block metadata snapshot locks.
 
 ### `API-10`: Broadcast and preview through the admission gateway
 
@@ -631,12 +703,88 @@ owned by [wallet-facing.md](wallet-facing.md).
   `-1` unavailable-txospenderindex error. An inconsistent spending index
   becomes an internal error, never an unspent result.
 - Empty output lists, strict object keys, txid syntax, and signed 32-bit
-  nonnegative vout validation follow the pinned reference. Missing or extra
-  argument counts retain local JSON-RPC `-32602` shape errors instead of
-  Core's `-1` help text; the registry declares this deviation.
+  nonnegative vout validation follow the pinned reference. After successful
+  named-argument binding, missing outputs and excess positional arguments
+  retain local JSON-RPC `-32602` shape errors. Core returns `-1` help for no
+  arguments or excess arity, but returns a `-3` null type error when named
+  options create an omitted outputs hole. Native keeps its missing-outputs
+  error for that hole; explicitly supplied null matches Core's `-3` type error.
+  Duplicate/unknown names, option conflicts and positional/named collisions
+  retain Core's earlier `-8` errors, including an overlong `args` prefix. The
+  registry declares these method-validation deviations.
 - The HTTP request-body limit bounds externally supplied queries; this
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.
+
+### `API-33`: Core snapshot import and lifecycle reporting
+
+`loadtxoutset(path)` synchronously reads an unmodified Bitcoin Core v2
+`dumptxoutset` file. Positional `[path]` and named `{ "path": path }` parameters
+are accepted. Relative paths resolve below the configured node datadir.
+The input must be a regular file outside the node's `assumeutxo` recovery
+namespace. The shared UTXO codec applies its finite resource limits and resolves
+height, commitment, and cumulative transaction count only from the compiled
+network anchor matching the header's base block hash. The complete decoded
+state must reproduce `hash_serialized_3`; a parsed header is not authentication.
+Only one file import per node may materialize a UTXO set at a time. Both the
+portable RPC and native-v4 embedding entry claim that same permit and reject
+an existing activation before opening or decoding input. The manager retains
+its lifecycle-protected admission recheck before activation.
+Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
+cleanup does not reset the accepted head or modify source artifact contents.
+
+The node enters the existing mempool generation fence and refuses activation
+while transactions remain in the mempool. Refusal settles the fence and preserves
+those transactions, fee deltas, and chainstate. With an empty pool, it activates
+through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
+consumers. Successful return certifies the durable snapshot anchor and consumer
+settlement. Settlement failure closes admission for recovery and is an error,
+even if the anchor committed. Headers through the base must already be known.
+The installation boundary, under chain-transition exclusion, rejects an invalid
+base or a base outside the current best-work header ancestry before publishing
+the lifecycle record. Repeated activation, missing headers, an existing
+full-revalidation requirement, and a base without strictly greater cumulative
+work than the settled active tip are also rejected. Height alone does not rank
+competing branches. Equal work is refused; the native header tree does not
+model Core's block-availability sequence/pointer tie-breaker, so this condition
+is not full Core comparator parity. Existing native v4 checkpoints
+remain internal recovery artifacts and are not accepted by this RPC.
+
+The result contains `coins_loaded` (unspent **outputs**, not txid records),
+`tip_hash`, `base_height`, and a UTF-8 display of the absolute input `path`.
+The path is rendered before activation; non-UTF-8 filesystem bytes are replaced
+only in this JSON display. Path/open failures return -8, malformed codec/trust
+failures -22, and underlying read-I/O, lifecycle, storage or settlement failures
+-32603. These explicit error-code deviations are not a full Core RPC parity
+claim. Historical validation continues through the existing P2P scheduler.
+
+`getchainstates()` attempts lifecycle exclusion before capturing both roles.
+If activation or historical lifecycle work owns it, the query reports typed
+unavailability (`-32603`) instead of waiting or inventing a partial role set.
+This is an availability deviation: Core can report its prior committed roles
+while staging a snapshot. Ordinary active-chain transition exclusion can still
+wait; this is not a claim that every query is nonblocking. The established
+embedding summary retains its blocking contract. Successful reports share one
+capture owner under lifecycle and active transition exclusion.
+`headers` is the best admitted header height; the
+historical role, when present, is first and the active role last. Each reports
+`blocks`, `bestblockhash`, `validated`, and `verificationprogress` when a known
+cumulative transaction count permits the existing transaction-based estimate.
+Unknown progress, including a missing applied tip, is omitted rather than
+replaced with a height fraction.
+The historical role contains coins validated from genesis and reports
+`validated: true`; the assumed active role reports false until finalization.
+`snapshot_blockhash` identifies the compiled base for a snapshot-derived active
+role, including after finalization or while a failed assumed role is still
+observable before shutdown. Core's difficulty and cache-allocation
+fields are omitted because this projection does not expose corresponding
+owner facts. Role state and progress survive restart through the durable head
+and the existing checkpoint/replay contract.
+
+`dumptxoutset` export remains unimplemented and is a separate producer feature.
+The process contract is exercised by `e2e/tests/assumeutxo.rs`, using an actual
+Core 31.1 dump of the deterministic, compiled regtest 200-height pin. Regtest
+evidence does not establish mainnet memory or throughput qualifications.
 
 ## Live gaps
 
@@ -644,6 +792,13 @@ owned by [wallet-facing.md](wallet-facing.md).
 - **Typed embedding surface**: Direct in-process application API as an alternative to localhost JSON-RPC daemon boundary is tracked under #145 (open).
 
 ## Proven by
+
+- `API-33`: `e2e/tests/assumeutxo.rs` covers a freshly Core-produced portable
+  snapshot, both chainstate roles, restart/finalization, non-UTF-8 symlink
+  targets, corrupt recovery, and orphan cleanup while preserving source hard
+  links. Node snapshot tests cover lifecycle provenance and bounded FIFO
+  rejection; chainstate snapshot tests cover unknown progress and live-writer
+  exclusion during cleanup.
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
   `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:

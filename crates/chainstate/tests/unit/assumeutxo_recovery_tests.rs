@@ -67,8 +67,56 @@ fn activate(
     )?;
     let manager =
         AssumeUtxoManager::open(Network::Regtest, active.clone(), Some(dir.to_path_buf()))?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     Ok((active, manager))
+}
+
+#[test]
+fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let committed = {
+        let mut fixture = snapshot_work_fixture(1, 0x2000_ffff, 2, 0x207f_ffff)?;
+        let prior = fixture
+            .active
+            .durable_head
+            .load()?
+            .ok_or("prior head missing")?;
+        let store = Arc::new(FjallStore::open(dir.path())?);
+        let head = Arc::new(KvDurableHeadStore::new(store));
+        head.commit(None, &prior, &CommitRecords::default())?;
+        Arc::get_mut(&mut fixture.active)
+            .ok_or("shared fixture")?
+            .durable_head = head.clone();
+        // The unequal-work header fixture intentionally bypasses regtest's
+        // contextual difficulty rule. Test the real durable commit/reopen
+        // boundary only; do not claim these headers pass node recovery.
+        let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+        fixture.activate(&manager)?;
+        let next = head.load()?.ok_or("snapshot commit missing")?;
+        assert!(next.height < prior.height);
+        assert_eq!(next.commit_id, prior.commit_id + 1);
+        assert_eq!(next.tip, fixture.pinned.block_hash);
+        assert_eq!(next.chain_tx_count, fixture.pinned.chain_tx_count);
+        assert_eq!(
+            fixture
+                .active
+                .applied_tip_snapshot()
+                .ok_or("applied tip missing")?
+                .hash,
+            next.tip
+        );
+        assert!(
+            matches!(next.assumeutxo, AssumeUtxoDiskStatus::Validating { base_height, base_hash, .. }
+            if base_height == next.height && base_hash == next.tip)
+        );
+        next
+    };
+    let reopened = KvDurableHeadStore::new(Arc::new(FjallStore::open(dir.path())?));
+    assert_eq!(reopened.load()?, Some(committed));
+    Ok(())
 }
 
 #[test]
@@ -244,7 +292,10 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         Some(dir.path().to_path_buf()),
         1,
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     manager.step_historical(&fixture.blocks[0], None)?;
     manager.step_historical(&fixture.blocks[1], None)?;
     let status = manager.status()?;
@@ -475,7 +526,10 @@ fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
     let head = active.durable_head.load()?;
     let tip = active.applied_tip_snapshot();
     assert!(matches!(
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        },
         Err(AssumeUtxoError::FullRevalidationRequired)
     ));
     assert_eq!(active.durable_head.load()?, head);
@@ -730,7 +784,10 @@ fn crash_writer() -> TestResult {
             DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL
         },
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
         fixture.blocks[2].block_hash(),
         3,
@@ -977,7 +1034,10 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
         active.clone(),
         Some(dir.path().to_path_buf()),
     )?;
-    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    {
+        let loaded = fixture.load()?;
+        manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+    }?;
     manager.step_historical(&fixture.blocks[0], None)?;
     let mut invalid = fixture.blocks[1].clone();
     invalid.txs.clear();
@@ -1031,7 +1091,10 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
             active.clone(),
             Some(dir.path().to_path_buf()),
         )?;
-        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+        {
+            let loaded = fixture.load()?;
+            manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
+        }?;
         if mismatch {
             let prior = active.durable_head.load()?.ok_or("missing head")?;
             let mut next = prior;

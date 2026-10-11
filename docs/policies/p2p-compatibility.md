@@ -67,17 +67,17 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only. No latency telemetry is kept. |
 | `pong` | ignored | No ping RTT accounting exists; the pong body is unused. |
-| `inv` | Transaction vectors are answered with `getdata` for the ones the node does not already hold. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
+| `inv` | Missing transaction vectors enter the connection-bound transaction request owner; only the selected eligible source receives `getdata`. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
 | `getdata` | `MSG_BLOCK` streams stripped stored blocks from the applied chain or an eligible stale branch; `MSG_WITNESS_BLOCK` preserves the stored witness serialization (BIP144). For full-relay peers, transaction inventory is served from the mempool, or from the orphan map only for a `MSG_WTX` item whose exact wtxid is resident. For block-relay-only peers, the listener removes transaction vectors before dispatch and drops transaction-only requests without a response. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. A `MSG_CMPCT_BLOCK` item is answered with a `cmpctblock` only while the block is within 5 of the applied tip; a deeper one is served as the whole witness-bearing `block`, as Core does (`net_processing.cpp:2705-2721`). Misses among dispatched inventory resolve to one trailing `notfound`. Bound: 50 000 vectors. |
-| `notfound` | ignored | Decoded with the same inventory bound. |
+| `notfound` | transaction fallback | A matching transaction request releases only its actual source and promptly considers retained alternatives; unrelated or unsolicited responses cannot release another connection's ownership. Block entries remain ignored. Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink / outbound | Forwarded to the node's header-sync pipeline. Newly committed active tips are announced via BIP130 `headers` (up to 8 headers, Core `MAX_BLOCKS_TO_ANNOUNCE`) to peers that negotiated `sendheaders` and can anchor on active chain history. Bound: ≤ 2 000 headers per message. |
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. The shared inbound channel is bounded once for the node, and each connection's unsolicited share of it is bounded separately; a body the download window asked that connection for is always admitted (`docs/contracts/p2p-wire.md` `P2P-07`). |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel, except while the node is in initial block download: unsolicited transaction bodies are then dropped before ingress, without a misbehavior score or disconnect (Core 31.1 `net_processing.cpp:4713-4716`). Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | ignored | No address gossip: Core answers with an `addr` burst. Deviation: silent. |
-| `addr` / `addrv2` | ignored | Decoded (bound: 1 000 entries, Core `MAX_ADDR_TO_SEND`); never gossiped onward. |
+| `getaddr` | served | At most 32 retained IP addresses, once per full-relay connection. Book-disabled test/embedding connections remain silent. |
+| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. |
 | `feefilter` | ignored | BIP133. We never send one and do not enforce a peer's. Core filters relay by it. |
 | `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. Inbound announcements also publish compact-fetch eligibility. |
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
@@ -130,31 +130,67 @@ refusals suppress the exact wtxid, not legacy txid inventory or another
 witness variant. The cache and retry lifecycle are governed by
 [MPL-04](../contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
 
-## 6. Message Policy: Reject-or-Ignore, Disconnect Where Core Disconnects
+## 6. Message policy and automatic discouragement
 
-| Condition | bitcoin-rs action | Core 31.1 action |
+The P2P service owns both the existing in-memory manual subnet bans and a
+separate bounded, process-local set of discouraged **exact IP addresses**.
+There is no additive score or second persisted ban database. `listbanned` and
+`clearbanned` describe only manual bans. An ordinary automatic peer's current
+connection records a typed remote protocol violation before teardown; an old
+lease cannot punish its same-address replacement. Local queue saturation,
+network inactivity, startup cancellation, insufficient advertised services,
+transport I/O/timeouts, and local encoding failures never discourage an IP.
+
+| Condition | bitcoin-rs action for an ordinary automatic nonlocal peer | Core 31.1 reference |
 | :--- | :--- | :--- |
-| Unknown command, peer ready | ignore, stay connected | ignore |
-| Non-handshake command before readiness | disconnect | disconnect (misbehavior), except Core's handshake whitelist (§7) |
-| Payload fails to decode | disconnect (typed `PeerError::Encode`) | disconnect (misbehavior) |
-| Checksum mismatch | disconnect | disconnect |
-| Wrong network magic | disconnect | disconnect |
-| Declared length > 32 MiB | disconnect | disconnect (above Core's 4 MiB cap) |
-| `inv`/`getdata`/`notfound` > 50 000 vectors | disconnect | misbehavior 40 → eventual ban |
-| `addr`/`addrv2` > 1 000 entries | disconnect | misbehavior → eventual ban |
-| Locator > 101 hashes | disconnect (checked before any state mutation) | misbehavior 255 → ban |
-| `headers` > 2 000 entries | disconnect | misbehavior |
-| `verack` before `version`; duplicate `version`; feature message while disconnected | disconnect | misbehavior |
-| Idle connection | `ping` once a direction has been idle 2 min; disconnect once a direction is silent past 20 min | `ping` per 2 min regardless of traffic; disconnect when the outstanding ping goes unanswered for 20 min (`PING_INTERVAL`, `net_processing.cpp:125`; `TIMEOUT_INTERVAL`, `net.h:59`; `MaybeSendPing`, `net_processing.cpp:5698-5712`; `InactivityCheck`, `net.cpp:2043-2090`) |
-| `tx` or a transaction `inv` on a block-relay-only connection | disconnect (protocol violation) | disconnect (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`; the `inv` branch at `net_processing.cpp:4385-4390`) |
-| `addr` or `addrv2` on a block-relay-only connection | ignored | ignored (address relay declined, `SetupAddressRelay`, `net_processing.cpp:5952-5970`) |
+| Unknown command after readiness | ignore | ignore |
+| Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
+| Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
+| Checksum failure | disconnect and temporarily avoid the IP | Core v1 rejects the message and resets its decoder; this remains a stricter bitcoin-rs policy |
+| Invalid command bytes, wrong magic, or length above 32 MiB | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection is separate from `Misbehaving`; Core's message-size cap is 4 MiB |
+| `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000 | disconnect and temporarily avoid the IP | the relevant Core handlers mark for discouragement |
+| Locator above 101 or `notfound` above 50,000 | disconnect and temporarily avoid the IP | Core directly disconnects oversized locators; oversized `notfound` is ignored by request handling, without generic punishment |
+| `getblocktxn` indexes beyond the body on the `blocktxn` serving path | disconnect and temporarily avoid the IP | Core marks these body-relative bounds violations for discouragement (`net_processing.cpp:2600-2608`), separately from differential decoding |
+| Empty `getblocktxn` list or non-increasing in-process absolute indexes | disconnect and temporarily avoid the IP | Empty rejection is stricter native policy; Core accepts an empty list. Both wire decoders guarantee increasing indexes before lookup (`blockencodings.h:23-54`, `net_processing.cpp:4333-4340`), so non-increasing lists are defensive in-process cases. Core decodes `uint16_t` indexes; the native codec retains `u64` indexes, with different range acceptance |
+| `tx` or transaction `inv` on a block-relay-only connection | disconnect without discouragement | connection-role rejection; not a new numeric penalty |
+| `addr` or `addrv2` on a block-relay-only connection | ignore | address relay is declined |
+| Idle connection | ping once a direction has been idle 2 minutes; disconnect once a direction is silent past 20 minutes; no discouragement | periodic ping and outstanding-ping timeout remain distinct from misconduct |
+| Valid traffic exceeds local queue/request budgets | bounded accounting, backpressure or connection-local cancellation | resource management, not a generic punishment score |
 
-**Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (setban-style), held in memory. Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
+Discouragement retains at most 4,096 canonical IPs for one monotonic hour.
+Repetition does not refresh the deadline or add another queue entry. At the
+capacity bound the oldest entry is evicted. Core instead uses a rolling Bloom
+filter with 50,000 elements and no explicit time expiry. The exact-set bound
+keeps this auxiliary policy finite and avoids probabilistic false positives;
+its smaller retention window is an explicit deviation, not a performance claim.
+Selection snapshots are captured before the address-book lock and applied to
+regular candidates, feelers and restart anchors. Inbound accepts and outbound
+socket admission recheck current policy, including after a queued dial connects.
 
-Structural invariants, verified by the deterministic fixtures (`crates/p2p/tests/core_compat.rs`):
+Manual connections and operator-protected peers discard a fully consumed bad
+message and continue. An unread/unsafe frame still closes the transport without
+address discouragement, as do unrelated I/O and resource failures. Other local
+peers disconnect without recording their address. Locality follows Core's
+`CNetAddr::IsLocal`: IPv4 0/8 and 127/8, and IPv6 `::1`; IPv4-mapped IPv6 is
+canonicalized before matching. Private LAN addresses are not implicitly local.
 
-- A rejected bound check fires *before* the FSM advances, so a rejected message never mutates peer state.
-- No inbound message — valid, malformed, or unknown — can stall or abort the listener; errors tear down only their own connection. The accept loop and other peers continue (this is the peer-facing face of the never-block-core invariant).
+The optional `--p2p-noban <IP/CIDR,...>` setting (TOML `p2p_noban`, environment
+`BITCOIN_RS_P2P_NOBAN`) defaults to an empty list. The existing `IpSubnet` owner
+parses and normalizes it. Permission is derived only from the actual socket IP,
+never from a peer's advertised addresses. `getpeerinfo.permissions` reports
+`noban` for these connections. This is an automatic-discouragement exemption,
+not Core's complete permission framework: explicit manual ban admission still
+wins, and transaction relay, fee filters, resource budgets and connection roles
+remain unchanged. No `Relay`, `ForceRelay`, `Addr` or generic permission flags
+are inferred.
+
+References: pinned Core v31.1 [Misbehaving and exemption handling](https://github.com/bitcoin/bitcoin/blob/v31.1/src/net_processing.cpp),
+[rolling discouraged set](https://github.com/bitcoin/bitcoin/blob/v31.1/src/banman.h),
+[v1 checksum rejection](https://github.com/bitcoin/bitcoin/blob/v31.1/src/net.cpp),
+and [canonical local-address classes](https://github.com/bitcoin/bitcoin/blob/v31.1/src/netaddress.cpp).
+The process comparison in `e2e/tests/peer_discouragement.rs` uses an oversized
+`headers` count, which actually reaches Core's `Misbehaving`, to test ordinary
+local disconnect/reconnect and operator `NoBan` survival via a ping/pong barrier.
 
 ## 7. Deviation Ledger
 
@@ -168,15 +204,218 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
-4. **Address management**: absent. There is no address store, no feeler
-   connection policy, no `getaddr` response, and no addr/addrv2 gossip.
-   Outbound peer discovery runs through DNS-seed bootstrap (on by default:
-   `run_dns_peer_maintenance`, `crates/p2p/src/service.rs`, seeds from
-   `Network::dns_seeds`), the configured `--connect` peers, and the
-   `addnode` RPC.
+4. **Address management**: one P2P-owned `AddressBook` retains canonical
+   endpoints, their original source and health, and up to eight distinct New
+   bucket references. IPv4-mapped IPv6 aliases are canonicalized at every book
+   endpoint boundary, including attempt/success, refresh, connected exclusion,
+   and pending claim/release/counting. Other linked IPv6 forms retain their
+   distinct endpoint identity; only their netgroup classification links IPv4. Lookup tables are derived indexes, not another persisted
+   peer store. Placement follows Core 31.1 `GetNewBucket`, `GetTriedBucket` and
+   `GetBucketPosition`: SHA256d with the persisted 256-bit secret, Core vector
+   framing, endpoint wire bytes, and separate New/Tried position domains. There
+   are 1,024 New and 256 Tried buckets of 64 positions. One source group can
+   reach at most 64 New buckets; a destination group reaches at most eight
+   Tried buckets. The former 64-endpoint/source quota and public position hash
+   are removed. IP grouping includes linked IPv4 /16, ordinary IPv6 /32,
+   Hurricane Electric /36 and Core's local/unroutable group. New DNS sources use
+   the first ten SHA256 bytes of the seed name as Core Internal identities.
+
+   `AddSingle` ordering governs time/service updates, probabilistic additional
+   references (1/2^existing-reference-count), and occupied-slot replacement.
+   Gossip applies a two-hour time penalty, except a source's self-announcement;
+   DNS applies none. An IsTerrible incumbent or one redundant reference of a
+   healthy multiply referenced incumbent may yield a New slot to a fresh
+   endpoint. Clearing a slot removes one reference; only the final New
+   reference deletes the endpoint. Local pending ownership protects final
+   endpoint deletion, not every redundant slot. Success promotes to a vacant
+   Tried slot and removes all New references. A Tried collision retains the
+   successful newcomer in New and enters a runtime-only set of at most ten
+   distinct challengers, including multiple challengers for the same slot.
+   Runtime-only creation IDs preserve Core's collision ordering across record
+   swaps; no ID or collision set is added to the durable format.
+   Core `ResolveCollisions` protects an incumbent successful within four hours;
+   an attempt within four hours permits replacement only after more than 60
+   seconds. Otherwise a challenger waiting more than 40 minutes can replace an
+   untested incumbent. Exact boundaries use the existing health timestamps,
+   not worker errors or a separate completion tracker. Replacement calls the
+   same Good(false) health transition, clears all challenger New references,
+   and demotes the incumbent to one original-source New reference. Only the
+   collided destination New reference is cleared; identity disappears only
+   at zero references. Pending final-reference victims defer the entire
+   transition before health or table changes. Local active/manual/pending
+   endpoints remain protected. Resolver policy snapshots cover at most twenty
+   endpoints and run outside the state lock before current state is rechecked.
+   Collision choice samples the shared RNG; feeler scheduling uses Core's
+   Poisson interval with a two-minute mean, observed on the service tick. Selecting an already TCP-connected
+   incumbent records Good and falls back to the existing New-only sampler;
+   queued/inflight work alone never certifies Good. Feeler targets require stored
+   NETWORK or NETWORK_LIMITED service advertisement. DNS records retain unknown
+   service bits and use ordinary selection until a handshake supplies them.
+   Ordinary candidate selection, restart-anchor admission, automatic dispatch
+   and the final pre-TCP check share the existing desirable-service predicate:
+   NETWORK plus WITNESS, or LIMITED plus WITNESS while approximate local tip
+   depth is below 144. Selection rechecks current record metadata after its
+   unlocked policy callback. Manual dials and feelers bypass this metadata
+   prefilter; ordinary received VERSION validation remains in place.
+
+   Accepted VERSION metadata overwrites the one stored service field before
+   ordinary service rejection, without marking Good, changing health times or
+   promoting membership. This field is an optional u64: unknown DNS metadata
+   is `None`; an observed zero-bit claim is `Some(0)`. Gossip ORs service bits
+   into the same field; zero-bit gossip preserves an existing unknown value.
+   Direct VERSION zero and a fresh IP-sourced zero advertisement remain known
+   zero. DNS without an advertisement preserves every known value. No second
+   last-VERSION or fitness flag is introduced. Only genuine unknown DNS metadata can bootstrap
+   ordinary selection; an accepted NONE VERSION is excluded immediately even
+   without Good, through DNS refresh and restart. A successful NONE feeler
+   still remains Good/Tried and is excluded from ordinary dialing. Native DNS
+   does not claim Core's service-filtered x9 discovery.
+   Feelers finish on a valid VERSION through the existing native parser/FSM,
+   without readiness or sync work. This does not claim Core's inherited minimum
+   protocol floor or connman-wide inbound self-nonce validation; ordinary
+   handshake validation is unchanged. Collision state starts empty
+   after restart. The former immediate failed-worker eviction path is removed.
+
+   The shared IsTerrible predicate first protects attempts within 60 seconds,
+   then checks future timestamps beyond ten minutes, age over 30 days, three
+   never-success failures, or ten failures with success older than seven days.
+   There is no periodic age/failure purge. Replacement cleanup happens at an
+   actual New-slot admission; fresh getaddr samples filter IsTerrible. Failed,
+   stale or clock-shifted knowledge remains selectable without DNS input.
+   Attempt health is recorded only after an actual TCP attempt, on success or
+   failure. Local ban/activity/cancellation refusal and failed thread creation
+   do not age a peer. Failures count only once per global Good epoch and only
+   with Core's persistent-outbound-netgroup connectivity gate, derived from
+   `max_peer_connections`. Established manual and handshaking outbound sessions
+   count; inbound, transient feelers and cancelled sessions do not. Manual attempts never count a
+   failure or own an automatic claim. Good from any non-inbound handshake
+   updates the epoch; known peers reset failures and record success/recent try,
+   while unknown manual peers are not inserted. Good does not overwrite
+   advertised last-seen time. Native periodic refresh applies only to ready
+   automatic full-relay peers, excluding feelers, at intervals over 20 minutes; block-relay peers
+   never refresh an advertised timestamp but still count for DNS recovery.
+   This periodic lifecycle differs from Core's FinalizeNode Connected update.
+   Last-try/count-attempt/global-Good times are runtime-only.
+
+   Selection chooses New/Tried once with equal probability when both eligible
+   tables exist, then samples a bucket and circular start position. Conditioning
+   on nonempty eligible buckets removes empty retries without changing that
+   distribution. Acceptance uses Core GetChance: 0.01 for attempts within ten
+   minutes, multiplied by 0.66^min(failures,8), with a 1.2 factor after rejection.
+   The minimum weight guarantees acceptance within 45 occupied proposals;
+   there is no deterministic rank winner or hard failure delay. Empty or wholly
+   excluded books return immediately. Policy callbacks run outside the book
+   lock; current membership/health/pending constraints are evaluated after it
+   is reacquired. Exact endpoint exclusion includes inbound; whole-group
+   exclusion uses outbound/pending only. This conditions on local ban/connection
+   exclusions, rather than duplicating Core net.cpp's outer 100-candidate loop.
+
+   Explicit native boundaries remain: ingress rejects future (>10-minute) and
+   older-than-30-day reports, whereas Core's wire caller normalizes some bad
+   timestamps before Add. Existing native port/routability admission is retained
+   (`addrman.rs::routable`), including its narrower accepted IPv6 ranges and
+   reserved IPv4 exclusions; exact group/hash vectors do not claim that every
+   Core-routable address is admitted. Only existing IP transports are supported.
+   DNS remains
+   bounded bootstrap input (64 results per seed pass), not a second address
+   owner. Books with at least 64 records get 60 seconds to connect before a
+   remaining ready-outbound deficit permits DNS recovery; smaller books query
+   immediately. Each path makes at most one seed pass per 60 seconds.
+   Full-relay gossip allowance is 32 entries, replenished one per ten seconds.
+   Getaddr is answered once per inbound full-relay connection, never outbound.
+   Its shared at-most-32-entry sample stays byte-stable for 24 hours across
+   reconnects and discoveries, then rotates and applies IsTerrible filtering.
+   This differs from Core's randomized 21–27-hour cache and response sizing.
+   Non-IP addrv2 families are ignored; block-relay-only peers neither learn nor
+   serve addresses. These boundaries are not a claim of complete Core peer
+   lifecycle equivalence.
+
+   The fixed indexes occupy 327,680 bytes; endpoint count is bounded at 81,920,
+   with at most eight New bucket IDs each and at most 65,536 occupied New slots.
+   On the tested 64-bit target Candidate is 144 bytes and Source is 24 bytes,
+   excluding allocator/index/vector overhead. Fixed-width serialized fields
+   have a conservative 512-byte/record bound (315-byte max-width fixture), so
+   record separators plus bounded header/checksum remain below the 64 MiB file
+   ceiling. Reads bound both bytes and record/reference sequences. These are
+   representation/work bounds, not RSS or performance measurements.
+
+   `--asmap <file>` (TOML `asmap`, environment `BITCOIN_RS_ASMAP`) loads one
+   immutable classifier through the P2P netgroup owner. Its validated Core
+   bytecode is bounded at 4 MiB. Placement, incoming source corroboration,
+   outbound diversity and persistent-TCP failure counting use that same map.
+   Core ASN groups serialize as NET_IPV6 followed by little-endian ASN bytes,
+   grouping IPv4/IPv6 together. ASN0 uses the corrected prefix/HE fallback;
+   public linked-IPv4 forms use their embedded IPv4 without rewriting the dial
+   endpoint. Internal and legacy DNS sources retain their source namespaces.
+   Startup logs the raw-file SHA256 identity. Invalid or unavailable configured
+   maps permit memory-only prefix fallback but disable all book publication
+   and migration backup creation; restoring the map recovers the untouched
+   book. Intentionally omitting the map permits backed-up prefix migration.
+
+   Schema v8 persists the secret, original source, health, map identity,
+   New membership and at most two anchors in one checksummed snapshot. Services
+   is a required field: JSON null means unknown DNS metadata, while numeric zero
+   means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
+   original source with no prior Good. Missing or invalid fields fail closed.
+   Same-map restart restores every reference; same-classifier v5/v6/v7-to-v8
+   upgrades preserve all references and anchors exactly. Known v1–v7 formats,
+   including genuine v3 files carrying anchors, are strict migration sources.
+   Their service fields must be numeric u64; old null or missing fields remain
+   invalid. Historical DNS zero/no-Good records cannot reveal whether zero was
+   actually observed. Decoding infers only that ambiguous case as unknown in
+   memory, where it may retry; its next accepted VERSION records the observation
+   precisely. Exact-byte backup gates publication of the upgraded file, not
+   in-memory discovery. If backup fails, the original file remains untouched and
+   the in-memory book runs with persistence disabled. IP zero and every
+   prior-Good zero stay known. No source, success or failure value is rewritten
+   to manufacture evidence.
+   The v1 reader retains its original 4,096-record/64-source/slot checks;
+   historical ASMap layouts validate source/record shape before re-bucketing.
+   The actual source bytes are copied to an exclusive content-named
+   `.v<schema>-<sha256>.bak` and file/directory-synced before replacement.
+   Schema-only upgrades do not discard corroboration. Changed classifiers or
+   old custom placement use deterministic original-source re-bucketing,
+   prioritizing proven/recent successes and logging retained/demoted/dropped
+   counts. Historic DNS u64 hashes retain a labelled legacy namespace; no
+   recovered seed name or Core hash is invented. Operational attempt/Good
+   times reset; advertised time, success and failures remain intact. A backup
+   failure allows memory discovery but disables writes. Unknown versions or
+   fields remain read-only. Retained anchors keep their original confirmation
+   time and remain a unique successful-record subset; regrouping prunes anchors
+   only when their endpoint is actually removed.
+
+   Actual Core group/placement evidence includes 224 ASMap rows and official
+   Tried236/New795 anchors. Migration fixtures were emitted by the original
+   v1/v2/v3/v4/v5/v6/v7 writers; v5/v6/v7 fixtures pin all eight retained references. These
+   are specific algorithm/persistence checks, not full peer-lifecycle parity.
+
+   Filenames remain scoped to actual P2P magic: `peers.dat` becomes
+   `peers-<8 hexadecimal magic digits>.dat`, including custom/drynet magics.
+   A valid scoped book wins; same-magic legacy-base import retains the base,
+   and a valid foreign-magic base is left untouched. Corrupt/unknown/unreadable
+   files disable publication while in-memory discovery continues. Publication
+   retains exclusive random temporary creation with bounded collisions, file
+   sync, atomic installation and the storage owner's directory-sync policy.
+   First installation cannot overwrite a newly appeared destination. Saves
+   retain the captured revision only after durable success, outside the state
+   lock; concurrent later changes remain dirty. Periodic saves occur every
+   15 minutes and shutdown/explicit barriers remain immediate.
+
+   Restart anchors come only from automatic block-relay peers that supplied
+   accepted chain evidence, with the existing seven-day age limit. On the first
+   active-network maintenance tick they
+   are removed from the durable snapshot before any endpoint is exposed for
+   dialing. Failed/read-only publication exposes no anchors. Their original
+   confirmation metadata moves into the existing pending reservation; queued
+   reservations consume a normal outbound slot, while feelers do not. Accepted
+   worker dispatch consumes an anchor at most once, independently of actual TCP
+   health accounting. Never-dispatched reservations return before shutdown save
+   with the original confirmation time, without replacing newer demonstrated
+   anchors. Dispatched attempts never return merely because connection fails.
+   A stale queue item cannot dispatch after its reservation was returned.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
-7. **Automatic misbehavior bans** (§6) absent; manual bans only.
+7. **Automatic discouragement** (§6) uses bounded exact-IP expiry rather than Core's rolling Bloom filter. The explicit strict-parser, transport and permission differences are listed in §6; there is no additive score.
 8. **Chain-sync timeout scope**: a full-relay outbound connection that stops bringing a better chain is timed out as Core does (`ConsiderEviction`, `net_processing.cpp:5498-5550`), with one `getheaders` probe at 20 minutes (`CHAIN_SYNC_TIMEOUT`, definition `net_processing.cpp:109`) and the first four outbound connections to reach the tip protected (`MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT`, definition `net_processing.cpp:107`). Protection and the timeout both key on a tip the peer actually handed us, never on the height its handshake claimed: Core reads `pindexBestKnownBlock` there, not `nStartingHeight` (use-site `net_processing.cpp:3203-3210`). An operator-pinned connection is exempt in both, as it is in Core: `IsOutboundOrBlockRelayConn()` excludes `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Block-relay-only connections are exempt here; Core times out both outbound classes. A connection dialed for blocks alone is therefore never replaced by this timer.
 9. **Download budgets**: bitcoin-rs bounds one sync at `PENDING_BUDGET = 256` in-flight bodies and `RECEIVED_BLOCK_BUDGET = 256` staged bodies (`crates/p2p/src/download_window/policy.rs:54,58`), and stripes at `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16` once `MIN_PEERS_FOR_FANOUT = 8` eligible peers exist (`:107,116`), where Core runs one `BLOCK_DOWNLOAD_WINDOW = 1024` ahead of the last common block with the same 16 per peer (`net_processing.cpp:151,133`). The 256 depth is measured, not assumed: a bounded 0–150,000 daemon single-peer IBD run at this window was 1.52× the 128-block control (`crates/p2p/src/download_window/policy.rs:50-51`). The shallower window is a bounded divergence kept by operator decision: it caps buffered bodies and re-request work per connection instead of matching Core's depth.
 10. **Extra-peer selection**: once a stale tip needs no extra full-relay connection, bitcoin-rs retires the newest automatic full-relay outbound connection that sits one beyond the slots and is older than `MINIMUM_CONNECT_TIME` (`retire_extra_full_relay_connection`, `crates/p2p/src/service.rs:976`). An operator-pinned connection is outside the count and the victim set both, as in Core: neither `IsFullOutboundConn()` nor `IsBlockOnlyConn()` includes `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`). Core's `EvictExtraOutboundPeers` (`net_processing.cpp:5604-5668`) instead retires the connection that announced a block longest ago, breaking a tie by dropping the most recently connected one. The retired count is the same; the retired connection is not. A pinned outbound peer therefore neither creates an excess nor stands as a victim, matching `IsFullOutboundConn`/`IsBlockOnlyConn` excluding `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`).
@@ -185,11 +424,55 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 12. **Inbound admission**: bitcoin-rs refuses an inbound socket once the live inbound count reaches `max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots` (default `200 - 8 - 2 = 190`, `net.h:1124-1127`), closing the stream before a handshake lease exists (`crates/p2p/src/listener.rs`, `PeerTable::try_register_inbound`). Core derives the same remainder and then scores an eviction (`AttemptToEvictConnection`, `net.cpp:1695-1735`) to make room. The eviction scoring is deliberately not implemented: no bitcoin-rs sync path depends on being able to displace an inbound peer, the resource-exhaustion defect closes at the admission boundary, and adding a second peer-selection policy would need an acceptance requirement it does not have. The operator-visible consequence is that the 191st inbound connection is refused rather than replacing a chosen peer.
 13. **Outbound service gate**: an outbound peer that does not advertise the desirable set is disconnected right after its `version`, before it is published as usable, exactly as Core's `HasAllDesirableServiceFlags` check does (`net_processing.cpp:1857-1872`, applied to an outbound connection at `:3864-3871`). The desirable set is `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks (`NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`). Inbound peers are not service-checked, as in Core.
 14. **Limited peers and block download**: a connection without `NODE_NETWORK` is never asked for block bodies while the node is in initial block download, and after it only for the last 288 blocks of that peer's own chain (`net_processing.cpp:6521`, `NODE_NETWORK_LIMITED_MIN_BLOCKS` at `:159`, window applied at `:1637`). The rule reads the node's single `InitialBlockDownload` latch and applies to request, fan-out, probe, and hedge selection alike; header requests stay open to such a peer.
-15. **Transaction request tracker** (TXR-01–05, TXR-07): absent. On an
-   announced transaction, bitcoin-rs immediately requests it from every
-   announcing peer that supplies the announcement; it has no Core-style
-   per-peer in-flight request tracker or cap and does not retry a transaction
-   after `notfound`.
+15. **Transaction download scheduling bounds**: one P2P owner tracks
+   txid and wtxid announcements, with 5,000 retained announcements and 100
+   in-flight requests per connection, a 60-second request lifetime, and
+   two-second non-preferred, txid-while-wtxid-peers-exist, and overloaded
+   source delays (Core `node/txdownloadman_impl.cpp:198-221`). An outbound
+   eligible source wins over inbound candidates. Matching `notfound`,
+   disconnect and expiry release ownership and make remaining announcers
+   immediately eligible; unsolicited `notfound` cannot release another
+   source's request. Admission completion releases only the delivering source; alternate witnesses
+   remain eligible until mempool/orphan/reject state retires the matching
+   identity. Accepted bodies retire both identities. A paced 100-ms pass checks
+   at most 1,024 retained identities against known state and at most 1,024 ready
+   request identities before sending. The ordered request owner supplies the
+   resumable cursors for both sweeps and ready batches, so reannounced lower
+   keys cannot starve older tail requests. These traversals still use that map;
+   a separate derived set of candidate references serves only bounded admission.
+   Every selected identity is checked even if its periodic sweep turn has not arrived. Gateway
+   reads happen without policy/table locks; eligible candidates are rechecked
+   before reserving and enqueueing under one owner lock. Only transaction inv
+   wakes periodic policy work from the wire: ping, headers and unrelated traffic
+   perform no gateway census. Matching notfound, disconnect and admission results
+   use scoped immediate checks, preserving prompt fallback between periodic ticks.
+   TX/WTX announcements carrying identical 32-byte hashes share one download
+   ownership domain, including source preference and failure fallback (Core
+   `txrequest.cpp` `ByPeer`/`ByTxHash`). Known/reject checks retain their inventory
+   type. Different raw hashes remain independent until a body proves their
+   txid/wtxid relationship; no persistent alias map or second body cache is added. Additional
+   native resource policy: at most 100,000 total announcements and eight sources
+   per raw 32-byte hash shared by TX/WTX. At either limit a preferred arrival may
+   replace one non-preferred, non-owner candidate with the largest existing
+   numeric priority. A full hash must replace within that hash; that one removal
+   also frees a global slot when both caps are full. Current owners and preferred
+   candidates are protected. Ordinary arrivals or fully protected limits are
+   refused, as are duplicates and sources already at their 5,000-entry cap,
+   without eviction or punishment. Core does not have these global/hash caps;
+   this replacement rule is native resource policy, not Core contributor fairness.
+   One derived ordered set holds at most 100,000 fixed-size references
+   (priority, typed identity, connection ID), never announcement/owner copies.
+   Admission uses a constant number of lookups and scans of candidate groups,
+   each bounded by eight entries. Global victim selection uses the ordered index
+   with logarithmic updates; there is no per-announcement full-table scan or lazy
+   stale entry.
+   Orphan-parent requests share the owner and limits but preserve their
+   existing immediate source retry rather than Core's parent delay. A parent
+   already announced by that source is expedited without another announcement
+   or a second in-flight owner; ordinary duplicate inv cannot bypass its delay.
+   A newly retained parent reports success even when replacing a weak candidate
+   leaves the total announcement count unchanged.
+   These hard caps are resource-policy bounds, not measured throughput claims.
 16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
    queued transaction as an immediate single-item `inv`; Core batches and
    delays relay through its trickle scheduling.

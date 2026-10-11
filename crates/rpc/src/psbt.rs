@@ -3,7 +3,7 @@
 //! No transaction/key codec lives here. Consumers own their method parameters
 //! and error projection; supplied public metadata remains in rust-bitcoin's PSBT.
 use bitcoin::psbt::{Psbt, raw};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::RpcError;
 
@@ -97,16 +97,16 @@ pub(crate) fn decode(encoded: &str) -> Result<Psbt, DecodeError> {
     }
     normalize_missing_witness_utxos(&mut psbt);
     measure(&psbt)?;
-    validate_original_fields(&bytes, &psbt)?;
+    admit_original_fields(&bytes, &mut psbt)?;
     normalize_tap_origin_leaves(&mut psbt);
     validate(&psbt)?;
     Ok(psbt)
 }
 
 // The typed reader loses explicit DEFAULT signature bytes and pubkey encoding
-// in BIP32 origins. Inspect these fields on original, library-validated framing;
-// keep no second representation and do not interpret transactions/keys here.
-fn validate_original_fields(bytes: &[u8], psbt: &Psbt) -> Result<(), DecodeError> {
+// in BIP32 origins, and its unknown map loses MuSig2 alias wire order. Inspect
+// the existing library-validated framing, keeping metadata only in the PSBT.
+fn admit_original_fields(bytes: &[u8], psbt: &mut Psbt) -> Result<(), DecodeError> {
     use bitcoin::consensus::Decodable as _;
     fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
         let length = bitcoin::VarInt::consensus_decode(bytes)
@@ -122,6 +122,21 @@ fn validate_original_fields(bytes: &[u8], psbt: &Psbt) -> Result<(), DecodeError
     let mut remaining = bytes.get(5..).ok_or(DecodeError::Trailing)?;
     let inputs = psbt.inputs.len();
     for map in 0..=inputs + psbt.outputs.len() {
+        let mut musig2_seen = BTreeSet::new();
+        let mut input = map
+            .checked_sub(1)
+            .and_then(|index| psbt.inputs.get_mut(index))
+            .filter(|input| {
+                input.unknown.keys().any(|key| {
+                    key.key.len() == 98
+                        && musig2_null_leaf_identity(key.type_value, &key.key).is_some()
+                })
+            });
+        if let Some(input) = input.as_ref() {
+            // Core checks every original value before emplace can discard an
+            // alias. Validate before changing the typed map for the same reason.
+            validate_musig2(&input.unknown, true)?;
+        }
         loop {
             let key = field(&mut remaining)?;
             if key.is_empty() {
@@ -144,6 +159,27 @@ fn validate_original_fields(bytes: &[u8], psbt: &Psbt) -> Result<(), DecodeError
                     "explicit DEFAULT Taproot signature suffix is not supported".to_owned(),
                 ));
             }
+            if let Some(input) = input.as_mut()
+                && let Some(identity) = musig2_null_leaf_identity(key[0], &key[1..])
+            {
+                let canonical = raw::Key {
+                    type_value: key[0],
+                    key: identity.to_vec(),
+                };
+                let original = raw::Key {
+                    type_value: key[0],
+                    key: key[1..].to_vec(),
+                };
+                if musig2_seen.insert(canonical.clone()) {
+                    if original != canonical
+                        && let Some(value) = input.unknown.remove(&original)
+                    {
+                        input.unknown.insert(canonical, value);
+                    }
+                } else if original != canonical {
+                    input.unknown.remove(&original);
+                }
+            }
         }
     }
     Ok(())
@@ -159,6 +195,15 @@ pub(crate) fn check_item_count(inputs: usize, outputs: usize) -> Result<usize, D
 
 pub(crate) fn encode(psbt: &Psbt) -> Result<String, RpcError> {
     measure(psbt).map_err(DecodeError::into_rpc)?;
+    // Serialization may drop a later null-leaf alias; do not let that hide an
+    // invalid original value in a programmatically constructed PSBT either.
+    for input in &psbt.inputs {
+        if input.unknown.keys().any(|key| {
+            key.key.len() == 98 && musig2_null_leaf_identity(key.type_value, &key.key).is_some()
+        }) {
+            validate_musig2(&input.unknown, true).map_err(DecodeError::into_rpc)?;
+        }
+    }
     let mut normalized = std::borrow::Cow::Borrowed(psbt);
     if needs_core_serialization(psbt) {
         normalize_for_core_serialization(normalized.to_mut());
@@ -180,7 +225,7 @@ pub(crate) fn encode(psbt: &Psbt) -> Result<String, RpcError> {
     // The library has additional per-map/value read limits (notably its
     // 4,000,000-byte global map). Never return output our sole reader rejects.
     let mut remaining = bytes.as_slice();
-    Psbt::deserialize_from_reader(&mut remaining).map_err(|_| {
+    let mut readback = Psbt::deserialize_from_reader(&mut remaining).map_err(|_| {
         RpcError::InvalidParameter(
             "PSBT output is not readable within library codec limits".to_owned(),
         )
@@ -190,7 +235,7 @@ pub(crate) fn encode(psbt: &Psbt) -> Result<String, RpcError> {
             "library PSBT serialization left unread bytes".to_owned(),
         ));
     }
-    validate_original_fields(&bytes, psbt).map_err(|_| {
+    admit_original_fields(&bytes, &mut readback).map_err(|_| {
         RpcError::InvalidParameter("PSBT output contains an unsupported field encoding".to_owned())
     })?;
     Ok(crate::base64::encode(&bytes))
@@ -251,7 +296,9 @@ fn needs_core_serialization(psbt: &Psbt) -> bool {
     has_missing_witness_utxo(psbt)
         || tap_origin_leaves(psbt).any(|leaves| leaves.windows(2).any(|pair| pair[0] >= pair[1]))
         || psbt.inputs.iter().any(|input| {
-            input.final_script_sig.is_some()
+            input.unknown.keys().any(|key| {
+                key.key.len() == 98 && musig2_null_leaf_identity(key.type_value, &key.key).is_some()
+            }) || input.final_script_sig.is_some()
                 || input.final_script_witness.is_some()
                 || input
                     .redeem_script
@@ -298,6 +345,19 @@ fn normalize_for_core_serialization(psbt: &mut Psbt) {
         }
     }
     for input in &mut psbt.inputs {
+        // A programmatic PSBT has no original wire order. The library emits
+        // unknown entries in BTreeMap order, so preserve its first alias just
+        // as Core would when reading that serialization.
+        if input.unknown.keys().any(|key| {
+            key.key.len() == 98 && musig2_null_leaf_identity(key.type_value, &key.key).is_some()
+        }) {
+            for (mut key, value) in std::mem::take(&mut input.unknown) {
+                if musig2_null_leaf_identity(key.type_value, &key.key).is_some() {
+                    key.key.truncate(66);
+                }
+                input.unknown.entry(key).or_insert(value);
+            }
+        }
         if let Some(tx) = &mut input.non_witness_utxo {
             for previous_input in &mut tx.input {
                 previous_input.witness.clear();
@@ -518,6 +578,16 @@ pub(crate) fn input_utxo(psbt: &Psbt, index: usize) -> Option<&bitcoin::TxOut> {
 }
 
 fn validate(psbt: &Psbt) -> Result<(), DecodeError> {
+    // Core's global_xpubs set compares public key plus chain code, excluding
+    // depth, parent fingerprint, child number, and network version bytes.
+    let mut xpubs = BTreeSet::new();
+    for xpub in psbt.xpub.keys() {
+        if !xpubs.insert((xpub.public_key, xpub.chain_code)) {
+            return Err(DecodeError::Field(
+                "Duplicate key, global xpub already provided".to_owned(),
+            ));
+        }
+    }
     validate_unknown_types(&psbt.unknown)?;
     for key in psbt.proprietary.keys() {
         proprietary_subtype(key)?;
@@ -552,6 +622,18 @@ pub(crate) fn is_musig2(key: &raw::Key, input: bool) -> bool {
         matches!(key.type_value, 0x1a..=0x1c)
     } else {
         key.type_value == 0x08
+    }
+}
+
+// Core uses the null uint256 for both an absent MuSig2 leaf and an explicit
+// all-zero leaf. The two wire keys identify one participant/aggregate entry.
+fn musig2_null_leaf_identity(kind: u8, key: &[u8]) -> Option<&[u8]> {
+    if matches!(kind, 0x1b | 0x1c)
+        && (key.len() == 66 || key.len() == 98 && key[66..].iter().all(|byte| *byte == 0))
+    {
+        Some(&key[..66])
+    } else {
+        None
     }
 }
 
@@ -703,6 +785,71 @@ mod tests {
             }
         }
         assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    #[test]
+    fn core_identity_fields_match_recorded_core_results() {
+        for case in fixtures()["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().expect("name");
+            if !name.starts_with("core-identity-") {
+                continue;
+            }
+            let result = decode(case["psbt"].as_str().expect("encoded"));
+            if case["core_valid"] == true {
+                assert_eq!(
+                    encode(&result.expect("Core accepts identity")).expect("canonical output"),
+                    case["core_roundtrip"]
+                        .as_str()
+                        .expect("recorded Core output"),
+                    "{name}",
+                );
+            } else {
+                let error = result
+                    .expect_err("Core rejects original identity/value")
+                    .into_rpc();
+                assert_eq!(error.code(), -22, "{name}");
+                assert_eq!(
+                    error.to_string(),
+                    case["reason"].as_str().expect("Core error"),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn programmatic_identity_encoding_preserves_the_caller_and_checks_discarded_aliases() {
+        let data = fixtures();
+        let cases = data["cases"].as_array().expect("cases");
+        for case in cases {
+            let name = case["name"].as_str().expect("name");
+            if !name.starts_with("core-identity-") {
+                continue;
+            }
+            let bytes = crate::base64::decode(case["psbt"].as_str().expect("encoded"))
+                .expect("independent fixture base64");
+            // Bypass RPC admission to exercise the encoder's own owner boundary.
+            let psbt = Psbt::deserialize(&bytes).expect("typed representation");
+            let before = psbt.clone();
+            let result = encode(&psbt);
+            assert_eq!(psbt, before, "{name}: encoder preserves caller");
+            if case["core_valid"] == false {
+                assert!(result.is_err(), "{name}: reject even a discarded alias");
+                continue;
+            }
+            // In-memory unknown maps serialize the shorter missing-leaf key
+            // first, regardless of the original fixture's wire ordering.
+            let expected_name = name.replace("-zero-first", "-missing-first");
+            let expected = cases
+                .iter()
+                .find(|entry| entry["name"] == expected_name)
+                .expect("Core serialized-map-order reference");
+            assert_eq!(
+                result.expect("canonical output"),
+                expected["core_roundtrip"].as_str().expect("Core output"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

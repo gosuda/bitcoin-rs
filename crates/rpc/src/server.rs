@@ -152,7 +152,16 @@ fn serve_connection(
         let request = match read_request(&mut reader) {
             Ok(Some(request)) => request,
             Ok(None) => return Ok(()),
-            Err(error) => {
+            Err(RequestReadError::RestBodyTooLarge) => {
+                let response = if rest_enabled {
+                    crate::rest::getutxos_body_too_large()
+                } else {
+                    crate::rest::not_found()
+                };
+                write_response(reader.get_mut(), &response, false, CorsPolicy::Disabled)?;
+                return Ok(());
+            }
+            Err(RequestReadError::Io(error)) => {
                 let rpc_error = RpcError::InvalidRequest("malformed http request");
                 let response =
                     JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
@@ -181,6 +190,11 @@ fn dispatch_http_request(
     match classify(&request.method, &request.path) {
         HttpRoute::Rest { path, query } => {
             let response = crate::rest::route(handler.context(), path, query, rest_enabled);
+            write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
+        }
+        HttpRoute::RestPost { path } => {
+            let response =
+                crate::rest::route_post(handler.context(), path, &request.body, rest_enabled);
             write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
         }
         HttpRoute::EsploraGet {
@@ -281,7 +295,20 @@ fn read_headers(
             if parsed > MAX_BODY_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
             }
+            if content_length.is_some_and(|previous| previous != parsed) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "conflicting content-length",
+                ));
+            }
             content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            // This server supports Content-Length framing only. Accepting
+            // both would leave body bytes to be interpreted as another request.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported transfer-encoding",
+            ));
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("connection") {
@@ -290,31 +317,35 @@ fn read_headers(
     }
 }
 
-fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequest>> {
+enum RequestReadError {
+    Io(io::Error),
+    RestBodyTooLarge,
+}
+
+impl From<io::Error> for RequestReadError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn read_request(
+    reader: &mut BufReader<TcpStream>,
+) -> Result<Option<HttpRequest>, RequestReadError> {
     let (request_line, bytes) = read_head_line(reader, MAX_HEADER_BYTES)?;
     if bytes == 0 {
         return Ok(None);
     }
     if !request_line.ends_with("\r\n") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request line",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     }
 
     let request_target = request_line.trim_end_matches(['\r', '\n']);
     let mut request_parts = request_target.split_whitespace();
     let Some(method) = request_parts.next() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request line",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
     let Some(path) = request_parts.next() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request line",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
     if method.is_empty()
         || !method.bytes().all(|byte| {
@@ -338,10 +369,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
                 )
         })
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request method",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request method").into());
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
@@ -349,14 +377,19 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     // body-carrying by definition. Other methods reach the demux and 404 there.
     let content_length = match (method, content_length) {
         ("POST", None) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "missing content-length",
-            ));
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "missing content-length").into(),
+            );
         }
         (_, Some(len)) => len,
         (_, None) => 0,
     };
+    if method == "POST"
+        && crate::rest::getutxos_suffix(split_path_query(path).0).is_some()
+        && content_length > crate::rest::MAX_GETUTXOS_BODY_BYTES
+    {
+        return Err(RequestReadError::RestBodyTooLarge);
+    }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok(Some(HttpRequest {
@@ -588,6 +621,9 @@ fn split_path_query(path: &str) -> (&str, &str) {
 /// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
 #[derive(Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
+    RestPost {
+        path: &'a str,
+    },
     Rest {
         path: &'a str,
         query: &'a str,
@@ -642,6 +678,8 @@ fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     if path.starts_with("/rest/") {
         return if method == "GET" {
             HttpRoute::Rest { path, query }
+        } else if method == "POST" && crate::rest::getutxos_suffix(path).is_some() {
+            HttpRoute::RestPost { path }
         } else {
             HttpRoute::NotFound
         };
@@ -787,6 +825,67 @@ mod tests {
 
     use crate::context::Context;
     use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+
+    /// Exercises HTTP demux and framing, including refusal before a declared
+    /// oversized body is uploaded. No Content-Length-sized allocation is needed.
+    fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        client.set_read_timeout(Some(Duration::from_secs(3)))?;
+        let (server, _) = listener.accept()?;
+        let join = std::thread::spawn(move || {
+            let handler = Handler::new(Arc::new(Context::new()));
+            serve_connection(
+                server,
+                &Auth::basic("user", "pass"),
+                &handler,
+                enabled,
+                Duration::from_secs(2),
+            )
+        });
+        client.write_all(request)?;
+        let mut response = Vec::new();
+        client.read_to_end(&mut response)?;
+        let _result = join.join().expect("server thread");
+        Ok(response)
+    }
+
+    #[test]
+    fn getutxos_post_preserves_http_security_and_limits() -> std::io::Result<()> {
+        for (path, enabled, expected) in [
+            ("/rest/getutxos.bin", true, 200),
+            ("/rest/getutxos.bin", false, 404),
+            ("/rest/chaininfo.json", true, 404),
+            ("/rest/getutxos-extra.bin", true, 404),
+            ("/", true, 401),
+        ] {
+            let mut request = format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").into_bytes();
+            request.extend_from_slice(&[0, 0]);
+            let response = rest_wire_request(&request, enabled)?;
+            assert!(response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()));
+            assert!(!String::from_utf8_lossy(&response).contains("Access-Control-Allow-Origin"));
+        }
+        for framing in [
+            "Content-Length: 2\r\nContent-Length: 3\r\n",
+            "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+            "",
+        ] {
+            let request = format!(
+                "POST /rest/getutxos.bin HTTP/1.1\r\nHost: localhost\r\n{framing}Connection: close\r\n\r\n"
+            );
+            assert!(rest_wire_request(request.as_bytes(), true)?.starts_with(b"HTTP/1.1 400 "));
+        }
+        for (enabled, expected) in [(true, 400), (false, 404)] {
+            // Deliberately send no body: receiving an answer proves the cap
+            // was enforced before read_exact or body allocation.
+            let response = rest_wire_request(b"POST /rest/getutxos.hex?cache=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2049\r\nConnection: keep-alive\r\n\r\n", enabled)?;
+            assert!(response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()));
+            let text = String::from_utf8_lossy(&response);
+            assert!(text.contains("Connection: close"));
+            assert!(text.contains("Content-Type: text/plain"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn prepare_http_socket_disables_nagle() {

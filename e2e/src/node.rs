@@ -22,7 +22,8 @@ pub const START_TIMEOUT: Duration = Duration::from_mins(1);
 /// Graceful shutdown budget before the harness reaps the child.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Single request deadline.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Default RPC request budget, also available for a single polling deadline.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound on retained child output.
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
 /// Bound on the journaled RPC and HTTP transcript.
