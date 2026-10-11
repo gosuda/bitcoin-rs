@@ -72,6 +72,59 @@ fn shared_psbt_codec_follows_core_and_retains_legacy_error_classes() {
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 }
 
+#[test]
+fn combined_xpub_aliases_follow_core_and_refuse_unreadable_origins() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    let data: Value = serde_json::from_str(include_str!(
+        "../../../../crates/rpc/tests/data/psbt-combine-core-v31.1.json"
+    ))
+    .expect("independent combine fixtures");
+    for case in data["cases"].as_array().expect("combine cases") {
+        let name = case["name"].as_str().expect("name");
+        for source in case["sources"].as_array().expect("source PSBTs") {
+            core.rpc("decodepsbt", &json!([source]))
+                .expect("each source is independently valid");
+        }
+        let params = json!([case["sources"]]);
+        let reference = core.rpc("combinepsbt", &params).expect("Core combination");
+        assert_eq!(
+            reference, case["core_result"],
+            "{name}: recorded Core output"
+        );
+        let readable = core.rpc("decodepsbt", &json!([reference]));
+        let candidate = node.rpc("combinepsbt", &params);
+        if case["core_output_valid"] == true {
+            assert!(readable.is_ok(), "{name}: Core output is readable");
+        } else {
+            let expected = case["core_output_error"]["message"]
+                .as_str()
+                .expect("Core error");
+            assert!(
+                matches!(readable, Err(Error::Rpc { code: -22, message, .. }) if message == expected),
+                "{name}: Core output is unreadable"
+            );
+        }
+        if case["candidate_result"].is_string() {
+            let result = candidate.expect("readable combination");
+            assert_eq!(
+                result, case["candidate_result"],
+                "{name}: retained metadata"
+            );
+            core.rpc("decodepsbt", &json!([result]))
+                .expect("candidate output remains readable");
+        } else {
+            let expected = case
+                .get("candidate_error")
+                .unwrap_or_else(|| &case["core_output_error"]);
+            assert!(
+                matches!(candidate, Err(Error::Rpc { code, message, .. }) if Some(code) == expected["code"].as_i64() && Some(message.as_str()) == expected["message"].as_str()),
+                "{name}: preserve the refusal class and library-error precedence"
+            );
+        }
+    }
+}
+
 // The typed library canonically orders these sibling nodes. Preserve one typed
 // tree owner; prove the exact observed reorder commits to the same output using
 // independent Core descriptor derivation before comparing every other field.
