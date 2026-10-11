@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
@@ -100,6 +101,74 @@ pub(crate) fn params_array(params: &Value) -> Result<&sonic_rs::Array, RpcError>
     params
         .as_array()
         .ok_or(RpcError::InvalidParams("params must be an array"))
+}
+
+/// Binds a method's ordinary named arguments to its positional order.
+///
+/// Core's optional `args` prefix fills only the initial unnamed positions;
+/// explicit nulls still count as named arguments. Omitted trailing arguments
+/// stay omitted, and a non-array `args` value is consumed without effect.
+/// Method owners retain arity, type, default, and value validation.
+pub(crate) fn bind_named_params<'a>(
+    params: &'a Value,
+    names: &[&str],
+) -> Result<Cow<'a, Value>, RpcError> {
+    if params.is_array() {
+        return Ok(Cow::Borrowed(params));
+    }
+    if params.is_null() {
+        return Ok(Cow::Owned(Value::from(Vec::<Value>::new())));
+    }
+    let object = params
+        .as_object()
+        .ok_or(RpcError::InvalidParams("params must be an array or object"))?;
+    ensure_unique_named_params(object)?;
+
+    let mut values = Vec::new();
+    let mut first_named = None;
+    for (index, name) in names.iter().enumerate() {
+        if let Some(value) = params.get(*name) {
+            first_named.get_or_insert((index, *name));
+            values.resize(index, Value::new_null());
+            values.push(value.clone());
+        }
+    }
+    if let Some(args) = params.get("args").and_then(|value| value.as_array()) {
+        if let Some((index, name)) = first_named
+            && args.len() > index
+        {
+            return Err(RpcError::InvalidParameter(format!(
+                "Parameter {name} specified twice both as positional and named argument"
+            )));
+        }
+        let mut prefixed = args.to_vec();
+        prefixed.extend(values.into_iter().skip(args.len()));
+        values = prefixed;
+    }
+    if let Some(key) = object
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| *key != "args" && !names.contains(key))
+        .min()
+    {
+        return Err(RpcError::InvalidParameter(format!(
+            "Unknown named parameter {key}"
+        )));
+    }
+    Ok(Cow::Owned(Value::from(values)))
+}
+
+/// Validate original object keys before a method folds named-only options.
+pub(crate) fn ensure_unique_named_params(object: &sonic_rs::Object) -> Result<(), RpcError> {
+    let mut seen = hashbrown::HashSet::new();
+    for (key, _) in object {
+        if !seen.insert(key) {
+            return Err(RpcError::InvalidParameter(format!(
+                "Parameter {key} specified multiple times"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Returns the type name Bitcoin Core 31.1 spells for a JSON value.
@@ -382,5 +451,126 @@ mod registry_tests {
                 "z".repeat(64)
             )
         );
+    }
+
+    /// Core 31.1 transformNamedArguments: named holes, `args`, and collision
+    /// ordering are observable through the transaction RPC, not a new route.
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn named_transaction_arguments_follow_core() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!({"inputs": [], "outputs": {}, "locktime": 7}),
+            json!({"args": [[]], "outputs": {}, "locktime": 7}),
+            json!({"args": false, "inputs": [], "outputs": {}, "locktime": 7}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("createrawtransaction", &params)
+                    .expect("named create"),
+                json!("02000000000007000000")
+            );
+        }
+        let error = handler
+            .dispatch(
+                "createrawtransaction",
+                &json!({"args": [[], {}], "inputs": null, "extra": 1}),
+            )
+            .expect_err("named null still conflicts before unknown-name rejection");
+        assert_eq!(error.code(), -8);
+        assert_eq!(
+            error.to_string(),
+            "Parameter inputs specified twice both as positional and named argument"
+        );
+        let error = handler
+            .dispatch(
+                "decoderawtransaction",
+                &json!({"hexstring": "02000000000000000000", "extra": 1}),
+            )
+            .expect_err("unknown name");
+        assert_eq!(error.code(), -8);
+        assert_eq!(error.to_string(), "Unknown named parameter extra");
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn unsupported_creation_version_is_never_silently_ignored() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!([[], {}, 0, false, 1]),
+            json!({"args": [[], {}, 0, false, 1]}),
+            json!([[], {}, 0, false, null]),
+            json!({"args": [[], {}, 0, false, null]}),
+            json!([[], {}, 0, false, 1, null]),
+            json!({"args": [[], {}, 0, false, 1, null]}),
+        ] {
+            let error = handler
+                .dispatch("createrawtransaction", &params)
+                .expect_err("unsupported fifth argument must not produce version 2");
+            assert_eq!(error.code(), -32602);
+            assert_eq!(error.to_string(), "invalid params: too many parameters");
+        }
+        assert_eq!(
+            handler
+                .dispatch("createrawtransaction", &json!([[], {}, 0, false]))
+                .expect("supported four-argument creation"),
+            json!("02000000000000000000")
+        );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn named_binding_preserves_method_boundaries() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!({"options": {}}),
+            json!({"options": null}),
+            json!({"mempool_only": true}),
+            json!({"return_spending_tx": false, "args": []}),
+            json!({"mempool_only": true, "args": false}),
+        ] {
+            let error = handler
+                .dispatch("gettxspendingprevout", &params)
+                .expect_err("outputs omitted");
+            assert_eq!(error.code(), -32602);
+            assert_eq!(error.to_string(), "invalid params: outputs is required");
+        }
+        for params in [
+            json!({"outputs": null, "mempool_only": true}),
+            json!({"args": [null], "return_spending_tx": false}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("gettxspendingprevout", &params)
+                    .expect_err("explicit null is a type error")
+                    .code(),
+                -3
+            );
+        }
+        let error = handler
+            .dispatch("gettxspendingprevout", &json!({"options": {}, "extra": 0}))
+            .expect_err("name validation precedes missing outputs");
+        assert_eq!(error.code(), -8);
+        assert_eq!(error.to_string(), "Unknown named parameter extra");
+        // The prerequisite must not newly recognize parameters whose semantics
+        // are implemented in the later raw-transaction/PSBT conversion slice.
+        for (method, params, name) in [
+            (
+                "createrawtransaction",
+                json!({"inputs": [], "outputs": {}, "version": 1}),
+                "version",
+            ),
+            (
+                "decoderawtransaction",
+                json!({"hexstring": "zz", "iswitness": false}),
+                "iswitness",
+            ),
+        ] {
+            let error = handler
+                .dispatch(method, &params)
+                .expect_err("unsupported name");
+            assert_eq!(error.code(), -8);
+            assert_eq!(error.to_string(), format!("Unknown named parameter {name}"));
+        }
     }
 }

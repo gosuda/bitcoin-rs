@@ -24,17 +24,50 @@ The gateway registers these Core REST prefixes:
 | `/rest/chaininfo` | JSON | Chain summary |
 | `/rest/mempool/{info,contents}` | JSON | Mempool summary or contents |
 | `/rest/headers/{hash}` | JSON, hex, binary | Active-chain header walk |
-| `/rest/getutxos[/checkmempool]/{txid}-{vout}...` | JSON, hex, binary | URI-form UTXO lookup; at most 15 outpoints |
+| `/rest/getutxos[/checkmempool]/{txid}-{vout}...` | JSON, hex, binary | URI GET and binary/hex POST UTXO lookup; at most 15 outpoints |
 | `/rest/deploymentinfo[/{hash}]` | JSON | Deployment state |
 | `/rest/blockhashbyheight/{height}` | JSON, hex, binary | Block hash by height |
 | `/rest/spenttxouts/{hash}` | JSON, hex, binary | Explicitly unavailable: no undo data |
+
+## UTXO POST input
+
+`POST /rest/getutxos.bin` accepts a one-byte `checkmempool` boolean followed
+by a canonical CompactSize count and that many outpoints (32-byte transaction
+hash in consensus byte order, then little-endian `u32` output index).
+`POST /rest/getutxos.hex` accepts the same bytes as hex; ASCII whitespace is
+allowed between byte pairs. Input and response formats must match.
+
+Both forms share GET's lookup and response encoding. With `checkmempool`,
+outputs spent in the pool are absent and pool-created outputs are present
+with Core's REST height sentinel `2147483647`. Confirmed-only requests
+exclude chain transitions during the tip/coin capture; mixed requests retain
+the existing mempool generation checks. Locks are released before rendering.
+
+The maximum body is 2048 bytes including hex whitespace, enforced before
+HTTP body allocation/read. The decoded request contains at most 15
+outpoints. A zero-point serialized vector is valid. Empty requests,
+JSON bodies, mixed URI/body input, noncanonical counts, truncation, trailing
+bytes and excessive counts/bodies return HTTP 400. Oversized HTTP requests
+close the connection without reading the body. Empty-body POST with URI
+outpoints retains the URI request form. Other REST resources remain GET-only;
+REST remains opt-in, unauthenticated, and without CORS headers.
+
+This endpoint intentionally differs from Bitcoin Core 31.1 POST: its
+`src/rest.cpp` serializes the incoming string into a DataStream, prepending
+its length and shifting the boolean/count/outpoints. Canonical POST here is
+decoded directly. The process test compares complete response bytes with
+same-tip Core GET and independent wire fixtures, and explicitly verifies
+the released Core POST discrepancy. This is a declared deviation, not exact
+Core POST parity. Malformed bodies are rejected rather than reproducing
+Core's permissive handling of some hex/JSON/trailing inputs.
 
 ## Coherent views
 
 Handlers that read chain state capture the applied-tip publication
 (`ChainHandles::applied_view`, one `TipSnapshot` load) and assemble their
 responses from that view: `route_block` in its `json` arm, `route_getutxos`
-after its mempool pool read, plus headers, chaininfo, and deploymentinfo.
+inside its stable plain read or after its mixed mempool read, plus headers,
+chaininfo, and deploymentinfo.
 `/rest/tx/<hash>.hex` and `/rest/blockpart` return without it. A response
 never mixes a tip loaded from one commit with coins, mempool contents, or
 index rows from another.

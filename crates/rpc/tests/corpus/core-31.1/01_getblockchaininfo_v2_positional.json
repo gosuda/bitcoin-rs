@@ -80,10 +80,6 @@
           "size_on_disk": 293,
           "pruned": false,
           "warnings": [],
-          "automatic_pruning": null,
-          "prune_target_size": null,
-          "pruneheight": null,
-          "signet_challenge": null,
           "is_closed_for_recovery": false
         },
         "id": 1
@@ -127,10 +123,6 @@
             "size_on_disk"
           ],
           "gap_keys": [
-            "automatic_pruning",
-            "prune_target_size",
-            "pruneheight",
-            "signet_challenge",
             "is_closed_for_recovery"
           ]
         }
@@ -149,10 +141,6 @@
   },
   "gap_paths": [
     "body.result.difficulty",
-    "body.result.automatic_pruning",
-    "body.result.prune_target_size",
-    "body.result.pruneheight",
-    "body.result.signet_challenge",
     "body.result.is_closed_for_recovery",
     "headers.content-type"
   ]

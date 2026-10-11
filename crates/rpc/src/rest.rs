@@ -30,7 +30,11 @@ use bitcoin_rs_index::block_log::BlockRecord;
 const DEFAULT_HEADER_COUNT: u32 = 5;
 const MAX_HEADER_COUNT: u32 = 2_000;
 /// Core's `MAX_GETUTXOS_OUTPOINTS`.
-const MAX_GETUTXOS_OUTPOINTS: usize = 15;
+const MAX_GETUTXOS_OUTPOINTS: u8 = 15;
+/// Includes bounded whitespace in hex input; checked before HTTP body allocation.
+pub(crate) const MAX_GETUTXOS_BODY_BYTES: usize = 2_048;
+/// Core's `MEMPOOL_HEIGHT` sentinel in REST CCoin/JSON responses.
+const MEMPOOL_HEIGHT: u32 = 0x7fff_ffff;
 
 /// BIP141's maximum block weight also bounds any valid serialized block body.
 const MAX_REST_BLOCK_BODY_BYTES: usize = 4_000_000;
@@ -107,7 +111,7 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
         return route_headers(ctx, suffix, query);
     }
     if let Some(suffix) = path.strip_prefix("/rest/getutxos") {
-        return route_getutxos(ctx, suffix);
+        return route_getutxos(ctx, suffix, &[]);
     }
     if let Some(suffix) = path.strip_prefix("/rest/deploymentinfo") {
         return route_deploymentinfo(ctx, suffix);
@@ -119,6 +123,35 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
         return route_spent_txouts(suffix);
     }
     not_found()
+}
+
+/// The exact REST resource boundary admitted for POST (including bad formats,
+/// which the resource itself diagnoses). Other REST methods stay unavailable.
+pub(crate) fn getutxos_suffix(path: &str) -> Option<&str> {
+    path.strip_prefix("/rest/getutxos")
+        .filter(|suffix| suffix.is_empty() || suffix.starts_with(['/', '.']))
+}
+
+/// Routes a bounded POST to the getutxos resource. URI input remains accepted
+/// with an empty body; nonempty input is exclusively binary or hex.
+#[must_use]
+pub fn route_post(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) -> Response {
+    if !enabled {
+        return not_found();
+    }
+    let Some(suffix) = getutxos_suffix(path) else {
+        return not_found();
+    };
+    if body.len() > MAX_GETUTXOS_BODY_BYTES {
+        return getutxos_body_too_large();
+    }
+    route_getutxos(ctx, suffix, body)
+}
+
+pub(crate) fn getutxos_body_too_large() -> Response {
+    bad_request(format!(
+        "getutxos request body exceeds {MAX_GETUTXOS_BODY_BYTES} bytes"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,18 +415,28 @@ fn arm_capture_hook(hook: impl FnOnce() + 'static) {
 
 /// Core `/rest/getutxos[/checkmempool]/<txid>-<n>....{bin,hex,json}`.
 ///
-/// Only the URI-scheme input form is implemented (Core's raw-body form is not
-/// served). Responses follow Core's BIP64-ish shape.
+/// URI and canonical bool/vector body input share the same lookup. Core 31.1
+/// incorrectly prepends a serialized-string length when decoding POST; this
+/// route intentionally decodes the supplied bytes directly (registry deviation).
 ///
 /// PRE: parsing and format resolution have succeeded.
 /// POST: the `checkmempool` branch answers only while the gateway's chain
 /// generation is stable across the whole read; an unstable or moved
 /// generation returns the retry response instead of a body.
-/// INVARIANT: the plain branch never reads the generation and acquires no
-/// new lock.
-fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
+/// INVARIANT: plain UTXO reads exclude chain transitions without depending on
+/// mempool generation. Mixed reads retain the existing generation fence.
+fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
     let (path, format) = split_format(suffix);
-    let (check_mempool, outpoints) = match parse_getutxos_outpoints(path) {
+    let request = if body.is_empty() {
+        parse_getutxos_outpoints(path)
+    } else if !path.is_empty() {
+        Err(bad_request(
+            "Combination of URI scheme inputs and raw post data is not allowed",
+        ))
+    } else {
+        parse_getutxos_body(format, body)
+    };
+    let (check_mempool, outpoints) = match request {
         Ok(request) => request,
         Err(response) => return response,
     };
@@ -411,34 +454,44 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     } else {
         None
     };
-    // The pool read fence is taken first: a chain transition between the
-    // tip capture and the UTXO reads could otherwise pair UTXOs committed
-    // under tip B with the height and hash of tip A.
-    let pool = ctx.mempool.gateway.read();
+    // A pool read cannot exclude a chain change that already began: the
+    // gateway releases its writer after setting the odd generation. Plain
+    // reads therefore use the existing transition read role, while mixed
+    // reads use the checked generation and retain one pool snapshot.
+    let transition = (!check_mempool).then(|| ctx.chain.chain_transition.lock());
+    let pool = check_mempool.then(|| ctx.mempool.gateway.read());
     // Height and hash describe one publication, so a response cannot pair one
     // block's height with another block's hash.
     let view = ctx.chain.applied_view();
     release_applied_capture();
-    let active_height = view.height();
-    let active_hash = view.hash(ctx.chain.chain_network);
 
-    let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
     let mut outs = Vec::with_capacity(outpoints.len());
     let mut hits = Vec::with_capacity(outpoints.len());
     for (txid, vout) in &outpoints {
         let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
-        let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);
-        let live = if mempool_spent {
+        let mempool_spent = pool
+            .as_ref()
+            .is_some_and(|pool| pool.is_outpoint_spent(&outpoint));
+        let coin = if mempool_spent {
             None
+        } else if let Some(entry) = pool.as_ref().and_then(|pool| pool.entry_by_txid(txid)) {
+            usize::try_from(*vout)
+                .ok()
+                .and_then(|index| entry.tx.outputs.get(index))
+                .map(|output| (MEMPOOL_HEIGHT, output.clone()))
         } else {
-            ctx.chain.utxo.get_entry(&outpoint)
+            ctx.chain
+                .utxo
+                .get_entry(&outpoint)
+                .map(|entry| (entry.height, entry.txout))
         };
-        hits.push(live.is_some());
-        if let Some(entry) = live {
-            outs.push((entry.height, entry.txout));
+        hits.push(coin.is_some());
+        if let Some(coin) = coin {
+            outs.push(coin);
         }
     }
     drop(pool);
+    drop(transition);
     // The end check compares for exact equality only; a generation that
     // moved while the reads ran discards the assembled results and asks the
     // client to retry.
@@ -446,6 +499,19 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     {
         return service_unavailable("chain generation is odd; retry");
     }
+    getutxos_response(ctx.chain.chain_network, &view, format, &hits, &outs)
+}
+
+fn getutxos_response(
+    network: bitcoin_rs_primitives::Network,
+    view: &AppliedView,
+    format: &str,
+    hits: &[bool],
+    outs: &[(u32, TxOut)],
+) -> Response {
+    let active_height = view.height();
+    let active_hash = view.hash(network);
+    let mut bitmap = vec![0_u8; hits.len().div_ceil(8)];
     // Bitmap packs the least-significant hit bit first per byte, matching Core.
     for (index, hit) in hits.iter().enumerate() {
         if *hit {
@@ -466,7 +532,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
                     json!({
                         "height": height,
                         "value": tx_render::btc_amount_json(txout.value.to_sat()),
-                        "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, ctx.chain.chain_network)
+                        "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, network)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -484,14 +550,14 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
             "text/plain",
             format!(
                 "{}\n",
-                serialize_getutxos_bin(active_height, active_hash, &bitmap, &outs)
+                serialize_getutxos_bin(active_height, active_hash, &bitmap, outs)
                     .to_lower_hex_string()
             )
             .into_bytes(),
         ),
         "bin" => binary_response(
             "application/octet-stream",
-            &serialize_getutxos_bin(active_height, active_hash, &bitmap, &outs),
+            &serialize_getutxos_bin(active_height, active_hash, &bitmap, outs),
         ),
         _ => format_not_found(available_formats()),
     }
@@ -690,6 +756,56 @@ fn invalid_count(value: &str) -> Response {
 // Getutxos helpers
 // ---------------------------------------------------------------------------
 
+/// Parses at most fifteen outpoints without allocating from a wire count.
+/// Full consumption is required, including for a zero-length vector.
+fn parse_getutxos_body(
+    format: Option<&str>,
+    body: &[u8],
+) -> Result<(bool, Vec<(Txid, u32)>), Response> {
+    use bitcoin::consensus::Decodable as _;
+    use bitcoin::hashes::Hash as _;
+
+    let decoded;
+    let bytes = match format {
+        Some("bin") => body,
+        Some("hex") => {
+            let text = core::str::from_utf8(body).map_err(|_| bad_request("Parse error"))?;
+            let mut bytes = Vec::with_capacity(body.len() / 2);
+            for part in text.split_ascii_whitespace() {
+                bytes.extend(Vec::<u8>::from_hex(part).map_err(|_| bad_request("Parse error"))?);
+            }
+            decoded = bytes;
+            decoded.as_slice()
+        }
+        Some("json") => return Err(bad_request("JSON request bodies are not supported")),
+        _ => return Err(format_not_found(available_formats())),
+    };
+    let Some((&flag, mut remaining)) = bytes.split_first() else {
+        return Err(bad_request("Parse error"));
+    };
+    let count = bitcoin::VarInt::consensus_decode(&mut remaining)
+        .map_err(|_| bad_request("Parse error"))?
+        .0;
+    if count > u64::from(MAX_GETUTXOS_OUTPOINTS) {
+        return Err(bad_request(format!(
+            "Error: max outpoints exceeded (max: {MAX_GETUTXOS_OUTPOINTS}, tried: {count})"
+        )));
+    }
+    let mut points = Vec::new();
+    for _ in 0..count {
+        let point = bitcoin::OutPoint::consensus_decode(&mut remaining)
+            .map_err(|_| bad_request("Parse error"))?;
+        points.push((
+            Txid::from(Hash256::from_le_bytes(point.txid.as_byte_array())),
+            point.vout,
+        ));
+    }
+    if !remaining.is_empty() {
+        return Err(bad_request("Parse error"));
+    }
+    Ok((flag != 0, points))
+}
+
 fn parse_getutxos_outpoints(path: &str) -> Result<(bool, Vec<(Txid, u32)>), Response> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
@@ -714,7 +830,7 @@ fn parse_getutxos_outpoints(path: &str) -> Result<(bool, Vec<(Txid, u32)>), Resp
     if outpoints.is_empty() {
         return Err(bad_request("Error: empty request"));
     }
-    if outpoints.len() > MAX_GETUTXOS_OUTPOINTS {
+    if outpoints.len() > usize::from(MAX_GETUTXOS_OUTPOINTS) {
         return Err(bad_request(format!(
             "Error: max outpoints exceeded (max: {MAX_GETUTXOS_OUTPOINTS}, tried: {})",
             outpoints.len()
@@ -1698,12 +1814,22 @@ mod tests {
     }
 
     #[test]
-    fn chaininfo_json_uses_enforcer_field_names() {
+    fn chaininfo_json_uses_core_field_names_and_omits_absent_options() {
         let ctx = Arc::new(Context::new());
         let response = route(&ctx, "/rest/chaininfo.json", "", true);
         let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
         for field in ["chain", "blocks", "headers", "bestblockhash"] {
             assert!(value.get(field).is_some(), "{field}: {value:?}");
+        }
+        // Core 31.1 rpc/blockchain.cpp only inserts pruning/signet facts
+        // when applicable; an unpruned mainnet context has none of them.
+        for field in [
+            "automatic_pruning",
+            "prune_target_size",
+            "pruneheight",
+            "signet_challenge",
+        ] {
+            assert!(value.get(field).is_none(), "{field}: {value:?}");
         }
     }
 
@@ -1721,6 +1847,182 @@ mod tests {
         assert_eq!(value.get("bitmap").and_then(Value::as_str), Some("0"));
         let utxos = value.get("utxos").expect("utxos field");
         assert!(utxos.as_array().expect("utxos array").is_empty());
+    }
+
+    #[test]
+    fn getutxos_post_canonical_wire_and_input_boundaries() {
+        let ctx = Arc::new(Context::new());
+        // Independent BIP64 wire fixture: nonzero bool, one little-endian
+        // txid (display 00..01), vout 0. This outpoint does not exist.
+        let mut wire = vec![2, 1, 1];
+        wire.resize(38, 0);
+        let get = route(&ctx, &GETUTXOS_JSON.replace(".json", ".bin"), "", true);
+        for (format, body) in [
+            ("bin", wire.clone()),
+            ("hex", wire.to_lower_hex_string().into_bytes()),
+        ] {
+            let post = route_post(&ctx, &format!("/rest/getutxos.{format}"), &body, true);
+            assert_eq!(post.status, 200);
+            let bytes = if format == "hex" {
+                Vec::<u8>::from_hex(core::str::from_utf8(&post.body).expect("hex").trim())
+                    .expect("response bytes")
+            } else {
+                post.body
+            };
+            assert_eq!(bytes, get.body);
+            assert_eq!(
+                &bytes[36..],
+                &[1, 0, 0],
+                "bitmap length, missing bit, zero coins"
+            );
+        }
+        let uri = GETUTXOS_JSON.replace(".json", ".bin");
+        assert_eq!(route_post(&ctx, &uri, &[], true).body, get.body);
+        assert_eq!(route_post(&ctx, &uri, &[0, 0], true).status, 400);
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.bin", b"0000", true).status,
+            400
+        );
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.hex", &[0, 0], true).status,
+            400
+        );
+        let mut fifteen = vec![0, 15];
+        for _ in 0..15 {
+            fifteen.extend_from_slice(&wire[2..]);
+        }
+        let response = route_post(&ctx, "/rest/getutxos.bin", &fifteen, true);
+        assert_eq!(response.status, 200);
+        assert_eq!(&response.body[36..], &[2, 0, 0, 0]);
+        for flag in [0, 1] {
+            let response = route_post(&ctx, "/rest/getutxos.bin", &[flag, 0], true);
+            assert_eq!(response.status, 200);
+            assert_eq!(&response.body[36..], &[0, 0]);
+        }
+    }
+
+    #[test]
+    fn getutxos_post_rejects_malformed_and_oversized_inputs() {
+        let ctx = Arc::new(Context::new());
+        let mut wire = vec![1, 1, 1];
+        wire.resize(38, 0);
+        let malformed: &[&[u8]] = &[
+            &[0],
+            &[0, 1],
+            &[0, 0, 0],
+            &[0, 16],
+            &[0, 253, 1, 0],
+            &[0, 254, 0, 0, 0, 0],
+            &[0, 255, 255, 255, 255, 255, 255, 255, 255, 255],
+            &wire[..37],
+        ];
+        for body in malformed {
+            assert_eq!(
+                route_post(&ctx, "/rest/getutxos.bin", body, true).status,
+                400,
+                "{body:?}"
+            );
+        }
+        for body in [b"0".as_slice(), b"gg", b"0 0", b"  ", &[255]] {
+            assert_eq!(
+                route_post(&ctx, "/rest/getutxos.hex", body, true).status,
+                400
+            );
+        }
+        for suffix in ["/checkmempool.bin", "/00-0.bin", "/checkmempool.json"] {
+            assert_eq!(
+                route_post(&ctx, &format!("/rest/getutxos{suffix}"), &[0, 0], true).status,
+                400
+            );
+        }
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.json", b"{}", true).status,
+            400
+        );
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos", &[0, 0], true).status,
+            404
+        );
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.bin", &[], true).status,
+            400
+        );
+        let mut at_limit = b"00 00".to_vec();
+        at_limit.resize(MAX_GETUTXOS_BODY_BYTES, b' ');
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.hex", &at_limit, true).status,
+            200
+        );
+        at_limit.push(b' ');
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.hex", &at_limit, true).status,
+            400
+        );
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.hex", &at_limit, false).status,
+            404
+        );
+    }
+
+    #[test]
+    fn getutxos_post_uses_the_existing_applied_view_and_generation_fence() {
+        let ctx = Arc::new(Context::new());
+        let a = tip_snapshot(10, 0xaa, 100);
+        ctx.chain.applied_tip.store(Some(Arc::clone(&a)));
+        let publisher = Arc::clone(&ctx);
+        arm_capture_hook(move || {
+            publisher
+                .chain
+                .applied_tip
+                .store(Some(tip_snapshot(20, 0xbb, 200)));
+        });
+        let response = route_post(&ctx, "/rest/getutxos.bin", &[0, 0], true);
+        assert_eq!(response.status, 200);
+        assert_eq!(&response.body[..4], &10_u32.to_le_bytes());
+        assert_eq!(&response.body[4..36], &a.hash.to_le_bytes());
+        ctx.mempool.gateway.force_chain_generation(3);
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.bin", &[1, 0], true).status,
+            503
+        );
+        ctx.mempool.gateway.force_chain_generation(4);
+        let publisher = Arc::clone(&ctx);
+        arm_capture_hook(move || publisher.mempool.gateway.force_chain_generation(6));
+        assert_eq!(
+            route_post(&ctx, "/rest/getutxos.bin", &[1, 0], true).status,
+            503
+        );
+    }
+
+    #[test]
+    fn getutxos_plain_read_waits_for_the_chain_transition() {
+        let ctx = Arc::new(Context::new());
+        ctx.chain
+            .applied_tip
+            .store(Some(tip_snapshot(10, 0xaa, 100)));
+        let transition = ctx.chain.chain_transition.lock();
+        let worker = Arc::clone(&ctx);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            tx.send(route_post(&worker, "/rest/getutxos.bin", &[0, 0], true))
+                .expect("response");
+        });
+        started_rx.recv().expect("worker started");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        let committed = tip_snapshot(20, 0xbb, 200);
+        ctx.chain.applied_tip.store(Some(Arc::clone(&committed)));
+        drop(transition);
+        let response = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("settled response");
+        join.join().expect("worker");
+        assert_eq!(&response.body[..4], &20_u32.to_le_bytes());
+        assert_eq!(&response.body[4..36], &committed.hash.to_le_bytes());
     }
 
     /// An applied-tip publication with a distinctive height, hash, and count.

@@ -78,7 +78,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .map(|source| source.rollback_warnings())
             .unwrap_or_default(),
     };
-    let mut response = typed_to_sonic(&response)?;
+    let mut response = typed_to_sonic_omitting_nulls(&response)?;
     if let Some(object) = response.as_object_mut() {
         object.insert(
             "is_closed_for_recovery",

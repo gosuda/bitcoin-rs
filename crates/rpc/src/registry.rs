@@ -82,7 +82,7 @@ macro_rules! declare_rows {
 
 declare_rows! {
     // -- JSON-RPC: shipped methods (registration order) --------------
-    "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional prune and signet fields serialize as null rather than omitted (automatic_pruning, prune_target_size, pruneheight, signet_challenge). Tracked in #160.", "0.4.0", Some(chain::getblockchaininfo);
+    "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);
     "getchaintips", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintips);
     "getchaintxstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintxstats);
@@ -105,12 +105,12 @@ declare_rows! {
     "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported.", "0.4.0", Some(tx::sendrawtransaction);
     "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported.", "0.4.0", Some(tx::testmempoolaccept);
     "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction);
-    "createrawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::createrawtransaction);
+    "createrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface.", "0.4.0", Some(tx::createrawtransaction);
     "combinepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::combinepsbt);
     "finalizepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::finalizepsbt);
     "getmempoolinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md.", "0.4.0", Some(mempool::getmempoolinfo);
     "getmempoolentry", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolentry);
-    "gettxspendingprevout", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Mempool lookup and options follow Core 31.1 without txospenderindex. Missing or extra argument counts return local JSON-RPC shape errors rather than Core help text. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot.", "0.11.0", Some(mempool::gettxspendingprevout);
+    "gettxspendingprevout", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Mempool lookup and options follow Core 31.1 without txospenderindex. After named binding, missing outputs and excess positional arguments use local -32602 shape errors. Core uses -1 help for no arguments/excess arity but -3 for an outputs hole created by named options; explicit null matches Core -3. Name and collision errors retain Core precedence. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot.", "0.11.0", Some(mempool::gettxspendingprevout);
     "getrawmempool", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool);
     "getmempoolancestors", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolancestors);
     "getmempooldescendants", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempooldescendants);
@@ -151,6 +151,7 @@ declare_rows! {
 
     // -- JSON-RPC: additional Core blockchain/control surfaces ------
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
+    "getblockfilter", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "BIP157/158 compact block filters and the filter index are not implemented.", "n/a", None;
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
     "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs.", "0.12.0", Some(chain::getchainstates);
     "getdeploymentinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists).", "n/a", None;
@@ -255,7 +256,7 @@ declare_rows! {
     "/rest/chaininfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/mempool/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/headers/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs).", "0.4.0", None;
-    "/rest/getutxos", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs).", "0.4.0", None;
+    "/rest/getutxos", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "GET and bounded canonical binary/hex POST share UTXO and mempool lookup. Intentionally corrects Core 31.1 POST string-length-prefix decoding; rejects mixed inputs, JSON bodies and trailing data. POST limit: 2048 bytes, 15 outpoints.", "0.4.0", None;
     "/rest/deploymentinfo/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/deploymentinfo", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
