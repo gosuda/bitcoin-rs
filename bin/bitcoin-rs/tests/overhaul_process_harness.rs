@@ -152,12 +152,8 @@ fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
     }
 }
 
-/// API-02: ordinary named arguments share Core's positional binding rules.
-#[test]
-fn named_rpc_arguments_follow_core() {
-    let mut core = start(Kind::Core);
-    let mut node = start(Kind::BitcoinRs);
-    for (method, params) in [
+fn named_rpc_cases() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
         (
             "createrawtransaction",
             json!({"inputs": [], "outputs": {}, "locktime": 7}),
@@ -178,6 +174,18 @@ fn named_rpc_arguments_follow_core() {
             "createrawtransaction",
             json!({"inputs": [], "outputs": {}, "extra": 1}),
         ),
+        (
+            "createrawtransaction",
+            json!({"args": [[], {}, 0, false, 1], "inputs": null, "extra": 1}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"args": [[], {}, 0, false, 1], "replaceable": null}),
+        ),
+        (
+            "createrawtransaction",
+            json!({"args": [[], {}, 0, false, 1], "extra": 1}),
+        ),
         ("decoderawtransaction", json!({"hexstring": "zz"})),
         ("decoderawtransaction", json!({"args": ["zz"]})),
         ("gettxspendingprevout", json!({"outputs": []})),
@@ -197,12 +205,53 @@ fn named_rpc_arguments_follow_core() {
             "gettxspendingprevout",
             json!({"args": [[], {}], "outputs": null, "extra": 1}),
         ),
-    ] {
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "outputs": []}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "outputs": null}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "options": {}}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "options": null}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "mempool_only": true}),
+        ),
+        (
+            "gettxspendingprevout",
+            json!({"args": [[], {}, false], "unknown": 1}),
+        ),
+    ]
+}
+
+/// API-02: ordinary named arguments share Core's positional binding rules.
+#[test]
+fn named_rpc_arguments_follow_core() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    for (method, params) in named_rpc_cases() {
         let request = json!({"jsonrpc": "2.0", "id": "named", "method": method, "params": params});
         let reference = core.rpc_raw(&request).expect("Core named request");
         let candidate = node.rpc_raw(&request).expect("candidate named request");
         compare_reply(&request.to_string(), &reference, &candidate)
             .expect("named binding and method errors match Core");
+    }
+    // Arity is method-owned only after name/collision binding succeeds.
+    // The existing local compact parameter error is explicitly a deviation.
+    for params in [json!([[], {}, false]), json!({"args": [[], {}, false]})] {
+        let request = json!({"jsonrpc": "2.0", "id": "arity", "method": "gettxspendingprevout", "params": params});
+        let reference = core.rpc_raw(&request).expect("Core arity control");
+        let candidate = node.rpc_raw(&request).expect("candidate arity control");
+        assert_eq!(reference["error"]["code"], json!(-1));
+        assert_eq!(candidate["error"]["code"], json!(-32602));
     }
     // Preserve repeated JSON keys until the binder rejects them. Building
     // these requests through serde_json::Value would discard that evidence.
@@ -225,6 +274,84 @@ fn named_rpc_arguments_follow_core() {
     }
     core.stop().expect("core stop");
     node.stop().expect("node stop");
+}
+
+/// API-02/API-32: unsupported creation and missing-output deviations are explicit.
+#[test]
+fn named_rpc_review_boundaries_are_explicit() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    let request = json!({"jsonrpc": "2.0", "id": "default-version", "method": "createrawtransaction", "params": [[], {}, 0, false]});
+    let reference = core.rpc_raw(&request).expect("Core default creation");
+    let candidate = node.rpc_raw(&request).expect("native default creation");
+    assert_eq!(reference["result"], json!("02000000000000000000"));
+    compare_reply(&request.to_string(), &reference, &candidate)
+        .expect("supported four-argument creation matches Core");
+
+    // Until the constructor implements version, every supplied form refuses;
+    // Core must actually serialize non-default version 1 for this discriminator.
+    for (params, code, message) in [
+        (
+            json!([[], {}, 0, false, 1]),
+            -32602,
+            "invalid params: too many parameters",
+        ),
+        (
+            json!({"args": [[], {}, 0, false, 1]}),
+            -32602,
+            "invalid params: too many parameters",
+        ),
+        (
+            json!({"inputs": [], "outputs": {}, "locktime": 0, "replaceable": false, "version": 1}),
+            -8,
+            "Unknown named parameter version",
+        ),
+    ] {
+        let request = json!({"jsonrpc": "2.0", "id": "explicit-version", "method": "createrawtransaction", "params": params});
+        let reference = core.rpc_raw(&request).expect("Core explicit version");
+        let candidate = node.rpc_raw(&request).expect("native unsupported version");
+        assert_eq!(reference["result"], json!("01000000000000000000"));
+        assert_eq!(
+            candidate["error"],
+            json!({"code": code, "message": message})
+        );
+    }
+
+    let null_outputs = json!({
+        "code": -3,
+        "message": "Wrong type passed:\n{\n    \"Position 1 (outputs)\": \"JSON value of type null is not of expected type array\"\n}"
+    });
+    for params in [
+        json!({"mempool_only": true}),
+        json!({"options": {}}),
+        json!({"options": null}),
+        json!({"return_spending_tx": false, "args": []}),
+        json!({"mempool_only": true, "args": false}),
+    ] {
+        let request = json!({"jsonrpc": "2.0", "id": "omitted-outputs", "method": "gettxspendingprevout", "params": params});
+        let reference = core.rpc_raw(&request).expect("Core omitted outputs");
+        let candidate = node.rpc_raw(&request).expect("native omitted outputs");
+        assert_eq!(reference["error"], null_outputs);
+        assert_eq!(
+            candidate["error"],
+            json!({"code": -32602, "message": "invalid params: outputs is required"})
+        );
+    }
+    for params in [
+        json!({"outputs": null}),
+        json!({"outputs": null, "mempool_only": true}),
+        json!({"args": [null], "return_spending_tx": false}),
+    ] {
+        let request = json!({"jsonrpc": "2.0", "id": "null-outputs", "method": "gettxspendingprevout", "params": params});
+        let reference = core.rpc_raw(&request).expect("Core explicit null outputs");
+        let candidate = node
+            .rpc_raw(&request)
+            .expect("native explicit null outputs");
+        assert_eq!(reference["error"], null_outputs);
+        assert_eq!(candidate["error"], null_outputs);
+    }
+    core.stop().expect("Core stop");
+    node.stop().expect("native stop");
 }
 
 /// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.

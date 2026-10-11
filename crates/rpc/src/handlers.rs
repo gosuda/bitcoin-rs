@@ -495,6 +495,32 @@ mod registry_tests {
 
     #[test]
     #[expect(clippy::expect_used)]
+    fn unsupported_creation_version_is_never_silently_ignored() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!([[], {}, 0, false, 1]),
+            json!({"args": [[], {}, 0, false, 1]}),
+            json!([[], {}, 0, false, null]),
+            json!({"args": [[], {}, 0, false, null]}),
+            json!([[], {}, 0, false, 1, null]),
+            json!({"args": [[], {}, 0, false, 1, null]}),
+        ] {
+            let error = handler
+                .dispatch("createrawtransaction", &params)
+                .expect_err("unsupported fifth argument must not produce version 2");
+            assert_eq!(error.code(), -32602);
+            assert_eq!(error.to_string(), "invalid params: too many parameters");
+        }
+        assert_eq!(
+            handler
+                .dispatch("createrawtransaction", &json!([[], {}, 0, false]))
+                .expect("supported four-argument creation"),
+            json!("02000000000000000000")
+        );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
     fn named_binding_preserves_method_boundaries() {
         let handler = Handler::new(Arc::new(Context::new()));
         for params in [

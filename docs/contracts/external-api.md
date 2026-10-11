@@ -47,6 +47,12 @@
   (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
   (not connected), `-10` (initial download), `-22` (deserialization),
   and `-25` plus `-26` (submission).
+- `createrawtransaction` currently consumes only `inputs`, `outputs`,
+  `locktime` and `replaceable`: transaction version stays 2 and replaceable
+  defaults to false. A named `version` is unknown (`-8`); a supplied fifth
+  positional or `args`-prefix entry, including null, is refused (`-32602`).
+  Duplicate, collision and unknown-name validation precedes this method-owned
+  arity check. The registry declares this transaction-creation deviation.
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision.
 - The node ships no wallet and holds no private key material. Methods
@@ -94,6 +100,26 @@
   path return 404. Malformed parameters return 400. A well-formed but
   unknown block hash returns an empty 200, matching the pinned Core
   behavior.
+
+- `/rest/getutxos` GET URI input and POST binary/hex input share one
+  authoritative UTXO/mempool lookup. POST reads a bool and canonical
+  CompactSize outpoint vector directly, limited to 15 outpoints and a
+  2048-byte wire body before allocation. JSON bodies, mixed input sources,
+  malformed/trailing data and oversized requests fail with HTTP 400.
+  Empty serialized vectors are valid; URI requests still require outpoints.
+- Plain coin reads capture tip and coins under the existing stable chain
+  read role. Mixed reads retain one pool view and reject a changed/odd
+  chain generation. Rendering happens after guards are dropped. Pool-created
+  outputs use Core REST's `MEMPOOL_HEIGHT` value, 2147483647.
+- The canonical POST decoder intentionally corrects Core 31.1's incoming
+  string-length-prefix bug; the registry retains `Deviation`. Independent
+  wire fixtures and same-tip Core GET establish intended response bytes;
+  Core POST's measured different answer is an explicit known gap.
+- Evidence: `rest::tests::getutxos_post_canonical_wire_and_input_boundaries`,
+  `getutxos_post_uses_the_existing_applied_view_and_generation_fence`,
+  `getutxos_plain_read_waits_for_the_chain_transition`,
+  `server::tests::getutxos_post_preserves_http_security_and_limits`, and
+  `bin/bitcoin-rs/tests/rest_getutxos_process.rs`.
 
 ### `API-04`: ZMQ notification contract
 
@@ -567,9 +593,15 @@ owned by [wallet-facing.md](wallet-facing.md).
   `-1` unavailable-txospenderindex error. An inconsistent spending index
   becomes an internal error, never an unspent result.
 - Empty output lists, strict object keys, txid syntax, and signed 32-bit
-  nonnegative vout validation follow the pinned reference. Missing or extra
-  argument counts retain local JSON-RPC `-32602` shape errors instead of
-  Core's `-1` help text; the registry declares this deviation.
+  nonnegative vout validation follow the pinned reference. After successful
+  named-argument binding, missing outputs and excess positional arguments
+  retain local JSON-RPC `-32602` shape errors. Core returns `-1` help for no
+  arguments or excess arity, but returns a `-3` null type error when named
+  options create an omitted outputs hole. Native keeps its missing-outputs
+  error for that hole; explicitly supplied null matches Core's `-3` type error.
+  Duplicate/unknown names, option conflicts and positional/named collisions
+  retain Core's earlier `-8` errors, including an overlong `args` prefix. The
+  registry declares these method-validation deviations.
 - The HTTP request-body limit bounds externally supplied queries; this
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.
