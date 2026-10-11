@@ -3326,6 +3326,7 @@ fn fanout_eligibility_requires_block_service_flags() {
             addr,
             version: 70_016,
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             services,

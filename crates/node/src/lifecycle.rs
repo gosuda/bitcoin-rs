@@ -622,7 +622,8 @@ pub(crate) fn start_node(
     let (relay_queue, relay_rx) =
         bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
     guard.services.tx_relay = Some(bitcoin_rs_p2p::spawn_tx_relay_worker(
-        bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table()),
+        bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table())
+            .with_ibd(state.ibd(), state.config().network),
         relay_rx,
         Arc::downgrade(&gateway),
         state.shutdown_reader(),

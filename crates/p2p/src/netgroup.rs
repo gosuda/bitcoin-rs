@@ -61,6 +61,25 @@ pub(crate) fn linked_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(bytes))
 }
 
+/// Core's `GetNetClass` for the ordinary IP transports supported here. This
+/// intentionally ignores remote prefixes and `ASMap`; those are netgroups.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum NetworkClass {
+    Unroutable,
+    Ipv4,
+    Ipv6,
+}
+
+pub(crate) fn network_class(ip: IpAddr) -> NetworkClass {
+    if !routable(ip) {
+        NetworkClass::Unroutable
+    } else if linked_ipv4(ip).is_some() {
+        NetworkClass::Ipv4
+    } else {
+        NetworkClass::Ipv6
+    }
+}
+
 fn prefix_group(ip: IpAddr) -> Vec<u8> {
     let ip = canonical_ip(ip);
     if !routable(ip) {
@@ -419,6 +438,42 @@ mod tests {
             interpret(LINKED_ASMAP, "9.9.9.9".parse().expect("IPv4")),
             Some(19281)
         );
+    }
+
+    #[test]
+    fn supported_ip_network_classes_follow_core_getnetclass() {
+        // Independent classification cases from Core v31.1
+        // 9be056a8a72b624dae9623b2f7bded92c2a21c91 netaddress.cpp:
+        // IsRoutable, HasLinkedIPv4 and GetNetClass. These are grouping-only
+        // fixtures, not permission to dial otherwise unsupported addresses.
+        for (address, expected) in [
+            ("127.0.0.1", NetworkClass::Unroutable),
+            ("::1", NetworkClass::Unroutable),
+            ("::ffff:127.0.0.1", NetworkClass::Unroutable),
+            ("10.0.0.1", NetworkClass::Unroutable),
+            ("fe80::1", NetworkClass::Unroutable),
+            ("fc00::1", NetworkClass::Unroutable),
+            ("2001:10::1", NetworkClass::Unroutable),
+            ("2001:20::1", NetworkClass::Unroutable),
+            ("8.8.8.8", NetworkClass::Ipv4),
+            ("::ffff:8.8.8.8", NetworkClass::Ipv4),
+            ("::ffff:0:808:808", NetworkClass::Ipv4),
+            ("64:ff9b::808:808", NetworkClass::Ipv4),
+            ("2002:0808:0808::1", NetworkClass::Ipv4),
+            ("2001:0:0:0:0:0:f7f7:f7f7", NetworkClass::Ipv4),
+            // Linked IPv4 inherits outer routability, unlike mapped IPv4.
+            ("64:ff9b::7f00:1", NetworkClass::Ipv4),
+            ("2001:4860:4860::8888", NetworkClass::Ipv6),
+            ("64:ff9b:1::808:808", NetworkClass::Ipv6),
+            // Core excludes FE80::/64, not the whole FE80::/10 range.
+            ("fe80:1::1", NetworkClass::Ipv6),
+        ] {
+            assert_eq!(
+                network_class(address.parse().expect("Core IP case")),
+                expected,
+                "{address}"
+            );
+        }
     }
 
     proptest::proptest! {

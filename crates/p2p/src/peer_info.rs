@@ -46,6 +46,8 @@ pub struct PeerInfo {
     /// Whether this connection requested BIP339 witness-id announcements.
     /// Published with the completed handshake; never inherited by a replacement.
     pub wtxid_relay: bool,
+    /// Whether the remote version requested transaction announcements.
+    pub relay_transactions: bool,
     /// Whether this connection announced BIP152 compact-block relay (sent a
     /// `sendcmpct` with a known version). Published `false` at handshake and
     /// raised by the listener when the peer's post-verack announcement
@@ -120,6 +122,7 @@ impl PeerInfo {
             addr,
             version: version.version,
             wtxid_relay: false,
+            relay_transactions: version.relay,
             compact_block_relay: false,
             send_headers: false,
             services: version.services.to_u64(),

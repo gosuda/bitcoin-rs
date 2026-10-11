@@ -76,6 +76,7 @@ impl Peer {
             start_height,
         );
         version.version = 70016;
+        version.relay = true;
         peer.send(NetworkMessage::Version(version), deadline)?;
         let mut saw_version = false;
         for _ in 0..64 {

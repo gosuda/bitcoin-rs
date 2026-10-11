@@ -78,7 +78,7 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
 | `getaddr` | served | At most 32 retained IP addresses, once per full-relay connection. Book-disabled test/embedding connections remain silent. |
 | `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. |
-| `feefilter` | ignored | BIP133. We never send one and do not enforce a peer's. Core filters relay by it. |
+| `feefilter` | applied | BIP133. Valid nonnegative thresholds through `MAX_MONEY` filter queued outbound transaction inventory for that connection; invalid values are ignored. The threshold never changes admission. Full-relay connections at protocol 70013+ receive rounded effective local floors on randomized refreshes. |
 | `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. Inbound announcements also publish compact-fetch eligibility. |
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
 | `getblocktxn` | served | BIP152. A stored, non-invalid block within 10 of the applied tip is answered with `blocktxn`, including a block that became stale after its compact announcement. As in Core, this shallow path requires body availability but does not apply the inventory stale-age filter. A deeper request uses full witness-bearing `block` inventory policy, including the stale validation and age restrictions below; depth is checked before past-the-end indexes. Unknown or unavailable blocks stay unanswered. The mutually supported compact serving profile determines transaction witness encoding. On the `blocktxn` path an index past the body is a protocol disconnect; empty or non-increasing indexes are rejected at the inbound boundary regardless of depth. The headroom gate runs before any body load. |
@@ -473,14 +473,36 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    A newly retained parent reports success even when replacing a weak candidate
    leaves the total announcement count unchanged.
    These hard caps are resource-policy bounds, not measured throughput claims.
-16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
-   queued transaction as an immediate single-item `inv`; Core batches and
-   delays relay through its trickle scheduling.
-17. **Proactive `feefilter` emission**: absent. Core sends
-   `feefilter=MAX_MONEY` while initial block download is active; bitcoin-rs
-   does not construct or send `feefilter`. This is distinct from the §5
-   receive row, which states that bitcoin-rs neither emits nor enforces peer
-   feefilters.
+16. **Inventory timing and bounds** (TXR-09): transaction identities are
+   queued under the same P2P owner as downloads. Inbound connections share an
+   exponential deadline by remote IP network class and actual local bind IP
+   and port, matching Core's key for supported IP transports; outbound
+   connections have independent deadlines. Remote addresses, source ports,
+   netgroups, and ASNs do not split a shared clock. The shared map lasts for
+   the policy owner's lifetime, keyed only by local endpoints and network
+   classes, so disconnecting and reconnecting cannot redraw a future deadline.
+   Deadlines use Core's 5-second inbound and 2-second outbound means, with an
+   additional 30-second maximum delay. Each tick orders queued parents before
+   children and prefers higher-fee eligible entries, then sends at most
+   `min(1000, 70 + 5 * (pending / 1000))` inventory vectors, matching Core's
+   target and cap. Empty ticks also advance the deadline so a new admission
+   does not define the broadcast clock. Additional bounds are 5,000 pending
+   entries per peer and 100,000 globally; overflow drops new entries without
+   blocking admission or discouraging peers. Each connection remembers 5,000
+   exact recently known identities in a bounded FIFO set (Core uses a rolling
+   Bloom filter). Version `relay=false`, block-relay roles, source exclusion,
+   negotiated txid/wtxid encoding, the latest received fee filter, and the
+   queued admission epoch are rechecked at their owning boundaries.
+17. **Outgoing fee-filter timing**: the threshold comes from the gateway's
+   existing mempool-pressure/min-relay projection and is rounded through
+   Core v31.1's 1.1-spaced grid (50 sat/kvB initial boundary, 10,000,000 sat/kvB
+   maximum grid). The final value is at least the configured min-relay floor.
+   Unchanged values are not resent; randomized periodic refreshes average ten
+   minutes. A substantial change advances a distant refresh to within five
+   minutes. IBD uses the high filter and exit schedules an immediate floor
+   refresh. The extra inventory latency cap and exact known-inventory FIFO
+   are explicit bounded-resource choices; no throughput or bit-for-bit timing
+   parity is claimed.
 
 ## 8. Verification
 

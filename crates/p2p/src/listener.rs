@@ -1543,6 +1543,29 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     }
                     return Err(error);
                 }
+                match &message {
+                    crate::Message::Inv(items) => shared
+                        .peer_table
+                        .note_transaction_inventory(lease.source(peer_addr), items),
+                    crate::Message::FeeFilter(rate) => shared
+                        .peer_table
+                        .receive_fee_filter(lease.source(peer_addr), *rate),
+                    crate::Message::Tx(tx) => {
+                        use bitcoin::hashes::Hash as _;
+                        shared.peer_table.note_transaction_inventory(
+                            lease.source(peer_addr),
+                            &[
+                                bitcoin::p2p::message_blockdata::Inventory::Transaction(
+                                    bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()),
+                                ),
+                                bitcoin::p2p::message_blockdata::Inventory::WTx(
+                                    bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()),
+                                ),
+                            ],
+                        );
+                    }
+                    _ => {}
+                }
                 if tx_relay_open() {
                     shared.update_transaction_requests(lease.source(peer_addr), &message);
                 }
@@ -2443,6 +2466,7 @@ mod writer_setup_cleanup_tests {
             addr,
             version: 70_016,
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             services: 0,
@@ -2581,6 +2605,7 @@ mod writer_shutdown_tests {
             addr,
             version: 70_016,
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             services: 1,
@@ -2780,6 +2805,7 @@ mod writer_shutdown_tests {
                 addr,
                 version: 70_016,
                 wtxid_relay: false,
+                relay_transactions: true,
                 compact_block_relay: false,
                 send_headers: false,
                 services: 0,
@@ -3220,6 +3246,7 @@ mod writer_shutdown_tests {
                 addr: peer_addr,
                 version: 70_016,
                 wtxid_relay: false,
+                relay_transactions: true,
                 compact_block_relay: false,
                 send_headers: false,
                 services: 0,
@@ -3304,6 +3331,7 @@ mod writer_shutdown_tests {
                 addr: peer_addr,
                 version: 70_016,
                 wtxid_relay: false,
+                relay_transactions: true,
                 compact_block_relay: false,
                 send_headers: false,
                 services: 9,
@@ -3425,6 +3453,7 @@ mod ready_notify_tests {
             addr,
             version: 70_016,
             wtxid_relay: false,
+            relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
             services: 1,

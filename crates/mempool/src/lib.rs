@@ -65,7 +65,7 @@ pub use pool::{
     Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats, OutpointSpender,
     PrioritiseError, PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
-pub use rbf::RbfError;
+pub use rbf::{RbfError, required_fee};
 #[cfg(any(test, feature = "test-seam"))]
 pub use rbf::{ReplacementCandidate, ReplacementPlan};
 pub use reader::MempoolReader;

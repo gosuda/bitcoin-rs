@@ -2496,6 +2496,7 @@ mod tests {
                 addr,
                 version: 70016,
                 wtxid_relay: false,
+                relay_transactions: true,
                 compact_block_relay: false,
                 send_headers: false,
                 services: 9,

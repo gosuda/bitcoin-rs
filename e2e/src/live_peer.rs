@@ -50,6 +50,10 @@ pub struct LivePeer {
     pub headers: Vec<BlockHeader>,
     /// Every decoded getdata frame in arrival order.
     pub getdata_seen: Vec<GetdataSeen>,
+    /// Transaction inventory observed from the node.
+    pub inventory_seen: Vec<Inventory>,
+    /// Proactive BIP133 thresholds observed from the node (sat/kvB).
+    pub fee_filters_seen: Vec<i64>,
     /// `at_ms` of every getheaders frame, in arrival order.
     pub getheaders_at: Vec<u64>,
     /// Bodies served stripped because the node asked `MSG_BLOCK`.
@@ -98,6 +102,8 @@ impl LivePeer {
             blocks: BTreeMap::new(),
             headers: Vec::new(),
             getdata_seen: Vec::new(),
+            inventory_seen: Vec::new(),
+            fee_filters_seen: Vec::new(),
             getheaders_at: Vec::new(),
             stripped_served: 0,
             dropped: false,
@@ -129,6 +135,7 @@ impl LivePeer {
             start_height,
         );
         version.version = 70016;
+        version.relay = true;
         peer.send(NetworkMessage::Version(version), deadline)?;
         let mut received_version = false;
         for _ in 0..64 {
@@ -284,6 +291,8 @@ impl LivePeer {
                     let items = items.clone();
                     serve(self, &items);
                 }
+                Ok(NetworkMessage::Inv(items)) => self.inventory_seen.extend(items),
+                Ok(NetworkMessage::FeeFilter(rate)) => self.fee_filters_seen.push(rate),
                 Ok(NetworkMessage::GetHeaders(_)) => {
                     let at = self.at_ms();
                     self.getheaders_at.push(at);
