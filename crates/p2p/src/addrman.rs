@@ -587,21 +587,15 @@ impl AddressBook {
             publication: Mutex::new(()),
         })
     }
-    pub(crate) fn refresh_connected(&self, active: &[SocketAddr], now: u64) {
+    pub(crate) fn connected(&self, addr: SocketAddr, now: u64) {
+        let addr = canonical(addr);
         let mut manager = self.state.lock();
-        let mut changed = false;
-        for addr in active {
-            let addr = canonical(*addr);
-            if let Some(index) = manager.by_addr.get(&addr).copied() {
-                let entry = &mut manager.stored.records[index];
-                if now.saturating_sub(entry.last_seen) > 20 * 60 {
-                    entry.last_seen = now;
-                    changed = true;
-                }
+        if let Some(index) = manager.by_addr.get(&addr).copied() {
+            let entry = &mut manager.stored.records[index];
+            if now.saturating_sub(entry.last_seen) > 20 * 60 {
+                entry.last_seen = now;
+                manager.revision = manager.revision.wrapping_add(1);
             }
-        }
-        if changed {
-            manager.revision = manager.revision.wrapping_add(1);
         }
     }
     pub(crate) fn len(&self) -> usize {

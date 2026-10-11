@@ -309,7 +309,7 @@ fn gossip_cache_is_shared_stable_until_expiry_and_rotates_new_discoveries() {
         })
         .expect("new discovery");
     let updated = first[0].1.socket_addr().expect("endpoint");
-    book.refresh_connected(&[updated], 20_000);
+    book.connected(updated, 20_000);
     let before = book.state.lock().revision;
     for seconds in 0..100 {
         assert_eq!(
@@ -1339,7 +1339,7 @@ fn mapped_alias_manual_health_and_refresh_use_the_known_core_identity() {
         assert!(manager.pending.is_empty());
         assert_indexes(&manager);
     }
-    book.refresh_connected(&[alias], EPOCH + 2);
+    book.connected(alias, EPOCH + 2);
     assert_eq!(book.state.lock().stored.records[0].last_seen, EPOCH + 2);
 }
 

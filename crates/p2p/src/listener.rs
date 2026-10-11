@@ -985,7 +985,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
+    let ready = shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -1000,6 +1000,11 @@ fn run_connected_session(
     shared.peer_table.remove_current(peer_addr, &lease);
     if let Some(announcer) = &shared.block_announcer {
         announcer.on_peer_disconnected(source);
+    }
+    if ready && !lease.is_inbound() && !lease.is_manual() && lease.role().relays_transactions() {
+        if let Some(book) = &shared.address_book {
+            book.connected(peer_addr, crate::addrman::now());
+        }
     }
     lease.cancel();
     let _ = peer.stream.shutdown(std::net::Shutdown::Both);
@@ -3006,6 +3011,79 @@ mod writer_shutdown_tests {
                 published_rx.try_recv().expect("published ready metadata"),
                 peer_requested_wtxid
             );
+        }
+    }
+
+    #[test]
+    fn session_disconnect_updates_full_relay_and_preserves_block_relay_privacy() {
+        for (block_relay, stale) in [(false, false), (true, false), (false, true)] {
+            let (client, server, peer_addr) = loopback_pair();
+            drop(client);
+
+            let peer_table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                peer_table,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+            book.learn_dns("seed", &[peer_addr], 5000);
+            shared.address_book = Some(Arc::clone(&book));
+
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let lease = if block_relay {
+                crate::PeerLease::new_block_relay(outbound_tx)
+            } else {
+                crate::PeerLease::new(outbound_tx)
+            };
+            shared.peer_table.register(peer_addr, lease.clone());
+            if stale {
+                let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+                assert!(
+                    shared
+                        .peer_table
+                        .register(peer_addr, crate::PeerLease::new(replacement_tx),)
+                );
+            }
+
+            let info = crate::PeerInfo {
+                addr: peer_addr,
+                version: 70_016,
+                wtxid_relay: false,
+                compact_block_relay: false,
+                send_headers: false,
+                services: 9,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: peer_addr,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            };
+
+            let mut peer = Peer::new(
+                crate::CountingStream::new(
+                    server,
+                    std::sync::Arc::new(crate::PeerCounters::default()),
+                ),
+                Magic::BITCOIN,
+            );
+            let _ = run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
+
+            let last_seen = book.gossip(10_000)[0].0;
+            if block_relay || stale {
+                assert_eq!(
+                    last_seen, 5000,
+                    "block-relay or rejected ready session must never refresh last_seen"
+                );
+            } else {
+                assert_ne!(
+                    last_seen, 5000,
+                    "full-relay disconnect must refresh last_seen"
+                );
+            }
         }
     }
 

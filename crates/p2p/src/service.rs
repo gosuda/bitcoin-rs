@@ -1232,14 +1232,11 @@ fn park_automatic_dial(
     true
 }
 
-// One census preserves all automatic ready roles for recovery, but publishing
-// a block-relay peer's connection time through gossip would violate its privacy.
-fn refresh_ready_addresses(
-    book: &crate::addrman::AddressBook,
-    peer_table: &crate::PeerTable,
-    now: u64,
-) -> usize {
-    let ready: Vec<_> = peer_table
+// One census preserves all automatic ready roles for recovery. Active peer
+// timestamps are not refreshed while connected to prevent topology leakage;
+// only disconnect updates full-relay timestamps in the book.
+fn ready_address_count(peer_table: &crate::PeerTable) -> usize {
+    peer_table
         .sessions()
         .into_iter()
         .filter(|session| {
@@ -1248,14 +1245,7 @@ fn refresh_ready_addresses(
                 && !session.lease.is_cancelled()
                 && session.info.is_some()
         })
-        .collect();
-    let full_relay: Vec<_> = ready
-        .iter()
-        .filter(|session| session.lease.role().relays_transactions())
-        .map(|session| session.addr)
-        .collect();
-    book.refresh_connected(&full_relay, now);
-    ready.len()
+        .count()
 }
 
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
@@ -1275,8 +1265,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let ready_count =
-            refresh_ready_addresses(&maintenance.address_book, &maintenance.peer_table, now);
+        let ready_count = ready_address_count(&maintenance.peer_table);
         if maintenance.network_active.load(Ordering::Acquire) {
             // A fresh but unreachable book must not permanently suppress seed
             // recovery. Retained candidates remain usable with DNS disabled.
@@ -1991,15 +1980,18 @@ mod tests {
             };
             assert!(table.publish_info(addr, &lease, info));
         }
-        assert_eq!(refresh_ready_addresses(&book, &table, 10_000), 2);
+        assert_eq!(ready_address_count(&table), 2);
         let response = book.gossip(10_000);
-        for (addr, expected) in [(full, 10_000), (block, 5000)] {
+        for (addr, expected) in [(full, 5000), (block, 5000)] {
             let timestamp = response
                 .iter()
                 .find(|(_, advertised)| advertised.socket_addr().ok() == Some(addr))
                 .expect("advertised")
                 .0;
-            assert_eq!(timestamp, expected);
+            assert_eq!(
+                timestamp, expected,
+                "active connections never refresh gossip timestamp"
+            );
         }
     }
 
@@ -2058,7 +2050,7 @@ mod tests {
             crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).len(),
             1
         );
-        book.refresh_connected(&[addr], 20_000);
+        book.connected(addr, 20_000);
         save_address_book_if_due(&book, tick + Duration::from_secs(901), &mut next);
         assert_eq!(
             crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true).gossip(20_000)[0].0,
