@@ -38,6 +38,12 @@ This page assigns ownership and cites proof under the
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
+- Automatic discouragement is owned by the P2P service's `BannedReader` and
+  bounded ephemeral policy. The listener records only typed remote violations
+  from a current lease. Immutable exclusion snapshots precede address-book
+  locks; socket admission rechecks them. Manual/local/operator protection and
+  the exact Core deviations are specified in policy §6, with deterministic
+  ownership/expiry tests and the real-process `peer_discouragement` comparison.
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
 - Parent requests validate the delivering connection and enqueue under the
@@ -50,6 +56,29 @@ This page assigns ownership and cites proof under the
   request and deferred body fetch owned by a connection outside that set,
   so a same-address replacement never inherits or loses its predecessor's
   work.
+
+Proof: `crates/p2p/src/discouragement.rs` tests
+`avoidance_is_bounded_expires_and_does_not_refresh_on_repetition` and
+`mapped_addresses_share_identity_and_local_exemptions` cover retention,
+expiry and canonical/local identity. `crates/p2p/src/listener.rs`'s
+`discouragement_tests` cover current-lease attribution, native socket teardown
+and admission refusal, exemptions and protected handshake recovery.
+`crates/p2p/src/service.rs` tests `automatic_policy_and_manual_bans_are_distinct`
+and `all_automatic_selection_classes_exclude_discouraged_addresses` cover
+policy precedence and regular/feeler/anchor selection. The lock boundaries are
+exercised by `with_current_rejects_stale_source_and_holds_live_identity` in
+`crates/p2p/src/peer_table.rs` and
+`policy_callbacks_run_unlocked_and_selection_rechecks_pending` in
+`crates/p2p/src/addrman/tests.rs`.
+
+For the process comparison, set `BITCOIN_RS_NODE` to a binary built from the
+tested commit and `BITCOIN_RS_REFERENCE_BITCOIND` to the pinned Core binary.
+`cargo test -p bitcoin-rs-e2e --test peer_discouragement` runs
+`e2e/tests/peer_discouragement.rs` against pinned Core 31.1 and the candidate on
+loopback: protected oversized-headers senders remain connected, unprotected
+local senders disconnect and can reconnect, RPC reflects `noban`, and no manual
+ban is added. It does not test nonlocal Core avoidance, retention capacity or
+expiry.
 
 ### `P2P-03`: Demonstrated best-known-height credit and request eligibility
 
@@ -315,7 +344,7 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   owns the capacity decision, and the accept loop in `serve`
   (`crates/p2p/src/listener.rs`) is its only inbound caller.
   `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
-  outbound service predicate.
+  ordinary outbound desirable-service predicate.
 - The accept loop reserves the connection's inbound lease before it spawns the
   handshake thread, and the reservation and the live inbound count are one
   table write operation. A socket that arrives at `max_inbound =
@@ -324,20 +353,52 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   `bitcoin-core/src/net.h:1124-1127` and applies it at `net.cpp:1838-1845`). A
   replacement at an address already in the table is admitted: it takes the slot
   its predecessor held. The live count is always derived from the live entry
-  set, so no independent counter can drift from it. Ban, inactive-network,
-  session-cancellation, and accept-backoff behaviour are unchanged, and a
-  failed spawn releases the reservation it took.
-- `run_outbound_handshake` ends the connection when the remote `version` does
+  set, so no independent counter can drift from it. A failed spawn releases
+  the reservation it took.
+- `PeerTable::set_network_active` and conditional inbound/outbound socket
+  registration share the table write lock. If disable wins first, registration
+  returns no lease without replacement or capacity mutation. If registration
+  wins first, disable cancels that admitted lease for its connection owner to
+  remove. Re-enabling permits fresh leases without reviving cancelled ones.
+  Socket I/O, metadata queries and logging remain outside the write lock. TCP
+  already in progress may finish after disable; rejected registration closes
+  it before publishing metadata or sending handshake messages.
+- Ordinary `run_outbound_handshake` ends the connection when the remote `version` does
   not offer the desirable set (`net_processing.cpp:1857-1872`, read for
   an outbound connection at `:3864-3871`): `NETWORK | WITNESS`, or
   `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks.
   The check runs before the peer is published as usable, so a dial that cannot
   serve blocks never occupies a selection slot that maintenance cannot replace.
-  Inbound handshakes are not service-gated, as in Core.
+  Inbound handshakes and VERSION-only feelers are not service-gated, as in Core.
+- Ordinary automatic selection, anchor admission, dispatch and the final
+  pre-TCP check reuse that predicate against current AddrMan service metadata.
+  Accepted ordinary VERSION updates metadata before service rejection without
+  marking Good. Unknown DNS service metadata retains its bootstrap exemption;
+  an observed VERSION, including zero services, is known metadata. Representation
+  and migration are owned by `docs/policies/p2p-compatibility.md` section 7;
+  manual dials and feelers bypass this metadata prefilter.
 - The advertised set follows the prune setting (`init.cpp:2022-2026`):
   `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when
   `storage.prune_target_mb > 0`, and both handshake paths use the same set from
   `P2pServiceConfig::local_services`.
+
+Proof: `crates/p2p/src/peer_table.rs` tests
+`network_disable_orders_before_or_after_inbound_and_outbound_admission` and
+`inactive_registration_never_mutates_or_returns_an_existing_lease` cover both
+admission orders, inactive identity/capacity guards and re-enable behavior.
+`crates/p2p/src/service.rs` tests
+`disable_during_outbound_tip_query_refuses_registration_before_handshake`,
+`ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp`,
+`ordinary_selection_skips_known_incomplete_peer_and_anchor_return_preserves_age`
+and `a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot` cover
+the actual paused outbound worker, fresh service/tip checks, anchor preservation
+and probe accounting. `crates/p2p/src/listener.rs` tests
+`version_only_feeler_uses_native_acceptance_without_publishing_work`,
+`ordinary_handshake_still_requires_services_and_verack`,
+`rejected_ordinary_version_updates_services_without_good` and
+`manual_dial_bypasses_known_incomplete_stored_services` cover VERSION-only
+feelers, ordinary handshake requirements, metadata-only updates and manual
+prefilter exemption.
 
 ### `P2P-09`: Block-body service eligibility
 

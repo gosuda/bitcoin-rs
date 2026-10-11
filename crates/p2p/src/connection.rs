@@ -242,6 +242,8 @@ pub struct PeerLease {
     /// Whether the operator pinned this dial by hand (`--connect` or
     /// `addnode`). Core: `ConnectionType::MANUAL`.
     manual: bool,
+    /// Granted only from operator configuration using the actual socket IP.
+    no_ban: bool,
     /// Monotonic instant the connection was created.
     connected: Instant,
 }
@@ -345,6 +347,7 @@ impl PeerLease {
             inbound,
             role,
             manual,
+            no_ban: false,
             connected: Instant::now(),
         }
     }
@@ -362,6 +365,25 @@ impl PeerLease {
             false,
             budget,
         )
+    }
+
+    pub(crate) fn with_no_ban(mut self, no_ban: bool) -> Self {
+        self.no_ban = no_ban;
+        self
+    }
+
+    /// Whether the operator exempted this connection from automatic punishment.
+    #[must_use]
+    pub const fn is_no_ban(&self) -> bool {
+        self.no_ban
+    }
+
+    pub(crate) const fn is_protected(&self) -> bool {
+        self.manual || self.no_ban
+    }
+
+    pub(crate) fn ignores_protocol_error(&self, error: &crate::PeerError) -> bool {
+        self.is_protected() && error.recoverable_for_protected()
     }
 
     /// Stable process-unique node id for this connection (Core `nodeid`).

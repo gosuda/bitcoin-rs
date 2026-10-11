@@ -39,7 +39,8 @@ pub use bitcoin_rs_consensus::SoftforkState;
 pub use block_body::BlockBodySource;
 pub use count::ChainTxCount;
 pub use deployment::{
-    SignallingDeployment, bip30_duplicate_scan_required, candidate_version, signalling_deployments,
+    DeploymentQueryError, DeploymentStatus, SignallingDeployment, VersionBitsStatus,
+    bip30_duplicate_scan_required, candidate_version, deployment_statuses, signalling_deployments,
     softfork_state,
 };
 pub use header_sync::{

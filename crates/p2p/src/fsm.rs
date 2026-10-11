@@ -35,7 +35,7 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
             if peer.state == PeerState::Ready {
                 Ok(())
             } else {
-                Err(PeerError::Protocol(
+                Err(PeerError::Misbehavior(
                     "message received before handshake completed",
                 ))
             }
@@ -58,14 +58,14 @@ fn receive_version<S>(
             Ok(())
         }
         PeerState::Ready | PeerState::Disconnecting => {
-            Err(PeerError::Protocol("duplicate version message"))
+            Err(PeerError::Misbehavior("duplicate version message"))
         }
     }
 }
 
 const fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
     if peer.remote_version.is_none() {
-        return Err(PeerError::Protocol("verack received before version"));
+        return Err(PeerError::Misbehavior("verack received before version"));
     }
     peer.received_verack = true;
     peer.refresh_ready_state();
@@ -75,9 +75,9 @@ const fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
 const fn ensure_negotiating_or_ready<S>(peer: &Peer<S>) -> Result<(), PeerError> {
     match peer.state {
         PeerState::VersionExchange | PeerState::Verack | PeerState::Ready => Ok(()),
-        PeerState::Disconnected | PeerState::Disconnecting => {
-            Err(PeerError::Protocol("feature negotiation outside handshake"))
-        }
+        PeerState::Disconnected | PeerState::Disconnecting => Err(PeerError::Misbehavior(
+            "feature negotiation outside handshake",
+        )),
     }
 }
 

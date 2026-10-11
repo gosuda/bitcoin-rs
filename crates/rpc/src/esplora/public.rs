@@ -644,53 +644,60 @@ pub(super) fn history(
     include_mempool: bool,
 ) -> Response {
     let projection = Projection::new(ctx);
-    let activity = match projection.script_activity(h) {
-        Ok(activity) => activity,
-        Err(response) => return response,
-    };
+    // Sentinel "" selects mempool transactions only. Avoid confirmed resolution.
     if last == Some("") {
-        return activity
-            .mempool
+        let mempool = match projection.mempool_activity_for(h) {
+            Ok(mempool) => mempool,
+            Err(response) => return response,
+        };
+        return mempool
             .into_iter()
             .take(MEMPOOL_PAGE)
             .map(|t| projection.transaction_value(&t, None))
             .collect::<Result<Vec<_>, _>>()
             .map_or_else(|r| r, json_ok);
+    }
+
+    let mut out = if include_mempool {
+        let mempool = match projection.mempool_activity_for(h) {
+            Ok(mempool) => mempool,
+            Err(response) => return response,
+        };
+        match mempool
+            .into_iter()
+            .take(MEMPOOL_PAGE)
+            .map(|t| projection.transaction_value(&t, None))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(out) => out,
+            Err(r) => return r,
+        }
+    } else {
+        Vec::new()
     };
-    let start = last.and_then(|x| {
-        activity
-            .confirmed
-            .iter()
-            .position(|entry| entry.record.txid.to_string() == x)
-            .map(|n| n + 1)
-    });
+
+    let records = match projection.confirmed_history(h) {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
     // API-09: only an exact known lowercase txid advances the page. Unknown
     // or noncanonical cursors restart, including links made stale by a reorg.
-    let out = if include_mempool {
-        activity
-            .mempool
+    let start = last.and_then(|x| {
+        records
             .iter()
-            .take(MEMPOOL_PAGE)
-            .map(|t| projection.transaction_value(t, None))
-            .collect::<Result<Vec<_>, _>>()
-    } else {
-        Ok(Vec::new())
-    };
-    let mut out = match out {
-        Ok(out) => out,
-        Err(r) => return r,
-    };
-    let chain = match activity
-        .confirmed
+            .position(|entry| entry.txid.to_string() == x)
+            .map(|n| n + 1)
+    });
+    let chain = match records
         .into_iter()
         .skip(start.unwrap_or(0))
         .take(CHAIN_PAGE)
-        .map(|entry| {
-            projection
-                .confirmed_transaction(&entry.record.txid)
-                .and_then(|transaction| {
-                    projection.transaction_value(&transaction, Some(entry.confirmation))
-                })
+        .map(|record| {
+            let confirmation = projection
+                .confirmation_at_height(record.height)
+                .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+            let transaction = projection.confirmed_transaction(&record.txid)?;
+            projection.transaction_value(&transaction, Some(confirmation))
         })
         .collect::<Result<Vec<_>, _>>()
     {

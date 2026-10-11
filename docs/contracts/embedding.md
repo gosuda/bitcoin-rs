@@ -93,7 +93,11 @@ the first embedder — there is one lifecycle implementation, not two.
 
 ## Startup failure and cancellation
 
-`Node::activate_assumeutxo_snapshot_file` enters the node-owned snapshot
+`Node::activate_assumeutxo_snapshot_file` preserves its native v4 input contract
+and caller-relative path interpretation. Portable Bitcoin Core v2 files are
+imported through `loadtxoutset`; both entry points share the one-import resource
+permit and the same format-independent activation owner. Neither translates
+one input format into the other. The embedding method enters the node-owned snapshot
 activation boundary after ordinary header synchronization has admitted the
 pinned base. It preserves mempool fencing and consumer alignment without
 exporting `NodeState` or the historical mutation handle. Like startup, this

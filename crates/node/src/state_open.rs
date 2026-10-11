@@ -279,6 +279,9 @@ impl NodeState {
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig {
                 listen_addrs: config.p2p.listen.clone(),
+                address_book_path: Some(config.data_dir.join("peers.dat")),
+                asmap_path: config.p2p.asmap.clone(),
+                allow_local_addresses: config.network == bitcoin_rs_primitives::Network::Regtest,
                 magic: bitcoin::p2p::Magic::from_bytes(config.p2p.magic),
                 dns_seeds_enabled: config.p2p.dns_seeds_enabled,
                 dns_seeds: config
@@ -289,6 +292,7 @@ impl NodeState {
                     .collect(),
                 dns_port: config.network.default_p2p_port(),
                 fixed_peers: config.p2p.connect.clone(),
+                noban_subnets: config.p2p.noban_subnets.clone(),
                 outbound_full_relay_slots,
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,
@@ -438,6 +442,13 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
+        let snapshots = Arc::new(crate::snapshot::SnapshotControl::new(
+            assumeutxo,
+            Arc::clone(&chainstate),
+            followers.clone(),
+            config.data_dir.clone(),
+            config.network,
+        ));
         Ok(Self {
             config,
             #[cfg(test)]
@@ -457,7 +468,7 @@ impl NodeState {
             followers,
             sync,
             recovery_reporter,
-            assumeutxo,
+            snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
         })
     }

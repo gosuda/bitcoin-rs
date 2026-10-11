@@ -436,6 +436,10 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
 
     // Phase 3: the same announcement is now requested and admitted.
     peer.announce_with_barrier(vec![Inventory::Transaction(txid)], 7_003)?;
+    let request_deadline = Instant::now() + REQUEST_TIMEOUT;
+    while !peer.txid_requested(&txid.to_string()) && Instant::now() < request_deadline {
+        peer.pump(Duration::from_millis(100));
+    }
     assert!(
         peer.txid_requested(&txid.to_string()),
         "after initial block download the announced transaction must be requested"
