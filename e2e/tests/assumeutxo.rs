@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hex::FromHex as _;
+use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin::{Block, Witness};
 use bitcoin_rs_e2e::helpers::{
-    funding_address, funding_output, grind_pow, mempool_txids, op_true_script, spend_anyone,
+    funding_address, funding_output, grind_pow, mempool_txids, mine_bare_blocks, op_true_script,
+    spend_anyone, submit_genesis,
 };
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
@@ -517,6 +519,144 @@ fn nonempty_mempool_refuses_snapshot_without_losing_transaction() -> Result<()> 
         node.stop()?;
     }
     Ok(())
+}
+
+/// An empty mempool can still contain operator fee adjustments for absent
+/// transactions. Snapshot activation must retain that overlay, as Core does.
+#[test]
+fn core_snapshot_import_preserves_absent_transaction_prioritisation() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    let txid = "11".repeat(32);
+    for kind in [Kind::Core, Kind::BitcoinRs] {
+        let mut node = ProcessNode::spawn(kind)?;
+        admit_headers(&mut node, &blocks)?;
+        assert_eq!(
+            node.rpc("prioritisetransaction", &json!([txid, 0, 5000]))?,
+            true
+        );
+        assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+        let before = node.rpc("getprioritisedtransactions", &json!([]))?;
+        assert_eq!(before.as_object().unwrap().len(), 1);
+        assert_eq!(
+            before[&txid],
+            json!({"fee_delta": 5000, "in_mempool": false})
+        );
+        let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+        assert_eq!(imported["tip_hash"], BASE);
+        assert_eq!(imported["coins_loaded"], 200);
+        assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+        assert_eq!(
+            node.rpc("getprioritisedtransactions", &json!([]))?,
+            before,
+            "{kind:?} snapshot import must preserve the operator fee overlay"
+        );
+        node.stop()?;
+    }
+    Ok(())
+}
+
+/// Native policy: a resident orphan can become spendable solely through the
+/// imported UTXO set. Core does not globally retry orphans at this boundary.
+/// Unit tests own the retry-claim count and closed-fence timing assertions.
+#[test]
+fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let snapshot = artifacts.path().join("core200.dat");
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    let blocks = core_blocks()?;
+    let (outpoint, prevout) = funding_output(&blocks[0].txdata[0])?;
+    let witness_script = op_true_script();
+    assert_eq!(prevout.script_pubkey, witness_script.to_p2wsh());
+    let mut orphan = spend_anyone(outpoint, &prevout, 1_000);
+    orphan.input[0].witness = Witness::from_slice(&[witness_script.as_bytes()]);
+    let txid = orphan.compute_txid().to_string();
+    let wtxid = orphan.compute_wtxid();
+    let parent_txid = outpoint.txid.to_string();
+
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    submit_genesis(&mut node)?;
+    mine_bare_blocks(&mut node, 1)?;
+    // A recent ordinary tip exits the process-wide IBD latch. The pinned
+    // headers then win by work, but their coinbase bodies remain unavailable.
+    assert_eq!(
+        node.rpc("getblockchaininfo", &json!([]))?["initialblockdownload"],
+        false
+    );
+    admit_headers(&mut node, &blocks)?;
+    assert!(
+        node.rpc("gettxout", &json!([parent_txid, 0, false]))?
+            .is_null()
+    );
+    assert_eq!(
+        node.rpc("prioritisetransaction", &json!([txid, 0, 5000]))?,
+        true
+    );
+    assert_eq!(
+        node.rpc("getprioritisedtransactions", &json!([]))?[&txid],
+        json!({"fee_delta": 5000, "in_mempool": false})
+    );
+    let mut peer = LivePeer::connect_with_height(&node, "snapshot-resident-orphan", 0)?;
+    peer.send(
+        NetworkMessage::Inv(vec![Inventory::WTx(wtxid)]),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    node.wait_for("orphan body requested", Duration::from_secs(15), |_| {
+        peer.pump(Duration::from_millis(20), &mut |_, _| {});
+        Ok(peer
+            .getdata_seen
+            .iter()
+            .flat_map(|frame| &frame.items)
+            .any(|(kind, hash)| *kind == 5 && hash == &wtxid.to_string())
+            .then_some(()))
+    })?;
+    peer.send(
+        NetworkMessage::Tx(orphan),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    // A missing-parent request is positive evidence that ingress classified
+    // and retained the peer's body as an orphan. Never supply that parent.
+    node.wait_for(
+        "held orphan parent requested",
+        Duration::from_secs(15),
+        |_| {
+            peer.pump(Duration::from_millis(20), &mut |_, _| {});
+            Ok(peer
+                .getdata_seen
+                .iter()
+                .flat_map(|frame| &frame.items)
+                .any(|(kind, hash)| matches!(*kind, 1 | 0x4000_0001) && hash == &parent_txid)
+                .then_some(()))
+        },
+    )?;
+    assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
+    let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+    assert_eq!(imported["tip_hash"], BASE);
+    assert_eq!(imported["coins_loaded"], 200);
+    // Keep the announcing peer alive, but offer no more tx or block bodies.
+    // The normal ingress retry driver must use only the newly imported coin.
+    node.wait_for(
+        "snapshot orphan admitted",
+        Duration::from_secs(15),
+        |node| {
+            peer.pump(Duration::from_millis(20), &mut |_, _| {});
+            Ok((mempool_txids(node)? == std::slice::from_ref(&txid)).then_some(()))
+        },
+    )?;
+    assert_eq!(
+        node.rpc("getprioritisedtransactions", &json!([]))?[&txid],
+        json!({"fee_delta": 5000, "in_mempool": true, "modified_fee": 6000})
+    );
+    assert_eq!(
+        states(&mut node)?["chainstates"][1]["snapshot_blockhash"],
+        BASE
+    );
+    assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
+    assert!(!peer.dropped);
+    drop(peer);
+    node.stop()
 }
 
 #[test]

@@ -315,18 +315,13 @@ impl ChainFollowers {
     /// Reconciles derived consumers after an atomic snapshot-tip replacement.
     /// The caller has verified an empty mempool under the held generation fence.
     /// No per-block notifications are fabricated for the skipped history.
-    pub(crate) fn on_snapshot(
-        &self,
-        change: Option<&ChainChangeGuard>,
-    ) -> Result<(), bitcoin_rs_mempool::ChainChangeError> {
+    pub(crate) fn on_snapshot(&self) {
         if let Some(gateway) = &self.mempool {
-            let change = change.ok_or(bitcoin_rs_mempool::ChainChangeError::ForeignGuard)?;
-            gateway.clear_for_snapshot(change)?;
+            gateway.snapshot_changed();
         }
         self.blocks.write().clear();
         self.wake_index();
         self.mining.publish_generation();
-        Ok(())
     }
 
     fn wake_index(&self) {
@@ -698,7 +693,7 @@ mod tests {
         let fence = followers
             .begin_mempool_change()?
             .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
-        followers.on_snapshot(Some(&fence))?;
+        followers.on_snapshot();
         assert!(gateway.read().is_empty());
         assert!(gateway.stable_generation().is_none());
         assert!(wake_rx.try_recv().is_ok());
@@ -706,6 +701,96 @@ mod tests {
         assert!(followers.block_log().read().is_empty());
         fence.finish()?;
         assert!(gateway.stable_generation().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_retries_each_resident_orphan_once_after_settlement() -> anyhow::Result<()> {
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+        ));
+        let followers = followers_with_gateway(&gateway);
+        let parent = Network::Regtest.genesis_block().txs[0].txid();
+        let available = orphan_child(OutPoint::new(parent, 0));
+        let missing = orphan_child(OutPoint::new(Hash256::from_le_bytes(&[43; 32]).into(), 0));
+        let source = PeerToken {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+            connection_id: 7,
+        };
+        let replacement = PeerToken {
+            connection_id: 8,
+            ..source
+        };
+        let missing_source = PeerToken {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18445)),
+            connection_id: 9,
+        };
+        let chain = AdmissionCoins::default();
+        for (orphan, announcer) in [
+            (&available, source),
+            (&available, replacement),
+            (&missing, missing_source),
+        ] {
+            assert!(matches!(
+                gateway.submit_transaction(
+                    Arc::clone(orphan),
+                    AdmissionOrigin::Peer(announcer),
+                    None,
+                    0,
+                    &chain,
+                ),
+                Ok(SubmitOutcome::Held { .. })
+            ));
+        }
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.orphan_count(), 2);
+        assert!(!gateway.has_observer());
+        let fence = gateway.begin_chain_change()?;
+        // Existing parent work and the snapshot-wide wake must share one ready
+        // identity. The other parent becomes available only through the snapshot.
+        gateway.chain_changed(&[missing.inputs[0].previous_output.txid]);
+        *chain.prevouts.write() = vec![(
+            available.inputs[0].previous_output,
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )];
+        followers.on_snapshot();
+        followers.on_snapshot();
+        // The queued claim must select a still-live announcer after the
+        // original connection leaves, without losing the resident body.
+        gateway.maintain_orphans(1, [replacement, missing_source]);
+        assert_eq!(gateway.retry_orphans(&chain, 1), []);
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.orphan_count(), 2);
+        assert_eq!(gateway.read().sequence_number(), 0);
+        fence.finish()?;
+
+        let retries = gateway.retry_orphans(&chain, 2);
+        assert_eq!(retries.len(), 2, "one retry per resident witness identity");
+        let accepted = retries
+            .iter()
+            .find(|retry| retry.wtxid == available.wtxid())
+            .ok_or_else(|| anyhow::anyhow!("snapshot did not schedule the newly funded orphan"))?;
+        assert_eq!(accepted.source, replacement);
+        assert!(matches!(accepted.result, Ok(SubmitOutcome::Committed(_))));
+        let retained = retries
+            .iter()
+            .find(|retry| retry.wtxid == missing.wtxid())
+            .ok_or_else(|| anyhow::anyhow!("snapshot lost the still-missing orphan"))?;
+        assert_eq!(retained.source, missing_source);
+        assert!(matches!(retained.result, Ok(SubmitOutcome::Held { .. })));
+        assert!(gateway.read().contains_txid(&available.txid()));
+        assert_eq!(gateway.orphan_count(), 1);
+        assert_eq!(
+            gateway.get_tx_by_wtxid(missing.wtxid()).as_ref(),
+            Some(missing.as_ref())
+        );
+        assert_eq!(gateway.read().sequence_number(), 1);
+        assert_eq!(gateway.retry_orphans(&chain, 3), []);
         Ok(())
     }
 

@@ -101,11 +101,20 @@ state (`crates/mempool/src/orphan.rs`).
   explicit `finish` leaves the generation odd — admission stays closed.
   Only `finish` may compare-exchange the odd value to the reserved even value,
   reopening admission. One guard covers one externally coherent chain operation.
-- Snapshot replacement retires the old pool and fee history through
-  `clear_for_snapshot`, which also clears orphan/reject residency, verifies the gateway identity and exact odd
-  generation under the pool write lock. It publishes ordinary `Clear` removals
-  and keeps admission fenced until the node settles the new chain's consumers.
-  Ordinary reconnect/reorg recovery does not use this wholesale reset.
+- Snapshot activation requires empty membership under the node-owned generation
+  fence. A populated pool is refused and the fence is settled without removing
+  transactions or operator fee deltas. Successful activation retains the existing
+  pool, prioritisation overlays (including absent txids), fee history, and orphans.
+  The gateway's `snapshot_changed` event invalidates chain-bound reject entries
+  and marks each resident witness identity ready once. Existing orphan residency
+  limits bound that pass, and the existing ready-identity set coalesces pending
+  work. No retry claim is consumed while the generation is odd; after settlement,
+  the normal retry driver checks the current coins, policy and announcer before
+  admission. Still-missing entries remain held without self-rescheduling. This
+  snapshot-wide wakeup is native policy;
+  [Core 31.1's tip notification](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/node/txdownloadman_impl.cpp#L92-L109)
+  only resets rejection filters. Activation emits no fabricated transaction removals. Neither
+  snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,
   after reconsidering its disconnected transactions under the odd generation.

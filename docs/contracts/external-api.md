@@ -623,12 +623,12 @@ its lifecycle-protected admission recheck before activation.
 Archive publication and abandoned-reservation cleanup follow `ARCH-07b`;
 cleanup does not reset the accepted head or modify source artifact contents.
 
-The node enters the existing mempool generation fence and refuses activation
-while transactions remain in the mempool. Refusal settles the fence and preserves
-those transactions, fee deltas, and chainstate. With an empty pool, it activates
-through `AssumeUtxoManager` and reconciles the block log, index, mining, and mempool
-consumers. Successful return certifies the durable snapshot anchor and consumer
-settlement. Settlement failure closes admission for recovery and is an error,
+Activation requires an empty mempool and retains operator fee prioritisation.
+Its native orphan reconsideration policy, bounds, and mempool settlement rules
+are owned by [MPL-04](mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
+The node activates through `AssumeUtxoManager` and reconciles its consumers.
+Successful return certifies the durable snapshot anchor and consumer settlement.
+Settlement failure closes admission for recovery and is an error,
 even if the anchor committed. Headers through the base must already be known.
 The installation boundary, under chain-transition exclusion, rejects an invalid
 base or a base outside the current best-work header ancestry before publishing

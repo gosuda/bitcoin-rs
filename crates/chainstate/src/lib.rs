@@ -664,15 +664,15 @@ impl Chainstate {
             self.fail_closed_for_recovery();
         })?;
         let applied = self.applied_tip_snapshot();
-        if prior.map(|head| (head.tip, head.height, head.chain_tx_count))
-            != applied
-                .as_ref()
-                .map(|tip| (tip.hash, tip.height, tip.chain_tx_count.to_wire()))
-        {
+        let durable_tip = prior.map(|head| (head.tip, head.height, head.chain_tx_count));
+        let applied_tip = applied
+            .as_ref()
+            .map(|tip| (tip.hash, tip.height, tip.chain_tx_count.to_wire()));
+        if durable_tip != applied_tip {
             self.fail_closed_for_recovery();
             return Err(AssumeUtxoError::SnapshotTipNotSettled {
-                durable_tip: prior.map(|head| head.tip),
-                applied_tip: applied.as_ref().map(|tip| tip.hash),
+                durable_tip,
+                applied_tip,
             });
         }
         // Height cannot order unequal-difficulty forks. Require strictly

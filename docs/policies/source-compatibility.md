@@ -76,8 +76,10 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs` | `bin/bitcoin-rs` | Command-line node binary |
 
 ### 4.1 Semver Rules
-- During `0.x.y` releases, public API breaking changes require a minor version bump (e.g., `0.4.0` to `0.5.0`).
-- Patch updates (e.g., `0.4.0` to `0.4.1`) must contain only non-breaking bug fixes, performance optimizations, or internal refactoring.
+- Semver compatibility is assessed between published releases, not between pull requests or intermediate development commits. Merging a pull request does not itself publish a release.
+- Unreleased APIs may change within the planned development version, including before the first public release. Such changes still update their contracts, callers, and tests together and follow the clean-cutover policy below; they do not require a fresh minor bump for each development change.
+- When preparing a `0.x.y` release, public API breaking changes relative to the latest published release require a minor version bump (e.g., `0.4.0` to `0.5.0`).
+- Patch releases (e.g., `0.4.0` to `0.4.1`) must contain only non-breaking bug fixes, performance optimizations, or internal refactoring relative to the previous published release.
 
 ## 5. Anti-Shim Principle and Deprecation Policy
 
