@@ -84,6 +84,17 @@ Readers resolve each locator against the authoritative UTXO set and exact-check
 the full script. Deletes are exact point deletes, so a prefix collision cannot
 remove another script's output.
 
+`ScriptHistory` persists funding rows (`ScriptHashRow`) keyed by
+`(script_hash_prefix, height)` and spending rows (`SpendingPrefixRow`) keyed by
+`(outpoint_prefix, height)`. Because spending rows index the spent outpoint rather
+than the original script hash, spend discovery for a script requires first
+discovering all funding outpoints for that script. As a result, confirmed history
+queries (`confirmed_history`) must discover all funding outputs across the script's
+history before resolving spends; reverse-chronological scanning directly at the
+storage level cannot be bounded to an initial page without omitting spends of
+older funding outputs. However, `confirmed_history` avoids allocating or retaining
+unneeded funding record lists when callers only require history records.
+
 ### `IDX-03`: Query gating and snapshot consistency
 
 - **Ready invariant**: `ready ⇔ cursor == applied_tip on active chain`.
