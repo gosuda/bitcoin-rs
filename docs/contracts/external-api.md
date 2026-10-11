@@ -103,6 +103,11 @@
   output maps are omitted on encoding. An encoding copy preserves parsed/caller
   metadata for decode, analyze and join. Already
   decoded CompactSize types/subtypes and BIP373 fields receive Core checks.
+  Global XPUB uniqueness uses Core public-key/chain-code identity. MuSig2
+  absent/all-zero leaf aliases retain the first wire value after validation
+  of every original entry, and encode without a zero-leaf suffix. Encoding
+  programmatic maps uses their library serialization order and preserves the
+  caller's metadata.
 - PSBT admission limits encoded inputs/outputs to 16 MiB, input plus output
   maps to 10,000, and retained map entries to 100,000. Creators can check
   counts before map allocation. Serialized bytes are checked before library
