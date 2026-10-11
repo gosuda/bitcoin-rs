@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::netgroup::NetGroups;
 use bitcoin::secp256k1::rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 // min GetChance=.01*.66^8; at zero-based proposal44 its product with1.2^44>1.
 const MAX_SELECTION_PROPOSALS: usize = 45;
 
@@ -35,7 +36,7 @@ const MAX_SELECTION_PROPOSALS: usize = 45;
 enum Source {
     Ip(IpAddr),
     Internal([u8; 10]),
-    // v1 did not retain the original seed name or its full Core internal hash.
+    // Historical formats did not retain the seed name or full Core internal hash.
     LegacyDns(u64),
 }
 impl Source {
@@ -45,9 +46,9 @@ impl Source {
         bytes.copy_from_slice(&hash[..10]);
         Self::Internal(bytes)
     }
-    fn group(&self) -> Vec<u8> {
+    fn group(&self, groups: &NetGroups) -> Vec<u8> {
         match self {
-            Self::Ip(ip) => crate::netgroup::group(*ip),
+            Self::Ip(ip) => groups.group(*ip),
             Self::Internal(bytes) => {
                 let mut group = vec![6];
                 group.extend_from_slice(bytes);
@@ -111,10 +112,12 @@ struct Stored {
     secret: [u8; 32],
     #[serde(deserialize_with = "read_records")]
     records: Vec<Candidate>,
+    asmap_id: Option<[u8; 32]>,
 }
 
 struct Manager {
     stored: Stored,
+    groups: NetGroups,
     by_addr: HashMap<SocketAddr, usize>,
     new: Vec<u32>,
     tried: Vec<u32>,
@@ -166,9 +169,14 @@ fn endpoint_key(addr: SocketAddr) -> Vec<u8> {
     bytes.extend_from_slice(&addr.port().to_be_bytes());
     bytes
 }
-fn new_bucket(secret: &[u8; 32], addr: SocketAddr, source_group: &[u8]) -> usize {
+fn new_bucket(
+    secret: &[u8; 32],
+    addr: SocketAddr,
+    source_group: &[u8],
+    groups: &NetGroups,
+) -> usize {
     let mut bytes = secret.to_vec();
-    vector(&crate::netgroup::group(addr.ip()), &mut bytes);
+    vector(&groups.group(addr.ip()), &mut bytes);
     vector(source_group, &mut bytes);
     let first = cheap_hash(&bytes) % 64;
     let mut bytes = secret.to_vec();
@@ -176,12 +184,12 @@ fn new_bucket(secret: &[u8; 32], addr: SocketAddr, source_group: &[u8]) -> usize
     bytes.extend_from_slice(&first.to_le_bytes());
     usize::try_from(cheap_hash(&bytes) % 1024).unwrap_or_default()
 }
-fn tried_bucket(secret: &[u8; 32], addr: SocketAddr) -> usize {
+fn tried_bucket(secret: &[u8; 32], addr: SocketAddr, groups: &NetGroups) -> usize {
     let mut bytes = secret.to_vec();
     vector(&endpoint_key(addr), &mut bytes);
     let first = cheap_hash(&bytes) % 8;
     let mut bytes = secret.to_vec();
-    vector(&crate::netgroup::group(addr.ip()), &mut bytes);
+    vector(&groups.group(addr.ip()), &mut bytes);
     bytes.extend_from_slice(&first.to_le_bytes());
     usize::try_from(cheap_hash(&bytes) % 256).unwrap_or_default()
 }
@@ -194,7 +202,7 @@ fn bucket_position(secret: &[u8; 32], addr: SocketAddr, new: bool, bucket: usize
 }
 
 impl Manager {
-    fn new(magic: [u8; 4], allow_local: bool, path: Option<PathBuf>) -> Self {
+    fn new(magic: [u8; 4], allow_local: bool, path: Option<PathBuf>, groups: NetGroups) -> Self {
         let mut rng = StdRng::from_entropy();
         let mut secret = [0; 32];
         rng.fill_bytes(&mut secret);
@@ -204,7 +212,9 @@ impl Manager {
                 magic,
                 secret,
                 records: Vec::new(),
+                asmap_id: groups.identity(),
             },
+            groups,
             by_addr: HashMap::new(),
             new: vec![EMPTY_SLOT; NEW_BUCKETS * BUCKET_SIZE],
             tried: vec![EMPTY_SLOT; TRIED_BUCKETS * BUCKET_SIZE],
@@ -229,7 +239,7 @@ impl Manager {
         bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, true, bucket)
     }
     fn tried_slot(&self, addr: SocketAddr) -> usize {
-        let bucket = tried_bucket(&self.stored.secret, addr);
+        let bucket = tried_bucket(&self.stored.secret, addr, &self.groups);
         bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, false, bucket)
     }
     fn install_indexes(&mut self) {
@@ -355,7 +365,12 @@ impl Manager {
                 return false;
             }
         }
-        let bucket = new_bucket(&self.stored.secret, addr, &source.group());
+        let bucket = new_bucket(
+            &self.stored.secret,
+            addr,
+            &source.group(&self.groups),
+            &self.groups,
+        );
         let slot = self.new_slot(addr, bucket);
         let occupant = self.new[slot];
         if occupant != EMPTY_SLOT {
@@ -416,7 +431,7 @@ impl Manager {
                 continue;
             }
             if entry.tried {
-                tried_buckets[tried_bucket(&self.stored.secret, entry.addr)] = true;
+                tried_buckets[tried_bucket(&self.stored.secret, entry.addr, &self.groups)] = true;
             } else {
                 for bucket in &entry.new_buckets {
                     new_buckets[usize::from(*bucket)] = true;
@@ -535,13 +550,21 @@ fn legacy_prefix(ip: IpAddr) -> u64 {
 }
 
 impl AddressBook {
-    pub(crate) fn open(path: Option<PathBuf>, magic: [u8; 4], allow_local: bool) -> Arc<Self> {
+    pub(crate) fn open(
+        path: Option<PathBuf>,
+        magic: [u8; 4],
+        allow_local: bool,
+        asmap_path: Option<&Path>,
+    ) -> Arc<Self> {
         let scoped = path.as_deref().map(|base| network_path(base, magic));
-        let mut manager = Manager::new(magic, allow_local, scoped.clone());
+        let groups = NetGroups::load(asmap_path);
+        let writable = asmap_path.is_none() || groups.identity().is_some();
+        let mut manager = Manager::new(magic, allow_local, scoped.clone(), groups);
+        manager.writable = writable;
         if let Some(scoped) = scoped {
-            let loaded = match read_book(&scoped, Some(magic), allow_local) {
+            let loaded = match read_book(&scoped, Some(magic), allow_local, &manager.groups) {
                 Ok(Some(loaded)) => Some((scoped, true, loaded)),
-                Ok(None) => path.and_then(|legacy| match read_book(&legacy, None, true) {
+                Ok(None) => path.and_then(|legacy| match read_book(&legacy, None, true, &manager.groups) {
                     Ok(Some(loaded)) if loaded.stored.magic == magic => Some((legacy, false, loaded)),
                     Ok(_) => None,
                     Err(error) => {
@@ -563,15 +586,26 @@ impl AddressBook {
                 {
                     manager.stored = loaded.stored;
                     manager.published = scoped_source;
-                    if loaded.legacy {
-                        if let Err(error) = backup_legacy(&source_path, &loaded.bytes) {
+                    let rebucket =
+                        loaded.schema <= 3 || manager.stored.asmap_id != manager.groups.identity();
+                    let migrate = loaded.schema != VERSION || rebucket;
+                    if migrate && manager.writable {
+                        if let Err(error) =
+                            backup_before_migration(&source_path, &loaded.bytes, loaded.schema)
+                        {
                             tracing::warn!(path=%source_path.display(), %error, "address book migration backup failed; preserving source and disabling writes");
                             manager.writable = false;
                         }
-                        manager.rebucket_legacy();
-                        manager.revision = 1;
+                    }
+                    if rebucket {
+                        manager.rebucket();
                     } else {
                         manager.install_indexes();
+                    }
+                    if migrate {
+                        manager.stored.version = VERSION;
+                        manager.stored.asmap_id = manager.groups.identity();
+                        manager.revision = 1;
                     }
                     if !scoped_source {
                         manager.revision = manager.revision.wrapping_add(1);
@@ -648,7 +682,7 @@ impl AddressBook {
         let groups: HashSet<_> = grouped
             .iter()
             .chain(&manager.pending)
-            .map(|addr| crate::netgroup::group(addr.ip()))
+            .map(|addr| manager.groups.group(addr.ip()))
             .collect();
         let eligible: Vec<_> = manager
             .stored
@@ -658,11 +692,27 @@ impl AddressBook {
                 allowed.contains(&entry.addr)
                     && !connected.contains(&entry.addr)
                     && !manager.pending.contains(&entry.addr)
-                    && !groups.contains(&crate::netgroup::group(entry.addr.ip()))
+                    && !groups.contains(&manager.groups.group(entry.addr.ip()))
             })
             .collect();
         manager.select(&eligible, now)
     }
+    /// Applies Core's failure-count connectivity threshold to the caller's
+    /// persistent outbound TCP snapshot using this book's configured classifier.
+    /// Connection roles and leases remain owned by the caller.
+    pub(crate) fn count_failure(&self, outbound: &[SocketAddr], maximum: usize) -> bool {
+        let threshold = maximum.saturating_sub(1).min(2);
+        let manager = self.state.lock();
+        let mut groups = HashSet::new();
+        for address in outbound {
+            groups.insert(manager.groups.group(address.ip()));
+            if groups.len() >= threshold {
+                return true;
+            }
+        }
+        threshold == 0
+    }
+
     pub(crate) fn queued(&self, addr: SocketAddr) {
         let addr = canonical(addr);
         self.state.lock().pending.insert(addr);
@@ -800,7 +850,7 @@ fn invalid(message: &'static str) -> io::Error {
 
 struct Loaded {
     stored: Stored,
-    legacy: bool,
+    schema: u32,
     bytes: Vec<u8>,
 }
 
@@ -878,12 +928,37 @@ struct LegacyStored {
     records: Vec<LegacyCandidate>,
 }
 
-fn validate_current(stored: &Stored, allow_local: bool) -> io::Result<()> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupedLegacyStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    records: Vec<LegacyCandidate>,
+    asmap_id: Option<[u8; 32]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrefixStored {
+    version: u32,
+    magic: [u8; 4],
+    secret: [u8; 32],
+    #[serde(deserialize_with = "read_records")]
+    records: Vec<Candidate>,
+}
+
+fn validate_current(
+    stored: &Stored,
+    allow_local: bool,
+    groups: Option<&NetGroups>,
+) -> io::Result<()> {
     if stored.version != VERSION || stored.records.len() > MAX_RECORDS {
         return Err(invalid("address book version/count"));
     }
     let mut endpoints = HashSet::new();
     let mut slots = HashSet::new();
+    let mut tried_count = 0;
     for entry in &stored.records {
         if !routable(entry.addr, allow_local)
             || canonical(entry.addr) != entry.addr
@@ -895,10 +970,18 @@ fn validate_current(stored: &Stored, allow_local: bool) -> io::Result<()> {
             return Err(invalid("invalid address book record"));
         }
         if entry.tried {
-            let bucket = tried_bucket(&stored.secret, entry.addr);
-            let position = bucket_position(&stored.secret, entry.addr, false, bucket);
-            if !slots.insert((false, bucket, position)) {
-                return Err(invalid("Tried bucket collision"));
+            tried_count += 1;
+            if tried_count > TRIED_BUCKETS * BUCKET_SIZE {
+                return Err(invalid("Tried count exceeds table"));
+            }
+            // A changed map cannot reproduce the old Tried slots. Validate all
+            // map-independent structure, then back up and rebucket at open.
+            if let Some(groups) = groups {
+                let bucket = tried_bucket(&stored.secret, entry.addr, groups);
+                let position = bucket_position(&stored.secret, entry.addr, false, bucket);
+                if !slots.insert((false, bucket, position)) {
+                    return Err(invalid("Tried bucket collision"));
+                }
             }
         } else {
             let mut buckets = HashSet::new();
@@ -938,7 +1021,7 @@ fn legacy_slot(secret: &[u8; 32], entry: &LegacyCandidate) -> u64 {
     }
 }
 fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
-    if old.version != 1 || old.records.len() > 4096 {
+    if !(1..=3).contains(&old.version) || old.records.len() > 4096 {
         return Err(invalid("legacy address book version/count"));
     }
     let mut addresses = HashSet::new();
@@ -952,13 +1035,13 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
                 .source_ip
                 .is_some_and(|ip| legacy_prefix(ip) != entry.source_group)
             || entry.tried && entry.last_success == 0
-            || !slots.insert(legacy_slot(&old.secret, entry))
+            || old.version == 1 && !slots.insert(legacy_slot(&old.secret, entry))
         {
             return Err(invalid("invalid legacy address record"));
         }
         let count = sources.entry(entry.source_group).or_insert(0_usize);
         *count += 1;
-        if *count > 64 {
+        if old.version == 1 && *count > 64 {
             return Err(invalid("legacy source limit"));
         }
     }
@@ -989,9 +1072,15 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
         magic: old.magic,
         secret: old.secret,
         records,
+        asmap_id: None,
     })
 }
-fn read_book(path: &Path, magic: Option<[u8; 4]>, allow_local: bool) -> io::Result<Option<Loaded>> {
+fn read_book(
+    path: &Path,
+    magic: Option<[u8; 4]>,
+    allow_local: bool,
+    groups: &NetGroups,
+) -> io::Result<Option<Loaded>> {
     #[derive(Deserialize)]
     struct Header {
         version: u32,
@@ -1016,34 +1105,80 @@ fn read_book(path: &Path, magic: Option<[u8; 4]>, allow_local: bool) -> io::Resu
         return Err(invalid("address book checksum"));
     }
     let header: Header = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-    let legacy = header.version == 1;
-    let stored = if legacy {
-        if bytes.len() > 2 * 1024 * 1024 {
-            return Err(invalid("legacy address book size"));
+    let stored = match header.version {
+        1..=3 => {
+            if bytes.len() > 2 * 1024 * 1024 {
+                return Err(invalid("legacy address book size"));
+            }
+            if header.version == 1 {
+                let old =
+                    serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+                convert_legacy(old, allow_local)?
+            } else {
+                let old: GroupedLegacyStored =
+                    serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+                let asmap_id = old.asmap_id;
+                let mut stored = convert_legacy(
+                    LegacyStored {
+                        version: old.version,
+                        magic: old.magic,
+                        secret: old.secret,
+                        records: old.records,
+                    },
+                    allow_local,
+                )?;
+                stored.asmap_id = asmap_id;
+                stored
+            }
         }
-        let old = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-        convert_legacy(old, allow_local)?
-    } else if header.version == VERSION {
-        let stored: Stored =
-            serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-        validate_current(&stored, allow_local)?;
-        stored
-    } else {
-        return Err(invalid("unsupported address book schema"));
+        5 => {
+            let old: PrefixStored =
+                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+            if old.version != 5 {
+                return Err(invalid("prefix address book version"));
+            }
+            let stored = Stored {
+                version: VERSION,
+                magic: old.magic,
+                secret: old.secret,
+                records: old.records,
+                asmap_id: None,
+            };
+            validate_current(&stored, allow_local, Some(&NetGroups::default()))?;
+            stored
+        }
+        VERSION => {
+            let stored: Stored =
+                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+            let prefix = NetGroups::default();
+            let classifier = if stored.asmap_id.is_none() {
+                Some(&prefix)
+            } else if stored.asmap_id == groups.identity() {
+                Some(groups)
+            } else {
+                None
+            };
+            validate_current(&stored, allow_local, classifier)?;
+            stored
+        }
+        _ => return Err(invalid("unsupported address book schema")),
     };
     if magic.is_some_and(|magic| magic != stored.magic) {
         return Err(invalid("address book network"));
     }
     Ok(Some(Loaded {
         stored,
-        legacy,
+        schema: header.version,
         bytes,
     }))
 }
-fn backup_legacy(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn backup_before_migration(path: &Path, bytes: &[u8], schema: u32) -> io::Result<()> {
     use bitcoin::hex::DisplayHex as _;
     let digest = Sha256::digest(bytes);
-    let backup = path.with_extension(format!("v1-{}.bak", digest[..].to_lower_hex_string()));
+    let backup = path.with_extension(format!(
+        "v{schema}-{}.bak",
+        digest[..].to_lower_hex_string()
+    ));
     match fs::symlink_metadata(&backup) {
         Ok(metadata) => {
             if !metadata.is_file()
@@ -1079,7 +1214,7 @@ fn backup_legacy(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 impl Manager {
-    fn rebucket_legacy(&mut self) {
+    fn rebucket(&mut self) {
         let mut records = std::mem::take(&mut self.stored.records);
         let before = records.len();
         records.sort_by_key(|entry| {
@@ -1094,6 +1229,7 @@ impl Manager {
         self.tried.fill(EMPTY_SLOT);
         let mut demoted = 0;
         for mut entry in records {
+            entry.new_buckets.clear();
             let tried_slot = self.tried_slot(entry.addr);
             if entry.tried && self.tried[tried_slot] == EMPTY_SLOT {
                 let index = self.stored.records.len();
@@ -1102,7 +1238,12 @@ impl Manager {
                 self.stored.records.push(entry);
                 continue;
             }
-            let bucket = new_bucket(&self.stored.secret, entry.addr, &entry.source.group());
+            let bucket = new_bucket(
+                &self.stored.secret,
+                entry.addr,
+                &entry.source.group(&self.groups),
+                &self.groups,
+            );
             let slot = self.new_slot(entry.addr, bucket);
             if self.new[slot] != EMPTY_SLOT {
                 continue;
@@ -1122,7 +1263,7 @@ impl Manager {
             retained = self.stored.records.len(),
             demoted,
             dropped = before - self.stored.records.len(),
-            "migrated backed-up address book to Core placement"
+            "regrouped address book with Core placement"
         );
     }
 }

@@ -3190,7 +3190,7 @@ mod ready_notify_tests {
         let mut shared = shared_with_notify_counter(&Arc::new(AtomicUsize::new(0)));
         let now = crate::addrman::now();
         let known = SocketAddr::from(([127, 0, 0, 1], 8333));
-        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
         book.learn_dns("seed", &[known], now);
         shared.address_book = Some(Arc::clone(&book));
         let (tx, _) = crossbeam_channel::bounded(1);
@@ -3423,7 +3423,7 @@ mod address_tests {
             let (headers, _) = crossbeam_channel::unbounded();
             let (blocks, _) = crossbeam_channel::unbounded();
             let mut shared = test_shared(table, headers, blocks);
-            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
             book.learn_dns("seed", &[target], now - 31 * 86400);
             shared.address_book = Some(Arc::clone(&book));
             shared.session_cancel.store(cancelled);
@@ -3450,7 +3450,7 @@ mod address_tests {
         let (headers_tx, _) = crossbeam_channel::unbounded();
         let (blocks_tx, _) = crossbeam_channel::unbounded();
         let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
-        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
         book.learn_dns(
             "seed",
             &[SocketAddr::from(([127, 0, 0, 2], 8333))],
@@ -3482,7 +3482,7 @@ mod address_tests {
         let (headers_tx, _) = crossbeam_channel::unbounded();
         let (blocks_tx, _) = crossbeam_channel::unbounded();
         let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
-        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
         shared.address_book = Some(Arc::clone(&book));
         let (sender, receiver) = crossbeam_channel::unbounded();
         let source = SocketAddr::from(([127, 0, 0, 1], 9000));

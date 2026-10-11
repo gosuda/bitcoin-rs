@@ -5,7 +5,7 @@ fn addr(n: u8) -> SocketAddr {
     SocketAddr::new(Ipv4Addr::new(8, n, 1, 1).into(), 8333)
 }
 fn book() -> Arc<AddressBook> {
-    AddressBook::open(None, [1; 4], false)
+    AddressBook::open(None, [1; 4], false, None)
 }
 
 #[test]
@@ -64,16 +64,16 @@ fn invalid_and_duplicate_addresses_do_not_create_records() {
 fn restart_roundtrip_and_corruption_preserves_operator_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.dat");
-    let book = AddressBook::open(Some(path.clone()), [1; 4], false);
+    let book = AddressBook::open(Some(path.clone()), [1; 4], false, None);
     book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
     book.succeeded(addr(1), 9, 10_001);
     book.save();
-    let restored = AddressBook::open(Some(path.clone()), [1; 4], false);
+    let restored = AddressBook::open(Some(path.clone()), [1; 4], false, None);
     assert_eq!(restored.len(), 1);
     assert!(restored.state.lock().stored.records[0].tried);
     for corrupt in [b"truncated".to_vec(), vec![0; 40]] {
         fs::write(network_path(&path, [1; 4]), &corrupt).expect("corrupt fixture");
-        let recovered = AddressBook::open(Some(path.clone()), [1; 4], false);
+        let recovered = AddressBook::open(Some(path.clone()), [1; 4], false, None);
         recovered.learn_peer(addr(2).ip(), &[(addr(3), 9, 10_000)], 10_000);
         recovered.save();
         assert_eq!(
@@ -126,15 +126,15 @@ fn scoped_network_books_and_stale_temporary_files_are_independent() {
     let dir = tempfile::tempdir().expect("dir");
     let base = dir.path().join("peers.dat");
     let path = network_path(&base, [1; 4]);
-    let book = AddressBook::open(Some(base.clone()), [1; 4], false);
+    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     book.learn_dns("seed", &[addr(1)], 10_000);
     book.save();
     let original = fs::read(&path).expect("read");
-    let other = AddressBook::open(Some(base.clone()), [2; 4], false);
+    let other = AddressBook::open(Some(base.clone()), [2; 4], false, None);
     other.learn_dns("seed", &[addr(2)], 10_000);
     other.save();
     assert_eq!(fs::read(&path).expect("read"), original);
-    assert_eq!(AddressBook::open(Some(base), [2; 4], false).len(), 1);
+    assert_eq!(AddressBook::open(Some(base), [2; 4], false, None).len(), 1);
     let stale = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&stale, b"operator-owned stale temporary file").expect("fixture");
     book.attempted(addr(1), true, 10_001);
@@ -157,7 +157,7 @@ fn legacy_import_retains_original_and_scoped_state_wins() {
     let stored = source.state.lock().stored.clone();
     publish_book(&base, &stored, &mut false).expect("legacy fixture");
     let original = fs::read(&base).expect("legacy bytes");
-    let migrated = AddressBook::open(Some(base.clone()), [1; 4], false);
+    let migrated = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     assert_eq!(migrated.state.lock().stored.secret, stored.secret);
     assert_eq!(migrated.len(), 1);
     migrated.save();
@@ -168,10 +168,10 @@ fn legacy_import_retains_original_and_scoped_state_wins() {
     assert_eq!(fs::read(&base).expect("legacy unchanged"), original);
     fs::write(&base, b"future format unknown to this node").expect("unknown legacy");
     assert_eq!(
-        AddressBook::open(Some(base.clone()), [1; 4], false).len(),
+        AddressBook::open(Some(base.clone()), [1; 4], false, None).len(),
         1
     );
-    let unknown = AddressBook::open(Some(base.clone()), [3; 4], false);
+    let unknown = AddressBook::open(Some(base.clone()), [3; 4], false, None);
     unknown.learn_dns("seed", &[addr(2)], 10_000);
     unknown.save();
     assert!(!network_path(&base, [3; 4]).exists());
@@ -189,15 +189,15 @@ fn valid_foreign_legacy_and_raced_destination_are_never_overwritten() {
     source.learn_dns("seed", &[addr(1)], 10_000);
     publish_book(&base, &source.state.lock().stored, &mut false).expect("legacy fixture");
     let original = fs::read(&base).expect("legacy bytes");
-    let foreign = AddressBook::open(Some(base.clone()), [2; 4], false);
+    let foreign = AddressBook::open(Some(base.clone()), [2; 4], false, None);
     foreign.learn_dns("seed", &[addr(2)], 10_000);
     foreign.save();
     assert_eq!(
-        AddressBook::open(Some(base.clone()), [2; 4], false).len(),
+        AddressBook::open(Some(base.clone()), [2; 4], false, None).len(),
         1
     );
     assert_eq!(fs::read(&base).expect("retained"), original);
-    let raced = AddressBook::open(Some(base.clone()), [3; 4], false);
+    let raced = AddressBook::open(Some(base.clone()), [3; 4], false, None);
     raced.learn_dns("seed", &[addr(3)], 10_000);
     let path = network_path(&base, [3; 4]);
     fs::write(&path, b"operator created this after open").expect("raced destination");
@@ -238,7 +238,7 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
     assert_eq!(calls, 2);
     assert_eq!(fs::read(&stale).expect("stale retained"), b"stale");
     assert_eq!(
-        read_book(&path, Some([1; 4]), false)
+        read_book(&path, Some([1; 4]), false, &NetGroups::default())
             .expect("published")
             .expect("exists")
             .stored
@@ -251,7 +251,7 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
 #[test]
 fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     let dir = tempfile::tempdir().expect("dir");
-    let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false);
+    let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false, None);
     book.learn_peer(addr(2).ip(), &[(addr(1), 1, 10_000)], 10_000);
     book.save();
     let clean = book.state.lock().saved_revision;
@@ -399,7 +399,8 @@ fn add_ref(manager: &mut Manager, addr: SocketAddr, source: &Source, seen: u64) 
     panic!("fixed-seed reference fixture should find its 1/2^N admission");
 }
 fn assert_indexes(manager: &Manager) {
-    validate_current(&manager.stored, manager.allow_local).expect("membership invariants");
+    validate_current(&manager.stored, manager.allow_local, Some(&manager.groups))
+        .expect("membership invariants");
     assert_eq!(manager.by_addr.len(), manager.stored.records.len());
     let mut count = 0;
     for (index, entry) in manager.stored.records.iter().enumerate() {
@@ -455,19 +456,24 @@ fn placement_matches_68_unmodified_core_vectors() {
             Source::Ip(origin.parse().expect("source IP"))
         };
         assert_eq!(
-            crate::netgroup::group(addr.ip()).to_lower_hex_string(),
+            NetGroups::default().group(addr.ip()).to_lower_hex_string(),
             row["address_group_hex"].as_str().expect("group")
         );
         assert_eq!(
-            source.group().to_lower_hex_string(),
+            source.group(&NetGroups::default()).to_lower_hex_string(),
             row["source_group_hex"].as_str().expect("source group")
         );
         assert_eq!(
             endpoint_key(addr).to_lower_hex_string(),
             row["endpoint_key_hex"].as_str().expect("wire endpoint")
         );
-        let new = new_bucket(&secret, addr, &source.group());
-        let tried = tried_bucket(&secret, addr);
+        let new = new_bucket(
+            &secret,
+            addr,
+            &source.group(&NetGroups::default()),
+            &NetGroups::default(),
+        );
+        let tried = tried_bucket(&secret, addr, &NetGroups::default());
         assert_eq!(u64::try_from(new).expect("bucket"), row["new_bucket"]);
         assert_eq!(u64::try_from(tried).expect("bucket"), row["tried_bucket"]);
         assert_eq!(
@@ -737,7 +743,7 @@ fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
         };
         let bytes = fixture_bytes(&old_fixture());
         fs::write(&source, &bytes).expect("old operator book");
-        let restored = AddressBook::open(Some(base.clone()), [1; 4], false);
+        let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert_eq!(restored.len(), 1);
         assert_eq!(
             restored.select(&[], &[], EPOCH, |_| true),
@@ -760,7 +766,7 @@ fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
             assert_eq!(manager.last_good, 1);
             assert_indexes(&manager);
         }
-        let retry = AddressBook::open(Some(base.clone()), [1; 4], false);
+        let retry = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert!(
             retry.state.lock().writable,
             "matching durable backup is reusable before first migration publication"
@@ -770,7 +776,7 @@ fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
         if !scoped {
             assert_eq!(fs::read(&source).expect("legacy retained"), bytes);
         }
-        let again = AddressBook::open(Some(base), [1; 4], false);
+        let again = AddressBook::open(Some(base), [1; 4], false, None);
         assert_eq!(again.len(), 1);
         assert_eq!(again.state.lock().stored.version, VERSION);
     }
@@ -787,19 +793,19 @@ fn migration_backup_failure_and_unknown_child_schemas_preserve_operator_files() 
     let digest = Sha256::digest(&bytes);
     let backup = path.with_extension(format!("v1-{}.bak", digest[..].to_lower_hex_string()));
     fs::create_dir(&backup).expect("unusable backup");
-    let book = AddressBook::open(Some(base.clone()), [1; 4], false);
+    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     assert_eq!(book.len(), 1);
     assert!(!book.state.lock().writable);
     book.learn_dns("seed", &[addr(8)], EPOCH);
     book.save();
     assert_eq!(fs::read(&path).expect("preserved"), bytes);
-    for version in [2, 3, 4, 6, 99] {
+    for version in [2, 3, 4, 7, 99] {
         let mut value = old_fixture();
         value["version"] = version.into();
         value["anchors"] = serde_json::json!([{"addr":"8.8.8.8:8333","confirmed_at":EPOCH}]);
         let bytes = fixture_bytes(&value);
         fs::write(&path, &bytes).expect("unknown");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false);
+        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert!(!book.state.lock().writable);
         book.learn_dns("seed", &[addr(9)], EPOCH);
         book.save();
@@ -811,7 +817,7 @@ fn migration_backup_failure_and_unknown_child_schemas_preserve_operator_files() 
 fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() {
     let dir = tempfile::tempdir().expect("dir");
     let base = dir.path().join("peers.dat");
-    let book = AddressBook::open(Some(base.clone()), [1; 4], false);
+    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     {
         let mut manager = book.state.lock();
         manager.rng = StdRng::seed_from_u64(5);
@@ -840,7 +846,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
     };
     assert!(refs.len() > 1);
     book.save();
-    let restored = AddressBook::open(Some(base.clone()), [1; 4], false);
+    let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     let manager = restored.state.lock();
     let entry = &manager.stored.records[0];
     assert_eq!(manager.stored.secret, secret);
@@ -860,7 +866,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
         let bytes = fixture_bytes(&value);
         let path = network_path(&base, [1; 4]);
         fs::write(&path, &bytes).expect("malformed");
-        let rejected = AddressBook::open(Some(base.clone()), [1; 4], false);
+        let rejected = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert!(!rejected.state.lock().writable);
         rejected.save();
         assert_eq!(fs::read(&path).expect("preserved"), bytes);
@@ -929,7 +935,7 @@ fn capacity_and_file_budget_have_explicit_bounded_representations() {
     };
     let size = serde_json::to_vec(&entry).expect("max-width fields").len();
     assert!(size <= 512, "fixed-width field serialization bound");
-    assert!(MAX_RECORDS * 513 + 256 + 32 < usize::try_from(MAX_FILE_BYTES).expect("file cap"));
+    assert!(MAX_RECORDS * 513 + 512 + 32 < usize::try_from(MAX_FILE_BYTES).expect("file cap"));
     assert_eq!(
         (NEW_BUCKETS + TRIED_BUCKETS) * BUCKET_SIZE * std::mem::size_of::<u32>(),
         327_680
@@ -1144,7 +1150,7 @@ fn ring_manager(second_port: u16) -> (Manager, SocketAddr, SocketAddr) {
         "../../tests/data/core-addrman-ring-v31.1.json"
     ))
     .expect("actual Core ring");
-    let mut manager = Manager::new([1; 4], false, None);
+    let mut manager = Manager::new([1; 4], false, None, NetGroups::default());
     manager.stored.secret =
         <[u8; 32]>::from_hex(data["rows"][0]["secret_raw_hex"].as_str().expect("secret"))
             .expect("Core secret");
@@ -1396,3 +1402,5 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
     );
 }
+#[path = "asmap_tests.rs"]
+mod asmap_tests;
