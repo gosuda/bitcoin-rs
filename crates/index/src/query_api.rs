@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(unknown.records, first.records);
         let empty = source.confirmed_history_page(script, Some(record(2, 6).txid), 0)?;
         assert!(empty.cursor_found);
-        assert!(empty.records.is_empty());
+        assert_eq!(empty.records, []);
         Ok(())
     }
 }

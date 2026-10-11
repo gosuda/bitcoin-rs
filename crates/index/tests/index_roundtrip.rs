@@ -2904,6 +2904,30 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// The input spends a real prior output; this index fixture does not claim
+/// consensus-valid genesis spending.
+fn external_spend_fixture() -> (Block, Block) {
+    let funding = Network::Regtest.genesis_block();
+    let funding_tx = &funding.txs[0];
+    let mut spending = funding.clone();
+    spending.header.prev_blockhash = funding.block_hash();
+    spending.txs = vec![Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(funding_tx.txid(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: funding_tx.outputs[0].value,
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+    }];
+    (funding, spending)
+}
+
 #[test]
 fn historical_conveniences_use_explicit_external_spent_scripts()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -2927,31 +2951,13 @@ fn historical_conveniences_use_explicit_external_spent_scripts()
         }
     }
 
-    // This index fixture uses a real prior output's script and an ordinary
-    // external input. It does not claim consensus-valid genesis spending.
-    let funding = Network::Regtest.genesis_block();
+    let (funding, spending) = external_spend_fixture();
     let funding_tx = &funding.txs[0];
     let coin = PriorCoin(
         OutPoint::new(funding_tx.txid(), 0),
         funding_tx.outputs[0].script_pubkey.clone(),
     );
     let target = ScriptHash::from_script_bytes(&coin.1);
-    let mut spending = funding.clone();
-    spending.header.prev_blockhash = funding.block_hash();
-    spending.txs = vec![Tx {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        inputs: vec![TxIn {
-            previous_output: coin.0,
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: funding_tx.outputs[0].value,
-            script_pubkey: Script::from_bytes(vec![0x51]),
-        }],
-    }];
     let funding_body = consensus_bytes(&funding);
     let spending_body = consensus_bytes(&spending);
     let expected_funding = bitcoin_rs_index::ScriptHistoryEntry::confirmed(funding_tx.txid(), 0);

@@ -385,8 +385,8 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(final_watermark)
     }
 
-    /// Atomically rolls back anchorless TxLookup rows and the consumer cursor.
-    /// ScriptHistory and ScriptLive require
+    /// Atomically rolls back anchorless `TxLookup` rows and the consumer cursor.
+    /// `ScriptHistory` and `ScriptLive` require
     /// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
     pub fn commit_rollback_one_for_with_cursor(
         &mut self,
@@ -412,7 +412,7 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Atomically rolls back one block with the exact scripts of its spent
-    /// coins, required when ScriptHistory or ScriptLive is selected.
+    /// coins, required when `ScriptHistory` or `ScriptLive` is selected.
     ///
     /// The commit point is the successful return from the durable conditional
     /// write, so recovery sees either the prior state or the complete rollback.

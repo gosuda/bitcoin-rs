@@ -21,7 +21,7 @@ use bitcoin_rs_storage::KvStore;
 ///
 /// A block body carries only each input's previous outpoint; the spent coin's
 /// `script_pubkey` lives in authoritative UTXO state, and on disconnect in the
-/// block's undo record. ScriptHistory spending occurrences and ScriptLive
+/// block's undo record. `ScriptHistory` spending occurrences and `ScriptLive`
 /// deletes require this authoritative script instead of guessing from the parse.
 pub trait SpentCoinScripts {
     /// The exact `script_pubkey` bytes of the coin `txid:vout`, if known.
@@ -32,7 +32,7 @@ pub trait SpentCoinScripts {
 
 /// The anchorless source: answers nothing.
 ///
-/// Used by the anchorless TxLookup path. ScriptHistory and ScriptLive require
+/// Used by the anchorless `TxLookup` path. `ScriptHistory` and `ScriptLive` require
 /// an explicit spent-script source, even when a particular block has no spends.
 pub(crate) struct NoSpentScripts;
 
@@ -319,8 +319,8 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
-    /// Prepares anchorless TxLookup rows from one serialized block scan.
-    /// ScriptHistory and ScriptLive return [`IndexError::MissingSpentScripts`];
+    /// Prepares anchorless `TxLookup` rows from one serialized block scan.
+    /// `ScriptHistory` and `ScriptLive` return [`IndexError::MissingSpentScripts`];
     /// use [`Self::prepare_block_with_spent_scripts`] for either capability.
     pub fn prepare_block_for(
         &self,
@@ -338,7 +338,7 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Prepares capability-selected rows with the exact external spent scripts
-    /// required by ScriptHistory occurrences and ScriptLive deletes.
+    /// required by `ScriptHistory` occurrences and `ScriptLive` deletes.
     pub fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,

@@ -667,10 +667,10 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("empty cursor page failed: {error}"));
         assert!(empty.cursor_found);
-        assert!(empty.records.is_empty());
+        assert_eq!(empty.records, []);
     }
 
-    /// IDX-04 preserves sibling history when only TxLookup is rebuilt from
+    /// IDX-04 preserves sibling history when only `TxLookup` is rebuilt from
     /// a pruned frontier. API-09 must not call a retained cursor unknown.
     #[test]
     fn history_pages_respect_independent_transaction_lookup_coverage()

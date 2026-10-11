@@ -99,7 +99,7 @@ pub enum IndexError {
         /// Watermark found in the store.
         actual: Option<IndexWatermark>,
     },
-    /// ScriptHistory or ScriptLive was requested without a spent-coin source.
+    /// `ScriptHistory` or `ScriptLive` was requested without a spent-coin source.
     /// An external input's script is absent from the block body and must be
     /// supplied for history occurrences and live-output deletes.
     #[error("ScriptHistory and ScriptLive require a spent-coin script source")]
