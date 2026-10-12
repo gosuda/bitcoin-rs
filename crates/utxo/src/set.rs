@@ -30,71 +30,46 @@ pub enum UtxoError {
     Scan(#[from] crate::scan::UtxoScanError),
     /// A script does not fit the snapshot and record `u16` length field.
     #[error("script_pubkey is too large for a u16 length: {len} bytes")]
-    ScriptTooLarge {
-        len: usize,
-    },
+    ScriptTooLarge { len: usize },
     /// One encoded record could not fit in the local address space.
     #[error("encoded UTXO record exceeds addressable size at {len} bytes")]
-    RecordTooLarge {
-        len: usize,
-    },
+    RecordTooLarge { len: usize },
     /// Encoded UTXO record bytes are truncated, trailing, or noncanonical.
     #[error("invalid encoded UTXO record")]
     CorruptRecord,
     /// A snapshot coin must have been created no later than its base height.
     #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
-    SnapshotCoinHeightOutOfRange {
-        height: u32,
-        snapshot_height: u32,
-    },
+    SnapshotCoinHeightOutOfRange { height: u32, snapshot_height: u32 },
     /// Snapshot I/O failed.
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
     /// Snapshot magic did not match `UTXO`.
     #[error("invalid snapshot magic {actual:#010x}")]
-    InvalidSnapshotMagic {
-        actual: u32,
-    },
+    InvalidSnapshotMagic { actual: u32 },
     /// Snapshot version is not supported by this crate.
     #[error("unsupported snapshot version {version}")]
-    UnsupportedSnapshotVersion {
-        version: u32,
-    },
+    UnsupportedSnapshotVersion { version: u32 },
     /// Snapshot record count does not fit the local platform.
     #[error("snapshot record count {count} does not fit usize")]
-    SnapshotRecordCountTooLarge {
-        count: u64,
-    },
+    SnapshotRecordCountTooLarge { count: u64 },
     /// Strict snapshot records did not produce the declared number of records.
     #[error("strict snapshot record count mismatch: declared {declared}, actual {actual}")]
-    SnapshotRecordCountMismatch {
-        declared: u64,
-        actual: usize,
-    },
+    SnapshotRecordCountMismatch { declared: u64, actual: usize },
     /// Snapshot output count does not fit the record header.
     #[error("snapshot record has too many live outputs: {count}")]
-    SnapshotOutputCountTooLarge {
-        count: usize,
-    },
+    SnapshotOutputCountTooLarge { count: usize },
     /// Snapshot record serialized the same vout more than once.
     #[error("snapshot record duplicates vout {vout}")]
-    SnapshotDuplicateVout {
-        vout: u32,
-    },
+    SnapshotDuplicateVout { vout: u32 },
     /// Snapshot shard byte does not match the key's first byte.
     #[error("snapshot shard {shard} does not match key shard {key_shard}")]
-    SnapshotShardMismatch {
-        shard: u8,
-        key_shard: u8,
-    },
+    SnapshotShardMismatch { shard: u8, key_shard: u8 },
     /// Snapshot full txid does not match the stored key prefix.
     #[error("snapshot txid prefix does not match record key prefix")]
     SnapshotTxidPrefixMismatch,
     /// An output value exceeds the largest amount any UTXO can hold.
     #[error("output value {value} exceeds the maximum money supply")]
-    AmountOutOfRange {
-        value: u64,
-    },
+    AmountOutOfRange { value: u64 },
 }
 
 // Counts the actual insertion boundary, on the decoding thread only, so

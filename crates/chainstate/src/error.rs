@@ -24,15 +24,10 @@ pub enum ApplyError {
     HeightOverflow(u32),
     /// A transaction carries more outputs than a `u32` vout can index.
     #[error("output count of transaction {txid} exceeds the vout index range")]
-    VoutOverflow {
-        txid: bitcoin_rs_primitives::Txid,
-    },
+    VoutOverflow { txid: bitcoin_rs_primitives::Txid },
     /// The prepared block's txid slice does not cover every transaction.
     #[error("block has {transactions} transactions but {txids} txids were supplied")]
-    TxidCountMismatch {
-        transactions: usize,
-        txids: usize,
-    },
+    TxidCountMismatch { transactions: usize, txids: usize },
     /// Summing a block's input or output values left the satoshi range.
     #[error("block value total overflows the satoshi range")]
     BlockValueOverflow,
@@ -129,25 +124,17 @@ pub enum ApplyError {
     #[error(
         "cannot disconnect block at height {height} at or below assumeutxo base height {base_height}"
     )]
-    DisconnectBelowSnapshotBase {
-        height: u32,
-        base_height: u32,
-    },
+    DisconnectBelowSnapshotBase { height: u32, base_height: u32 },
     /// Prefix pruning must retain the history needed to validate a snapshot.
     #[error(
         "cannot prune while historical validation is required through assumeutxo base height {base_height}"
     )]
-    PruneDuringHistoricalValidation {
-        base_height: u32,
-    },
+    PruneDuringHistoricalValidation { base_height: u32 },
     /// Historical chainstate cannot connect blocks past the `AssumeUTXO` snapshot base.
     #[error(
         "historical chainstate cannot connect block at height {height} past target height {base_height}"
     )]
-    ConnectPastHistoricalTarget {
-        height: u32,
-        base_height: u32,
-    },
+    ConnectPastHistoricalTarget { height: u32, base_height: u32 },
     /// The historical chain reached a different block at the pinned base height.
     #[error("historical target at height {base_height} is {found}, expected {expected}")]
     HistoricalTargetHashMismatch {

@@ -24,9 +24,7 @@ pub enum IndexError {
     AnchorUnsupportedSelection,
     /// A block header did not have the consensus 80-byte length.
     #[error("invalid block header length {len}")]
-    InvalidHeaderLength {
-        len: usize,
-    },
+    InvalidHeaderLength { len: usize },
     /// A transaction's byte range in the block does not fit the `u32` that
     /// [`crate::types::TxPosition`] stores.
     ///
@@ -34,28 +32,20 @@ pub enum IndexError {
     /// 4 GiB — but the arithmetic is checked rather than wrapped, and the
     /// failure is an addressing limit, not a malformed header.
     #[error("transaction byte range does not fit u32 at block offset {offset}")]
-    UnaddressablePosition {
-        offset: u64,
-    },
+    UnaddressablePosition { offset: u64 },
     /// Durable watermark bytes do not have the expected length.
     #[error("invalid TxIndex watermark encoding")]
     InvalidWatermark,
     /// A persisted `TxIndex` prefix row had an invalid key length.
     #[error("invalid TxIndex prefix row length {len}")]
-    InvalidPrefixRowLength {
-        len: usize,
-    },
+    InvalidPrefixRowLength { len: usize },
     /// A `ScriptLive` row had a non-empty value even though the row format is
     /// key-only.
     #[error("invalid ScriptLive row value length {len}")]
-    InvalidLiveRowValue {
-        len: usize,
-    },
+    InvalidLiveRowValue { len: usize },
     /// The `TxIndex` format version is not supported.
     #[error("unsupported TxIndex format version {version}")]
-    UnsupportedTxIndexFormatVersion {
-        version: u32,
-    },
+    UnsupportedTxIndexFormatVersion { version: u32 },
     /// A serialized block header does not hash to the expected identity.
     #[error(
         "block body identity mismatch at height {height}: expected {expected:?}, found {actual:?}"
@@ -67,18 +57,13 @@ pub enum IndexError {
     },
     /// The watermark block identity row is missing during rollback.
     #[error("TxIndex watermark block identity row is missing at height {height} ({hash:?})")]
-    MissingWatermarkIdentity {
-        height: u32,
-        hash: [u8; 32],
-    },
+    MissingWatermarkIdentity { height: u32, hash: [u8; 32] },
     /// Prepared mutation accounting exceeded the platform size type.
     #[error("prepared TxIndex mutation size overflow")]
     MutationSizeOverflow,
     /// A prepared forward transition does not extend the durable watermark.
     #[error("prepared TxIndex transition is not contiguous with {watermark:?}")]
-    NonContiguousPrepared {
-        watermark: Option<IndexWatermark>,
-    },
+    NonContiguousPrepared { watermark: Option<IndexWatermark> },
     /// A prepared transition did not begin at the durable watermark it expected.
     #[error("TxIndex watermark mismatch: expected {expected:?}, found {actual:?}")]
     WatermarkMismatch {

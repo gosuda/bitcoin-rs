@@ -43,10 +43,7 @@ pub enum PolicyError {
     FeeArithmetic,
     /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
-    BelowMinRelayFee {
-        tx_rate: u64,
-        min_rate: u64,
-    },
+    BelowMinRelayFee { tx_rate: u64, min_rate: u64 },
     /// The transaction would join a cluster holding too many transactions.
     #[error("too many transactions in cluster")]
     ClusterCountLimit,

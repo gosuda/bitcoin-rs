@@ -111,9 +111,8 @@ mod tests {
             value: bitcoin::Amount::from_sat(10_000),
             script_pubkey: bitcoin::ScriptBuf::from_bytes(prevout_script),
         };
-        let ref_cost = reference.total_sigop_cost(|outpoint| {
-            (*outpoint == ref_outpoint).then_some(ref_output.clone())
-        });
+        let ref_cost = reference
+            .total_sigop_cost(|outpoint| (*outpoint == ref_outpoint).then_some(ref_output.clone()));
         assert_eq!(
             u32::try_from(ref_cost),
             Ok(expected),

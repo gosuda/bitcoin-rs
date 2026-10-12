@@ -546,7 +546,6 @@ mod tests {
     use crate::eval::{OP_CODESEPARATOR, remove_all};
     use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
 
-
     fn make_tx(version: i32, lock_time: u32, sequence: u32) -> Tx {
         Tx {
             version,

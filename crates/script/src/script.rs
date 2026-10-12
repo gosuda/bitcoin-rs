@@ -157,7 +157,8 @@ pub const fn instructions(script: &[u8]) -> Instructions<'_> {
     }
 }
 
-/// Whether every instruction has Core's valid legacy opcode and element encoding.
+/// Checks legacy opcode and push validity (`OP_NOP10`, 520-byte elements).
+/// Does not evaluate scripts or enforce the total script-size limit.
 #[must_use]
 pub fn has_valid_ops(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {

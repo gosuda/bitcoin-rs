@@ -279,15 +279,10 @@ script_errors! {
 pub enum ScriptError {
     /// The requested input index was not present in the transaction.
     #[error("input index {index} out of range for {inputs} inputs")]
-    InputIndexOutOfRange {
-        index: usize,
-        inputs: usize,
-    },
+    InputIndexOutOfRange { index: usize, inputs: usize },
     /// A Core vector flag name was not known by this crate.
     #[error("unknown script verify flag {name}")]
-    UnknownFlag {
-        name: String,
-    },
+    UnknownFlag { name: String },
     /// The delegated consensus verifier rejected the script.
     #[error("script verification failed: {0}")]
     Verification(String),
@@ -296,9 +291,7 @@ pub enum ScriptError {
     TaprootPrevoutsUnavailable,
     /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
-    Invalid {
-        code: ScriptErrCode,
-    },
+    Invalid { code: ScriptErrCode },
 }
 
 /// Public script verifier for the portable posture.
@@ -390,9 +383,7 @@ pub enum PrevoutError {
     },
     /// A row identifies a different outpoint than the corresponding input.
     #[error("prevout does not match transaction input {input_index}")]
-    Mismatch {
-        input_index: usize,
-    },
+    Mismatch { input_index: usize },
 }
 
 /// Checks that resolved prevouts cover the transaction in input order.

@@ -37,10 +37,7 @@ pub enum BoundedReadError {
     Unsupported,
     /// The stored value exceeded the requested owned-copy limit.
     #[error("stored value has {size} bytes, exceeding the {limit}-byte read limit")]
-    Limit {
-        size: usize,
-        limit: usize,
-    },
+    Limit { size: usize, limit: usize },
     /// The underlying read failed.
     #[error(transparent)]
     Storage(#[from] StorageError),

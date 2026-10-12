@@ -12,10 +12,7 @@ pub enum BatchOp {
         value: Bytes,
     },
     /// Deletes `key` from `cf`.
-    Delete {
-        cf: ColumnFamily,
-        key: Vec<u8>,
-    },
+    Delete { cf: ColumnFamily, key: Vec<u8> },
     /// Deletes every key in `[start, end)` from `cf`.
     DeleteRange {
         cf: ColumnFamily,

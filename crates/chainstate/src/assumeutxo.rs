@@ -124,10 +124,7 @@ pub enum HistoricalAdvance {
     /// The replay budget was used; another local pass must run before requesting.
     ReplayPending,
     /// The required body is not in the committed archive and must be fetched.
-    MissingBody {
-        height: u32,
-        hash: Hash256,
-    },
+    MissingBody { height: u32, hash: Hash256 },
 }
 
 /// Errors produced by `AssumeUTXO` management and validation.
@@ -163,10 +160,7 @@ pub enum AssumeUtxoError {
     SnapshotHeaderMissing(Hash256),
     /// A known base header must have the pinned height.
     #[error("snapshot base header height {found} does not match pinned height {expected}")]
-    SnapshotHeaderHeightMismatch {
-        expected: u32,
-        found: u32,
-    },
+    SnapshotHeaderHeightMismatch { expected: u32, found: u32 },
     /// The compiled snapshot base is outside the current best-work header ancestry.
     #[error(
         "snapshot base {base_hash} at height {base_height} is not on the best-work header chain ending at {best_header:?}"
@@ -178,25 +172,16 @@ pub enum AssumeUtxoError {
     },
     /// Historical validation must reproduce the pinned cumulative transaction count.
     #[error("historical transaction count {found} does not match pinned count {expected}")]
-    HistoricalTransactionCountMismatch {
-        expected: u64,
-        found: u64,
-    },
+    HistoricalTransactionCountMismatch { expected: u64, found: u64 },
     /// Snapshot height is not pinned in the network parameters.
     #[error("snapshot height {0} is not pinned in AssumeUtxoData for this network")]
     UntrustedSnapshotHeight(u32),
     /// Snapshot tip hash does not match the pinned block hash.
     #[error("snapshot block hash {found} does not match pinned hash {expected}")]
-    SnapshotBlockHashMismatch {
-        expected: Hash256,
-        found: Hash256,
-    },
+    SnapshotBlockHashMismatch { expected: Hash256, found: Hash256 },
     /// Snapshot commitment (`hash_serialized_3`) does not match the pinned commitment.
     #[error("snapshot commitment {found} does not match pinned hash {expected}")]
-    SnapshotCommitmentMismatch {
-        expected: Hash256,
-        found: Hash256,
-    },
+    SnapshotCommitmentMismatch { expected: Hash256, found: Hash256 },
     /// Node was previously marked as failed; refuses to start to protect operator data.
     #[error(
         "node previously failed assumeutxo validation at base height {base_height}: expected {expected_hash_serialized}, found {actual_hash_serialized}; failing closed"

@@ -37,16 +37,10 @@ pub const COIN_STATS_ENCODED_LEN: usize = 804;
 pub enum CoinStatsRewindError {
     /// The stats are not at the block being disconnected.
     #[error("coinstats are at height {found}, not the disconnected height {expected}")]
-    HeightMismatch {
-        expected: u32,
-        found: u32,
-    },
+    HeightMismatch { expected: u32, found: u32 },
     /// The rewind would take `tx_count` below zero.
     #[error("rewind of {tx_delta} transactions exceeds the recorded count {tx_count}")]
-    TxCountUnderflow {
-        tx_count: u64,
-        tx_delta: u64,
-    },
+    TxCountUnderflow { tx_count: u64, tx_delta: u64 },
 }
 
 /// Incremental UTXO set statistics.

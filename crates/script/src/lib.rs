@@ -16,7 +16,6 @@ pub mod sigops;
 mod stack;
 mod taproot;
 
-
 pub use checker::check_signature_encoding;
 pub use eval::{MAX_SCRIPT_SIZE, is_op_success};
 pub use interpreter::{
