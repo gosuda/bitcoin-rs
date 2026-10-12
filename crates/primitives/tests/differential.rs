@@ -153,8 +153,7 @@ fn fixture_blocks_roundtrip_byte_identically() {
 /// are dominated by Core's "Superfluous witness record" rule
 /// (`superfluous_witness`): a BIP144 marker/flag with an all-empty witness
 /// section can never re-encode byte-identically, so the codec rejects it
-/// before the lock time, matching the check position of both Core and
-/// rust-bitcoin.
+/// before the lock time, matching Bitcoin Core's check position.
 ///
 /// `CORPUS_VERDICTS_WRITE=1` regenerates `verdicts.json` from observed
 /// verdicts (test-local write path, the documented maintenance route; the

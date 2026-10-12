@@ -420,9 +420,8 @@ impl<'a> ParsedTransaction<'a> {
                 let limit = widening(witness_spans.len());
                 input.witness = MetadataRange::new(first, limit, limit)?;
             }
-            // BIP144 round-trip rule, checked at the same position as both
-            // oracles (before the lock time): the marker/flag exists only to
-            // carry witness data, so an all-empty witness section can never
+            // BIP144 round-trip rule (checked before the lock time): the marker/flag exists
+            // only to carry witness data, so an all-empty witness section can never
             // re-encode byte-identically and is not a parseable shape.
             if inputs.iter().all(|input| input.witness.is_empty()) {
                 return Err(DecodeError::SuperfluousWitness);
