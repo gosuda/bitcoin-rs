@@ -3,8 +3,6 @@
 
 extern crate alloc;
 
-/// Mempool outputs layered over confirmed coin lookup.
-mod accept;
 /// Shared resolved-input accounting.
 mod accounting;
 /// Shared transaction preparation, retries, and gateway lifecycle queries.

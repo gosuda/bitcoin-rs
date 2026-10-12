@@ -8,7 +8,6 @@ use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 
 use crate::wire::{Message, PeerError};
-use crate::wtxid::WtxidRelayState;
 
 /// Peer connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +31,24 @@ pub struct PeerCapabilities {
     pub send_headers: bool,
     /// Peer supports BIP155 addrv2 messages.
     pub addr_v2: bool,
+}
+
+/// BIP339 wtxid-relay negotiation state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WtxidRelayState {
+    peer_advertised: bool,
+}
+
+impl WtxidRelayState {
+    /// Mark that the remote peer sent `wtxidrelay`.
+    pub(crate) const fn mark_peer_supported(&mut self) {
+        self.peer_advertised = true;
+    }
+
+    /// Return true if the remote peer advertised BIP339 support.
+    pub const fn peer_supported(self) -> bool {
+        self.peer_advertised
+    }
 }
 
 /// BIP152 compact-block protocol version this node speaks and advertises.

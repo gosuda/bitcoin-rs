@@ -60,8 +60,6 @@ pub(crate) mod tx_policy;
 pub(crate) mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
-/// BIP339 wtxid-relay state.
-pub(crate) mod wtxid;
 
 #[cfg(test)]
 mod test_support;
@@ -80,7 +78,9 @@ pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use peer::{CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState};
+pub use peer::{
+    CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState, WtxidRelayState,
+};
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
@@ -94,7 +94,6 @@ pub use tx_relay::{
     RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
-pub use wtxid::WtxidRelayState;
 
 pub use download_window::default_sync_budget;
 
