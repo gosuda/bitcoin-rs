@@ -289,12 +289,17 @@ pub enum PeerError {
     /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
     BannedDestination(std::net::IpAddr),
+    /// The BIP324 transport failed: a malformed handshake, or a packet that
+    /// is oversized or fails authentication. BIP324 does not authenticate
+    /// peers, so this ends the connection without implicating the peer.
+    #[error(transparent)]
+    Transport(#[from] crate::transport::TransportFailure),
 }
 
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) => error,
+            Self::Io(_) | Self::Transport(_) => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -344,27 +349,56 @@ fn write_all_vectored<W: Write + ?Sized>(
     Ok(())
 }
 
-/// One encoded wire frame: the 24-byte header plus the payload `Bytes` the
-/// vectored write emits — the analogue of Core's `CSerializedNetMsg`.
+/// One encoded outbound message, the analogue of Core's `CSerializedNetMsg`:
+/// what the vectored write emits, and the payload the lease admitted.
 pub(crate) struct FramedMessage {
-    header: [u8; HEADER_LEN],
+    wire: FrameWire,
     payload: bytes::Bytes,
 }
 
+/// The bytes a frame puts on the wire around its payload.
+enum FrameWire {
+    /// The 24-byte v1 header, written before the payload.
+    V1([u8; HEADER_LEN]),
+    /// A sealed BIP324 packet, written instead of the header and payload.
+    V2(Vec<u8>),
+}
+
 impl FramedMessage {
-    /// Total wire size: header plus payload.
+    /// A BIP324 packet carrying `payload`.
+    pub(crate) const fn sealed(packet: Vec<u8>, payload: bytes::Bytes) -> Self {
+        Self {
+            wire: FrameWire::V2(packet),
+            payload,
+        }
+    }
+
+    /// The budget the lease charged for this message: the v1 frame length,
+    /// whichever transport carries it ([`wire_len`]).
     fn wire_len(&self) -> usize {
         HEADER_LEN + self.payload.len()
     }
 
-    /// The encoded payload bytes the vectored write emits.
+    /// The encoded payload bytes the frame carries.
     pub(crate) fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// Appends the slices this frame writes, in order.
+    fn push_slices<'a>(&'a self, slices: &mut Vec<IoSlice<'a>>) {
+        match &self.wire {
+            FrameWire::V1(header) => {
+                slices.push(IoSlice::new(header));
+                slices.push(IoSlice::new(&self.payload));
+            }
+            FrameWire::V2(packet) => slices.push(IoSlice::new(packet)),
+        }
+    }
 }
 
-/// Encodes `message` into its wire frame.
-pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
+/// The encoded payload of `message`, sharing a block's retained bytes, or an
+/// error when it exceeds [`MAX_MESSAGE_PAYLOAD`].
+pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerError> {
     let payload = match message {
         Message::BlockPayload(bytes) => bytes.clone(),
         other => bytes::Bytes::from(encode_payload(other)?),
@@ -372,6 +406,12 @@ pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMess
     if payload.len() > MAX_MESSAGE_PAYLOAD {
         return Err(PeerError::PayloadTooLarge(payload.len()));
     }
+    Ok(payload)
+}
+
+/// Encodes `message` into its v1 wire frame.
+pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
+    let payload = message_payload(message)?;
 
     let mut header = [0u8; HEADER_LEN];
     header[..4].copy_from_slice(&magic.to_bytes());
@@ -382,18 +422,10 @@ pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMess
             .to_le_bytes(),
     );
     header[20..24].copy_from_slice(&checksum(&payload));
-    Ok(FramedMessage { header, payload })
-}
-
-/// Encodes a burst of messages into wire frames, in order.
-pub(crate) fn encode_frames(
-    magic: Magic,
-    messages: &[Message],
-) -> Result<Vec<FramedMessage>, PeerError> {
-    messages
-        .iter()
-        .map(|message| encode_frame(magic, message))
-        .collect()
+    Ok(FramedMessage {
+        wire: FrameWire::V1(header),
+        payload,
+    })
 }
 
 /// Writes one encoded frame with a single vectored write and returns the
@@ -405,10 +437,9 @@ pub(crate) fn write_frame<W: Write + ?Sized>(
     // Header and payload ride in one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
     // segment splits and per-part syscall overhead on TcpStream).
-    write_all_vectored(
-        writer,
-        &mut [IoSlice::new(&frame.header), IoSlice::new(&frame.payload)],
-    )?;
+    let mut slices = Vec::with_capacity(2);
+    frame.push_slices(&mut slices);
+    write_all_vectored(writer, &mut slices)?;
     Ok(frame.wire_len())
 }
 
@@ -420,8 +451,7 @@ pub(crate) fn write_frames<W: Write + ?Sized>(
 ) -> Result<Vec<usize>, PeerError> {
     let mut slices = Vec::with_capacity(frames.len().saturating_mul(2));
     for frame in frames {
-        slices.push(IoSlice::new(&frame.header));
-        slices.push(IoSlice::new(&frame.payload));
+        frame.push_slices(&mut slices);
     }
     write_all_vectored(writer, &mut slices)?;
     Ok(frames.iter().map(FramedMessage::wire_len).collect())
@@ -441,7 +471,7 @@ pub fn write_message<W: Write + ?Sized>(
 ///
 /// One-shot: a read timeout part-way through a frame discards the bytes
 /// already consumed. Connection loops that retry poll timeouts read through
-/// `V1Receiver` instead.
+/// [`Peer::read_message`](crate::Peer::read_message) instead.
 pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -489,6 +519,16 @@ struct PendingBody {
 const RECEIVE_CHUNK: usize = 16 * 1024;
 
 impl V1Receiver {
+    /// A receiver whose first header already holds `prefix`: the bytes a
+    /// BIP324 responder read before it recognized a v1 peer.
+    pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
+        let mut receiver = Self::default();
+        let len = prefix.len().min(HEADER_LEN);
+        receiver.header[..len].copy_from_slice(&prefix[..len]);
+        receiver.header_filled = len;
+        receiver
+    }
+
     /// Read one validated wire payload, observing it before typed decoding.
     ///
     /// POST: a poll-timeout I/O error keeps the partial frame for the next
@@ -680,7 +720,8 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
     payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(value));
 }
 
-fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
+/// Decodes a command's payload, or an unknown command into [`Message::Unknown`].
+pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
     // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {

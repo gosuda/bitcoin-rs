@@ -3,22 +3,18 @@
 //! The `ElligatorSwift` key agreement, the HKDF key schedule, the
 //! forward-secure ciphers that seal and open packets, the handshake state
 //! machine, resumable packet reads, and the message type encoding. Nothing
-//! here owns a socket; connections still speak v1 until the transport is
-//! wired in (#1503).
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into peer connections by a later #1503 step"
-    )
-)]
+//! here owns a socket: [`crate::transport`] drives it over a connection.
 
 mod cipher;
 mod handshake;
 mod keys;
-mod msg_type;
+pub(crate) mod msg_type;
 mod packet;
 mod reader;
+
+pub(crate) use handshake::{Established, Handshake, Step};
+pub(crate) use packet::SendCipher;
+pub(crate) use reader::{MAX_PAYLOAD_LEN, PacketReader, is_poll_timeout};
 
 /// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
 /// retried with all progress kept; every other error ends the connection.

@@ -7,7 +7,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 
-use crate::wire::{Message, PeerError, write_message};
+use crate::wire::{Message, PeerError};
 use crate::wtxid::WtxidRelayState;
 
 /// Peer connection state.
@@ -124,13 +124,27 @@ pub struct Peer<S> {
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
-    /// Partial inbound frame kept across poll timeouts.
-    receive: crate::wire::V1Receiver,
+    /// Receive half of the transport, with any partial frame or packet kept
+    /// across poll timeouts.
+    recv: crate::transport::RecvTransport,
+    /// Send half of the transport, until the connection's writer thread takes it.
+    send: Option<crate::transport::SendTransport>,
+    /// The transport this connection negotiated.
+    transport: crate::transport::TransportProtocol,
 }
 
 impl<S> Peer<S> {
-    /// Create a peer over `stream`.
+    /// Create a v1 peer over `stream`.
     pub fn new(stream: S, magic: Magic) -> Self {
+        Self::with_transport(stream, magic, crate::transport::Negotiated::v1(magic))
+    }
+
+    /// Create a peer over `stream` speaking the `negotiated` transport.
+    pub(crate) fn with_transport(
+        stream: S,
+        magic: Magic,
+        negotiated: crate::transport::Negotiated,
+    ) -> Self {
         Self {
             stream,
             state: PeerState::Disconnected,
@@ -142,8 +156,21 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             net_trace: None,
-            receive: crate::wire::V1Receiver::default(),
+            recv: negotiated.recv,
+            send: Some(negotiated.send),
+            transport: negotiated.protocol,
         }
+    }
+
+    /// The transport this connection negotiated.
+    pub const fn transport(&self) -> crate::TransportProtocol {
+        self.transport
+    }
+
+    /// Hands the send half to the connection's writer thread. Later sends
+    /// through this peer fail.
+    pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
+        self.send.take()
     }
 
     /// Attaches the `net:*` probe context captured at the connection root.
@@ -160,34 +187,33 @@ impl<S> Peer<S> {
 }
 
 impl<S: Read + Write> Peer<S> {
-    /// Write one outbound message.
+    /// Write one outbound message through the connection's transport.
     ///
-    /// Returns the framed wire length so handshake accounting can charge the
-    /// same bytes `write_message` emitted, without encoding the payload twice.
+    /// Returns the v1 frame length, the budget a lease charges for the
+    /// message whichever transport carries it.
     ///
-    /// With a `net:*` probe context attached, the frame is encoded once and
-    /// `net:outbound_message` observes its payload before the write attempt,
-    /// the way Core's `CSerializedNetMsg` is shared by its send path and the
-    /// probe.
+    /// The message is encoded once, and `net:outbound_message` observes its
+    /// payload before the write attempt, the way Core's `CSerializedNetMsg` is
+    /// shared by its send path and the probe.
     pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
-        if self.net_trace.is_some() {
-            let frame = crate::wire::encode_frame(self.magic, message)?;
-            crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
-            return crate::wire::write_frame(&mut self.stream, &frame);
-        }
-        write_message(&mut self.stream, self.magic, message)
+        let transport = self.send.as_mut().ok_or(PeerError::Protocol(
+            "send transport moved to the writer thread",
+        ))?;
+        let frame = transport.encode(message)?;
+        crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
+        crate::wire::write_frame(&mut self.stream, &frame)
     }
 }
 
 impl<S: Read> Peer<S> {
-    /// Read one framed message.
+    /// Read one message through the connection's transport.
     ///
-    /// A poll timeout part-way through a frame keeps the bytes already read,
-    /// so retrying after `TimedOut` or `WouldBlock` continues the same frame.
+    /// A poll timeout part-way through a frame or packet keeps the bytes
+    /// already read, so retrying after `TimedOut` or `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
         let net_trace = self.net_trace.as_ref();
-        self.receive
-            .read_message_with(&mut self.stream, self.magic, |command, payload| {
+        self.recv
+            .read_message(&mut self.stream, self.magic, |command, payload| {
                 crate::net_trace::inbound_message(net_trace, command, payload);
             })
             .map_err(PeerError::inbound)
@@ -259,6 +285,7 @@ pub(crate) const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::write_message;
 
     #[test]
     fn compact_negotiation_ignores_versions_we_do_not_advertise() {

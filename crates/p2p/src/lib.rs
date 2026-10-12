@@ -52,6 +52,8 @@ pub(crate) mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// A connection's v1 or BIP324 v2 transport and its negotiation.
+pub(crate) mod transport;
 /// Connection-bound transaction request and relay policy.
 pub(crate) mod tx_policy;
 /// Bounded transaction announcements and their peer relay worker.
@@ -86,6 +88,7 @@ pub use service::{
     P2pServiceError,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use transport::{TransportFailure, TransportProtocol};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
     RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,

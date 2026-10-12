@@ -98,6 +98,11 @@ pub struct P2pServiceConfig {
     pub outbound_full_relay_slots: usize,
     /// The services this node advertises in every `version`.
     pub local_services: ServiceFlags,
+    /// Whether connections try BIP324 v2 (see [`ConnectionShared::v2_transport`]).
+    /// The operator advertises `NODE_P2P_V2` through `local_services`.
+    ///
+    /// [`ConnectionShared::v2_transport`]: crate::listener::ConnectionShared::v2_transport
+    pub v2_transport: bool,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     pub outbound_block_relay_slots: usize,
@@ -126,6 +131,7 @@ impl Default for P2pServiceConfig {
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            v2_transport: false,
         }
     }
 }
@@ -475,6 +481,7 @@ impl P2pService {
         );
         shared.max_inbound = self.config.max_inbound();
         shared.local_services = self.config.local_services;
+        shared.v2_transport = self.config.v2_transport;
         shared.address_book = Some(Arc::clone(&self.address_book));
 
         let mut listeners = Vec::with_capacity(bound_listeners.len());

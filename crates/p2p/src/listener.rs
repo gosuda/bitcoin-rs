@@ -139,6 +139,11 @@ pub struct ConnectionShared {
     /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
     /// when pruned (Core `init.cpp:2022-2026`).
     pub local_services: ServiceFlags,
+    /// Whether connections try BIP324 v2: inbound detects v1 and v2, and
+    /// outbound starts v2 to manual peers and to addresses advertising
+    /// `NODE_P2P_V2`, falling back to v1 once when unanswered. `false` keeps
+    /// every connection on v1.
+    pub v2_transport: bool,
 }
 
 impl ConnectionShared {
@@ -186,6 +191,7 @@ impl ConnectionShared {
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            v2_transport: false,
         }
     }
 
@@ -683,10 +689,8 @@ pub(crate) fn spawn_dial(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One connection owner keeps admission, TCP health, lease publication, and handshake teardown ordered"
-)]
+/// Admits one outbound connection to `addr` and dials it, retrying once over
+/// v1 when a v2 attempt goes unanswered.
 fn run_outbound_connection(
     addr: SocketAddr,
     shared: &ConnectionShared,
@@ -714,6 +718,51 @@ fn run_outbound_connection(
             ));
         }
     }
+    // Core starts BIP324 on every manual connection, and on an automatic one
+    // only when the address advertises `NODE_P2P_V2`.
+    let try_v2 = shared.v2_transport
+        && (manual
+            || shared
+                .address_book
+                .as_ref()
+                .is_some_and(|book| book.advertises(addr, ServiceFlags::P2P_V2)));
+    match dial(addr, shared, role, manual, count_failure, try_v2)? {
+        Dialed::Done => Ok(()),
+        Dialed::V1Retry => {
+            // The peer closed a v2 attempt without sending a byte, as a v1-only
+            // node does: retry once over v1, as Core does. The unanswered
+            // attempt is not evidence against the peer.
+            tracing::debug!(
+                peer_addr = %addr,
+                "p2p v2 handshake unanswered; retrying with v1 transport protocol"
+            );
+            dial(addr, shared, role, manual, false, false).map(|_| ())
+        }
+    }
+}
+
+/// How one outbound dial ended.
+enum Dialed {
+    /// The connection completed or ended; nothing to retry.
+    Done,
+    /// A v2 attempt went unanswered, so a v1 retry may succeed.
+    V1Retry,
+}
+
+/// Connects to `addr` and runs the connection to completion, opening with a
+/// BIP324 handshake when `try_v2` is set.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One connection owner keeps admission, TCP health, lease publication, and handshake teardown ordered"
+)]
+fn dial(
+    addr: SocketAddr,
+    shared: &ConnectionShared,
+    role: crate::peer_info::PeerRole,
+    manual: bool,
+    count_failure: bool,
+    try_v2: bool,
+) -> Result<Dialed, crate::wire::PeerError> {
     let connection = TcpStream::connect_timeout(&addr, Duration::from_secs(10));
     if let Some(book) = &shared.address_book {
         // Like Core ConnectNode, record actual TCP attempts on success/failure,
@@ -761,21 +810,58 @@ fn run_outbound_connection(
         shared.peer_table.remove_current(addr, &lease);
         lease.cancel();
         let _ = stream.shutdown(std::net::Shutdown::Both);
-        return Ok(());
+        return Ok(Dialed::Done);
     }
+
+    // One deadline covers the transport and the version handshake, as
+    // Core's single `-peertimeout` does.
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut stream = stream;
+    let negotiated = if try_v2 {
+        let mut handshake = crate::bip324::Handshake::initiator(
+            shared.magic,
+            &mut bitcoin::secp256k1::rand::thread_rng(),
+        );
+        match crate::transport::establish(
+            &mut stream,
+            &mut handshake,
+            shared.magic,
+            &lease,
+            handshake_deadline,
+        ) {
+            Ok(negotiated) => negotiated,
+            Err(error) => {
+                let revoked = lease.is_cancelled();
+                shared.peer_table.remove_current(addr, &lease);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                if revoked {
+                    tracing::debug!(peer_addr = %addr, "p2p outbound lease revoked during handshake");
+                    return Ok(Dialed::Done);
+                }
+                if !handshake.received_any()
+                    && shared.activity.is_active()
+                    && !shared.is_session_cancelled()
+                {
+                    return Ok(Dialed::V1Retry);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        crate::transport::Negotiated::v1(shared.magic)
+    };
 
     let nonce = generate_nonce(addr);
 
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
-    let mut peer = Peer::new(stream, shared.magic);
+    let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
     peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
         lease.node_id(),
         addr,
         role,
         manual,
     ));
-    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
@@ -796,7 +882,7 @@ fn run_outbound_connection(
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         if revoked {
             tracing::debug!(peer_addr = %addr, "p2p outbound lease revoked during handshake");
-            return Ok(());
+            return Ok(Dialed::Done);
         }
         return Err(error);
     }
@@ -831,9 +917,9 @@ fn run_outbound_connection(
         shared.peer_table.remove_current(addr, &lease);
         lease.cancel();
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
-        return Ok(());
+        return Ok(Dialed::Done);
     }
-    run_connected_session(&mut peer, addr, shared, lease, outbound_rx, info)
+    run_connected_session(&mut peer, addr, shared, lease, outbound_rx, info).map(|()| Dialed::Done)
 }
 
 /// Drives the outbound handshake until the peer is ready.
@@ -975,6 +1061,24 @@ fn spawn_handshake_thread(
     }
 }
 
+/// The transport an inbound connection speaks: BIP324 when this node speaks
+/// v2 and the peer opens with a key, v1 otherwise.
+fn negotiate_inbound(
+    stream: &mut crate::CountingStream<TcpStream>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    deadline: Instant,
+) -> Result<crate::transport::Negotiated, crate::wire::PeerError> {
+    if !shared.v2_transport {
+        return Ok(crate::transport::Negotiated::v1(shared.magic));
+    }
+    let mut handshake = crate::bip324::Handshake::responder(
+        shared.magic,
+        &mut bitcoin::secp256k1::rand::thread_rng(),
+    );
+    crate::transport::establish(stream, &mut handshake, shared.magic, lease, deadline)
+}
+
 fn run_handshake(
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -1025,13 +1129,32 @@ fn run_handshake(
         return Ok(());
     }
 
+    // One deadline covers the transport and the version handshake, as
+    // Core's single `-peertimeout` does.
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut stream = stream;
+    let negotiated = match negotiate_inbound(&mut stream, shared, &lease, handshake_deadline) {
+        Ok(negotiated) => negotiated,
+        Err(error) => {
+            let revoked = lease.is_cancelled();
+            if !revoked {
+                shared.note_misbehavior(peer_addr, &lease, &error);
+            }
+            shared.peer_table.remove_current(peer_addr, &lease);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            if revoked {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+
     let nonce = generate_nonce(peer_addr);
-    let mut peer = Peer::new(stream, shared.magic);
+    let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
     peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
         lease.node_id(),
         peer_addr,
     ));
-    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_inbound_handshake(
         &mut peer,
         nonce,
@@ -1109,9 +1232,14 @@ fn run_connected_session(
             .stream
             .try_clone()
             .map_err(crate::wire::PeerError::Io)?;
+        let transport = peer
+            .take_send_transport()
+            .ok_or(crate::wire::PeerError::Protocol(
+                "send transport already taken",
+            ))?;
         spawn_connection_writer(
             writer_stream,
-            shared.magic,
+            transport,
             outbound_rx,
             lease.close_signal(),
             lease.budget_handle(),
@@ -1133,9 +1261,14 @@ fn run_connected_session(
     let ready = shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
+    let transport = match peer.transport() {
+        crate::TransportProtocol::V1 => "v1",
+        crate::TransportProtocol::V2 { .. } => "v2",
+    };
     tracing::info!(
         peer_addr = %peer_addr,
         inbound,
+        transport,
         "p2p handshake complete; entering message loop",
     );
 
@@ -1870,7 +2003,7 @@ fn process_compact_message(
 /// INVARIANT: The counted stream accounts every sent byte once.
 fn spawn_connection_writer(
     mut stream: crate::CountingStream<TcpStream>,
-    magic: Magic,
+    mut transport: crate::transport::SendTransport,
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
     close_rx: crossbeam_channel::Receiver<()>,
     budget: Arc<crate::connection::OutboundBudget>,
@@ -1885,7 +2018,7 @@ fn spawn_connection_writer(
                 close_rx,
                 &budget,
                 &mut stream,
-                magic,
+                &mut transport,
                 net_trace.as_ref(),
             );
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1941,14 +2074,18 @@ fn write_ready_burst(
     first: crate::Message,
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     writer: &mut dyn std::io::Write,
-    magic: Magic,
+    transport: &mut crate::transport::SendTransport,
     budget: &Arc<crate::connection::OutboundBudget>,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) -> bool {
     let mut pending = Some(first);
     while let Some(head) = pending.take() {
         let (burst, leftover) = collect_write_burst(head, outbound_rx);
-        let frames = match crate::wire::encode_frames(magic, &burst) {
+        let encoded: Result<Vec<_>, _> = burst
+            .iter()
+            .map(|message| transport.encode(message))
+            .collect();
+        let frames = match encoded {
             Ok(frames) => frames,
             Err(error) => {
                 tracing::debug!(%error, "p2p writer thread exiting");
@@ -1989,14 +2126,14 @@ fn run_writer_loop(
     mut close_rx: crossbeam_channel::Receiver<()>,
     budget: &Arc<crate::connection::OutboundBudget>,
     writer: &mut dyn std::io::Write,
-    magic: Magic,
+    transport: &mut crate::transport::SendTransport,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) {
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(first, outbound_rx, writer, magic, budget, net_trace) {
+                if !write_ready_burst(first, outbound_rx, writer, transport, budget, net_trace) {
                     break;
                 }
             }
@@ -3054,7 +3191,7 @@ mod writer_shutdown_tests {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let writer = spawn_connection_writer(
             writer_stream,
-            Magic::BITCOIN,
+            crate::transport::SendTransport::V1(Magic::BITCOIN),
             outbound_rx,
             lease.close_signal(),
             lease.budget_handle(),
@@ -3116,7 +3253,7 @@ mod writer_shutdown_tests {
                 close_rx,
                 &budget,
                 &mut writer,
-                Magic::BITCOIN,
+                &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
                 Some(&net_trace),
             );
             let _ = done_tx.send(());
@@ -3170,7 +3307,7 @@ mod writer_shutdown_tests {
                 close_rx,
                 &worker_budget,
                 &mut writer,
-                Magic::BITCOIN,
+                &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
                 None,
             );
             let _ = done_tx.send(());
@@ -3202,7 +3339,7 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new(outbound_tx);
         let writer = spawn_connection_writer(
             crate::CountingStream::new(server, std::sync::Arc::new(crate::PeerCounters::default())),
-            Magic::BITCOIN,
+            crate::transport::SendTransport::V1(Magic::BITCOIN),
             outbound_rx,
             lease.close_signal(),
             lease.budget_handle(),
@@ -4512,3 +4649,6 @@ mod discouragement_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod v2_transport_tests;
