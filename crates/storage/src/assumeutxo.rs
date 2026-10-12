@@ -4,10 +4,9 @@ use bitcoin_rs_primitives::Hash256;
 
 /// One body durably retained before validation, but not exposed to index readers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(missing_docs)]
 pub struct PendingHistoricalBlock {
-    /// Expected historical height.
     pub height: u32,
-    /// Identity of the body being checked.
     #[serde(with = "serde_hash256")]
     pub hash: Hash256,
     /// Staged flat-file position; volatile stores have no position.
@@ -20,12 +19,10 @@ pub struct PendingHistoricalBlock {
 /// authority for whether this generation may be used and how far historical
 /// validation has durably progressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(missing_docs)]
 pub struct HistoricalCheckpointRef {
-    /// Published generation and manifest digest in the historical namespace.
     pub checkpoint: crate::checkpoint::CheckpointReference,
-    /// Historical applied height represented by the checkpoint.
     pub height: u32,
-    /// Historical applied block hash represented by the checkpoint.
     #[serde(with = "serde_hash256")]
     pub hash: Hash256,
 }
@@ -54,24 +51,19 @@ mod serde_hash256 {
 /// The durable head owns this record; commitments use
 /// Bitcoin Core's serialized-set hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(missing_docs)]
 pub enum AssumeUtxoDiskStatus {
     /// No `AssumeUTXO` snapshot has been activated.
     Uninitialized,
     /// Snapshot is active; background historical validation is progressing towards `base_height`.
     Validating {
-        /// Block height of the snapshot base.
         base_height: u32,
-        /// Block hash of the snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Pinned expected UTXO commitment (`hash_serialized_3`) at `base_height`.
         #[serde(with = "serde_hash256")]
         expected_hash_serialized: Hash256,
-        /// Cumulative transaction count through `base_height`.
         chain_tx_count: u64,
-        /// Last durably archived historical height; live coins may be replaying below it.
         historical_height: u32,
-        /// Hash of the last durably archived historical block.
         #[serde(with = "serde_hash256")]
         historical_hash: Hash256,
         /// Unfinished validation must complete during startup before serving.
@@ -82,26 +74,19 @@ pub enum AssumeUtxoDiskStatus {
     /// Background historical validation succeeded and matched the pinned commitment.
     /// Chainstate roles have converged to `Ordinary`.
     Finalized {
-        /// Block height of the validated snapshot base.
         base_height: u32,
-        /// Block hash of the validated snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Verified UTXO commitment (`hash_serialized_3`) at `base_height`.
         #[serde(with = "serde_hash256")]
         validated_hash_serialized: Hash256,
     },
     /// Background validation failed (e.g. commitment mismatch). The node must fail closed.
     Failed {
-        /// Block height of the snapshot base.
         base_height: u32,
-        /// Block hash of the snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Expected UTXO commitment (`hash_serialized_3`).
         #[serde(with = "serde_hash256")]
         expected_hash_serialized: Hash256,
-        /// Reconstructed actual UTXO commitment (`hash_serialized_3`).
         #[serde(with = "serde_hash256")]
         actual_hash_serialized: Hash256,
     },

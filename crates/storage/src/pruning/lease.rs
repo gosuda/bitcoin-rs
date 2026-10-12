@@ -469,7 +469,7 @@ impl RetentionRegistry {
 /// [`RetentionRegistry`]'s owner and its composition root. A chain transition
 /// only ever needs to pin the rows it is about to re-read, so it receives this
 /// capability rather than the registry itself: there is no path from here to
-/// reserving, committing, or closing retained history (#1151).
+/// reserving, committing, or closing retained history.
 #[derive(Clone)]
 pub struct MandatoryRetention {
     registry: Arc<RetentionRegistry>,

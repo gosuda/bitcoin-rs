@@ -126,7 +126,7 @@ pub trait BlockBodyStore: Send + Sync {
     /// The default answers nothing: only stores backed by the chainstate
     /// key-value index hold undo rows, and a `ScriptLive`-selecting worker
     /// step fails closed on `None` rather than indexing without its spent-coin
-    /// anchor (#225).
+    /// anchor.
     fn undo_record(
         &self,
         height: u32,

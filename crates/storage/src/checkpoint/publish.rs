@@ -24,10 +24,9 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 
 /// Size and SHA-256 digest produced while writing one checkpoint artifact.
+#[allow(missing_docs)]
 pub struct ArtifactDigest {
-    /// Number of artifact bytes written.
     pub bytes: u64,
-    /// SHA-256 digest of the written bytes.
     pub sha256: [u8; 32],
 }
 /// Capability-scoped staging state for one checkpoint generation.
