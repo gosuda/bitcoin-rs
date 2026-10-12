@@ -137,7 +137,6 @@ pub struct EarlyEndOfScript;
 /// Iterator over the instructions of a script, yielding a parse error at the
 /// first malformed push (and never again, matching Core's `GetOp` loop).
 ///
-/// Byte semantics mirror rust-bitcoin's non-minimal `Script::instructions`:
 /// `0x01..=0x4b` are direct pushes, `OP_PUSHDATA1/2/4` carry an explicit
 /// little-endian length, `0x00` pushes an empty slice, and every other byte
 /// is an [`Instruction::Op`].
@@ -257,9 +256,8 @@ impl<'a> Instructions<'a> {
 
 /// Returns `true` when every instruction of `script` is a push.
 ///
-/// Small-integer pushnum opcodes count as pushes. This mirrors Core's
-/// `IsPushOnly` as rust-bitcoin implements it: parse failure or any opcode
-/// above `OP_16` fails.
+/// Small-integer pushnum opcodes count as pushes. Mirrors Core's
+/// `IsPushOnly`: parse failure or any opcode above `OP_16` fails.
 #[must_use]
 pub fn is_push_only(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {
@@ -373,9 +371,8 @@ pub fn is_witness_program(script: &[u8]) -> bool {
 
 /// Returns `true` for a bare multisig script.
 ///
-/// Shape: `OP_m <n key pushes> OP_n OP_CHECKMULTISIG` with `m <= n`, mirroring
-/// rust-bitcoin's `Script::is_multisig`. Key-length checking is the caller's
-/// policy decision, not a script-shape property.
+/// Shape: `OP_m <n key pushes> OP_n OP_CHECKMULTISIG` with `m <= n`.
+/// Key-length checking is the caller's policy decision, not a script-shape property.
 #[must_use]
 pub fn is_multisig(script: &[u8]) -> bool {
     let mut iter = instructions(script);
@@ -392,8 +389,6 @@ pub fn is_multisig(script: &[u8]) -> bool {
         match instruction {
             Instruction::PushBytes(_) => num_pubkeys = num_pubkeys.saturating_add(1),
             Instruction::Op(op) => {
-                // The opcode after the key pushes must be the OP_n key count;
-                // any other opcode makes the script malformed, not multisig.
                 match opcode::decode_pushnum(op) {
                     Some(pushnum) if pushnum == num_pubkeys => {}
                     _ => return false,
@@ -539,8 +534,7 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
 /// Returns the smallest non-dust value in satoshis for an output paying
 /// `script` under `dust_relay_fee_sat_per_kvb`.
 ///
-/// Mirrors Core's `GetDustThreshold` as rust-bitcoin's
-/// `minimal_non_dust_custom` implements it (spend overhead copied from Core;
+/// Mirrors Core's `GetDustThreshold` (spend overhead copied from Core;
 /// division by 1000 at the end only).
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {

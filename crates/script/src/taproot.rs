@@ -75,14 +75,12 @@ pub(crate) fn verify_taproot_commitment(
     program: &[u8],
     tapleaf_hash: &Hash256,
 ) -> bool {
-    // Internal x-only pubkey: bytes 1..33 of the control block.
     let Some(internal_bytes) = control.get(1..TAPROOT_CONTROL_BASE_SIZE) else {
         return false;
     };
     let Ok(internal) = XOnlyPublicKey::from_slice(internal_bytes) else {
         return false;
     };
-    // Output x-only pubkey: the 32-byte witness program.
     let Ok(output) = XOnlyPublicKey::from_slice(program) else {
         return false;
     };
@@ -98,7 +96,6 @@ pub(crate) fn verify_taproot_commitment(
     let Ok(tweak) = Scalar::from_be_bytes(tweak_bytes) else {
         return false;
     };
-    // Parity bit from the control block's first byte.
     let parity = if control[0] & 1 == 0 {
         Parity::Even
     } else {

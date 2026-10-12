@@ -2,7 +2,7 @@
 //!
 //! The driver mirrors Core's `VerifyScript`/`VerifyWitnessProgram` flow: run
 //! scriptSig then scriptPubKey through the opcode evaluator, apply P2SH
-//! redeem-script evaluation, dispatch SegWit v0 spends through their witness
+//! redeem-script evaluation, dispatch `SegWit` v0 spends through their witness
 //! programs, and hand taproot key-path and script-path spends to the local
 //! BIP341/BIP342 verifier.
 
@@ -276,19 +276,17 @@ script_errors! {
 
 /// Script execution errors surfaced by the script crate.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum ScriptError {
     /// The requested input index was not present in the transaction.
     #[error("input index {index} out of range for {inputs} inputs")]
     InputIndexOutOfRange {
-        /// Requested input index.
         index: usize,
-        /// Transaction input count.
         inputs: usize,
     },
     /// A Core vector flag name was not known by this crate.
     #[error("unknown script verify flag {name}")]
     UnknownFlag {
-        /// Unknown flag name.
         name: String,
     },
     /// The delegated consensus verifier rejected the script.
@@ -300,7 +298,6 @@ pub enum ScriptError {
     /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
     Invalid {
-        /// Failure error code.
         code: ScriptErrCode,
     },
 }
@@ -385,19 +382,17 @@ impl Interpreter {
 
 /// Invalid resolved-input wiring, rejected before script evaluation.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum PrevoutError {
     /// The supplied rows do not cover every input exactly once.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     Count {
-        /// Number of transaction inputs.
         input_count: usize,
-        /// Number of supplied prevouts.
         prevout_count: usize,
     },
     /// A row identifies a different outpoint than the corresponding input.
     #[error("prevout does not match transaction input {input_index}")]
     Mismatch {
-        /// Index of the first mismatched input.
         input_index: usize,
     },
 }
@@ -932,7 +927,6 @@ mod tests {
         ));
     }
 
-    /// A prevout slice whose length does not match the input count is refused before evaluation.
     #[test]
     fn execute_with_prevouts_rejects_a_mismatched_prevout_slice() {
         let interpreter = Interpreter;

@@ -159,7 +159,6 @@ fn script_num_serialize(value: i64) -> Bytes {
 fn cast_to_bool(bytes: &[u8]) -> bool {
     for (index, byte) in bytes.iter().enumerate() {
         if *byte != 0 {
-            // Can be negative zero.
             return !(index == bytes.len() - 1 && *byte == 0x80);
         }
     }
@@ -254,7 +253,6 @@ pub(crate) fn eval_script(
         };
         let opcode_byte = match instruction {
             Instruction::PushBytes(data) => {
-                // The instruction's head byte is the push opcode.
                 let opcode_byte = script[instruction_start];
                 // Core checks push size unconditionally (interpreter.cpp:457),
                 // before testing fExec — a >520-byte push in a non-executed
@@ -447,8 +445,6 @@ fn dispatch(
                         code: ScriptErrCode::UnsatisfiedLocktime,
                     });
                 }
-            } else {
-                // Not enabled; treat as NOP2.
             }
         }
         OP_CHECKSEQUENCEVERIFY => {
@@ -460,14 +456,11 @@ fn dispatch(
                         code: ScriptErrCode::NegativeLocktime,
                     });
                 }
-                // Disabled-flag operands behave as a NOP.
                 if sequence & (1 << 31) == 0 && !checker.check_sequence(sequence) {
                     return Err(ScriptError::Invalid {
                         code: ScriptErrCode::UnsatisfiedLocktime,
                     });
                 }
-            } else {
-                // Not enabled; treat as NOP3.
             }
         }
         OP_NOP1 | OP_NOP4..=OP_NOP10 => {
@@ -522,9 +515,7 @@ fn dispatch(
         OP_VERIFY => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
             let bytes = item_bytes(&top).into_owned();
-            if cast_to_bool(&bytes) {
-                // Popped above; success leaves the stack unchanged.
-            } else {
+            if !cast_to_bool(&bytes) {
                 stack.push(top).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::StackSize,
                 })?;
@@ -591,7 +582,6 @@ fn dispatch(
             })?;
         }
         OP_2ROT => {
-            // drain(6) can only succeed with a full six items.
             let mut top_six = stack.drain(6).map_err(|_| invalid_stack())?.into_iter();
             let x1 = top_six
                 .next()
@@ -1150,7 +1140,6 @@ fn check_multisig(
         args -= 1;
     }
 
-    // The dummy element is consumed without inspection.
     if stack.is_empty() {
         return Err(invalid_stack());
     }
