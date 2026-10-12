@@ -86,20 +86,14 @@ impl ValidationMode {
 
 /// Chainstate journal durability and retention policy.
 #[derive(Clone, Copy, Debug)]
+#[allow(missing_docs)]
 pub struct ChainstateJournalConfig {
-    /// Whether journal recovery is enabled.
     pub enabled: bool,
-    /// Maximum blocks between durability boundaries.
     pub blocks: u32,
-    /// Maximum seconds between durability boundaries.
     pub seconds: u64,
-    /// Active segment rotation threshold in MiB.
     pub rotate_mib: u64,
-    /// Total journal retention bound in MiB.
     pub max_journal_mib: u64,
-    /// Maximum blocks the applied tip may lead the durable head.
     pub max_lag_blocks: u32,
-    /// Maximum seconds the applied tip may lead the durable head.
     pub max_lag_seconds: u64,
 }
 
@@ -119,20 +113,14 @@ impl Default for ChainstateJournalConfig {
 }
 
 /// Inputs required to open a chainstate journal writer.
+#[allow(missing_docs)]
 pub struct JournalBootstrap {
-    /// Whether to open an existing journal instead of initializing one.
     pub open_existing: bool,
-    /// Full-checkpoint generation the journal extends.
     pub base_generation: u64,
-    /// Durable base height.
     pub height: u32,
-    /// Durable base block hash.
     pub block_hash: [u8; 32],
-    /// Parent hash of the durable base.
     pub prev_hash: [u8; 32],
-    /// Cumulative transaction count through the durable base.
     pub chain_tx_count: u64,
-    /// Journal policy.
     pub config: ChainstateJournalConfig,
 }
 

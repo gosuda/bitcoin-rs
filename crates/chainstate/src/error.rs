@@ -2,6 +2,7 @@
 
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum ApplyError {
     /// Clean shutdown has closed block-apply admission.
     #[error("block apply rejected because clean shutdown has begun")]
@@ -16,9 +17,7 @@ pub enum ApplyError {
     /// The block's previous header hash does not match the current tip's hash.
     #[error("prev hash mismatch: tip {tip}, block prev {prev}")]
     PrevHashMismatch {
-        /// Current tip header hash, big-endian hex.
         tip: bitcoin_rs_primitives::Hash256,
-        /// Block's previous header hash, big-endian hex.
         prev: bitcoin_rs_primitives::Hash256,
     },
     /// Height arithmetic overflowed `u32::MAX`.
@@ -27,15 +26,12 @@ pub enum ApplyError {
     /// A transaction carries more outputs than a `u32` vout can index.
     #[error("output count of transaction {txid} exceeds the vout index range")]
     VoutOverflow {
-        /// Transaction id whose output count overflowed.
         txid: bitcoin_rs_primitives::Txid,
     },
     /// The prepared block's txid slice does not cover every transaction.
     #[error("block has {transactions} transactions but {txids} txids were supplied")]
     TxidCountMismatch {
-        /// Transactions in the block.
         transactions: usize,
-        /// Txids supplied for them.
         txids: usize,
     },
     /// Summing a block's input or output values left the satoshi range.
@@ -47,7 +43,6 @@ pub enum ApplyError {
     /// The block header hash does not satisfy its declared proof-of-work target.
     #[error("proof-of-work: header hash {hash} exceeds declared target")]
     ProofOfWork {
-        /// Block header hash, big-endian display.
         hash: bitcoin_rs_primitives::Hash256,
     },
     /// Declared target exceeds the network's proof-of-work limit.
@@ -75,9 +70,7 @@ pub enum ApplyError {
     /// unable to restore it.
     #[error("undo record cannot restore spent output {txid}:{vout}")]
     UndoPrevoutMissing {
-        /// Transaction id of the unresolvable spend.
         txid: bitcoin_rs_primitives::Txid,
-        /// Output index of the unresolvable spend.
         vout: u32,
     },
     /// The undo record for a block being disconnected could not be loaded.
@@ -86,15 +79,12 @@ pub enum ApplyError {
     /// The block asked to be disconnected is not the applied tip.
     #[error("block {hash} is not the applied tip {tip}")]
     DisconnectNotTip {
-        /// Block the caller asked to disconnect.
         hash: bitcoin_rs_primitives::Hash256,
-        /// Block that is actually applied.
         tip: bitcoin_rs_primitives::Hash256,
     },
     /// The supplied block body does not match its own header.
     #[error("block {hash} body does not match its header merkle root")]
     DisconnectBodyMismatch {
-        /// Block whose body was rejected.
         hash: bitcoin_rs_primitives::Hash256,
     },
     /// Advancing the durable head failed.
@@ -103,18 +93,14 @@ pub enum ApplyError {
     /// The stored durable head names a tip other than this block's parent.
     #[error("durable head names tip {head}, not this block's parent {prev}")]
     DurableHeadLineage {
-        /// Tip the stored head certifies.
         head: bitcoin_rs_primitives::Hash256,
-        /// Parent the connecting block names.
         prev: bitcoin_rs_primitives::Hash256,
     },
     /// The durable head does not certify the block being disconnected, so
     /// the disconnect cannot advance the head from a known commit point.
     #[error("disconnect of {hash} refused: durable head {head:?} does not certify it")]
     DisconnectOffDurableHead {
-        /// Block the caller asked to disconnect.
         hash: bitcoin_rs_primitives::Hash256,
-        /// Tip the stored head certifies, when one exists.
         head: Option<bitcoin_rs_primitives::Hash256>,
     },
     /// The committed-but-unpublished gap cannot be replayed from durable
@@ -125,15 +111,10 @@ pub enum ApplyError {
         restored_height.map_or_else(|| "<none>".to_owned(), |height| height.to_string())
     )]
     DurableHeadGapUnrecoverable {
-        /// Tip the stored head certifies.
         head_tip: bitcoin_rs_primitives::Hash256,
-        /// Height the stored head certifies.
         head_height: u32,
-        /// Tip the restored chainstate sits at, when one was restored.
         restored_tip: Option<bitcoin_rs_primitives::Hash256>,
-        /// Height the restored chainstate sits at, when one was restored.
         restored_height: Option<u32>,
-        /// Why the gap is not a replayable publication lag.
         reason: &'static str,
     },
     /// Recovery reconstructed a coherent state but could not publish the
@@ -150,9 +131,7 @@ pub enum ApplyError {
         "cannot disconnect block at height {height} at or below assumeutxo base height {base_height}"
     )]
     DisconnectBelowSnapshotBase {
-        /// Height of the block being disconnected.
         height: u32,
-        /// Snapshot base height.
         base_height: u32,
     },
     /// Prefix pruning must retain the history needed to validate a snapshot.
@@ -160,7 +139,6 @@ pub enum ApplyError {
         "cannot prune while historical validation is required through assumeutxo base height {base_height}"
     )]
     PruneDuringHistoricalValidation {
-        /// Snapshot base whose history is still required.
         base_height: u32,
     },
     /// Historical chainstate cannot connect blocks past the `AssumeUTXO` snapshot base.
@@ -168,25 +146,21 @@ pub enum ApplyError {
         "historical chainstate cannot connect block at height {height} past target height {base_height}"
     )]
     ConnectPastHistoricalTarget {
-        /// Height of the block attempting connection.
         height: u32,
-        /// Target base height.
         base_height: u32,
     },
     /// The historical chain reached a different block at the pinned base height.
     #[error("historical target at height {base_height} is {found}, expected {expected}")]
     HistoricalTargetHashMismatch {
-        /// Snapshot base height.
         base_height: u32,
-        /// Pinned base hash.
         expected: bitcoin_rs_primitives::Hash256,
-        /// Reconstructed block hash.
         found: bitcoin_rs_primitives::Hash256,
     },
 }
 
 /// The outcome of a refused or failed block disconnect.
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum DisconnectError {
     /// Refused before anything was touched. The chain is exactly as it was.
     #[error("disconnect refused: {0}")]
@@ -197,11 +171,8 @@ pub enum DisconnectError {
         "disconnect of block {hash} at height {height} failed after mutation began, chain state is partial: {source}"
     )]
     Fatal {
-        /// Block whose disconnect wedged.
         hash: bitcoin_rs_primitives::Hash256,
-        /// Height it was applied at.
         height: u32,
-        /// What failed.
         #[source]
         source: Box<ApplyError>,
     },
@@ -210,11 +181,8 @@ pub enum DisconnectError {
         "disconnect of block {hash} at height {height} completed but the in-flight marker remains set: {source}"
     )]
     MarkerStuck {
-        /// Block that was disconnected.
         hash: bitcoin_rs_primitives::Hash256,
-        /// Height it was applied at.
         height: u32,
-        /// Why the marker could not be cleared.
         #[source]
         source: Box<ApplyError>,
     },

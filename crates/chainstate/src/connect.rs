@@ -183,11 +183,6 @@ pub(super) fn apply_block_admitted<'b>(
         flags: verify_flags,
         locktime_cutoff,
     };
-    // Parse the block once with the kernel and take its txids. Core's
-    // `CTransaction` hashes itself while deserializing with the SHA-256
-    // implementation selected at runtime, so this one parse replaces the
-    // scalar `compute_txid` pass *and* the per-transaction serialize/reparse
-    // that script preparation used to perform.
     let (prepared, transactions_proven) = match proven {
         Some(ProvenApply::Proven(proof)) if proof.context == validation_context => {
             (proof.prepared, true)
