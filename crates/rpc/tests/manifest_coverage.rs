@@ -1,4 +1,4 @@
-//! Compatibility-manifest coverage gate (issue #78).
+//! Compatibility-manifest coverage gate.
 //!
 //! Proves four invariants:
 //! 1. the dispatcher's live dispatch registry and the shipped manifest rows

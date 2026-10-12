@@ -25,18 +25,13 @@ const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
+#[allow(missing_docs)]
 pub struct RpcServer {
-    /// Bound TCP listener.
     pub listener: TcpListener,
-    /// Shared authentication policy.
     pub auth: Arc<Auth>,
-    /// Shared JSON-RPC handler.
     pub handler: Arc<Handler>,
-    /// Maximum concurrent worker connections.
     pub max_connections: usize,
-    /// Idle read timeout for each connection.
     pub idle_timeout: Duration,
-    /// Whether Bitcoin Core-compatible REST routes are enabled.
     pub rest_enabled: bool,
 }
 

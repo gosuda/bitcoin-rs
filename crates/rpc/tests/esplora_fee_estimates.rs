@@ -1,5 +1,5 @@
 //! Esplora `/fee-estimates` reflects real admitted-and-confirmed history
-//! only (issue #641, boundary D1): a target without history is omitted from
+//! only: a target without history is omitted from
 //! the map instead of fabricated as the old 1 sat/vB floor, and the sat/vB
 //! projection consumes the RPC surface's `sat_to_btc` feerate value so the
 //! two fee-unit projections cannot drift.

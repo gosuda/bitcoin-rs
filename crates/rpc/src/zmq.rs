@@ -24,18 +24,14 @@ use std::collections::HashSet as StdHashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// ZMQ PUB notification topic.
+#[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ZmqTopic {
-    /// Block hash notification.
     HashBlock,
-    /// Transaction id notification.
     HashTx,
-    /// Raw serialized block notification.
     RawBlock,
-    /// Raw serialized transaction notification.
     RawTx,
-    /// Block sequence notification.
     Sequence,
 }
 
@@ -45,14 +41,12 @@ const DEFAULT_ZMQ_HWM: u32 = 1_000;
 /// Configuration for one ZMQ PUB socket.
 ///
 /// Topics sharing an endpoint necessarily share its socket-level HWM.
+#[allow(missing_docs)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ZmqEndpointConfig {
-    /// ZMQ endpoint to bind.
     pub endpoint: String,
-    /// Notification topics published through this endpoint.
     pub topics: Vec<ZmqTopic>,
-    /// Optional override for the publisher-owned queue limit.
     #[serde(default)]
     pub hwm: Option<u32>,
 }
@@ -173,13 +167,11 @@ impl SequenceEvent {
 /// time, each carrying its type, address, and high-water mark. The projection
 /// layer owns the JSON rendering: `topic` maps to the `pub…` type string and
 /// `endpoint` to the `address` key.
+#[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZmqNotifier {
-    /// Topic this notifier publishes.
     pub topic: ZmqTopic,
-    /// Endpoint the PUB socket bound.
     pub endpoint: String,
-    /// PUB socket send high-water mark.
     pub hwm: u32,
 }
 

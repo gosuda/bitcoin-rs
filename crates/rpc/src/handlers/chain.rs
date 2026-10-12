@@ -4884,7 +4884,7 @@ mod chaintxstats_window_tests {
 
     /// Bitcoin Core's `GetMedianTimePast`, written out rather than borrowed.
     ///
-    /// The median of the block and its ten ancestors. An oracle that called the
+    /// The median of the block and its ten ancestors. A reference that called the
     /// block tree could not disagree with the block tree.
     fn median_time_past(times: &[u32], height: usize) -> u32 {
         let start = height.saturating_sub(10);
