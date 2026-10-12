@@ -131,13 +131,11 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 
 /// Resolved storage configuration.
+#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
-    /// Selected storage backend.
     pub backend: StorageBackend,
-    /// Database cache budget in MiB.
     pub dbcache_mb: u64,
-    /// Pruning target in MiB.
     pub prune_target_mb: u64,
 }
 
@@ -161,31 +159,27 @@ pub struct P2pConfig {
 }
 
 /// Resolved RPC configuration.
+#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
-    /// JSON-RPC bind address.
     pub bind: SocketAddr,
-    /// Whether REST is enabled.
     pub rest: bool,
-    /// RPC authentication.
     pub auth: Auth,
 }
 
 /// Resolved index configuration.
+#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
-    /// Whether txindex is enabled.
     pub txindex: bool,
-    /// Script index mode.
     pub script_index: ScriptIndexMode,
 }
 
 /// Resolved observability configuration.
+#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct ObservabilityConfig {
-    /// Tracing filter level.
     pub log_level: String,
-    /// Optional Prometheus metrics bind address.
     pub metrics_bind: Option<SocketAddr>,
 }
 

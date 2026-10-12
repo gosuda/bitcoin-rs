@@ -22,7 +22,7 @@ fn auth_debug_redacts_secrets() {
     assert!(rendered.contains("<redacted>"));
 }
 
-// ---- #653 named config-option coverage --------------------------------
+// ---- Named config-option coverage -------------------------------------
 //
 // Retained source precedence, absent nested overrides, and cross-field
 // validation are exercised here at the one resolver every input layer
@@ -99,7 +99,7 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     );
 }
 
-// ---- #1117 unified validation engine -----------------------------------
+// ---- Unified validation engine ----------------------------------------
 //
 // The `kernel` feature is capability ("bitcoinkernel support is compiled
 // in"), not selection. `validation.engine` is the one authoritative engine

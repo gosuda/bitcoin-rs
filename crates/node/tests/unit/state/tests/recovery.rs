@@ -334,7 +334,7 @@ fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
 }
 
 // -----------------------------------------------------------------------
-// #208: a checkpoint restore far behind the durable witness must be loud
+// A checkpoint restore far behind the durable witness must be loud
 // -----------------------------------------------------------------------
 
 #[test]
@@ -353,7 +353,7 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     assert!(state.publish_checkpoint()?.is_some());
     drop(state);
 
-    // Simulate the #208 scenario: the node previously ran far ahead
+    // Simulate the stale checkpoint scenario: the node previously ran far ahead
     // (height 5000) and published a checkpoint there, writing a witness
     // at that height. A crash or clean stop left the checkpoint tree
     // pinned at height 0 while the witness records height 5000.
@@ -507,7 +507,7 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
 }
 
 // -----------------------------------------------------------------------
-// #655: restart on a committed-but-unpublished gap replays the durable
+// Restart on a committed-but-unpublished gap replays the durable
 // head chain and never re-commits it.
 // -----------------------------------------------------------------------
 
@@ -752,7 +752,7 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
 }
 
 // -----------------------------------------------------------------------
-// #655: prune-then-reorg and bounded deep-reorg scenarios.
+// Prune-then-reorg and bounded deep-reorg scenarios.
 // -----------------------------------------------------------------------
 
 /// What one fork plan needs: the fork tip's node id, its staged bodies by

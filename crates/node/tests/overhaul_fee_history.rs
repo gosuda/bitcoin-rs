@@ -1,4 +1,4 @@
-//! #641 / T23 acceptance: fee estimates come from real admission and
+//! T23 acceptance: fee estimates come from real admission and
 //! confirmation history, exercised through production wiring.
 //!
 //! Every leg drives the node's real surfaces: transactions enter through the

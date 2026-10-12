@@ -385,7 +385,7 @@ impl NodeState {
         // marker retirement (`docs/contracts/recovery.md`). A node that
         // starts on a torn chainstate builds on it, and every block it adds
         // makes the damage harder to find; a recovery that fails closed
-        // retains the marker and stops startup (#655).
+        // retains the marker and stops startup.
         match bitcoin_rs_chainstate::recover_disconnect_marker(&chainstate) {
             Ok(()) => {}
             Err(error @ bitcoin_rs_chainstate::ApplyError::DurableHeadGapUnrecoverable { .. }) => {
