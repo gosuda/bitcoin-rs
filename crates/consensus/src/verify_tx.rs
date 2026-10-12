@@ -21,48 +21,9 @@ const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 pub(crate) const COINBASE_MATURITY: u32 = 100;
 
-// Width of the script-verification pool. 16 was chosen on the belief that SMT
-// siblings slow secp256k1 down past that width. A full-verification replay of
-// mainnet 0..150_000 reading local block files measures otherwise on this host
-// (2x medians, `taskset -c 0-31`, wall and CPU together):
-//
-//    8 threads   130.6s wall   474.2s CPU
-//   16 threads    97.7s wall   521.3s CPU
-//   24 threads    83.7s wall   590.9s CPU
-//   32 threads    78.4s wall   652.3s CPU
-//
-// Wall falls monotonically with width while CPU rises sublinearly, so unlike
-// the threshold below this genuinely trades: 32 buys 1.67x the wall of 8 for
-// 1.38x the CPU, and wall is what a syncing node is waiting on. 32 equals the
-// core count here, and an earlier sweep found no gain from exceeding it.
-//
-// Re-measured after the block source was matched to Core's; the numbers this
-// rationale first carried (157.8s at 32, 173.1s at 16) came from the contended
-// REST harness. Same conclusion, sounder evidence — see CONCEPTS.md
-// → *Contended-harness tuning artefact*. Kept as a cap rather than raised to
-// verification against the rest of the apply pipeline; widen only against a
-// fresh measurement on the target hardware.
+/// Maximum width of the script-verification pool.
 const MAX_SCRIPT_VERIFY_THREADS: usize = 32;
-// Blocks with fewer checks than this verify serially. Measured on a
-// full-verification replay of mainnet 0..150_000 reading local block files,
-// `taskset -c 0-31`, three interleaved rounds, wall and CPU together:
-//
-//   threshold    4    84.4s wall   946.6s CPU
-//   threshold   16    80.1s wall   773.2s CPU
-//   threshold   32    75.5s wall   649.6s CPU   <- both optima
-//   threshold   64    78.4s wall   533.6s CPU
-//   threshold  128    94.0s wall   390.7s CPU
-//
-// 32 is the wall minimum and also beats every smaller value on CPU, so it
-// dominates rather than trades. CPU keeps falling above it, but wall turns
-// sharply at 128, and a node that finishes later has not saved anything.
-//
-// This replaced a value of 4, which an earlier sweep picked while the harness
-// fetched every block over REST from a second bitcoind competing for the same
-// cores. That contention inflated the serial path and made ever-finer fan-out
-// look free. Re-measured against local block files the ordering inverts, and 4
-// is now the worst point tested on both axes. Do not tune this against a
-// harness that shares CPU with the node, and do not tune it on wall alone.
+/// Minimum check count before dispatching to the parallel verification pool.
 const MIN_PARALLEL_SCRIPT_CHECKS: usize = 32;
 static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -340,7 +301,6 @@ pub fn verify_block_input_scripts(
     let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, parsed)?;
     timings.prepare_seconds = prepare_started.elapsed().as_secs_f64();
 
-    // Exclude the ordered error scan from script execution timing.
     let unit_slice = core::slice::from_ref(&unit);
     let parallel_started = Instant::now();
     let results = run_prepared_checks(unit_slice);
@@ -526,7 +486,6 @@ fn prepare_block_input_checks<'b>(
             }
         };
 
-        // Retain backend state before publishing its input checks.
         let script_state = match parsed.prepare_tx(tx_index, tx, &prep.prevouts) {
             Ok(state) => state,
             Err(setup_error) => {
@@ -721,7 +680,6 @@ mod tests {
         Ok(())
     }
 
-    /// Both entries enforce 2..=100 bytes without looking up coinbase prevouts.
     #[test]
     fn coinbase_script_sig_size_bounds_are_enforced_without_prevout_lookup() {
         let utxos = hashbrown::HashMap::new();
@@ -989,7 +947,6 @@ mod tests {
             vec![Some(op1_txout(50))],
             vec![Some(op1_txout(50))],
         ];
-        // Fails on its second transaction, not its first.
         let late_txs = vec![
             coinbase_transaction_with_script_sig_len(2),
             spend_tx(vec![true_spending_input(outpoint(1))], 50),

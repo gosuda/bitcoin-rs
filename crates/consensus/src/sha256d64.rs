@@ -401,7 +401,6 @@ mod tests {
         let mut output = [[0_u8; 32]; 8];
         avx2.transform_8way(&input, &mut output);
 
-        // Independent Python hashlib SHA256(SHA256(64 zero bytes)) oracle.
         let expected = [
             226, 246, 28, 63, 113, 209, 222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6,
             137, 121, 153, 98, 180, 139, 235, 216, 54, 151, 78, 140, 249,

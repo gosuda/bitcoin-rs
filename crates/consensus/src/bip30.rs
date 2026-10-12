@@ -68,7 +68,6 @@ mod tests {
             )
     }
 
-    /// Any hash that is not one of the two pinned ones.
     fn other_hash() -> Hash256 {
         Hash256::from_le_bytes(&[0x11; 32])
     }
@@ -81,7 +80,6 @@ mod tests {
         assert!(is_bip30_exception(91_880, exception(91_880)));
     }
 
-    /// The exception is the block, not the height.
     #[test]
     fn a_different_block_at_an_exception_height_is_not_exempt() {
         assert!(!is_bip30_exception(91_842, other_hash()));
@@ -90,7 +88,6 @@ mod tests {
         assert!(check_bip30(91_880, other_hash(), true).is_err());
     }
 
-    /// The two exception hashes are not interchangeable between their heights.
     #[test]
     fn an_exception_hash_at_the_wrong_height_is_not_exempt() {
         assert!(!is_bip30_exception(91_880, exception(91_842)));
@@ -110,7 +107,6 @@ mod tests {
         assert!(check_bip30(91_723, other_hash(), true).is_err());
     }
 
-    /// No duplicate means no BIP30 question, at any height or hash.
     #[test]
     fn a_block_without_a_duplicate_txid_always_passes() {
         assert_eq!(check_bip30(91_723, other_hash(), false), Ok(()));

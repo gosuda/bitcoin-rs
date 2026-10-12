@@ -113,7 +113,6 @@ mod kernel_backend {
                 .map_err(|error| ConsensusError::Kernel(error.to_string()))
         }
 
-        /// Mainnet `0..150_000`: 1.7M transaction IDs matched native `Tx::txid`.
         pub fn txids(&self) -> Result<Vec<Txid>, ConsensusError> {
             use bitcoinkernel::prelude::*;
 
@@ -259,8 +258,8 @@ impl BlockParse {
         }
     }
 
+    /// Returns the number of transactions in the parsed block.
     #[must_use]
-    /// Transaction count.
     pub fn transaction_count(&self) -> usize {
         match self {
             Self::Native(block) => block.transaction_count(),

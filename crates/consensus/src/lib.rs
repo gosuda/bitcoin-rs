@@ -75,6 +75,7 @@ pub enum ScriptEngine {
 
 /// Consensus validation error.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum ConsensusError {
     /// A transaction has no inputs.
     #[error("transaction has no inputs")]
@@ -86,25 +87,21 @@ pub enum ConsensusError {
     /// range.
     #[error("coinbase scriptSig length {len} outside allowed range 2..=100 bytes")]
     CoinbaseScriptSigSize {
-        /// Observed coinbase scriptSig length in bytes.
         len: usize,
     },
     /// A non-coinbase transaction contains a null previous output.
     #[error("non-coinbase transaction input {input_index} spends a null outpoint")]
     NullPrevout {
-        /// Input index containing the null outpoint.
         input_index: usize,
     },
     /// A transaction spends the same previous output more than once.
     #[error("transaction contains duplicate input {input_index}")]
     DuplicateInput {
-        /// Input index that repeats an earlier outpoint.
         input_index: usize,
     },
     /// A required UTXO was not present in the supplied view.
     #[error("missing prevout for input {input_index}")]
     MissingPrevout {
-        /// Input index whose previous output is unavailable.
         input_index: usize,
     },
     /// Total output value exceeds Bitcoin's maximum money supply.
@@ -113,27 +110,20 @@ pub enum ConsensusError {
     /// Total input value is smaller than total output value.
     #[error("transaction spends {input_value} sats but creates {output_value} sats")]
     InputsLessThanOutputs {
-        /// Total input value in satoshis.
         input_value: u64,
-        /// Total output value in satoshis.
         output_value: u64,
     },
     /// Script verification failed.
     #[error("script verification failed at input {input_index}: {reason}")]
     Script {
-        /// Input index that failed script verification.
         input_index: usize,
-        /// Script failure reason.
         reason: String,
-        /// The engine that rejected the script.
         engine: ScriptEngine,
     },
     /// Sigop cost exceeds consensus maximum.
     #[error("sigop cost {cost} exceeds max {max}")]
     SigopsLimit {
-        /// Observed sigop cost.
         cost: u32,
-        /// Consensus maximum.
         max: u32,
     },
     /// Block has no transactions.
@@ -145,7 +135,6 @@ pub enum ConsensusError {
     /// A non-first transaction is coinbase.
     #[error("block transaction {tx_index} is coinbase outside position 0")]
     ExtraCoinbase {
-        /// Transaction index.
         tx_index: usize,
     },
     /// Block merkle tree has a duplicate subtree mutation.
@@ -157,9 +146,7 @@ pub enum ConsensusError {
     /// The coinbase claims more than the subsidy plus the fees the block earned.
     #[error("coinbase pays {paid} sats but only {allowed} sats are available")]
     CoinbaseAmount {
-        /// Total value the coinbase outputs claim.
         paid: u64,
-        /// Block subsidy plus the fees of the block's other transactions.
         allowed: u64,
     },
     /// Summing a block's values overflowed the satoshi range.
@@ -177,46 +164,36 @@ pub enum ConsensusError {
     /// Block weight exceeds consensus maximum.
     #[error("block weight {weight} exceeds max {max}")]
     BlockWeight {
-        /// Observed block weight.
         weight: u64,
-        /// Consensus maximum block weight.
         max: u64,
     },
     /// BIP rule check failed.
     #[error("{bip}: {reason}")]
     Bip {
-        /// BIP identifier.
         bip: &'static str,
-        /// Failure reason.
         reason: String,
     },
     /// Block-level verification received the wrong number of prevout rows.
     #[error("block prevout matrix has {actual} rows for {expected} transactions")]
     PrevoutMatrixSize {
-        /// Number of block transactions that require rows.
         expected: usize,
-        /// Number of supplied prevout rows.
         actual: usize,
     },
     /// A transaction's script checks received the wrong number of prevout rows.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     PrevoutCount {
-        /// Number of transaction inputs.
         input_count: usize,
-        /// Number of supplied prevout rows.
         prevout_count: usize,
     },
     /// Resolved prevouts identify the wrong transaction input: a caller wiring
     /// error, not a script verdict or proof that a block is invalid.
     #[error("prevout does not match transaction input {input_index}")]
     PrevoutMismatch {
-        /// First input whose supplied prevout identity differs.
         input_index: usize,
     },
     /// The requested [`ValidationEngine`] is not compiled into this build.
     #[error("unsupported validation engine: {engine}")]
     UnsupportedEngine {
-        /// The refused engine.
         engine: ValidationEngine,
     },
     /// Kernel path failed or is not configured for the requested operation.
