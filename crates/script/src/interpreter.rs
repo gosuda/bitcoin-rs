@@ -300,7 +300,7 @@ pub enum ScriptError {
     /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
     Invalid {
-        /// Core's script error name for this failure.
+        /// Failure error code.
         code: ScriptErrCode,
     },
 }
@@ -397,7 +397,7 @@ pub enum PrevoutError {
     /// A row identifies a different outpoint than the corresponding input.
     #[error("prevout does not match transaction input {input_index}")]
     Mismatch {
-        /// First input with a mismatched prevout identity.
+        /// Index of the first mismatched input.
         input_index: usize,
     },
 }
@@ -932,9 +932,7 @@ mod tests {
         ));
     }
 
-    /// The [`Interpreter::execute_with_prevouts`] POST contract: a prevout
-    /// slice that is neither the full input set nor the single current-input
-    /// convention is refused before any evaluation.
+    /// A prevout slice whose length does not match the input count is refused before evaluation.
     #[test]
     fn execute_with_prevouts_rejects_a_mismatched_prevout_slice() {
         let interpreter = Interpreter;

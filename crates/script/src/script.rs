@@ -1,12 +1,8 @@
 //! Native script parsing, classification, and building helpers.
-//!
-//! Byte-level replacements for the `bitcoin::Script` utilities the workspace
-//! consumed before the native-primitives migration. Semantics are bug-for-bug
-//! with rust-bitcoin 0.32's `Script` helpers (and Core's `GetOp` loop behind
-//! them); differential tests pin the parity where the two overlap.
 
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
+
     macro_rules! opcodes {
         ($($(#[$doc:meta])* $visibility:vis $name:ident = $value:literal,)*) => {
             $(
@@ -163,10 +159,6 @@ pub const fn instructions(script: &[u8]) -> Instructions<'_> {
 }
 
 /// Whether every instruction has Core's valid legacy opcode and element encoding.
-///
-/// This checks parsing, the maximum opcode valid in legacy scripts (`OP_NOP10`),
-/// and the 520-byte push limit; it does not evaluate the script or impose a
-/// total script-size limit.
 #[must_use]
 pub fn has_valid_ops(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {
@@ -226,7 +218,6 @@ impl<'a> Iterator for Instructions<'a> {
 }
 
 impl<'a> Instructions<'a> {
-    /// Consumes `len` bytes from `rest`, failing the iterator on truncation.
     fn take_slice(&mut self, len: usize, rest: &'a [u8]) -> Result<&'a [u8], EarlyEndOfScript> {
         if let Some(data) = rest.get(..len) {
             self.remaining = &rest[len..];
@@ -237,8 +228,6 @@ impl<'a> Instructions<'a> {
         }
     }
 
-    /// Reads a little-endian push length of `len_bytes` width starting one byte
-    /// into `self.remaining`; `u64::MAX` marks truncation.
     fn read_len_le(&mut self, len_bytes: usize) -> u64 {
         if self.remaining.len() < 1 + len_bytes {
             self.failed = true;
@@ -251,8 +240,6 @@ impl<'a> Instructions<'a> {
         value
     }
 
-    /// Completes a length-prefixed push whose payload starts `start` bytes into
-    /// the original `rest` slice.
     fn take_len_slice(
         &mut self,
         len: usize,
@@ -426,15 +413,6 @@ pub fn is_multisig(script: &[u8]) -> bool {
     iter.next().is_none()
 }
 
-/// Counts the pubkeys in a bare multisig script, or `None` unless it matches
-/// Core's `MatchMultisig` exactly.
-///
-/// `m` and `n` are small integers in `1..=MAX_PUBKEYS_PER_MULTISIG` encoded as
-/// `OP_1..=OP_16` or minimally encoded script-number pushes, every key push
-/// decodes as a `CPubKey` (33 bytes starting `0x02`/`0x03`, 65 bytes starting
-/// `0x04`/`0x06`/`0x07`), `m <= n` equals the number of key pushes, and
-/// `OP_CHECKMULTISIG` ends the script.
-/// Core `MAX_PUBKEYS_PER_MULTISIG`.
 const MAX_BARE_MULTISIG_PUBKEYS: i64 = 20;
 
 /// Yields the next element as Core's `CScript::GetOp` does: the opcode
@@ -642,7 +620,6 @@ pub fn push_int(value: i64) -> Vec<u8> {
     push_data(&bytes)
 }
 
-/// Compact-size (Bitcoin varint) encoding length in bytes.
 const fn varint_size(value: usize) -> usize {
     if value < 0xfd {
         1

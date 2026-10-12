@@ -27,7 +27,6 @@ impl Stack {
     /// Maximum stack depth permitted by consensus script evaluation.
     pub(crate) const MAX_DEPTH: usize = 1000;
 
-    /// Creates an empty stack.
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
@@ -41,12 +40,10 @@ impl Stack {
         }
     }
 
-    /// Pops the top item.
     pub(crate) fn pop(&mut self) -> Result<ScriptItem, StackError> {
         self.items.pop().ok_or(StackError::Underflow)
     }
 
-    /// Returns the top item without removing it.
     pub(crate) fn peek(&self) -> Result<&ScriptItem, StackError> {
         self.items.last().ok_or(StackError::Underflow)
     }
@@ -113,19 +110,16 @@ impl Stack {
         Ok(self.items.drain(start..).collect())
     }
 
-    /// Returns the number of stack items.
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Returns true when the stack is empty.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    /// Removes all stack items.
     pub(crate) fn clear(&mut self) {
         self.items.clear();
     }

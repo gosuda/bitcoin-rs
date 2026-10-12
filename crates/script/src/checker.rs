@@ -207,21 +207,18 @@ impl<'a> TxSignatureChecker<'a> {
             return Ok(false);
         }
 
-        // Schnorr signatures are 64 or 65 bytes.
         if sig.len() != 64 && sig.len() != 65 {
             return Err(ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSigSize,
             });
         }
 
-        // Parse the hashtype from the optional 65th byte (length is 64 or 65 here).
         let (schnorr_sig_bytes, hashtype_byte) = if sig.len() == 65 {
             (&sig[..64], sig[64])
         } else {
             (sig, 0x00) // SIGHASH_DEFAULT (64-byte sig)
         };
 
-        // A 65-byte signature with SIGHASH_DEFAULT (0x00) is invalid.
         if sig.len() == 65 && hashtype_byte == 0x00 {
             return Err(ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSigHashtype,
@@ -233,7 +230,6 @@ impl<'a> TxSignatureChecker<'a> {
                 code: ScriptErrCode::SchnorrSigHashtype,
             })?;
 
-        // Parse the x-only public key (32 bytes).
         if pubkey.len() != 32 {
             return Err(ScriptError::Verification(
                 "Schnorr public key must be 32 bytes".to_owned(),
@@ -576,19 +572,13 @@ fn is_defined_hashtype(sig: &[u8]) -> bool {
     (0x01..=0x03).contains(&masked)
 }
 
-/// Core's `IsCompressedOrUncompressedPubKey`.
 fn is_compressed_or_uncompressed_pubkey(pubkey: &[u8]) -> bool {
     is_compressed_pubkey(pubkey) || (pubkey.len() == 65 && pubkey[0] == 0x04)
 }
 
-/// Core's `IsCompressedPubKey`.
 fn is_compressed_pubkey(pubkey: &[u8]) -> bool {
     pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -606,7 +596,6 @@ mod tests {
     use crate::eval::{OP_CODESEPARATOR, remove_all};
     use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
 
-    // --- Helper: build a minimal 1-input, 1-output transaction ---
 
     fn make_tx(version: i32, lock_time: u32, sequence: u32) -> Tx {
         Tx {

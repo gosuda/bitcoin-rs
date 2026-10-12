@@ -9,21 +9,14 @@ pub(crate) const ANNEX_TAG: u8 = 0x50;
 
 /// Control block base size: 1 leaf-version/parity byte + 32-byte x-only internal key.
 pub(crate) const TAPROOT_CONTROL_BASE_SIZE: usize = 33;
-
-/// Each merkle-path node is 32 bytes.
 pub(crate) const TAPROOT_CONTROL_NODE_SIZE: usize = 32;
 
 /// Maximum number of merkle-path nodes in a control block (BIP341).
 pub(crate) const TAPROOT_CONTROL_MAX_NODE_COUNT: usize = 128;
-
-/// Maximum control block size: base + up to 128 nodes.
 pub(crate) const TAPROOT_CONTROL_MAX_SIZE: usize =
     TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
 
-/// Mask isolating the leaf version from the control block's first byte.
 pub(crate) const TAPROOT_LEAF_MASK: u8 = 0xfe;
-
-/// Leaf version for BIP342 tapscript.
 pub(crate) const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
 
 // BIP340 "Tagged Hashes": the doubled tag digest is exactly one SHA256
