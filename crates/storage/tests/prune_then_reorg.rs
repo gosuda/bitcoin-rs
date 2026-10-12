@@ -174,7 +174,7 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
 /// pins survive a prune that would otherwise delete them, the recorded
 /// line only names what actually went, a floor the line crossed is
 /// refused as gone, and releasing the lease hands the authority back
-/// exactly once (`RCV-08`, #655).
+/// exactly once (`RCV-08`).
 #[test]
 fn prune_to_height_respects_an_active_retention_lease() -> Result<(), Box<dyn std::error::Error>> {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
@@ -390,7 +390,7 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
 /// The reservation is the prune/retention linearization point: a lease
 /// request that arrives after a pass planned its deletions but before the
 /// batch commits is refused, so it can never pin rows the batch staged. A
-/// pass that fails before committing releases the claim again (#1151).
+/// pass that fails before committing releases the claim again.
 #[test]
 fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -459,7 +459,7 @@ fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dy
 
 /// The executed frontier is a durable fact: it commits with its deletions,
 /// a restart reconstructs exactly that boundary, and the restarted authority
-/// refuses a lease over rows the previous process deleted (#1151).
+/// refuses a lease over rows the previous process deleted.
 #[test]
 fn executed_frontier_survives_restart_and_refuses_deleted_heights()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -498,7 +498,7 @@ fn executed_frontier_survives_restart_and_refuses_deleted_heights()
 }
 
 /// Repeated passes, and rows a reorg reintroduces below the line, never move
-/// the persisted frontier backwards, and the rows stay deleted (#1151).
+/// the persisted frontier backwards, and the rows stay deleted.
 #[test]
 fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -545,7 +545,7 @@ fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
 
 /// A datadir pruned before the record existed reconstructs its boundary from
 /// the rows that survived, never from the requested line while rows remain,
-/// and the first pass pins the reconstruction (#1151).
+/// and the first pass pins the reconstruction.
 #[test]
 fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -603,7 +603,7 @@ fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
 }
 
 /// With no rows left to prove deletion from, a legacy store falls back to its
-/// requested line; a fresh store starts at zero (#1151).
+/// requested line; a fresh store starts at zero.
 #[test]
 fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -634,7 +634,7 @@ fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
 /// older undo-only pass, or body rows a reorg reintroduced, leaves one
 /// family's lowest survivor below the other's. The join must stay the
 /// `max`: it at worst refuses a lease over rows that still exist, and
-/// never grants one over rows the other family already lost (#1151).
+/// never grants one over rows the other family already lost.
 #[test]
 fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -683,8 +683,7 @@ fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
 /// A durability error is not a rollback receipt. Before the pass releases
 /// its claim it reconciles the persisted record: a provably-applied batch
 /// promotes the line, a provably-unapplied one releases the claim, and an
-/// unprovable one holds it until a restart reconciles record and deletions
-/// (#1151).
+/// unprovable one holds it until a restart reconciles record and deletions.
 #[test]
 fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -813,7 +812,7 @@ fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
 /// An optional consumer inside its budget still clamps the line; one that
 /// lags beyond it stops blocking pruning, and the owner tells it the
 /// capability is gone instead of the consumer guessing from a read that
-/// returns nothing (#1151).
+/// returns nothing.
 #[test]
 fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn std::error::Error>>
 {
