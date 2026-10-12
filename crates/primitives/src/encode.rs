@@ -509,8 +509,7 @@ mod tests {
         marked.extend_from_slice(lock_time);
 
         // Marker+flag with an all-empty witness section: Core rejects this as a
-        // superfluous witness record, and so do we. rust-bitcoin 0.32 also rejects
-        // the non-empty-input form; that crate is not an oracle for this crate.
+        // superfluous witness record, and so do we.
         assert_eq!(
             deserialize::<Tx>(&marked),
             Err(DecodeError::SuperfluousWitness)
@@ -522,8 +521,7 @@ mod tests {
 
         // Degenerate zero-input marker+flag encoding: Core rejects it ("Superfluous
         // witness record") and so do we, since the encoder could never reproduce the
-        // marker/flag on re-encode. rust-bitcoin 0.32 accepts this shape (`!input
-        // .is_empty()` guard); that divergence is deliberate and not inherited.
+        // marker/flag on re-encode.
         let mut zero_input = 2_i32.to_le_bytes().to_vec();
         zero_input.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(

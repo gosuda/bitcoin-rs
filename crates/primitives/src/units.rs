@@ -1,8 +1,7 @@
 //! Native protocol scalar newtypes: amounts, sequences, locktime, compact targets.
 //!
-//! These are bitcoin-rs types, not `rust-bitcoin` aliases. Arithmetic and wire
-//! conversion live here so `Tx`, `TxIn`, `TxOut`, and `Header` do not restate
-//! satoshi, sequence, or nBits layout.
+//! Arithmetic and wire conversion live here so `Tx`, `TxIn`, `TxOut`, and
+//! `Header` do not restate satoshi, sequence, or nBits layout.
 
 use core::fmt;
 

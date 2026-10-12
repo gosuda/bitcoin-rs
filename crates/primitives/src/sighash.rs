@@ -3,8 +3,7 @@
 //! `SighashCache` holds a transaction reference plus lazily computed midstates. The
 //! algorithms are bug-for-bug compatible with Bitcoin Core's `interpreter.cpp`
 //! (`SignatureHash`, `SignatureHashSchnorr`). Durable tests pin Core's `sighash.json`
-//! vectors and published hash values; this crate does not take a `rust-bitcoin`
-//! oracle dependency.
+//! vectors and published hash values.
 
 use std::sync::OnceLock;
 
@@ -172,10 +171,10 @@ impl EcdsaType {
 /// Lazily cached signature hashes for one transaction.
 ///
 /// The taproot amount/scriptPubKey midstates assume the same prevout set is supplied to
-/// every call on this cache, including concurrent calls (the same assumption the `bitcoin` crate's cache makes);
-/// construct a fresh cache when the prevout set changes. Aggregate hashes initialize
-/// once and can be shared across parallel input checks. Script code, input index,
-/// hash type, annex and code-separator position remain arguments of each digest.
+/// every call on this cache, including concurrent calls; construct a fresh cache when
+/// the prevout set changes. Aggregate hashes initialize once and can be shared across
+/// parallel input checks. Script code, input index, hash type, annex and code-separator
+/// position remain arguments of each digest.
 pub struct SighashCache<'t> {
     tx: &'t Tx,
     segwit_prevouts: OnceLock<Hash256>,
@@ -211,8 +210,8 @@ impl<'t> SighashCache<'t> {
     /// when the masked type is SINGLE and `input_index` has no matching output, the
     /// uint256 value 1 is returned.
     ///
-    /// Legacy-only semantics, deliberately isolated from the other two families
-    /// (T07): `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
+    /// Legacy-only semantics, deliberately isolated from the other two families:
+    /// `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
     /// ANYONECANPAY single-input substitution, the zeroed sibling sequences and
     /// blanked sibling outputs of NONE/SINGLE, and the code-separator subscript
     /// deletion performed by the caller before this function, all live here and
