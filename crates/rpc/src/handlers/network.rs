@@ -9,8 +9,8 @@ use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
 use bitcoin_rs_primitives::USER_AGENT;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use crate::compat::convert::{i64_saturated, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
+use crate::convert::{i64_saturated, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
 use crate::handlers::{
     ensure_no_params, optional_bool, params_array, required_str, wrong_type_plain,
@@ -267,7 +267,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             } else {
                 Vec::new()
             },
-            minimum_fee_filter: crate::compat::convert::sat_to_btc(
+            minimum_fee_filter: sat_to_btc(
                 ctx.network
                     .peer_table
                     .transaction_fee_filter(session.lease.source(session.addr)),

@@ -15,11 +15,11 @@ use bitcoin_rs_primitives::{
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{
+use crate::context::Context;
+use crate::convert::{
     self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_i64, typed_to_sonic,
     typed_to_sonic_omitting_nulls,
 };
-use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::util::{generateblock_payout_script, payout_script_from_address};
 use crate::handlers::{

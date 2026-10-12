@@ -14,11 +14,10 @@ extern crate alloc;
 pub mod auth;
 /// Standard-alphabet Base64 encode/decode for auth headers and PSBTs.
 mod base64;
-/// Bitcoin Core wire-contract boundary: versioned response types and the
-/// sanctioned native<->bitcoin conversions backing them.
-mod compat;
 /// Dependency-injected RPC state.
 pub mod context;
+/// Native <-> rust-bitcoin conversions and typed wire serialization.
+pub(crate) mod convert;
 /// JSON-RPC error mapping.
 mod error;
 /// Esplora-compatible HTTP endpoints backed by node-owned indexes.
@@ -39,9 +38,6 @@ mod server;
 mod tx_render;
 /// Bitcoin Core-compatible ZMQ notification protocol and transport.
 pub mod zmq;
-
-#[cfg(test)]
-mod test_support;
 
 pub use auth::Auth;
 pub use manifest::MANIFEST_TOML;

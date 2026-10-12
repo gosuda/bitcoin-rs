@@ -1717,7 +1717,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let body = consensus_bytes(&block);
         let record = BlockRecord::from_block(0, &block);
-        let source = Arc::new(crate::test_support::BlockBodies {
+        let source = Arc::new(BlockBodies {
             bodies: vec![(0, record.hash, body.clone())],
         });
         let ctx = Context::from_handles(ContextHandles {
@@ -2437,5 +2437,22 @@ mod admission_chain_tests {
             "the accepted preview must not insert"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct BlockBodies {
+    pub(crate) bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+}
+
+#[cfg(test)]
+impl BlockBodySource for BlockBodies {
+    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        self.bodies
+            .iter()
+            .find(|(candidate_height, candidate_hash, _)| {
+                *candidate_height == height && *candidate_hash == hash
+            })
+            .map(|(_, _, body)| body.clone())
     }
 }

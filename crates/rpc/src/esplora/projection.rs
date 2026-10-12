@@ -12,8 +12,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::{instructions, is_p2sh, is_p2wsh};
 
-use crate::compat::convert::{self};
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+use crate::convert::{self};
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
 use super::http::query_error;
@@ -684,7 +684,7 @@ fn inner_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::convert::fixtures;
+    use crate::convert::fixtures;
     use bitcoin_rs_primitives::Amount;
 
     #[test]

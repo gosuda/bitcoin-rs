@@ -16,7 +16,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_script::{Instruction, instructions};
 
-use crate::compat::convert::{self};
+use crate::convert::{self};
 
 /// Optional confirmed-chain fields projected beside a transaction object.
 #[derive(Debug)]

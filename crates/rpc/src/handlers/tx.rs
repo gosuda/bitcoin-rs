@@ -16,8 +16,8 @@ use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
+use crate::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -1531,7 +1531,7 @@ mod tests {
         }
     }
 
-    use crate::test_support::BlockBodies;
+    use crate::context::BlockBodies;
 
     #[derive(Default)]
     struct ScriptedBodySource {

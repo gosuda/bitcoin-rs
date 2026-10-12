@@ -172,7 +172,7 @@ mod tests {
         }
     }
 
-    use crate::test_support::BlockBodies;
+    use crate::context::BlockBodies;
 
     fn transaction(input: Option<OutPoint>, output: TxOut) -> Tx {
         Tx {

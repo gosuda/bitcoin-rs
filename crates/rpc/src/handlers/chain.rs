@@ -17,11 +17,11 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, 
 use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
 use bitcoin::hex::DisplayHex as _;
 
-use crate::compat::convert::{
+use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
+use crate::convert::{
     self, compact_target_hex, i32_saturated, i64_saturated, i64_saturated_len, sat_to_btc,
     typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
 use crate::error::RpcError;
 use crate::handlers::{
     ensure_no_params, optional_bool, params_array, required_i64, required_str, required_u64,
@@ -1873,7 +1873,7 @@ mod tests {
         calls: core::sync::atomic::AtomicUsize,
     }
 
-    use crate::test_support::BlockBodies;
+    use crate::context::BlockBodies;
 
     impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
