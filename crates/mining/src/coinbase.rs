@@ -13,6 +13,7 @@ pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
 /// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub enum MiningError {
     /// The mempool owner's fee graph could not be evaluated.
     #[error(transparent)]
@@ -23,9 +24,7 @@ pub enum MiningError {
     /// The immutable snapshot contains an invalid ancestor position.
     #[error("snapshot entry {entry} names missing ancestor {ancestor}")]
     MissingAncestor {
-        /// Snapshot position of the entry.
         entry: usize,
-        /// Invalid ancestor position.
         ancestor: u32,
     },
     /// A selected fee sum exceeded the satoshi range.
@@ -34,19 +33,16 @@ pub enum MiningError {
     /// Candidate scalar arithmetic exceeded its supported width.
     #[error("candidate {field} overflows its supported width")]
     CandidateScalarOverflow {
-        /// Scalar that overflowed.
         field: &'static str,
     },
     /// Coinbase reservation already exhausts a configured block limit.
     #[error("coinbase reservation exhausts the {field} limit")]
     CapacityExhausted {
-        /// Limit that the coinbase alone exhausted.
         field: &'static str,
     },
     /// Exhausted `max_tries` without meeting the compact target.
     #[error("failed to meet compact target in {tries} nonce attempts")]
     Unsolved {
-        /// Nonce attempts consumed.
         tries: u64,
     },
 }

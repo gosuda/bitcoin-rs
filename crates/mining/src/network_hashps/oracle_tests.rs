@@ -110,7 +110,7 @@ fn assert_matches_core(
     let got = estimate_network_hashps(tree, start_id, lookup, network);
     assert!(
         (got - expected).abs() < 1e-9,
-        "lookup={lookup} height={height}: got {got}, Core oracle {expected}"
+        "lookup={lookup} height={height}: got {got}, Core reference {expected}"
     );
 }
 
