@@ -14,8 +14,8 @@ use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::{
-    Instruction, instructions, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr,
-    is_p2wpkh, is_p2wsh, is_push_only, minimal_non_dust, multisig_key_count, opcode,
+    is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh, is_push_only,
+    minimal_non_dust, multisig_key_count,
 };
 use thiserror::Error;
 
@@ -403,7 +403,7 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
     for output in &tx.outputs {
         let script = &output.script_pubkey;
         if is_op_return(script) {
-            if !is_standard_nulldata(script) {
+            if !is_push_only(&script[1..]) {
                 return Err(StandardnessError::NonStandardOutput);
             }
             let Some(limit) = policy.max_datacarrier_bytes else {
@@ -472,21 +472,6 @@ const fn compact_size_len(len: usize) -> usize {
     } else {
         9
     }
-}
-
-/// Extracts the payload length from an `OP_RETURN` script.
-fn is_standard_nulldata(script: &[u8]) -> bool {
-    let mut instructions = instructions(script);
-    if instructions.next().is_none() {
-        return false;
-    }
-    instructions.all(|inst| match inst {
-        Ok(Instruction::PushBytes(_)) => true,
-        Ok(Instruction::Op(op)) => {
-            op == opcode::OP_1NEGATE || (opcode::OP_PUSHNUM_1..=opcode::OP_PUSHNUM_16).contains(&op)
-        }
-        Err(_) => false,
-    })
 }
 
 #[cfg(test)]
@@ -567,17 +552,19 @@ mod tests {
         }
     }
 
-    /// Numeric push opcodes are pushes, and standard nulldata accepts them.
+    /// Push opcodes are pushes, and standard nulldata accepts them (including `OP_RESERVED` 0x50).
     #[test]
     fn accepts_op_return_followed_by_a_numeric_push() {
-        let mut tx = standard_tx(1);
-        tx.outputs[0].value = Amount::ZERO;
-        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_PUSHNUM_1].into();
-        tx.outputs.push(TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: p2pkh(&[9_u8; 20]).into(),
-        });
-        assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
+        for op in [opcode::OP_PUSHNUM_1, opcode::OP_RESERVED] {
+            let mut tx = standard_tx(1);
+            tx.outputs[0].value = Amount::ZERO;
+            tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, op].into();
+            tx.outputs.push(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: p2pkh(&[9_u8; 20]).into(),
+            });
+            assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
+        }
     }
 
     /// `OP_RETURN` followed by a non-push opcode is not standard nulldata.

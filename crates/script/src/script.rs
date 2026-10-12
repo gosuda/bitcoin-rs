@@ -28,6 +28,8 @@ pub mod opcode {
         pub(crate) OP_PUSHDATA4 = 0x4e,
         /// `OP_1NEGATE`: pushes the number -1.
         pub OP_1NEGATE = 0x4f,
+        /// `OP_RESERVED`: reserved opcode (0x50); counts as a push under Core's `IsPushOnly`.
+        pub OP_RESERVED = 0x50,
         /// `OP_1`: pushes the number 1 (`OP_PUSHNUM_1`).
         pub OP_PUSHNUM_1 = 0x51,
         /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
@@ -708,7 +710,9 @@ mod tests {
     fn push_only_rejects_non_push_opcodes_and_parse_errors() {
         let mut ok = push_data(&[1]);
         ok.push(opcode::OP_PUSHNUM_1);
+        ok.push(opcode::OP_RESERVED);
         assert!(is_push_only(&ok));
+        assert!(is_push_only(&[opcode::OP_RESERVED]));
         assert!(!is_push_only(&[opcode::OP_DUP]));
         assert!(!is_push_only(&[0x51, 0x20, 0x00])); // truncated 32-byte push
         assert!(!is_push_only(&[0x51, 0xff]));
