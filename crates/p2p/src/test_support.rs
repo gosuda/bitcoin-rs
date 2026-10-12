@@ -53,6 +53,9 @@ impl StallingStream {
 
 impl std::io::Read for StallingStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
         match self.script.pop_front() {
             None => Ok(0),
             Some(Inbound::Stall(kind)) => Err(kind.into()),

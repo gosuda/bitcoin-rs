@@ -127,7 +127,13 @@ expiry.
 - A poll timeout never loses inbound bytes. `Peer::read_message` reads through
   the peer's `wire::V1Receiver`, which keeps a partial header or payload across
   `TimedOut`/`WouldBlock`, so the retrying handshake and message loops continue
-  the same frame instead of resuming mid-frame.
+  the same frame instead of resuming mid-frame. The retained buffer holds only
+  received bytes: a stalled frame never pins the declared payload length.
+  Proof: `wire::tests::receiver_resumes_a_frame_split_by_poll_timeouts`,
+  `wire::tests::receiver_retains_only_received_bytes_for_a_stalled_frame`,
+  `wire::tests::receiver_restarts_at_a_frame_boundary_after_a_rejected_frame`,
+  `handshake::tests::inbound_handshake_resumes_frames_split_by_poll_timeouts`,
+  `peer::tests::socket_read_continues_a_frame_that_outlasts_the_poll_timeout`.
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 

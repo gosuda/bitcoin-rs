@@ -478,9 +478,15 @@ pub(crate) struct V1Receiver {
 struct PendingBody {
     command: String,
     checksum: [u8; 4],
+    /// Validated declared payload length; `payload` holds only received bytes.
+    expected: usize,
     payload: Vec<u8>,
-    filled: usize,
 }
+
+/// Largest single payload read. The retained buffer grows only with bytes
+/// actually received, so a peer that declares a huge payload then stalls
+/// cannot pin a full-size allocation.
+const RECEIVE_CHUNK: usize = 16 * 1024;
 
 impl V1Receiver {
     /// Read one validated wire payload, observing it before typed decoding.
@@ -498,7 +504,7 @@ impl V1Receiver {
         } else {
             self.read_header(reader, expected_magic)?
         };
-        if let Err(error) = fill(reader, &mut body.payload, &mut body.filled) {
+        if let Err(error) = fill_body(reader, &mut body) {
             if is_poll_timeout(&error) {
                 self.body = Some(body);
             }
@@ -531,8 +537,10 @@ impl V1Receiver {
     }
 }
 
-/// Validates a complete header and allocates its payload: magic, command,
-/// and length are checked before any payload byte is read.
+/// Validates a complete header and records its declared payload length:
+/// magic, command, and length are checked before any payload byte is read.
+/// The declared length never allocates; `payload` grows only with received
+/// bytes.
 fn pending_body(
     header: &[u8; HEADER_LEN],
     expected_magic: Magic,
@@ -558,9 +566,30 @@ fn pending_body(
     Ok(PendingBody {
         command,
         checksum,
-        payload: vec![0u8; payload_len],
-        filled: 0,
+        expected: payload_len,
+        payload: Vec::new(),
     })
+}
+
+/// Reads until the declared payload is buffered, in bounded chunks so a
+/// partial frame retains only the bytes actually received. A poll timeout
+/// resumes where it stopped.
+fn fill_body<R: Read>(reader: &mut R, body: &mut PendingBody) -> Result<(), PeerError> {
+    let mut scratch = [0u8; RECEIVE_CHUNK];
+    while body.payload.len() < body.expected {
+        let wanted = scratch.len().min(body.expected - body.payload.len());
+        match reader.read(&mut scratch[..wanted]) {
+            Ok(0) => {
+                return Err(PeerError::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )));
+            }
+            Ok(read) => body.payload.extend_from_slice(&scratch[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(PeerError::Io(error)),
+        }
+    }
+    Ok(())
 }
 
 /// Reads until `buffer` is full, recording progress in `filled` so a poll
@@ -985,6 +1014,38 @@ mod tests {
         assert_eq!(first, super::Message::Ping(42));
         let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
         assert_eq!(second, super::Message::Pong(7));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, OrFail, StallingStream};
+        use std::io::ErrorKind;
+
+        // A peer declares a maximum-size payload, delivers a fragment, then
+        // stalls: the retained buffer holds received bytes, not the declared
+        // length.
+        let dribble = [7u8; 100];
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(dribble.to_vec()),
+            Inbound::Stall(ErrorKind::TimedOut),
+        ]);
+        let mut receiver = super::V1Receiver::default();
+        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+        assert!(
+            matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
+            "a stall surfaces as a retryable timeout, got {result:?}"
+        );
+        let body = receiver
+            .body
+            .as_ref()
+            .or_fail("the partial frame is retained across the timeout");
+        assert_eq!(body.payload.len(), dribble.len());
+        assert!(
+            body.payload.capacity() <= super::RECEIVE_CHUNK,
+            "no full-size allocation is retained for a stalled declared payload"
+        );
         Ok(())
     }
 
