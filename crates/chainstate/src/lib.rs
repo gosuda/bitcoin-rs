@@ -444,7 +444,7 @@ pub struct Chainstate {
     pub(crate) capture_block_bytes: bool,
     /// Retention authority shared with the pruning pass: chain transitions
     /// and required readers pin old-branch bodies here so pruning cannot
-    /// delete data an active transition still re-reads (#655, `RCV-08`).
+    /// delete data an active transition still re-reads (`RCV-08`).
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     /// Optional history reads share storage's registry and bounded lease policy.
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
