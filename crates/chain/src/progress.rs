@@ -31,7 +31,7 @@ pub struct ChainProgress {
     pub time: u64,
     /// Median time past at the applied tip; `0` without one.
     pub median_time: u64,
-    /// Core `GuessVerificationProgress` in the inclusive range `[0, 1]`.
+    /// Estimated verification progress in the inclusive range `[0, 1]`.
     pub verification_progress: f64,
     /// The shared [`InitialBlockDownload`] decision.
     pub initial_block_download: bool,
