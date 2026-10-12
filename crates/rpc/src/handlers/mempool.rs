@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{OutPoint, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{OutPoint, consensus_bytes};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -58,14 +58,14 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
-    let snapshot = {
+    let response = {
         let pool = ctx.mempool.gateway.read();
         let entry = pool
             .entry_by_txid(&txid)
             .ok_or(RpcError::NotFound("transaction not in mempool"))?;
-        mempool_entry_snapshot(entry, &pool)
+        v31::GetMempoolEntry(mempool_entry_typed(entry, &pool))
     };
-    typed_to_sonic(&v31::GetMempoolEntry(mempool_entry_typed(snapshot)))
+    typed_to_sonic(&response)
 }
 
 /// Resolve all requested outpoints against one mempool generation. Copy only
@@ -257,12 +257,9 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }
     let pool = ctx.mempool.gateway.read();
     if verbose {
-        let entries = pool
-            .iter_entries()
-            .map(|entry| mempool_entry_snapshot(entry, &pool))
-            .collect();
+        let response = v31::GetRawMempoolVerbose(mempool_entries_typed(pool.iter_entries(), &pool));
         drop(pool);
-        return typed_to_sonic(&v31::GetRawMempoolVerbose(mempool_entries_typed(entries)));
+        return typed_to_sonic(&response);
     }
 
     let txids = pool.iter_txids();
@@ -291,15 +288,12 @@ pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<
         };
         let related_ids = pool.ancestor_ids_for_entry(id);
         if verbose {
-            let entries = related_ids
-                .iter()
-                .filter_map(|id| pool.entry(*id))
-                .map(|entry| mempool_entry_snapshot(entry, &pool))
-                .collect();
+            let response = v31::GetMempoolAncestorsVerbose(mempool_entries_typed(
+                related_ids.iter().filter_map(|id| pool.entry(*id)),
+                &pool,
+            ));
             drop(pool);
-            return typed_to_sonic(&v31::GetMempoolAncestorsVerbose(mempool_entries_typed(
-                entries,
-            )));
+            return typed_to_sonic(&response);
         }
         related_ids
             .iter()
@@ -321,15 +315,12 @@ pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Resul
         };
         let related_ids = pool.descendant_ids_for_entry(id);
         if verbose {
-            let entries = related_ids
-                .iter()
-                .filter_map(|id| pool.entry(*id))
-                .map(|entry| mempool_entry_snapshot(entry, &pool))
-                .collect();
+            let response = v31::GetMempoolDescendantsVerbose(mempool_entries_typed(
+                related_ids.iter().filter_map(|id| pool.entry(*id)),
+                &pool,
+            ));
             drop(pool);
-            return typed_to_sonic(&v31::GetMempoolDescendantsVerbose(mempool_entries_typed(
-                entries,
-            )));
+            return typed_to_sonic(&response);
         }
         related_ids
             .iter()
@@ -341,67 +332,36 @@ pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Resul
     typed_to_sonic(&v31::GetMempoolDescendants(names))
 }
 
-/// Entry accounting and graph membership captured under one pool read.
-struct MempoolEntrySnapshot {
-    entry: MempoolEntry,
-    depends: Vec<Txid>,
-    spent_by: Vec<Txid>,
-    descendant_count: u32,
-    ancestor_count: u32,
-}
-
-fn mempool_entry_snapshot(
+fn mempool_entry_typed(
     entry: &MempoolEntry,
     pool: &bitcoin_rs_mempool::Mempool,
-) -> MempoolEntrySnapshot {
-    let depends = entry
+) -> v31::MempoolEntry {
+    let mut depends = entry
         .tx
         .inputs
         .iter()
         .map(|input| input.previous_output.txid)
         .filter(|txid| pool.contains_txid(txid))
+        .map(|txid| txid.to_string())
         .collect::<Vec<_>>();
+    depends.sort();
+    depends.dedup();
 
     let entry_id = pool.entry_id_by_txid(&entry.txid);
-    let spent_by = entry_id
+    let mut spentby = entry_id
         .map(|id| pool.spender_txids(id))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    spentby.sort();
+    spentby.dedup();
     let (descendant_count, ancestor_count) = entry_id.map_or((1, 1), |id| {
         (
             pool.descendant_count_inclusive(id),
             pool.ancestor_count_inclusive(id),
         )
     });
-
-    MempoolEntrySnapshot {
-        entry: entry.clone(),
-        depends,
-        spent_by,
-        descendant_count,
-        ancestor_count,
-    }
-}
-
-fn mempool_entry_typed(snapshot: MempoolEntrySnapshot) -> v31::MempoolEntry {
-    let MempoolEntrySnapshot {
-        entry,
-        depends,
-        spent_by,
-        descendant_count,
-        ancestor_count,
-    } = snapshot;
-    let mut depends = depends
-        .into_iter()
-        .map(|txid| txid.to_string())
-        .collect::<Vec<_>>();
-    depends.sort();
-    depends.dedup();
-    let mut spentby = spent_by
-        .into_iter()
-        .map(|txid| txid.to_string())
-        .collect::<Vec<_>>();
-    spentby.sort();
-    spentby.dedup();
 
     // No cluster diagram is tracked, so `chunk*` fields approximate a
     // singleton cluster: the transaction's own weight and fee.
@@ -433,17 +393,12 @@ fn mempool_entry_typed(snapshot: MempoolEntrySnapshot) -> v31::MempoolEntry {
     }
 }
 
-fn mempool_entries_typed(
-    entries: Vec<MempoolEntrySnapshot>,
+fn mempool_entries_typed<'a>(
+    entries: impl Iterator<Item = &'a MempoolEntry>,
+    pool: &bitcoin_rs_mempool::Mempool,
 ) -> BTreeMap<String, v31::MempoolEntry> {
     entries
-        .into_iter()
-        .map(|snapshot| {
-            (
-                snapshot.entry.txid.to_string(),
-                mempool_entry_typed(snapshot),
-            )
-        })
+        .map(|entry| (entry.txid.to_string(), mempool_entry_typed(entry, pool)))
         .collect()
 }
 
