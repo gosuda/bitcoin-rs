@@ -41,9 +41,8 @@ pub(super) const NODE_NETWORK_LIMITED_MIN_BLOCKS: u32 = 288;
 /// that keeps only the retained window may have pruned two of its newest
 /// blocks by the time the request lands.
 const NODE_NETWORK_LIMITED_RACE_BUFFER: u32 = 2;
-/// `NODE_NETWORK_LIMITED` (bit 10) has no `ServiceFlags` variant in this
-/// `rust-bitcoin` version; the bit follows the protocol assignment also
-/// decoded in `PeerInfo::services_names`.
+/// `NODE_NETWORK_LIMITED` (bit 10) protocol assignment, also decoded in
+/// `PeerInfo::services_names`.
 pub(super) const NETWORK_LIMITED: u64 = 1_u64 << 10;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///

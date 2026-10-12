@@ -335,7 +335,7 @@ impl BlockSync {
     /// convict one owner, evict one stuck staged body, or fire one bounded
     /// cold-front hedge.
     ///
-    /// R8: window-blocked staller detection, the #1091 apply-side
+    /// R8: window-blocked staller detection, the apply-side
     /// suppression bound, and the pending-timeout fallback all read the
     /// same `next_required` body the scheduler requests — the frontier
     /// cannot disagree with itself about which block is required next.
@@ -441,7 +441,7 @@ impl BlockSync {
         }
     }
 
-    /// Issue #1091 escalation: evict the stuck staged body for
+    /// Evict the stuck staged body for
     /// refetch, without blaming any peer.
     ///
     /// Fired on [`BlockedDecision::EvictStaged`] after the apply-side
@@ -559,7 +559,7 @@ impl BlockSync {
         // demonstrated best-known height (handshake snapshot, raised as
         // the peer hands us accepted headers) rather than the handshake
         // value alone — a long-lived at-tip peer would otherwise become
-        // ineligible for every newly announced block (#617). Per-request
+        // ineligible for every newly announced block. Per-request
         // truncation by `peer_best_height` still bounds the damage of a
         // stale value. `peer_can_serve_height` also keeps a limited-service
         // peer inside its retained range. With nothing required the clause

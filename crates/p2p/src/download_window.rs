@@ -362,7 +362,7 @@ pub(crate) struct DownloadWindow {
     /// predicate term stops holding, so a transient stall never accumulates
     /// blame across unrelated episodes.
     stall: Option<StallEpisode>,
-    /// Current apply-side stuck observation, if any (#1091 bound). Re-keyed
+    /// Current apply-side stuck observation, if any. Re-keyed
     /// on the apply-front `(height, hash)` every
     /// [`Self::advance_apply_side_stuck`] call; a front advance or a
     /// same-height branch replacement resets it, brief unbusy seams do not,
@@ -371,8 +371,8 @@ pub(crate) struct DownloadWindow {
     /// Adaptive stalling threshold: starts at `stall_timeout_initial` (2s),
     /// doubles on every staller disconnect up to `stall_timeout_max` (64s),
     /// and decays by x0.85 per window-front arrival back toward the decay
-    /// floor ([`Self::stall_decay_floor`]) — Core's `m_block_stalling_timeout`
-    /// shape (PR #25880) with an adaptive floor. Decay, never reset: snapping
+    /// floor ([`Self::stall_decay_floor`]) — with an adaptive floor. Decay,
+    /// never reset: snapping
     /// to the floor on front progress would discard the anti-cascade doubling
     /// across a peer rotation and re-arm the 2s floor against the next
     /// honest-but-slow front owner. Window-global (not per-peer) exactly like
@@ -860,7 +860,7 @@ impl DownloadWindow {
         None
     }
 
-    /// Time-bounds the apply-side no-blame suppression (issue #1091).
+    /// Time-bounds the apply-side no-blame suppression.
     ///
     /// While the stager holds the next expected block, `apply_side_busy`
     /// suppresses stall conviction, pending-timeout conviction, and the
@@ -934,7 +934,7 @@ impl DownloadWindow {
         Some((frontier_hash, suppressed_for))
     }
 
-    /// Measurement only (issue #51): interval bookkeeping that never feeds
+    /// Measurement only: interval bookkeeping that never feeds
     /// a blockage decision.
     ///
     /// - download-blocked-by-apply: apply owns the frontier while requests
@@ -2187,7 +2187,7 @@ impl DownloadWindow {
     /// interval into [`Self::front_interval_ewma_ms`] (unless the sample is
     /// a same-chunk batch artifact under [`EWMA_MIN_SAMPLE_MS`]) and decays
     /// the adaptive threshold by x0.85 toward [`Self::stall_decay_floor`]
-    /// (Core's PR #25880 shape with the ADV-DRIP-1 adaptive floor) instead
+    /// (an adaptive floor) instead
     /// of snapping it to the floor: after a real fire the elevated threshold
     /// must survive the peer rotation, so the next front owner is judged
     /// against the doubled value while it gradually relaxes with front
@@ -2252,7 +2252,7 @@ impl DownloadWindow {
         self.last_front_advance = Some(now);
     }
 
-    /// Rejects a malformed block delivery, source-aware (issue #1070).
+    /// Rejects a malformed block delivery, source-aware.
     ///
     /// When the delivering peer owns the pending request for `hash`, the
     /// pending is released so the block becomes re-requestable from a
@@ -2453,7 +2453,7 @@ impl DownloadWindow {
     }
 }
 
-/// Outcome of rejecting a malformed block delivery (issue #1070).
+/// Outcome of rejecting a malformed block delivery.
 ///
 /// The window decides whether the delivering peer owned the pending request.
 /// Only the owner's malformed delivery releases the pending slot so the block

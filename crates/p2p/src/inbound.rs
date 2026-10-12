@@ -6,12 +6,10 @@ use bitcoin_rs_primitives::{Block, Header, Tx, consensus_bytes};
 ///
 /// `serialized` is the exact P2P message payload and matches the canonical
 /// consensus serialization of `block`.
+#[allow(missing_docs)]
 pub struct InboundBlock {
-    /// Decoded block.
     pub block: Block,
-    /// Wire-format block payload bytes.
     pub serialized: bytes::Bytes,
-    /// Delivering connection, or `None` for local injection.
     pub source: Option<crate::PeerSource>,
     /// Releases the delivering connection's unsolicited forwarding slot when
     /// this body leaves the ingress path — drained by sync, discarded by the
@@ -20,10 +18,9 @@ pub struct InboundBlock {
     pub(crate) forward_credit: Option<crate::connection::BlockForwardCredit>,
 }
 /// A `headers` message batch and the peer that delivered it.
+#[allow(missing_docs)]
 pub struct InboundHeaders {
-    /// Decoded headers, in wire order.
     pub headers: Vec<Header>,
-    /// Delivering connection, or `None` for local injection.
     pub source: Option<crate::PeerSource>,
     /// `true` only for a wire `headers` message; headers forwarded out of a
     /// delivered block body (`false`) reach the same admission path but are
@@ -42,10 +39,9 @@ pub struct InboundHeaders {
 /// and evaluates each through the mempool acceptance policy. `source`
 /// identifies the delivering peer so admission origin and relay accounting
 /// can attribute the transaction correctly.
+#[allow(missing_docs)]
 pub struct InboundTx {
-    /// Decoded transaction.
     pub tx: Tx,
-    /// Delivering connection.
     pub source: crate::PeerSource,
 }
 

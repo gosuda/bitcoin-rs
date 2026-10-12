@@ -525,7 +525,7 @@ impl BlockSync {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
                 }
-                // Issue #1070: the header-derived block hash does not bind the
+                // The header-derived block hash does not bind the
                 // delivered transaction or witness bytes by itself.
                 if let Err(error) = binding_result {
                     metrics::counter!("node.sync.body_binding_drops").increment(1);

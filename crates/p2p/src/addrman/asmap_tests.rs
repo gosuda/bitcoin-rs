@@ -25,7 +25,7 @@ fn asmap_placement_matches_224_actual_core_vectors() {
     let data: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/data/core-addrman-asmap-v31.1.json"
     ))
-    .expect("Core oracle");
+    .expect("Core reference");
     let directory = tempfile::tempdir().expect("directory");
     let mut classifiers = HashMap::new();
     for (name, info) in data["map_files"].as_object().expect("maps") {
@@ -130,7 +130,7 @@ fn incoming_source_asn_controls_corroboration_without_rewriting_primary_source()
     );
     let entry = &manager.stored.records[manager.by_addr[&addr]];
     assert_eq!(entry.source, primary);
-    // Direct linked-Core oracle: same ASN sources use53; the independent ASN602.
+    // Direct linked-Core reference: same ASN sources use53; the independent ASN602.
     assert_eq!(entry.new_buckets, vec![53, 602]);
     assert_indexes(&manager);
 }

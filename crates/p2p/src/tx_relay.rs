@@ -60,10 +60,9 @@ const RELAY_POLL: Duration = Duration::from_millis(100);
 
 /// One accepted transaction awaiting `inv` announcement.
 #[derive(Clone, Copy, Debug)]
+#[allow(missing_docs)]
 pub struct RelayRequest {
-    /// The transaction id to advertise in the `inv` vector.
     pub txid: Txid,
-    /// The accepted transaction's actual witness identifier for BIP339 peers.
     pub wtxid: Wtxid,
     /// The delivering peer's node id to exclude, or `None` for local
     /// injection.

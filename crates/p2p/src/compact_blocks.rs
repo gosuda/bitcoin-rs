@@ -385,7 +385,7 @@ fn place_prefills(compact: &HeaderAndShortIds, total: usize) -> Option<Vec<Optio
     Some(filled)
 }
 
-/// Registry (rust-bitcoin) block header → primitives header.
+/// Registry block header → primitives header.
 pub(crate) fn native_header(reg: &bitcoin::blockdata::block::Header) -> Option<Header> {
     deserialize(&bitcoin::consensus::encode::serialize(reg)).ok()
 }
