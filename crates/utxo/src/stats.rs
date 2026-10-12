@@ -1,8 +1,7 @@
 //! Running UTXO-set statistics over the live set.
 //!
 //! This is derived computation over the authoritative UTXO state that
-//! [`crate::set`] owns, which is why it lives here rather than in a crate of
-//! its own (issue #164). It reads the live set and folds it; it never decides
+//! [`crate::set`] owns. It reads the live set and folds it; it never decides
 //! what the live set contains. The rewind accounts for
 //! [`owed derived state`](../../../CONCEPTS.md#owed-derived-state) when a block
 //! disconnects.

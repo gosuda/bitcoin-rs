@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn finalize_byte_identical_after_optimized_multiply_chain() {
-        // Confirms the optimized path also matches the ruint oracle through
+        // Confirms the optimized path also matches the ruint reference through
         // finalize() across a seeded operation chain.
         let mut rng = SplitMix64::new(0xf1_0a11_2e57_3072);
         for _ in 0..2_000 {
@@ -829,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_sequence_matches_reference_oracle() {
+    fn operation_sequence_matches_reference() {
         let mut candidate = MuHash3072::new();
         let mut reference = ReferenceMuHash3072::new();
 
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_matches_reference_oracle() {
+    fn from_parts_matches_reference() {
         let mut reference = ReferenceMuHash3072::new();
         reference.insert(b"persisted numerator");
         reference.remove(b"persisted denominator");
@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_multiplication_matches_reference_oracle() {
+    fn boundary_multiplication_matches_reference() {
         let values = boundary_values();
 
         for left in &values {
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_boundary_bytes_match_reference_oracle() {
+    fn from_parts_boundary_bytes_match_reference() {
         let values = boundary_values();
 
         for numerator_value in &values {
@@ -908,7 +908,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn generated_multiplication_matches_reference_oracle(
+        fn generated_multiplication_matches_reference(
             left_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
             right_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
         ) {
@@ -926,7 +926,7 @@ mod tests {
         }
 
         #[test]
-        fn generated_operation_sequences_match_reference_oracle(
+        fn generated_operation_sequences_match_reference(
             ops in proptest::collection::vec(
                 (
                     0_u8..3,
