@@ -33,7 +33,7 @@ mod pareto;
 mod policy;
 /// Mempool indexes and mutation API.
 mod pool;
-/// Core 31.1 replacement fee and graph policy.
+/// Replacement fee and graph policy (BIP125 / Core rules).
 mod rbf;
 /// Cloneable read-only capability over the mempool.
 mod reader;

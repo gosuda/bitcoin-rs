@@ -102,9 +102,9 @@ fn package_count_order_conflicts_and_weight_boundaries() -> TestResult {
     for tx in &mut weighted {
         let padding = usize::try_from(202_000 - tx.weight() - 8)?;
         tx.inputs[0].witness = Witness::from_stack(vec![vec![0; padding]]);
-        let oracle: bitcoin::Transaction =
+        let reference: bitcoin::Transaction =
             bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(tx))?;
-        assert_eq!(oracle.weight().to_wu(), 202_000);
+        assert_eq!(reference.weight().to_wu(), 202_000);
     }
     assert!(check_structure(&weighted).is_ok());
     let mut padding = weighted[1].inputs[0].witness[0].clone();

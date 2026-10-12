@@ -51,7 +51,7 @@ impl Default for StandardnessPolicy {
 /// Minimum transaction version considered standard.
 const TX_VERSION_MIN: i32 = 1;
 
-/// Core 31.1 accepts version 3 with the additional BIP431 admission checks.
+/// Version 3 is accepted with BIP431 admission checks.
 const TX_VERSION_MAX: i32 = 3;
 
 /// Standardness policy rejection reason for a single transaction.

@@ -45,8 +45,7 @@ impl FeeRate {
     }
 }
 
-/// Why a persisted estimator-history payload was not adopted.
-/// CONTRACT: docs/policies/db-migration.md — every rejection degrades to
+/// Rejection reason when a persisted fee estimator history payload is rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryReject {
     /// Leading magic bytes are not the estimator's.
@@ -307,7 +306,6 @@ impl Default for FeeEstimator {
 }
 
 /// Owner-local persistence of the estimator's recoverable state.
-/// CONTRACT: docs/policies/db-migration.md — the format carries an
 mod history_codec {
     use super::{
         Bucket, FeeEstimator, HistoryReject, MAX_CONF_TARGET, MAX_PENDING_ENTRIES, PendingEntry,
