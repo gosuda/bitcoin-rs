@@ -461,7 +461,7 @@ pub(crate) fn decoded_script_json(script: &[u8], network: Network) -> Value {
             | ScriptShape::WitnessV0ScriptHash
     );
     if !eligible || !bitcoin_rs_script::has_valid_ops(script) || unspendable(script)
-        || instructions(script).any(|instruction| matches!(instruction, Ok(Instruction::Op(op)) if op == 0xba || bitcoin_rs_script::is_op_success(op)))
+        || instructions(script).any(|instruction| matches!(instruction, Ok(Instruction::Op(op)) if bitcoin_rs_script::is_op_success(op)))
     { return result; }
     let p2sh = bitcoin::ScriptBuf::new_p2sh(&bitcoin::ScriptHash::hash(script));
     if let Some(address) = convert::script_address(p2sh.as_bytes(), network) {

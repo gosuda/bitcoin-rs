@@ -167,7 +167,7 @@ pub const fn instructions(script: &[u8]) -> Instructions<'_> {
 #[must_use]
 pub fn has_valid_ops(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {
-        Ok(Instruction::Op(op)) => op <= opcode::OP_CHECKSIGADD,
+        Ok(Instruction::Op(op)) => op <= opcode::OP_NOP10,
         Ok(Instruction::PushBytes(data)) => data.len() <= crate::eval::MAX_SCRIPT_ELEMENT_SIZE,
         Err(_) => false,
     })
@@ -655,9 +655,9 @@ const fn varint_size(value: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        EarlyEndOfScript, Instruction, instructions, is_multisig, is_op_return, is_p2a, is_p2pk,
-        is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh, is_push_only, is_witness_program,
-        minimal_non_dust, multisig_key_count, opcode, push_data, push_int,
+        EarlyEndOfScript, Instruction, has_valid_ops, instructions, is_multisig, is_op_return,
+        is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh, is_push_only,
+        is_witness_program, minimal_non_dust, multisig_key_count, opcode, push_data, push_int,
     };
 
     const fn pushnum(n: u8) -> u8 {
@@ -848,5 +848,32 @@ mod tests {
         assert_eq!(push_int(-500), vec![0x02, 0xf4, 0x81]);
         assert_eq!(push_data(&[1, 2]), vec![0x02, 1, 2]);
         assert_eq!(push_data(&[0; 76])[..2], [opcode::OP_PUSHDATA1, 76]);
+    }
+
+    #[test]
+    fn has_valid_ops_enforces_core_legacy_boundary() {
+        // Valid legacy opcodes up to OP_NOP10 (0xb9) are accepted.
+        assert!(has_valid_ops(&[opcode::OP_NOP10]));
+        assert!(has_valid_ops(&[opcode::OP_DUP, opcode::OP_NOP10]));
+
+        // OP_CHECKSIGADD (0xba) is rejected under legacy HasValidOps.
+        assert!(!has_valid_ops(&[opcode::OP_CHECKSIGADD]));
+        assert!(!has_valid_ops(&[0xba]));
+
+        // Opcodes above the boundary (0xbb, 0xff) are rejected.
+        assert!(!has_valid_ops(&[0xbb]));
+        assert!(!has_valid_ops(&[0xff]));
+
+        // Malformed pushes are rejected.
+        assert!(!has_valid_ops(&[opcode::OP_PUSHDATA1]));
+        assert!(!has_valid_ops(&[0x02, 0x01]));
+
+        // 520-byte pushes are accepted (MAX_SCRIPT_ELEMENT_SIZE).
+        let max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE];
+        assert!(has_valid_ops(&push_data(&max_element)));
+
+        // Pushes exceeding 520 bytes are rejected.
+        let over_max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE + 1];
+        assert!(!has_valid_ops(&push_data(&over_max_element)));
     }
 }
