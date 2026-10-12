@@ -6,6 +6,7 @@
 #![cfg(feature = "redb")]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteCondition};
+use redb::ReadableDatabase;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -26,10 +27,10 @@ fn header_80(counter: u32) -> [u8; 80] {
     h
 }
 
-fn script_live_44(counter: u32) -> [u8; 44] {
-    let mut k = [0u8; 44];
+fn script_live_43(counter: u32) -> [u8; 43] {
+    let mut k = [0u8; 43];
     k[0..4].copy_from_slice(&counter.to_le_bytes());
-    k[40..].copy_from_slice(&counter.to_le_bytes());
+    k[40..].copy_from_slice(&counter.to_le_bytes()[..3]);
     k
 }
 
@@ -45,6 +46,45 @@ fn assert_invalid<T>(result: Result<T, StorageError>) {
         Err(error) => panic!("expected InvalidOperation, got {error}"),
         Ok(_) => panic!("expected InvalidOperation, got success"),
     }
+}
+
+#[test]
+fn txindex_reopens_empty_old_live_table_but_preserves_populated_table() -> TestResult<()> {
+    let old: redb::TableDefinition<&[u8; 44], ()> =
+        redb::TableDefinition::new("txindex_v1_script_live");
+    for populated in [false, true] {
+        let temp = tempfile::TempDir::new()?;
+        let path = temp.path().join("redb.db");
+        {
+            let db = redb::Database::create(&path)?;
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(old)?;
+                if populated {
+                    table.insert(&[7_u8; 44], ())?;
+                }
+            }
+            txn.commit()?;
+        }
+        let result = bitcoin_rs_storage::open_redb_tx_index_store(temp.path());
+        if populated {
+            assert_invalid(result);
+            let db = redb::Database::open(&path)?;
+            let txn = db.begin_read()?;
+            assert!(txn.open_table(old)?.get(&[7_u8; 44])?.is_some());
+        } else {
+            let store = result?;
+            store.put(ColumnFamily::ScriptLive, &script_live_43(1), b"")?;
+            store.flush()?;
+            drop(store);
+            let reopened = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+            assert_eq!(
+                reopened.get(ColumnFamily::ScriptLive, &script_live_43(1))?,
+                Some(Vec::new())
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -80,7 +120,7 @@ fn txindex_all_six_family_roundtrips() -> TestResult<()> {
         Some(Vec::new())
     );
 
-    let live = script_live_44(5);
+    let live = script_live_43(5);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -122,7 +162,7 @@ fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    let live = script_live_44(1);
+    let live = script_live_43(1);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -130,10 +170,11 @@ fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
     );
 
     // Non-empty values are rejected for the fixed-width ScriptLive table.
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_44(2), b"value"));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
 
     // Wrong key length is rejected before touching the database.
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
 
     Ok(())
 }
@@ -143,7 +184,7 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
 
-    let live = script_live_44(1);
+    let live = script_live_43(1);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -152,14 +193,15 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
 
     // The generic store must reject the same invalid ScriptLive rows as the
     // dedicated txindex store: non-empty values and wrong-width keys.
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_44(2), b"value"));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
 
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::ScriptLive, &script_live_44(3), b"value");
+    batch.put(ColumnFamily::ScriptLive, &script_live_43(3), b"value");
     assert_invalid(store.write(batch));
     assert_eq!(
-        store.get(ColumnFamily::ScriptLive, &script_live_44(3))?,
+        store.get(ColumnFamily::ScriptLive, &script_live_43(3))?,
         None
     );
 
@@ -493,13 +535,13 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
     batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
-    batch.put(ColumnFamily::ScriptLive, &script_live_44(2), b"non-empty");
+    batch.put(ColumnFamily::ScriptLive, &script_live_43(2), b"non-empty");
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
     assert!(store.get(ColumnFamily::Spending, &key_12(2))?.is_none());
     assert!(
         store
-            .get(ColumnFamily::ScriptLive, &script_live_44(2))?
+            .get(ColumnFamily::ScriptLive, &script_live_43(2))?
             .is_none()
     );
 
@@ -756,7 +798,7 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     )?);
     assert_eq!(store.get(ColumnFamily::BlockHeaders, &header)?, None);
 
-    let live = script_live_44(5);
+    let live = script_live_43(5);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     let mut batch = store.new_batch();
     batch.delete(ColumnFamily::ScriptLive, &live);
@@ -836,7 +878,7 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     assert_invalid(store.write_durable_if(
         &[WriteCondition::Equals {
             cf: ColumnFamily::ScriptLive,
-            key: &[0u8; 43],
+            key: &[0u8; 44],
             expected: b"",
         }],
         store.new_batch(),

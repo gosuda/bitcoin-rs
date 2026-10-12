@@ -22,12 +22,12 @@ included — is self-authenticating against the recorded provenance.
 
 | file | class | txid | height | flags | interpreter parity | source |
 |---|---|---|---|---|---|---|
-| `legacy_p2pk.json` | P2PK | `f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16` | 170 | `P2SH` | no | local mainnet datadir via `bitcoind -rest`, `/rest/block/00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee.json` |
-| `legacy_p2pkh.json` | P2PKH | `74c1a6dd6e88f73035143f8fc7420b5c395d28300a70bb35b943f7f2eddc656d` | 2812 | `P2SH` | no | local mainnet datadir via `bitcoind -rest`, `/rest/block/0000000049a63b4dda3a43450c19d085d6c28bfb4cbb2e0576815d7f31919c5d.json` |
-| `p2sh_spend.json` | P2SH (2-of-2 `OP_CHECKMULTISIG` redeem) | `3a12b4f2361806a2f8508ebcf1968cd07052351c24bfe069f143ef244c24a7e8` | 400000 | `P2SH,DERSIG,CHECKLOCKTIMEVERIFY` | no | <https://mempool.space/api/tx/3a12b4f2361806a2f8508ebcf1968cd07052351c24bfe069f143ef244c24a7e8> |
-| `segwit_v0_spend.json` | segwit v0 (P2WPKH) | `f91d0a8a78462bc59398f2c5d7a84fcff491c26ba54c4833478b202796c8aafd` | 481824 | `P2SH,DERSIG,NULLDUMMY,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS` | no | <https://mempool.space/api/tx/f91d0a8a78462bc59398f2c5d7a84fcff491c26ba54c4833478b202796c8aafd> |
+| `legacy_p2pk.json` | P2PK | `f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16` | 170 | `P2SH` | **yes** | local mainnet datadir via `bitcoind -rest`, `/rest/block/00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee.json` |
+| `legacy_p2pkh.json` | P2PKH | `74c1a6dd6e88f73035143f8fc7420b5c395d28300a70bb35b943f7f2eddc656d` | 2812 | `P2SH` | **yes** | local mainnet datadir via `bitcoind -rest`, `/rest/block/0000000049a63b4dda3a43450c19d085d6c28bfb4cbb2e0576815d7f31919c5d.json` |
+| `p2sh_spend.json` | P2SH (2-of-2 `OP_CHECKMULTISIG` redeem) | `3a12b4f2361806a2f8508ebcf1968cd07052351c24bfe069f143ef244c24a7e8` | 400000 | `P2SH,DERSIG,CHECKLOCKTIMEVERIFY` | **yes** | <https://mempool.space/api/tx/3a12b4f2361806a2f8508ebcf1968cd07052351c24bfe069f143ef244c24a7e8> |
+| `segwit_v0_spend.json` | segwit v0 (P2WPKH) | `f91d0a8a78462bc59398f2c5d7a84fcff491c26ba54c4833478b202796c8aafd` | 481824 | `P2SH,DERSIG,NULLDUMMY,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS` | **yes** | <https://mempool.space/api/tx/f91d0a8a78462bc59398f2c5d7a84fcff491c26ba54c4833478b202796c8aafd> |
 | `taproot_keypath_spend.json` | taproot key path | `33e794d097969002ee05d336686fc03c9e15a597c1b9827669460fac98799036` | 709635 | `P2SH,DERSIG,NULLDUMMY,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,TAPROOT` | **yes** | <https://mempool.space/api/tx/33e794d097969002ee05d336686fc03c9e15a597c1b9827669460fac98799036> |
-| `taproot_scriptpath_spend.json` | taproot script path | `905ecdf95a84804b192f4dc221cfed4d77959b81ed66013a7e41a6e61e7ed530` | 709635 | `P2SH,DERSIG,NULLDUMMY,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,TAPROOT` | no | <https://mempool.space/api/tx/905ecdf95a84804b192f4dc221cfed4d77959b81ed66013a7e41a6e61e7ed530> |
+| `taproot_scriptpath_spend.json` | taproot script path | `905ecdf95a84804b192f4dc221cfed4d77959b81ed66013a7e41a6e61e7ed530` | 709635 | `P2SH,DERSIG,NULLDUMMY,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,TAPROOT` | **yes** | <https://mempool.space/api/tx/905ecdf95a84804b192f4dc221cfed4d77959b81ed66013a7e41a6e61e7ed530> |
 
 ## Selection notes
 
@@ -47,12 +47,14 @@ included — is self-authenticating against the recorded provenance.
 - **`segwit_v0_spend`** is from block 481,824, the segwit activation block.
 - **`taproot_keypath_spend`** is the widely documented **first taproot spend
   on mainnet** (block 709,635, single input, one 64-byte Schnorr signature,
-  no annex). It is the fixture that currently carries
-  `interpreter_parity: true` for the kernel-vs-interpreter differential.
+  no annex).
 - **`taproot_scriptpath_spend`** is a single-input script-path spend from the
   same block. It is the fixture-grounded half of the
   `differential_is_non_vacuous` pin: each engine must accept the pristine
   spend and reject a tampered control block.
+
+All six fixtures carry `interpreter_parity: true` for the kernel-vs-interpreter
+differential.
 
 Esplora data was fetched from `mempool.space` (the recorded source URLs);
 `blockstream.info` serves the identical transactions under the same API paths

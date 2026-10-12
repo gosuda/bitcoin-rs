@@ -167,7 +167,7 @@ mod kernel_backend {
         precomputed: bitcoinkernel::PrecomputedTransactionData,
     }
 
-    fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
+    pub(super) fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
         kernel_tx: T,
         spent_outputs: &[(OutPoint, TxOut)],
     ) -> Result<PreparedKernelTx<T>, ConsensusError> {
@@ -194,7 +194,7 @@ mod kernel_backend {
             bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey).map_err(map_kernel_error)?;
         let amount = i64::try_from(prevout.value.to_sat())
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-        bitcoinkernel::verify(
+        match bitcoinkernel::verify(
             &script,
             Some(amount),
             &prepared.kernel_tx,
@@ -203,13 +203,21 @@ mod kernel_backend {
             // still activates WITNESS and P2SH in the native driver and counter.
             Some(flags.filled().kernel_bits()),
             &prepared.precomputed,
-        )
-        .map_err(|error| ConsensusError::Script {
-            input_index,
-            reason: format!("{}{error}", super::KERNEL_SCRIPT_REJECT_PREFIX),
-            engine: ScriptEngine::Kernel,
-        })?;
-        Ok(())
+        ) {
+            Ok(()) => Ok(()),
+            Err(bitcoinkernel::KernelError::ScriptVerify(
+                bitcoinkernel::ScriptVerifyError::Invalid,
+            )) => Err(ConsensusError::Script {
+                input_index,
+                reason: format!(
+                    "{}{}",
+                    super::KERNEL_SCRIPT_REJECT_PREFIX,
+                    bitcoinkernel::ScriptVerifyError::Invalid
+                ),
+                engine: ScriptEngine::Kernel,
+            }),
+            Err(error) => Err(ConsensusError::Kernel(error.to_string())),
+        }
     }
 
     fn kernel_txout(prevout: &TxOut) -> Result<bitcoinkernel::TxOut, ConsensusError> {
@@ -332,12 +340,15 @@ pub(crate) fn verify_prepared_input(
         PreparedTx::Kernel {
             state,
             spent_outputs,
-        } => kernel_backend::verify_prepared_input(
-            state,
-            &spent_outputs[input_index],
-            input_index,
-            flags,
-        ),
+        } => {
+            let Some(prevout) = spent_outputs.get(input_index) else {
+                return Err(ConsensusError::Kernel(format!(
+                    "input index {input_index} out of range for {} spent outputs",
+                    spent_outputs.len()
+                )));
+            };
+            kernel_backend::verify_prepared_input(state, prevout, input_index, flags)
+        }
     }
 }
 
@@ -418,5 +429,33 @@ mod tests {
                 Err(ConsensusError::PrevoutMismatch { input_index: 0 })
             ));
         }
+    }
+
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn kernel_verify_api_error_propagates_as_kernel_error() {
+        let block = Network::Regtest.genesis_block();
+        let tx = &block.txs[0];
+        let tx_bytes = consensus_bytes(tx);
+        let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
+            .unwrap_or_else(|error| panic!("genesis tx kernel parse: {error}"));
+        let prevout = tx.outputs[0].clone();
+        let prepared = kernel_backend::prepare_kernel_tx(
+            kernel_tx,
+            &[(tx.inputs[0].previous_output, prevout.clone())],
+        )
+        .unwrap_or_else(|error| panic!("prepare genesis tx: {error}"));
+        // Passing an out-of-bounds input index causes bitcoinkernel::verify to return
+        // KernelError::ScriptVerify(ScriptVerifyError::TxInputIndex), a kernel API/setup error.
+        let err =
+            kernel_backend::verify_prepared_input(&prepared, &prevout, 999, VerifyFlags::NONE);
+        assert!(
+            matches!(err, Err(ConsensusError::Kernel(ref msg)) if msg.contains("input index")),
+            "real kernel verification API error must map to ConsensusError::Kernel, got: {err:?}"
+        );
+        assert!(
+            !matches!(err, Err(ConsensusError::Script { .. })),
+            "real kernel verification API error must never masquerade as ConsensusError::Script"
+        );
     }
 }

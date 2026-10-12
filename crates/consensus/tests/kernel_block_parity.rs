@@ -26,10 +26,18 @@ enum Verdict {
 }
 
 impl Verdict {
-    fn of<T, E>(result: &Result<T, E>) -> Self {
+    fn of_interpreter<T, E>(result: &Result<T, E>) -> Self {
         match result {
             Ok(_) => Self::Accept,
             Err(_) => Self::Reject,
+        }
+    }
+
+    fn of_kernel(result: &Result<(), ConsensusError>) -> Result<Self, &ConsensusError> {
+        match result {
+            Ok(()) => Ok(Self::Accept),
+            Err(ConsensusError::Script { .. }) => Ok(Self::Reject),
+            Err(other) => Err(other),
         }
     }
 }
@@ -52,7 +60,7 @@ fn kernel_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), 
 fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), String> {
     for (input_index, (input, prevout)) in tx.inputs.iter().zip(prevouts).enumerate() {
         let witness = input.witness.clone();
-        Interpreter
+        let passed = Interpreter
             .execute_with_prevouts(
                 &prevout.script_pubkey,
                 &input.script_sig,
@@ -63,6 +71,9 @@ fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result
                 input_index,
             )
             .map_err(|error| format!("input {input_index}: {error}"))?;
+        if !passed {
+            return Err(format!("input {input_index}: script evaluated to false"));
+        }
     }
     Ok(())
 }
@@ -414,8 +425,10 @@ fn script_verdict_parity() -> TestResult {
             }
 
             let kernel = kernel_result(&tx, &fixture.prevouts, fixture.flags);
+            let kernel_verdict = Verdict::of_kernel(&kernel)
+                .unwrap_or_else(|err| panic!("kernel oracle infrastructure error: {err}"));
             assert_eq!(
-                Verdict::of(&kernel),
+                kernel_verdict,
                 mutation.expected(),
                 "kernel verdict: fixture={} class={} height={} mutation={mutation:?} \
                  result={kernel:?}",
@@ -438,8 +451,8 @@ fn script_verdict_parity() -> TestResult {
             if fixture.interpreter_parity {
                 let interpreter = interpreter_result(&tx, &fixture.prevouts, fixture.flags);
                 assert_eq!(
-                    Verdict::of(&interpreter),
-                    Verdict::of(&kernel),
+                    Verdict::of_interpreter(&interpreter),
+                    kernel_verdict,
                     "engine divergence: fixture={} class={} mutation={mutation:?} \
                      kernel={kernel:?} interpreter={interpreter:?}",
                     fixture.name,
@@ -460,10 +473,11 @@ fn script_verdict_parity() -> TestResult {
         }
     }
 
-    assert!(
-        interpreter_scoped >= 1,
-        "no fixture is interpreter-scoped: the kernel-vs-interpreter \
-         differential dimension has silently vanished from the corpus"
+    assert_eq!(
+        interpreter_scoped,
+        fixtures.len(),
+        "all fixtures must be interpreter-scoped: every committed spend class must \
+         exercise native-kernel differential parity"
     );
     Ok(())
 }
@@ -478,13 +492,15 @@ fn differential_is_non_vacuous() -> TestResult {
 
     let kernel = kernel_result(&script_path.tx, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&script_path.tx, &script_path.prevouts, script_path.flags);
+    let pristine_kernel_verdict = Verdict::of_kernel(&kernel)
+        .map_err(|err| format!("pristine taproot script-path kernel execution error: {err}"))?;
     assert_eq!(
-        Verdict::of(&kernel),
+        pristine_kernel_verdict,
         Verdict::Accept,
         "kernel must accept the pristine taproot script-path fixture: {kernel:?}"
     );
     assert_eq!(
-        Verdict::of(&interpreter),
+        Verdict::of_interpreter(&interpreter),
         Verdict::Accept,
         "interpreter must accept the pristine taproot script-path fixture: {interpreter:?}"
     );
@@ -494,14 +510,16 @@ fn differential_is_non_vacuous() -> TestResult {
         .ok_or("TamperWitness must apply to a taproot script-path spend")?;
     let kernel = kernel_result(&tampered, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&tampered, &script_path.prevouts, script_path.flags);
+    let tampered_kernel_verdict = Verdict::of_kernel(&kernel)
+        .map_err(|err| format!("tampered taproot script-path kernel execution error: {err}"))?;
     assert_eq!(
-        Verdict::of(&kernel),
+        tampered_kernel_verdict,
         Verdict::Reject,
         "kernel must reject a tampered control block; a constant Accept means \
          the kernel arm is not reading the transaction: {kernel:?}"
     );
     assert_eq!(
-        Verdict::of(&interpreter),
+        Verdict::of_interpreter(&interpreter),
         Verdict::Reject,
         "interpreter must reject a tampered control block; a constant Accept \
          means the Rust arm is not reading the transaction: {interpreter:?}"
