@@ -35,31 +35,22 @@ const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYT
 /// Errors returned when decoding an undo record.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum UndoCodecError {
-    /// The record ended before a field was fully read.
     #[error("undo record truncated: wanted {wanted} more bytes, {available} available")]
     Truncated { wanted: usize, available: usize },
-    /// The record was written by an incompatible format version.
     #[error("unsupported undo record version {found}, expected {expected}")]
     UnsupportedVersion { found: u8, expected: u8 },
-    /// The record belongs to a different block than the one being disconnected.
     #[error("undo record is for block {found}, not {expected}")]
     BlockHashMismatch { found: Hash256, expected: Hash256 },
-    /// An output payload was not valid consensus encoding.
     #[error("undo record contains a malformed transaction output")]
     MalformedTxOut,
-    /// Bytes remained after the final field.
     #[error("undo record has {trailing} trailing bytes")]
     TrailingBytes { trailing: usize },
-    /// A count field claims more entries than the remaining bytes can hold.
     #[error("undo record claims {count} entries but only {available} bytes remain")]
     CountTooLarge { count: u32, available: usize },
-    /// A query record claims more changes than its authenticated block can produce.
     #[error("undo record claims {count} entries, exceeding the block-derived limit {limit}")]
     BlockCountLimit { count: u32, limit: usize },
-    /// The coinbase flag was neither 0 nor 1.
     #[error("undo record coinbase flag {found} is not 0 or 1")]
     InvalidCoinbase { found: u8 },
-    /// The same outpoint appears twice, which a well-formed record never does.
     #[error("undo record repeats outpoint {txid}:{vout}")]
     DuplicateOutpoint { txid: Hash256, vout: u32 },
 }

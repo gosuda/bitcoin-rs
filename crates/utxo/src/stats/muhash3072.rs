@@ -829,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_sequence_matches_reference() {
+    fn operation_sequence_matches_reference_oracle() {
         let mut candidate = MuHash3072::new();
         let mut reference = ReferenceMuHash3072::new();
 
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_matches_reference() {
+    fn from_parts_matches_reference_oracle() {
         let mut reference = ReferenceMuHash3072::new();
         reference.insert(b"persisted numerator");
         reference.remove(b"persisted denominator");
@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_multiplication_matches_reference() {
+    fn boundary_multiplication_matches_reference_oracle() {
         let values = boundary_values();
 
         for left in &values {
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_boundary_bytes_match_reference() {
+    fn from_parts_boundary_bytes_match_reference_oracle() {
         let values = boundary_values();
 
         for numerator_value in &values {
@@ -908,7 +908,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn generated_multiplication_matches_reference(
+        fn generated_multiplication_matches_reference_oracle(
             left_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
             right_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
         ) {
@@ -926,7 +926,7 @@ mod tests {
         }
 
         #[test]
-        fn generated_operation_sequences_match_reference(
+        fn generated_operation_sequences_match_reference_oracle(
             ops in proptest::collection::vec(
                 (
                     0_u8..3,

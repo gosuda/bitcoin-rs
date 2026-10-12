@@ -321,7 +321,6 @@ impl KvSnapshot for CallTrackingSnapshot<'_> {
     }
 }
 
-/// Returns the recorded value of one put, if the batch records it.
 fn put_value_of(ops: &[BatchOp], cf: ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
     ops.iter().find_map(|op| match op {
         BatchOp::Put {
@@ -333,7 +332,6 @@ fn put_value_of(ops: &[BatchOp], cf: ColumnFamily, key: &[u8]) -> Option<Vec<u8>
     })
 }
 
-/// Whether the batch deletes any derived row outside the metadata family.
 fn deletes_derived_rows(ops: &[BatchOp]) -> bool {
     ops.iter().any(|op| {
         matches!(

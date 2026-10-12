@@ -1772,7 +1772,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "keep the BIP141 reference calculations and boundary vectors together"
+        reason = "keep the independent BIP141 oracle and offered-output boundary vectors together"
     )]
     fn package_prevouts_preserve_sigops_without_mutating_the_pool()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1824,21 +1824,21 @@ mod tests {
                     script_pubkey: Script::from_bytes(vec![0xac]),
                 }],
             };
-            let reference: bitcoin::Transaction =
+            let oracle: bitcoin::Transaction =
                 bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
-            let expected_outpoint = reference.input[0].previous_output;
-            let ref_output = bitcoin::TxOut {
+            let expected_outpoint = oracle.input[0].previous_output;
+            let oracle_output = bitcoin::TxOut {
                 value: bitcoin::Amount::from_sat(parent.outputs[1].value.to_sat()),
                 script_pubkey: bitcoin::ScriptBuf::from_bytes(
                     parent.outputs[1].script_pubkey.as_bytes().to_vec(),
                 ),
             };
             assert_eq!(
-                u32::try_from(reference.total_sigop_cost(|outpoint| {
-                    (*outpoint == expected_outpoint).then(|| ref_output.clone())
+                u32::try_from(oracle.total_sigop_cost(|outpoint| {
+                    (*outpoint == expected_outpoint).then(|| oracle_output.clone())
                 }))?,
                 4 + input_cost,
-                "reference sigop cost mismatch",
+                "independent rust-bitcoin oracle",
             );
             let outpoint = child.inputs[0].previous_output;
             let context = crate::accounting::prepared_context(

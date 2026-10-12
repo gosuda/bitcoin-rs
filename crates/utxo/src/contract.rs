@@ -86,13 +86,11 @@ impl<T> BlockChanges<T> {
         self.removes.push(outpoint);
     }
 
-    /// Returns the number of add operations.
     #[must_use]
     pub const fn add_count(&self) -> usize {
         self.adds.len()
     }
 
-    /// Returns the number of remove operations.
     #[must_use]
     pub const fn remove_count(&self) -> usize {
         self.removes.len()

@@ -93,7 +93,7 @@ mod tests {
         [vec![0x00, length], vec![2; usize::from(length)]].concat()
     }
 
-    fn assert_accounting(tx: &Tx, prevout_script: Vec<u8>, expected: u32) {
+    fn assert_oracle(tx: &Tx, prevout_script: Vec<u8>, expected: u32) {
         let prevouts = vec![(
             tx.inputs[0].previous_output,
             TxOut {
@@ -101,22 +101,23 @@ mod tests {
                 script_pubkey: Script::from_bytes(prevout_script.clone()),
             },
         )];
-        let reference: bitcoin::Transaction = deserialize(&consensus_bytes(tx))
-            .unwrap_or_else(|error| panic!("reference transaction decode failed: {error}"));
-        let ref_outpoint = bitcoin::OutPoint {
+        let oracle: bitcoin::Transaction = deserialize(&consensus_bytes(tx))
+            .unwrap_or_else(|error| panic!("oracle transaction decode failed: {error}"));
+        let oracle_outpoint = bitcoin::OutPoint {
             txid: bitcoin::Txid::from_byte_array(*tx.inputs[0].previous_output.txid.as_bytes()),
             vout: tx.inputs[0].previous_output.vout,
         };
-        let ref_output = bitcoin::TxOut {
+        let oracle_output = bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(10_000),
             script_pubkey: bitcoin::ScriptBuf::from_bytes(prevout_script),
         };
-        let ref_cost = reference
-            .total_sigop_cost(|outpoint| (*outpoint == ref_outpoint).then_some(ref_output.clone()));
+        let oracle_cost = oracle.total_sigop_cost(|outpoint| {
+            (*outpoint == oracle_outpoint).then_some(oracle_output.clone())
+        });
         assert_eq!(
-            u32::try_from(ref_cost),
+            u32::try_from(oracle_cost),
             Ok(expected),
-            "reference sigop cost mismatch"
+            "independent rust-bitcoin oracle"
         );
         assert_eq!(
             transaction_sigop_cost(tx, &prevouts, VerifyFlags::STANDARD),
@@ -124,40 +125,40 @@ mod tests {
         );
         let context = prepared_context(tx, &prevouts, false);
         assert_eq!(context.fee, 1_000);
-        assert_eq!(u32::try_from(reference.vsize()), Ok(context.vsize));
+        assert_eq!(u32::try_from(oracle.vsize()), Ok(context.vsize));
         assert_eq!(context.sigop_cost, expected);
         assert!(!context.missing_inputs);
     }
 
     #[test]
-    fn bip141_accounting_matches_reference_transaction() {
-        assert_accounting(
+    fn bip141_accounting_matches_independent_transaction_oracle() {
+        assert_oracle(
             &transaction(Vec::new(), Vec::new(), vec![opcode::OP_CHECKSIG]),
             vec![opcode::OP_PUSHNUM_1],
             4,
         );
         let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
-        assert_accounting(
+        assert_oracle(
             &transaction(push_data(&multisig), Vec::new(), Vec::new()),
             p2sh(),
             8,
         );
-        assert_accounting(
+        assert_oracle(
             &transaction(Vec::new(), Vec::new(), Vec::new()),
             witness_program(20),
             1,
         );
-        assert_accounting(
+        assert_oracle(
             &transaction(Vec::new(), vec![multisig.clone()], Vec::new()),
             witness_program(32),
             2,
         );
-        assert_accounting(
+        assert_oracle(
             &transaction(push_data(&witness_program(32)), vec![multisig], Vec::new()),
             p2sh(),
             2,
         );
-        assert_accounting(
+        assert_oracle(
             &transaction(Vec::new(), vec![vec![opcode::OP_CHECKSIG]], Vec::new()),
             [vec![opcode::OP_PUSHNUM_1, 0x20], vec![3; 32]].concat(),
             0,
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn arbitrary_redeem_data_does_not_activate_witness_accounting() {
         let tx = transaction(push_data(&witness_program(20)), Vec::new(), Vec::new());
-        assert_accounting(&tx, vec![opcode::OP_PUSHNUM_1], 0);
+        assert_oracle(&tx, vec![opcode::OP_PUSHNUM_1], 0);
     }
 
     #[test]

@@ -26,7 +26,6 @@ pub struct BlockTree {
 }
 
 impl BlockTree {
-    /// Builds an empty block tree.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -38,19 +37,16 @@ impl BlockTree {
         }
     }
 
-    /// Returns the number of nodes currently held by the tree.
     #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Returns true when the tree has no headers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    /// Returns a node by id.
     pub fn node(&self, id: NodeId) -> Result<&BlockTreeNode, ChainError> {
         let Some(index) = id.index() else {
             return Err(ChainError::UnknownNode { id });
@@ -58,10 +54,8 @@ impl BlockTree {
         self.nodes.get(index).ok_or(ChainError::UnknownNode { id })
     }
 
-    /// Returns a mutable node by id.
-    ///
-    /// Invalidates the active-height index when callers mutate an indexed node,
-    /// because they can change its parent or height.
+    /// Test-only mutation invalidates the active-height index before yielding
+    /// a node, because callers can change its parent or height.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn node_mut(&mut self, id: NodeId) -> Result<&mut BlockTreeNode, ChainError> {
         let is_indexed_active_node = {
@@ -244,21 +238,16 @@ impl BlockTree {
         leaves
     }
 
-    /// Returns the currently published best tip snapshot.
     #[must_use]
     pub fn tip(&self) -> Option<Arc<TipSnapshot>> {
         self.tip.load_full()
     }
 
-    /// Returns the `NodeId` of the published tip, or `None` if no tip is
-    /// published yet.
     #[must_use]
     pub fn tip_id(&self) -> Option<NodeId> {
         self.tip().map(|tip| tip.tip_id)
     }
 
-    /// Returns the height of the published tip, or `None` if no tip is
-    /// published yet.
     #[must_use]
     pub fn tip_height(&self) -> Option<u32> {
         self.tip().map(|tip| tip.height)
@@ -271,13 +260,11 @@ impl BlockTree {
         Arc::clone(&self.tip)
     }
 
-    /// Returns the cached BIP9 deployment-state tag for `(node_id, deployment_id)`, if any.
     #[must_use]
     pub(crate) fn cached_bip9_state(&self, node_id: NodeId, deployment_id: u32) -> Option<u8> {
         self.bip9_cache.get(node_id, deployment_id)
     }
 
-    /// Stores the cached BIP9 deployment-state tag for `(node_id, deployment_id)`.
     pub(crate) fn cache_bip9_state(&self, node_id: NodeId, deployment_id: u32, tag: u8) {
         self.bip9_cache.insert(node_id, deployment_id, tag);
     }

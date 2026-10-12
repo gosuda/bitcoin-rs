@@ -2464,7 +2464,7 @@ mod tests {
         request.prevouts[0].1.script_pubkey =
             Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
         request.context.sigop_cost = 0;
-        let reference: bitcoin::Transaction =
+        let oracle: bitcoin::Transaction =
             bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))?;
         let previous = bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(request.prevouts[0].1.value.to_sat()),
@@ -2472,7 +2472,7 @@ mod tests {
                 request.prevouts[0].1.script_pubkey.as_bytes().to_vec(),
             ),
         };
-        let cost = reference.total_sigop_cost(|_| Some(previous.clone()));
+        let cost = oracle.total_sigop_cost(|_| Some(previous.clone()));
         assert!(u32::try_from(cost)? > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST);
         assert_eq!(
             gateway.admit_transaction(request),

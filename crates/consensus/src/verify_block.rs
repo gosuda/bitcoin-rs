@@ -540,7 +540,7 @@ mod tests {
             .collect()
     }
 
-    fn reference_root(leaves: &[Txid]) -> Option<[u8; 32]> {
+    fn oracle_root(leaves: &[Txid]) -> Option<[u8; 32]> {
         use bitcoin::hashes::Hash as _;
         bitcoin::merkle_tree::calculate_root(
             leaves
@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn every_merkle_reducer_agrees_on_root_and_mutation() {
+    fn every_merkle_reducer_agrees_with_the_oracle_and_on_mutation() {
         let sizes = (0..=130usize).chain([255, 256, 257, 264, 1000]);
         for leaf_count in sizes {
             for tail in 0..=2usize {
@@ -761,13 +761,13 @@ mod tests {
                 );
                 assert_eq!(
                     spine.map(|(root, _)| *root.as_bytes()),
-                    reference_root(&leaves),
-                    "{label} against reference root"
+                    oracle_root(&leaves),
+                    "{label} against rust-bitcoin"
                 );
                 let mut bytes: Vec<[u8; 32]> = leaves.iter().map(|leaf| *leaf.as_bytes()).collect();
                 assert_eq!(
                     compute_merkle_root(&mut bytes),
-                    reference_root(&leaves),
+                    oracle_root(&leaves),
                     "{label} byte fold"
                 );
             }
@@ -801,11 +801,11 @@ mod tests {
                 merkle_root_and_mutation_borrowed(&leaves),
                 Some((root, mutated))
             );
-            assert_eq!(Some(*root.as_bytes()), reference_root(&leaves));
+            assert_eq!(Some(*root.as_bytes()), oracle_root(&leaves));
         }
         assert_eq!(
-            reference_root(&one_to_six),
-            reference_root(&(1u8..=6).chain([5, 6]).map(txid).collect::<Vec<_>>())
+            oracle_root(&one_to_six),
+            oracle_root(&(1u8..=6).chain([5, 6]).map(txid).collect::<Vec<_>>())
         );
     }
 

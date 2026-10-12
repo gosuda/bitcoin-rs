@@ -258,7 +258,6 @@ impl BlockParse {
         }
     }
 
-    /// Returns the number of transactions in the parsed block.
     #[must_use]
     pub fn transaction_count(&self) -> usize {
         match self {

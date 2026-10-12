@@ -65,7 +65,6 @@ impl LatchReader {
         self.inner.load(Ordering::Acquire)
     }
 
-    /// Whether the latch has been triggered.
     #[must_use]
     pub fn is_triggered(&self) -> bool {
         self.load()

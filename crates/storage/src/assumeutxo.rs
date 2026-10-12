@@ -57,10 +57,14 @@ pub enum AssumeUtxoDiskStatus {
         base_height: u32,
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
+        /// Pinned Bitcoin Core `hash_serialized_3` commitment at `base_height`.
         #[serde(with = "serde_hash256")]
         expected_hash_serialized: Hash256,
+        /// Cumulative transaction count through `base_height`.
         chain_tx_count: u64,
+        /// Last durably archived historical height; live replay may lag.
         historical_height: u32,
+        /// Hash of the last durably archived historical block.
         #[serde(with = "serde_hash256")]
         historical_hash: Hash256,
         /// Unfinished validation must complete during startup before serving.

@@ -1056,7 +1056,6 @@ impl Mempool {
         Some(&self.entries.slot(id)?.links)
     }
 
-    /// Returns the number of transactions in the mempool.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -1102,7 +1101,6 @@ impl Mempool {
         self.entry(indexed.id)
     }
 
-    /// Returns whether the pool currently holds zero entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

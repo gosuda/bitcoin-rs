@@ -49,11 +49,7 @@ pub struct SyncBudget {
 }
 
 impl SyncBudget {
-    /// Sets the fixed per-owner pending timeout. Test-only: this
-    /// constructor is compiled out of production builds.
-    ///
-    /// PRE: `timeout` is the fixed age every owner expires at.
-    /// POST: `pending_timeout_override` is `Some(timeout)`.
+    /// Sets the fixed timeout used by tests; production budgets cannot carry it.
     /// INVARIANT: production never populates `pending_timeout_override`.
     #[cfg(test)]
     pub(crate) fn with_pending_timeout_override(mut self, timeout: Duration) -> Self {
@@ -76,12 +72,10 @@ impl PeerRequest {
         self.owner
     }
 
-    /// Iterates over the `(height, hash)` pairs in this request.
     pub(crate) fn entries(&self) -> impl Iterator<Item = (u32, Hash256)> + '_ {
         self.entries.iter().map(|entry| (entry.height, entry.hash))
     }
 
-    /// Returns the number of block entries in this request.
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -182,19 +176,8 @@ struct StallEpisode {
     info_logged: bool,
 }
 
-/// One continuous apply-side stuck episode: the apply frontier pinned at
-/// `(height, frontier_hash)` with a staged body held (`apply_side_busy`)
-/// across [`DownloadWindow::advance_apply_side_stuck`] calls.
-///
-/// Keyed by height AND hash: the prune/refetch cycle briefly removes and
-/// re-delivers the stuck staged body (flipping `apply_side_busy` off and
-/// back on within one tick) and the conviction is about the pinned
-/// frontier, so the episode survives that seam — while a same-height branch
-/// replacement swaps in a different expected body and must start its own
-/// clock. The episode also starts only while a body is actually staged: an
-/// idle frontier (nothing staged yet) accumulates nothing, so a frontier
-/// that simply took long to deliver its first body does not have that
-/// delivery evicted on arrival.
+/// Apply-side stall keyed by frontier height and hash. A brief prune/refetch
+/// seam preserves the episode; a new hash or unstaged frontier starts none.
 #[derive(Clone, Copy, Debug)]
 struct ApplySideStuck {
     height: u32,
@@ -368,34 +351,12 @@ pub(crate) struct DownloadWindow {
     /// same-height branch replacement resets it, brief unbusy seams do not,
     /// and an idle frontier starts no clock at all.
     apply_side_stuck: Option<ApplySideStuck>,
-    /// Adaptive stalling threshold: starts at `stall_timeout_initial` (2s),
-    /// doubles on every staller disconnect up to `stall_timeout_max` (64s),
-    /// and decays by x0.85 per window-front arrival back toward the decay
-    /// floor ([`Self::stall_decay_floor`]) — with an adaptive floor. Decay,
-    /// never reset: snapping
-    /// to the floor on front progress would discard the anti-cascade doubling
-    /// across a peer rotation and re-arm the 2s floor against the next
-    /// honest-but-slow front owner. Window-global (not per-peer) exactly like
-    /// Core's, so an immediately-reconnecting staller faces the doubled
-    /// threshold instead of a fresh 2s.
+    /// Window-wide threshold: doubles after a staller conviction and decays
+    /// on front progress. Do not reset it on peer rotation; that would
+    /// repeatedly blame honest slow peers.
     stall_timeout: Duration,
-    /// EWMA (integer milliseconds, smoothing alpha = 1/4) of the interval
-    /// between consecutive window-front arrivals — the network's demonstrated
-    /// front cadence. `None` until the second front arrival produces the
-    /// first sample; the first sample seeds the EWMA directly. Feeds
-    /// [`Self::stall_decay_floor`] (the ADV-DRIP-1 fix): with a uniform
-    /// honest per-peer delivery gap g > `stall_timeout_initial` (ordinary
-    /// high-height IBD under peer upload caps), the static 2s floor lets the
-    /// x0.85 decay re-cross g in ~4-5 front advances and fire again — a limit
-    /// cycle draining one honest peer per ~5g seconds. Keying the floor to
-    /// twice the demonstrated cadence kills the cycle while a true staller
-    /// (silent while others stream) still convicts at ~2g. The estimate
-    /// stays honest because same-chunk batch arrivals (samples under
-    /// [`EWMA_MIN_SAMPLE_MS`]) are skipped so an in-order burst sharing one
-    /// chunk timestamp cannot deflate the floor. A window with no sample at
-    /// all (cold start) convicts at the `stall_timeout_initial` floor —
-    /// [`Self::advance_stall`] never suppresses conviction for lack of a
-    /// cadence estimate.
+    /// EWMA of front-arrival cadence. Same-chunk samples are ignored so a
+    /// batched delivery cannot collapse the adaptive stall floor.
     front_interval_ewma_ms: Option<u64>,
     /// When the window front last advanced (a front block arrived); the
     /// anchor for the next `front_interval_ewma_ms` sample.
@@ -525,7 +486,6 @@ impl DownloadWindow {
             .min(self.budget.max_peer_inflight)
     }
 
-    /// Returns the number of blocks currently pending (requested, not yet received).
     pub(crate) fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -535,18 +495,12 @@ impl DownloadWindow {
         self.budget.max_pending_blocks
     }
 
-    /// Returns the total estimated bytes of pending blocks.
     pub(crate) const fn pending_bytes(&self) -> usize {
         self.pending_bytes
     }
 
-    /// Returns `true` if the window can accept new block requests.
+    /// Whether pending and staged capacity can absorb another estimated block.
     ///
-    /// PRE: `stager` is the staging set coupled to this window (the same
-    ///      one the scheduler holds); expiry has run this tick.
-    /// POST: `true` only while pending counts, pending bytes, and the
-    ///      stager's staged byte and slot headroom can absorb one more
-    ///      estimated block.
     /// INVARIANT: staged-body counts and bytes are read from `stager`,
     ///      never from a window-local copy.
     pub(crate) fn has_request_capacity(&self, stager: &BlockStager) -> bool {
@@ -1382,7 +1336,6 @@ impl DownloadWindow {
         });
     }
 
-    /// Current adaptive stalling threshold (2s doubling to 64s).
     #[cfg(test)]
     pub(crate) const fn stall_timeout(&self) -> Duration {
         self.stall_timeout
@@ -1396,18 +1349,14 @@ impl DownloadWindow {
         self.recent_stallers.insert(peer_addr, now);
     }
 
-    /// Whether `peer_addr` was disconnected for stalling within the cooldown.
-    /// Such a peer is not fan-out eligible and gets no block requests unless
-    /// it is the last-resort peer — without this, a staller reconnecting on
-    /// the same address immediately re-acquires the window front and restarts
-    /// the cycle (the RE-ADV-2 recurrence).
+    /// Whether `peer_addr` is in cooldown; such peers are a last resort so a
+    /// reconnecting staller cannot immediately reacquire the window front.
     pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
         self.recent_stallers
             .get(&peer_addr)
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
     }
 
-    /// Returns `true` if `hash` is currently pending.
     pub(crate) fn contains_pending(&self, hash: &Hash256) -> bool {
         self.pending.contains_key(hash)
     }
@@ -1417,7 +1366,6 @@ impl DownloadWindow {
         self.pending.get(hash).map(|pending| pending.owner)
     }
 
-    /// Returns the start time of the active prefix probe, if any. Test-only.
     #[cfg(test)]
     pub(crate) fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
@@ -2234,7 +2182,6 @@ impl DownloadWindow {
         }
     }
 
-    /// Current inter-front-advance EWMA in milliseconds, if seeded.
     #[cfg(test)]
     pub(crate) const fn front_interval_ewma_ms(&self) -> Option<u64> {
         self.front_interval_ewma_ms
