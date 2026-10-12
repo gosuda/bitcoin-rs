@@ -1,7 +1,7 @@
 //! BIP141 witness-commitment rules at both exported block entries.
 //!
 //! BIP141 and Core v31.0 `CheckWitnessMalleation` / `CheckBlock` references.
-//! The staging gate (#1070) and block-rule entry share a witness/activation table.
+//! The staging gate and block-rule entry share a witness/activation table.
 //! Fixtures isolate block witness rules; they are not mined or UTXO-valid.
 
 use bitcoin_rs_consensus::verify_block::{
