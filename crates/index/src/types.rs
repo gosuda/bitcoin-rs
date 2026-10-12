@@ -248,12 +248,11 @@ pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
 /// One live-output row: a currently unspent outpoint filed under its script.
 ///
-/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian as
-/// rust-bitcoin serializes it) || vout(3, little-endian u24)` -- and the value is
-/// empty. This is #225's full-outpoint baseline locator: the 8-byte prefix is
-/// lossy exactly like `Funding`'s (readers exact-check the resolved coin's
-/// `script_pubkey`), but the outpoint half is complete, so two scripts that
-/// collide on the prefix can never collide on a whole key. That is what makes
+/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian) ||
+/// vout(3, little-endian u24)` -- and the value is empty. This is the full-outpoint
+/// baseline locator: the 8-byte prefix is lossy exactly like `Funding`'s (readers
+/// exact-check the resolved coin's `script_pubkey`), but the outpoint half is
+/// complete, so two scripts that collide on the prefix can never collide on a whole key. That is what makes
 /// a **point delete collision-safe**: removing a spent output deletes one
 /// exact key and cannot touch a colliding script's rows. Prefix-range scans
 /// over this family are read-only by contract; a delete is always a whole-key

@@ -65,23 +65,18 @@ const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 /// The serialized block body lives in durable storage behind
 /// [`bitcoin_rs_chain::BlockBodySource`]; records carry only identity and size facts.
 #[derive(Clone, Debug)]
+#[allow(missing_docs)]
 pub struct BlockRecord {
-    /// Block hash in conventional big-endian hex order.
     pub hash: BlockHash,
-    /// Height in the active chain.
     pub height: u32,
-    /// Serialized block byte length.
     pub body_size: usize,
     /// Serialized block header bytes, when the record carries a header.
     ///
     /// The log never carries one: the `BlockTree` already holds the header of
-    /// every applied block. Every constructor leaves this `None`, and
-    /// `Context::header_record` is the only thing that fills it. Boxed so an
+    /// every applied block. Every constructor leaves this `None`. Boxed so an
     /// absent header costs 8 bytes rather than the full 80 in every record.
     pub header: Option<Box<[u8; SERIALIZED_BLOCK_HEADER_LEN]>>,
-    /// Transaction count in the block.
     pub tx_count: usize,
-    /// Block header timestamp (UNIX seconds).
     pub time: u32,
 }
 

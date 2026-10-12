@@ -71,8 +71,8 @@ impl<S: KvStore> Indexer<S> {
     /// 8-byte scan prefix, decoded from [`ColumnFamily::ScriptLive`]. The
     /// prefix is lossy exactly like `Funding`'s: two scripts may share it, so
     /// callers MUST resolve each outpoint against authoritative UTXO state and
-    /// exact-check the resolved coin's full `script_pubkey` before serving it
-    /// (#225). This scan is read-only by contract -- live deletion is always a
+    /// exact-check the resolved coin's full `script_pubkey` before serving it.
+    /// This scan is read-only by contract -- live deletion is always a
     /// whole-key point delete, never a prefix-range operation.
     pub fn iter_live_outpoints(
         &self,
