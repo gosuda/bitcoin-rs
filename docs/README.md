@@ -33,9 +33,8 @@ owns format changes. Detailed admission and peer matrices live in
 input: it pins the Core identities the gates validate and records
 admission-profile evidence. The compatibility claim for every RPC, REST,
 and ZMQ surface lives in `crates/rpc/src/registry.rs`, the single owner.
-Treat [core-rpc-schema.json](api/core-rpc-schema.json) and the
-[hot-path ledger](benchmarks/hot-path-ledger.toml) as machine-consumed
-inputs too. [RPC reference](rpc-reference.md) is generated from that
+Treat the [hot-path ledger](benchmarks/hot-path-ledger.toml) as a
+machine-consumed input too. [RPC reference](rpc-reference.md) is generated from that
 registry; do not edit it by hand.
 
 External evidence is a separate axis: [ecosystem-compat.toml](api/ecosystem-compat.toml)
