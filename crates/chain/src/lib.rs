@@ -69,7 +69,6 @@ pub struct AncestryBudgetExceeded;
 
 /// Errors returned by header sync, block-tree, and reorg planning operations.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum ChainError {
     /// A slab index could not fit into the compact `NodeId` representation.
     #[error("block-tree node index {index} does not fit in NodeId")]
@@ -181,6 +180,7 @@ pub enum ChainError {
     TimestampTooFarAhead {
         hash: Hash256,
         timestamp: u32,
+        /// Maximum allowed future timestamp in Unix seconds (`now + 7200`).
         max_allowed: u32,
     },
 }

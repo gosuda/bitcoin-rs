@@ -2,7 +2,6 @@
 
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
 pub enum ApplyError {
     /// Clean shutdown has closed block-apply admission.
     #[error("block apply rejected because clean shutdown has begun")]
@@ -160,7 +159,6 @@ pub enum ApplyError {
 
 /// The outcome of a refused or failed block disconnect.
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
 pub enum DisconnectError {
     /// Refused before anything was touched. The chain is exactly as it was.
     #[error("disconnect refused: {0}")]

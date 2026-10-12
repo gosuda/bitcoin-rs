@@ -13,7 +13,6 @@ use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct MiningChainContext {
     pub(crate) previous_block_hash: Hash256,
     pub(crate) height: u32,

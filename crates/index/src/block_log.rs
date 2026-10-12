@@ -65,7 +65,6 @@ const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 /// The serialized block body lives in durable storage behind
 /// [`bitcoin_rs_chain::BlockBodySource`]; records carry only identity and size facts.
 #[derive(Clone, Debug)]
-#[allow(missing_docs)]
 pub struct BlockRecord {
     pub hash: BlockHash,
     pub height: u32,

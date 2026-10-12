@@ -24,7 +24,6 @@ const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
 
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
-#[allow(missing_docs)]
 pub enum UtxoError {
     /// A complete script scan was refused or interrupted.
     #[error(transparent)]
@@ -107,7 +106,6 @@ std::thread_local! {
 
 /// One live UTXO coin as contract consumers observe it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub struct UtxoCoin {
     pub outpoint: OutPoint,
     pub txout: TxOut,
@@ -117,7 +115,6 @@ pub struct UtxoCoin {
 
 /// Result of scanning a stable UTXO-set view.
 #[derive(Debug, Default)]
-#[allow(missing_docs)]
 pub struct UtxoScan {
     pub txouts: usize,
     pub unspents: Vec<UtxoCoin>,

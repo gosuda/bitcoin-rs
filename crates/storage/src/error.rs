@@ -31,7 +31,6 @@ impl StorageError {
 
 /// Failure of an explicitly bounded owned-value read.
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
 pub enum BoundedReadError {
     /// The backend does not provide a pre-copy bound; no unbounded fallback ran.
     #[error("bounded value reads are unavailable for this store")]

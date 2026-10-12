@@ -67,7 +67,6 @@ pub enum RpcError {
     Internal(String),
 }
 
-#[allow(missing_docs)]
 impl RpcError {
     const PARSE_ERROR: i64 = -32_700;
     const INVALID_REQUEST: i64 = -32_600;

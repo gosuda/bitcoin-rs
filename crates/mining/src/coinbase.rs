@@ -13,7 +13,6 @@ pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
 /// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum MiningError {
     /// The mempool owner's fee graph could not be evaluated.
     #[error(transparent)]

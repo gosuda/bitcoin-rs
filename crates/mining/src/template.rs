@@ -19,7 +19,6 @@ use crate::policy::select_packages;
 /// Callers derive these from the C1 mining context plus configured block limits.
 /// The mining crate never takes node locks or re-derives consensus state.
 #[derive(Clone, Debug)]
-#[allow(missing_docs)]
 pub struct CandidateContext {
     pub previous_block_hash: Hash256,
     pub height: u32,

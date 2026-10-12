@@ -61,7 +61,6 @@ mod serde_opt_hash256 {
 
 /// The operational role of a chainstate instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub enum ChainstateRole {
     /// Fully validated single active chainstate.
     Ordinary,
@@ -119,7 +118,6 @@ const DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL: u32 = 1024;
 
 /// Result of one bounded historical replay pass, independent of P2P scheduling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum HistoricalAdvance {
     /// Historical validation is finished (or has no active role).
     Complete,
@@ -134,7 +132,6 @@ pub enum HistoricalAdvance {
 
 /// Errors produced by `AssumeUTXO` management and validation.
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
 pub enum AssumeUtxoError {
     /// The snapshot base must have strictly more accumulated work than the applied tip.
     #[error("snapshot base does not have more accumulated work than the applied tip")]
@@ -274,7 +271,6 @@ pub struct ChainstatesReport {
 
 /// Active chainstate status.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub struct ActiveChainstateSummary {
     pub role: ChainstateRole,
     pub height: Option<u32>,
@@ -285,7 +281,6 @@ pub struct ActiveChainstateSummary {
 
 /// Historical background chainstate status.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub struct HistoricalChainstateSummary {
     pub base_height: u32,
     #[serde(with = "serde_hash256")]

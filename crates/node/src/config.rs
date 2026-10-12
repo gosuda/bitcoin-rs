@@ -131,7 +131,6 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 
 /// Resolved storage configuration.
-#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
     pub backend: StorageBackend,
@@ -159,7 +158,6 @@ pub struct P2pConfig {
 }
 
 /// Resolved RPC configuration.
-#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub bind: SocketAddr,
@@ -168,7 +166,6 @@ pub struct RpcConfig {
 }
 
 /// Resolved index configuration.
-#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
     pub txindex: bool,
@@ -176,7 +173,6 @@ pub struct IndexConfig {
 }
 
 /// Resolved observability configuration.
-#[allow(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct ObservabilityConfig {
     pub log_level: String,

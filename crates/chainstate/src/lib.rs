@@ -86,7 +86,6 @@ impl ValidationMode {
 
 /// Chainstate journal durability and retention policy.
 #[derive(Clone, Copy, Debug)]
-#[allow(missing_docs)]
 pub struct ChainstateJournalConfig {
     pub enabled: bool,
     pub blocks: u32,
@@ -113,13 +112,14 @@ impl Default for ChainstateJournalConfig {
 }
 
 /// Inputs required to open a chainstate journal writer.
-#[allow(missing_docs)]
 pub struct JournalBootstrap {
     pub open_existing: bool,
+    /// Full-checkpoint generation the journal extends.
     pub base_generation: u64,
     pub height: u32,
     pub block_hash: [u8; 32],
     pub prev_hash: [u8; 32],
+    /// Cumulative transaction count through the durable base.
     pub chain_tx_count: u64,
     pub config: ChainstateJournalConfig,
 }

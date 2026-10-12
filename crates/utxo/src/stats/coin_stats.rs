@@ -34,7 +34,6 @@ pub const COIN_STATS_ENCODED_LEN: usize = 804;
 
 /// Why a `CoinStats::rewind_block` was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[allow(missing_docs)]
 pub enum CoinStatsRewindError {
     /// The stats are not at the block being disconnected.
     #[error("coinstats are at height {found}, not the disconnected height {expected}")]
@@ -52,7 +51,6 @@ pub enum CoinStatsRewindError {
 
 /// Incremental UTXO set statistics.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub struct CoinStats {
     /// `MuHash3072` accumulator over live coins.
     pub muhash: MuHash3072,

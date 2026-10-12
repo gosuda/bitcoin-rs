@@ -34,7 +34,6 @@ const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYT
 
 /// Errors returned when decoding an undo record.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum UndoCodecError {
     /// The record ended before a field was fully read.
     #[error("undo record truncated: wanted {wanted} more bytes, {available} available")]

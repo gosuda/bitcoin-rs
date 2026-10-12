@@ -6,7 +6,6 @@ use thiserror::Error;
 
 /// Errors returned while indexing confirmed blocks.
 #[derive(Debug, Error)]
-#[allow(missing_docs)]
 pub enum IndexError {
     /// Backend storage failed while applying index rows.
     #[error("storage error: {0}")]
@@ -97,6 +96,7 @@ pub enum IndexError {
     /// would silently keep a spent output alive.
     #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
     MissingSpentCoin {
+        /// Spent transaction id (little-endian bytes).
         txid: [u8; 32],
         vout: u32,
         height: u32,

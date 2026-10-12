@@ -75,7 +75,6 @@ pub enum ScriptEngine {
 
 /// Consensus validation error.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum ConsensusError {
     /// A transaction has no inputs.
     #[error("transaction has no inputs")]

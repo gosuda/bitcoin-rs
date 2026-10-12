@@ -24,7 +24,6 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 
 /// Size and SHA-256 digest produced while writing one checkpoint artifact.
-#[allow(missing_docs)]
 pub struct ArtifactDigest {
     pub bytes: u64,
     pub sha256: [u8; 32],

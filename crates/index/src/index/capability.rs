@@ -226,7 +226,6 @@ impl FromIterator<IndexCapability> for IndexCapabilities {
 
 /// Durable cursors for the independently ready index capabilities.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct IndexWatermarks {
     pub tx_lookup: Option<IndexWatermark>,
     pub script_history: Option<IndexWatermark>,

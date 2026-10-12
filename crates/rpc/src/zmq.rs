@@ -24,7 +24,6 @@ use std::collections::HashSet as StdHashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// ZMQ PUB notification topic.
-#[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ZmqTopic {
@@ -41,7 +40,6 @@ const DEFAULT_ZMQ_HWM: u32 = 1_000;
 /// Configuration for one ZMQ PUB socket.
 ///
 /// Topics sharing an endpoint necessarily share its socket-level HWM.
-#[allow(missing_docs)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ZmqEndpointConfig {
@@ -167,7 +165,6 @@ impl SequenceEvent {
 /// time, each carrying its type, address, and high-water mark. The projection
 /// layer owns the JSON rendering: `topic` maps to the `pub…` type string and
 /// `endpoint` to the `address` key.
-#[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZmqNotifier {
     pub topic: ZmqTopic,

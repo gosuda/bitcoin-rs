@@ -4,7 +4,7 @@
 //! inbound channels and, when a peer reports a longer chain, sends
 //! `getheaders` toward that peer. Inbound `headers` batches are admitted
 //! through [`crate::sync::chain::SyncChain::admit_headers`]; inbound full blocks are staged in
-//! the [`BlockStager`] and committed through [`crate::sync::chain::SyncChain::commit_window`].
+//! the `BlockStager` and committed through [`crate::sync::chain::SyncChain::commit_window`].
 //! The download executor, window, staging, and peer policy are owned by this
 //! crate; applied-tip mutation behind `crate::sync::chain::SyncChain` remains a node-provided
 //! ARCH-07 seam.

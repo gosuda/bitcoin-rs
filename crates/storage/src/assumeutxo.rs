@@ -4,7 +4,6 @@ use bitcoin_rs_primitives::Hash256;
 
 /// One body durably retained before validation, but not exposed to index readers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub struct PendingHistoricalBlock {
     pub height: u32,
     #[serde(with = "serde_hash256")]
@@ -19,7 +18,6 @@ pub struct PendingHistoricalBlock {
 /// authority for whether this generation may be used and how far historical
 /// validation has durably progressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub struct HistoricalCheckpointRef {
     pub checkpoint: crate::checkpoint::CheckpointReference,
     pub height: u32,
@@ -51,7 +49,6 @@ mod serde_hash256 {
 /// The durable head owns this record; commitments use
 /// Bitcoin Core's serialized-set hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
 pub enum AssumeUtxoDiskStatus {
     /// No `AssumeUTXO` snapshot has been activated.
     Uninitialized,

@@ -34,7 +34,6 @@ impl Default for MempoolLimits {
 
 /// Policy rejection reason for non-consensus mempool limits.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[allow(missing_docs)]
 pub enum PolicyError {
     /// The caller supplied no positive policy size.
     #[error("invalid transaction virtual size")]

@@ -182,7 +182,6 @@ mod tests {
                 script_pubkey: Script::from_bytes(p2sh()),
             },
         )];
-        // CScript::GetSigOpCount(scriptSig) returns zero on opcodes above OP_16.
         assert_eq!(
             transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
             0

@@ -276,7 +276,6 @@ script_errors! {
 
 /// Script execution errors surfaced by the script crate.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum ScriptError {
     /// The requested input index was not present in the transaction.
     #[error("input index {index} out of range for {inputs} inputs")]
@@ -382,7 +381,6 @@ impl Interpreter {
 
 /// Invalid resolved-input wiring, rejected before script evaluation.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum PrevoutError {
     /// The supplied rows do not cover every input exactly once.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]

@@ -4,7 +4,6 @@ use crate::ColumnFamily;
 
 /// One recorded mutation inside a [`BufferedWriteBatch`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum BatchOp {
     /// Inserts or replaces `key` with `value` in `cf`.
     Put {
