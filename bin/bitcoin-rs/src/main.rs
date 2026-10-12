@@ -217,7 +217,7 @@ mod tests {
         assert!(!config.p2p.fast_sync);
     }
 
-    /// #1117: the startup failure for `validation.engine = "kernel"` on a
+    /// Startup failure for `validation.engine = "kernel"` on a
     /// build without bitcoinkernel support. The engine selection is resolved
     /// and checked during configuration — before the data directory, chain
     /// state, or any worker is created — and must name the missing capability.

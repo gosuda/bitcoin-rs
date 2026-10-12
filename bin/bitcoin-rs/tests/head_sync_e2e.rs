@@ -1,7 +1,7 @@
 //! E2E: live head-sync over the real P2P wire against a spawned bitcoin-rs
 //! daemon (regtest, fjall). A minimal loopback wire peer feeds `headers` /
 //! `inv` announcements and serves `getdata` bodies, exercising the live
-//! tip-following fixes in cba8166 (PR #1137):
+//! live tip-following fixes:
 //!
 //!  * inv-echo getdata must upgrade announced `MSG_BLOCK` to
 //!    `MSG_WITNESS_BLOCK` for WITNESS peers;

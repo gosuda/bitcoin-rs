@@ -1072,7 +1072,7 @@ fn stalled_response_respects_the_request_deadline() {
 }
 
 // ---------------------------------------------------------------------------
-// #653 readiness scenarios: the txindex capability's readiness facts must be
+// Readiness scenarios: the txindex capability's readiness facts must be
 // one fact everywhere they render — the `getcapabilities` row, the
 // `getindexinfo` report Core parity checks, the Esplora tip, and the
 // Prometheus readiness gauge all read the same node-owned status snapshot.
@@ -1335,7 +1335,7 @@ fn wait_gauge_active(addr: SocketAddr, expected: &str, deadline: Instant) -> Vec
     }
 }
 
-/// #653 startup: at one captured tip, the capability row, the Core-parity
+/// Startup readiness: at one captured tip, the capability row, the Core-parity
 /// index report, the Esplora tip, and the Prometheus gauge all agree.
 #[test]
 fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
@@ -1405,7 +1405,7 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     assert_reaped(node_pid);
 }
 
-/// #653 disabled index: the disabled capability has its own documented row,
+/// Disabled index: the disabled capability has its own documented row,
 /// not silence, and the absence is identical to Core's.
 #[test]
 fn disabled_index_reports_its_documented_disabled_row() {
@@ -1452,7 +1452,7 @@ fn disabled_index_reports_its_documented_disabled_row() {
     assert_reaped(node_pid);
 }
 
-/// #653 catch-up: blocks applied ahead of the derived worker must surface
+/// Catch-up: blocks applied ahead of the derived worker must surface
 /// only documented intermediate outcomes, and the poll ends Ready.
 #[test]
 fn catch_up_poll_stays_inside_the_documented_outcomes() {
@@ -1481,7 +1481,7 @@ fn catch_up_poll_stays_inside_the_documented_outcomes() {
     assert_reaped(pid);
 }
 
-/// #653 index failure: a destroyed derived store recovers by rebuilding from
+/// Index failure: a destroyed derived store recovers by rebuilding from
 /// retained canonical chainstate, and the historical row comes back.
 #[test]
 fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
@@ -1566,7 +1566,7 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     assert_reaped(pid);
 }
 
-/// #653 restart: a clean stop and restart over the same datadir restores
+/// Restart: a clean stop and restart over the same datadir restores
 /// Ready readiness at the pinned tip with the index intact.
 #[test]
 fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
@@ -1608,7 +1608,7 @@ fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
     assert_reaped(pid);
 }
 
-/// #653 reorg: invalidating a mid-chain block and mining a fork rewinds the
+/// Reorg: invalidating a mid-chain block and mining a fork rewinds the
 /// derived watermark and returns readiness to Ready on the forked tip.
 #[test]
 fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
