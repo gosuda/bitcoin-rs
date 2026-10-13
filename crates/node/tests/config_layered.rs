@@ -273,10 +273,7 @@ fn resolved_zmq_hwm_is_validated() {
 
     for hwm in [Some(1), Some(2_147_483_647), None] {
         config.notifications.zmq[0].hwm = hwm;
-        assert!(
-            config.validate().is_ok(),
-            "valid ZMQ HWM rejected: {hwm:?}"
-        );
+        assert!(config.validate().is_ok(), "valid ZMQ HWM rejected: {hwm:?}");
     }
 }
 
