@@ -148,21 +148,28 @@ expiry.
   active-branch announcement grants body capability. Losing the last credited
   peer must not require restart or an unsolicited announcement from a
   surviving peer.
-- The existing header request and timeout pace discovery. Empty responses
-  preserve that deadline. A nonempty batch consumes its matching request only
-  when it is a usable answer: admitted, or already known in full. A batch this
-  node rejects keeps the gate and moves its deadline to the answer, because
-  that connection did respond.
-- Header-request expiry is a strike against the exact connection that was
-  asked. On expiry the gate clears, that connection is marked unresponsive,
-  and it is disconnected while another usable peer remains, so the next tick
-  elects a different peer. Strikes lower that connection's header rank below
-  peers that advertise as much, and the sweep that releases a dead
-  connection's work drops its strikes with it, so a same-address replacement
-  starts clean. Only silence is blamed: a request that had been answered ages
-  out with no strike, no unresponsive mark, and no disconnect (Core
-  `net_processing.cpp:3294-3301` clears the outstanding request when a
-  connecting header lands).
+- The existing header request and timeout pace discovery. Empty wire
+  responses mark a request answered without changing its original timestamp;
+  an identical retry is paced only until five seconds from that timestamp,
+  and answered requests are not blamed as silence. Frontier requests use the
+  same five-second deadline while unanswered. An unanswered chain-sync
+  eviction probe keeps its request gate for the existing two-minute
+  `HEADERS_RESPONSE_TIME`, aligned with its eviction response window.
+  A nonempty batch consumes its matching request only when it is a usable
+  answer: admitted, or already known in full. A batch this node rejects keeps
+  the gate and moves its deadline to the answer, because that connection did
+  respond.
+- Header-request expiry is a strike against the exact connection only while
+  its request is unanswered. On ordinary frontier expiry the gate clears,
+  that connection is marked unresponsive, and it is disconnected while
+  another usable peer remains, so the next tick elects a different peer.
+  Strikes lower that connection's header rank below peers that advertise as
+  much, and the sweep that releases a dead connection's work drops its
+  strikes with it, so a same-address replacement starts clean. Only silence
+  is blamed (Core `net_processing.cpp:3294-3301` clears the outstanding
+  request when a connecting header lands). The below-floor and live
+  download-twice timeout in P2P-10 retires its source even when it is the last
+  usable peer.
 - A delivered body whose embedded header cannot attach releases the gate that
   connection owns before it asks for the missing ancestry
   (`clear_header_request_for`), so the recovery request reaches the wire with
@@ -189,6 +196,11 @@ expiry.
 Proof: `crates/p2p/src/sync/tests/frontier_recovery.rs` covers applied
 rollback, duplicate request suppression, empty-response pacing/rotation and
 cancelled readiness under contention.
+`crates/p2p/src/sync/tests/chain_sync.rs` tests
+`chain_sync_probe_holds_request_for_its_response_window`,
+`empty_chain_sync_probe_keeps_original_five_second_pacing`, and
+`replacing_expired_frontier_with_chain_sync_probe_releases_owner` cover probe
+exclusivity, answered-response pacing, and frontier selector ownership.
 `crates/p2p/src/sync/tests/witness_staging_gate.rs` covers bad delivery,
 peer replacement, relearned capability and eventual application. Existing
 branch-plan, attribution, timeout and bounded-staging suites remain required.
@@ -225,6 +237,17 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
   rejection drops the staged body (`stager.discard`, never re-queued;
   its download-window record is only released when the delivery drains), disconnects the source, and marks
   it unresponsive — the same outcome a rejected `headers` batch produces.
+  A staged body's recorded source is retained for work-floor validation and
+  header retry after that source disconnects, but exact-source checks prevent
+  the retry from crediting or faulting a same-address replacement
+  (`staged_body_retries_after_source_replacement_without_replacement_credit`).
+  The inbound body drain drops deliveries whose source is already retired
+  when checked at dequeue, before historical or foreground routing
+  (`queued_body_from_replaced_source_cannot_enter_staging`).
+  This check does not hold peer-table authority through body validation or
+  staging: a body accepted while its source is current may finish staging
+  after concurrent retirement. Credit and fault attribution still require
+  the exact source to be current.
 - A `cmpctblock` outcome that fetches the body itself (`RequestMissing`'s
   `getblocktxn`, `Fallback`'s `getdata`) is marked
   (`InboundHeaders::body_fetch_owned`): once the tip admits, the window
@@ -251,9 +274,10 @@ Proof: `crates/p2p/src/sync/tests/head_sync.rs` covers body-carried header
 admission and apply, gap-fill requests for staged bodies ahead of their
 header chain, announcer-directed `getheaders` on unattached batches,
 non-response forwards preserving pending-request state, staged-retry
-credit, shared-ancestor capability, bounded fork evidence, credit for
-already-known tips, the compact-owned pending mark, and the retained
-mark resolving once its tip header attaches.
+credit, `staged_body_retries_after_source_replacement_without_replacement_credit`,
+shared-ancestor capability, bounded fork evidence, credit for already-known
+tips, the compact-owned pending mark, and the retained mark resolving once its
+tip header attaches.
 `crates/p2p/src/sync/tests/limited_peers.rs` pins the block-body service clause
 on both paths: the `statically_fanout_eligible` rows for the
 initial-block-download exclusion, the 287/288-block retained-window boundary,
@@ -289,9 +313,9 @@ covers the delivery-path forward.
 - The queue holds one entry per connection — the first unprocessed
   announcement wins — so a later vector cannot replace an unknown tip before
   the drain sees it, and a peer cannot grow scheduler state by announcing.
-  While one `getheaders` request is outstanding, further unknown
-  announcements stay queued for a later drain: the singleton
-  `header_request` never has its owner overwritten mid-flight.
+  While the frontier-owned `getheaders` request is outstanding, further
+  unknown announcements stay queued for a later drain: the frontier request
+  owner never changes mid-flight.
 - **Near-tip direct fetch**: `BlockSync::direct_fetch_announced_tip` asks the
   connection that just proved a header for its body, inside the same drain
   that admitted it, instead of waiting for the next scheduler tick (Core
@@ -343,10 +367,14 @@ covers the delivery-path forward.
 Proof: `crates/p2p/src/dispatch.rs` test
 `inv_block_uses_headers_not_body_getdata`; `crates/p2p/src/sync/tests/head_sync.rs`
 test `announced_near_tip_is_direct_fetched_before_tick`;
+`crates/p2p/src/sync/tests/headers_presync.rs` test
+`owned_header_requests_suppress_competing_frontier_and_chain_sync_requests`;
 `crates/p2p/src/listener.rs` test
 `unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
 tests `permanent_consensus_body_disconnects_delivering_source` and
-`binding_and_operational_failures_do_not_disconnect`.
+`binding_and_operational_failures_do_not_disconnect`; and
+`crates/p2p/src/sync/tests/transitions_6.rs` test
+`reconcile_forgets_window_state_only_when_connection_identity_changes`.
 
 ### `P2P-08`: Inbound admission and the outbound service gate
 
@@ -460,18 +488,56 @@ prefilter exemption.
   connection, `headerssync.cpp:155-163`); every other failure — bad proof of
   work, an impermitted difficulty transition, a commitment divergence, or
   the commitment and buffer bounds — disconnects the connection.
+- One per-connection lifecycle entry owns both the optional presync cursor
+  and optional wire request. A nonempty wire answer clears only the request;
+  an empty answer ends presync but retains an answered request with its
+  original request timestamp; exact-source teardown removes the entry. A
+  request excludes competing `getheaders` on that exact connection while
+  unanswered: ordinary frontier requests, including PRESYNC/REDOWNLOAD
+  continuations, use five seconds, while a chain-sync eviction probe uses its
+  existing two-minute response window. An answered request paces only
+  identical locator/target requests until five seconds from that same original
+  timestamp. Only an
+  unanswered timeout below the work floor or during PRESYNC/REDOWNLOAD
+  retires the connection and its sync state before queued headers are
+  processed, even when it is the last usable peer. Recovery starts on another
+  connection. Wire deliveries whose source is retired or replaced at the
+  ingress identity check are ignored, never admitted or attributed to the
+  replacement. Foreground bodies accepted while their source is current may
+  finish staging and retry their embedded header after retirement through the
+  body-carried path, retaining their source for work-floor validation while
+  exact-source credit and fault checks exclude the replacement. The wire has
+  no request identifier with which to reconcile overlapping responses.
 - The serving side is the mirror rule: below the network's assumed work the
   node answers `getheaders` with the empty response
   (`ActiveChainQuery::headers_after`, `net_processing.cpp:3010-3018`), so a
   syncing node does not spread its low-work branch.
 
-Proof: `crates/p2p/src/sync/tests/headers_presync.rs` pins the presync
-lifecycle end to end — first-pass commitment collection, the work-floor
-crossing that restarts the sync at the fork point, commitment divergence
-on a substituted redownload header, salted-commitment spends, the benign
-lost-continuity break, and the disconnects every other failure costs the
-connection. `crates/p2p/benches/headers_presync.rs` measures the hashing
-bound the first pass pays per page.
+Proof: `crates/p2p/src/sync/tests/headers_presync.rs` tests
+`empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement`,
+`unowned_below_floor_peer_receives_one_tracked_chain_sync_probe`,
+`owned_header_requests_suppress_competing_frontier_and_chain_sync_requests`,
+`expired_header_syncs_drop_delayed_pages_before_recovery`, and
+`replaced_connection_cannot_admit_queued_predecessor_headers`, and pins the
+presync lifecycle end to end — first-pass commitment collection, the
+work-floor crossing that restarts the sync at the fork point, commitment
+divergence on a substituted redownload header, salted-commitment spends, the
+benign lost-continuity break, and the disconnects every other failure costs the
+connection. `crates/p2p/src/sync/tests/chain_sync.rs` test
+`frontier_and_eviction_probes_do_not_overwrite_live_requests` covers
+above-floor request ownership; `chain_sync_probe_holds_request_for_its_response_window`
+and `expired_chain_sync_probe_does_not_suppress_frontier_request` prove its
+unanswered two-minute gate; `empty_chain_sync_probe_keeps_original_five_second_pacing`
+and `replacing_expired_frontier_with_chain_sync_probe_releases_owner` cover
+answered pacing and selector ownership.
+`crates/p2p/src/sync/tests/head_sync.rs` test
+`staged_body_retries_after_source_replacement_without_replacement_credit`
+proves staged-body recovery without replacement credit after disconnect.
+`queued_body_from_replaced_source_cannot_enter_staging` in the same suite
+proves deliveries already stale at dequeue cannot enter staging through the
+inbound body drain.
+`crates/p2p/benches/headers_presync.rs` measures the hashing bound the first
+pass pays per page.
 
 ### `P2P-11`: BIP324 v2 transport negotiation
 
@@ -600,4 +666,3 @@ misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
   `a_timed_out_refill_does_not_replay_consumed_bytes`: one kernel delivery of
   two v1 frames decodes both without a second socket read, and a timed-out
   refill does not replay consumed bytes (`P2P-01`).
-

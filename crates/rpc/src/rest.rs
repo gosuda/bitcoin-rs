@@ -922,35 +922,10 @@ fn serialize_getutxos_bin(
 }
 
 fn append_compact_size(body: &mut Vec<u8>, len: usize) {
-    match len {
-        0..=252 => {
-            let Ok(value) = u8::try_from(len) else {
-                unreachable!("compact-size byte arm exceeded u8");
-            };
-            body.push(value);
-        }
-        253..=0xffff => {
-            let Ok(value) = u16::try_from(len) else {
-                unreachable!("compact-size u16 arm exceeded u16");
-            };
-            body.push(253);
-            body.extend_from_slice(&value.to_le_bytes());
-        }
-        0x1_0000..=0xffff_ffff => {
-            let Ok(value) = u32::try_from(len) else {
-                unreachable!("compact-size u32 arm exceeded u32");
-            };
-            body.push(254);
-            body.extend_from_slice(&value.to_le_bytes());
-        }
-        _ => {
-            let Ok(value) = u64::try_from(len) else {
-                panic!("compact-size length exceeds u64");
-            };
-            body.push(255);
-            body.extend_from_slice(&value.to_le_bytes());
-        }
-    }
+    let Ok(value) = u64::try_from(len) else {
+        panic!("compact-size length exceeds u64");
+    };
+    body.extend_from_slice(bitcoin_rs_primitives::varint::encode(value).as_slice());
 }
 
 // ---------------------------------------------------------------------------

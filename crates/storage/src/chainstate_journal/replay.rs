@@ -2,6 +2,7 @@
 
 use super::record::{FRAME_HEADER_LEN, JournalRecord, MAX_PAYLOAD_LEN, decode_record};
 use super::writer::{HeadMarker, read_head_bytes};
+use bitcoin_rs_primitives::encode::hex_encode;
 
 /// Fail-closed errors encountered while replaying the committed journal range.
 #[derive(Debug, thiserror::Error)]
@@ -217,9 +218,9 @@ pub(crate) fn stream_segment(
                 "contiguity break at height {}: expected ({}, {}), found ({}, {})",
                 record.height,
                 *expected_height,
-                hex(expected_prev),
+                hex_encode(expected_prev),
                 record.height,
-                hex(&record.prev_hash)
+                hex_encode(&record.prev_hash)
             )));
         }
         *expected_height = record.height.checked_add(1).ok_or_else(|| {
@@ -308,16 +309,6 @@ pub fn replay_committed_range(
         chain_tx_count: head.chain_tx_count,
         record_count,
     })
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
-            use std::fmt::Write as _;
-            let _ = write!(out, "{b:02x}");
-            out
-        })
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 | Read repository-wide invariants | [Project invariants](../CONSTRAINTS.md) |
 | Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
 | Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
+| Evaluate the experimental keyless BIP352 codec | [Silent Payments feasibility](silent-payments.md) |
 | Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 | Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
 
@@ -27,7 +28,9 @@ change either side.
 dependency, TLS, and versioning policy. [Database migration](policies/db-migration.md)
 owns format changes. Detailed admission and peer matrices live in
 [mempool policy](policies/mempool-policy.md) and
-[P2P compatibility](policies/p2p-compatibility.md).
+[P2P compatibility](policies/p2p-compatibility.md). BIP capabilities follow
+[BIP adoption](policies/bip-adoption.md); the coverage map is
+[bip-support.md](bip-support.md).
 
 `crates/rpc/core-compat.toml` is a machine-consumed *reference*
 input: it pins the Core identities the gates validate and records
@@ -56,5 +59,7 @@ target design, and this index does not duplicate gate verdicts.
 The default binary is kernel-free; library defaults are governed separately by
 [validation-default.md](contracts/validation-default.md). The optional
 `kernel` lane is not a claim that native-default promotion has passed.
-BIP324 remains target work: there is no usable `bip324` Cargo feature in this
-checkout.
+BIP324 v2 is in the tree behind `v2transport` (off by default); the live
+bidirectional Core evidence and the shipped-default promotion stay open work
+([BIP adoption](policies/bip-adoption.md), BIP 324 row in
+[bip-support.md](bip-support.md)).

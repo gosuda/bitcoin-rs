@@ -516,7 +516,7 @@ impl MiningControl for MiningCoordinator {
             }
             generated.push(GeneratedBlock {
                 hash: block.block_hash(),
-                hex: bitcoin_rs_storage::checkpoint::hex_encode(&consensus_bytes(&block)),
+                hex: bitcoin_rs_primitives::encode::hex_encode(&consensus_bytes(&block)),
             });
         }
         Ok(generated)

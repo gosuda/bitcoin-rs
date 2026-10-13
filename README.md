@@ -219,18 +219,22 @@ to Bitcoin Core.
 
 We check compatibility against real ecosystem consumers and reference
 implementations. See the [validation tooling index](docs/validation-tooling.md)
-for tested scope and the [compatibility matrix](docs/api/ecosystem-compat.toml)
-for per-interface status.
+for tested scope, the [compatibility matrix](docs/api/ecosystem-compat.toml)
+for per-interface status, and the [BIP support matrix](docs/bip-support.md)
+with its [adoption policy](docs/policies/bip-adoption.md) for BIP-based
+capabilities.
 
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
-verification commands, CI workflows, and crate architecture conventions.
+verification commands, CI workflows, crate architecture conventions, and how
+to [propose and implement BIPs](CONTRIBUTING.md#proposing-and-implementing-bips).
 
 ## Documentation
 
 - [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
 - [docs/README.md](docs/README.md) — Documentation index
+- [docs/bip-support.md](docs/bip-support.md) — BIP support matrix
 - [docs/validation-tooling.md](docs/validation-tooling.md) — Validation tooling and evidence index
 - [docs/contracts/](docs/contracts/) — Normative architecture and protocol contracts
 - [docs/contracts/ecosystem-compatibility.md](docs/contracts/ecosystem-compatibility.md) — External ecosystem compatibility strategy

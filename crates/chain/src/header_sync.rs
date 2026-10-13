@@ -7,7 +7,7 @@ use pow::{compact_to_target, target_to_compact};
 use crate::{
     ChainError,
     node::{BlockHeader, ChainWork, NodeId, NodeStatus},
-    tree::{BlockTree, hash_from_header, prev_hash_from_header},
+    tree::BlockTree,
 };
 
 // Maximum live future drift from the caller's network-adjusted clock.
@@ -64,7 +64,7 @@ pub fn accept_headers(
 ) -> Result<Vec<NodeId>, ChainError> {
     let mut accepted = Vec::with_capacity(headers.len());
     for header in headers {
-        let hash = hash_from_header(header);
+        let hash = Hash256::from(header.compute_hash());
         if let Some(existing_id) = tree.lookup(hash) {
             if matches!(tree.node(existing_id)?.status, NodeStatus::Invalid) {
                 return Err(ChainError::KnownInvalidHeader { hash });
@@ -77,7 +77,7 @@ pub fn accept_headers(
         if tree.is_empty() {
             if hash != network.genesis_block_hash() {
                 return Err(ChainError::MissingParent {
-                    prev_hash: prev_hash_from_header(header),
+                    prev_hash: Hash256::from(header.prev_blockhash),
                 });
             }
             // The validated genesis root: the tree is empty, so the
@@ -86,7 +86,7 @@ pub fn accept_headers(
             accepted.push(id);
             continue;
         }
-        let prev_hash = prev_hash_from_header(header);
+        let prev_hash = Hash256::from(header.prev_blockhash);
         let parent_id = match tree.lookup(prev_hash) {
             Some(parent_id) => parent_id,
             None => return Err(ChainError::MissingParent { prev_hash }),
@@ -144,7 +144,7 @@ pub fn validate_contextual_header(
         .ok_or(ChainError::UnknownNode { id: parent_id })?;
     if header.time <= median {
         return Err(ChainError::TimestampTooEarly {
-            hash: hash_from_header(header),
+            hash: Hash256::from(header.compute_hash()),
             timestamp: header.time,
             median,
         });
@@ -173,7 +173,7 @@ pub fn validate_contextual_header(
         let max_allowed = now_secs.saturating_add(MAX_FUTURE_TIME_SECONDS);
         if header.time > max_allowed {
             return Err(ChainError::TimestampTooFarAhead {
-                hash: hash_from_header(header),
+                hash: Hash256::from(header.compute_hash()),
                 timestamp: header.time,
                 max_allowed,
             });
@@ -571,7 +571,7 @@ mod contextual_header_tests {
     use crate::{
         ChainError,
         node::{BlockHeader, NodeStatus},
-        tree::{BlockTree, hash_from_header},
+        tree::BlockTree,
     };
     use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 
@@ -639,7 +639,7 @@ mod contextual_header_tests {
                 })
             );
             assert_eq!(
-                tree.lookup(hash_from_header(&rejected)),
+                tree.lookup(Hash256::from(rejected.compute_hash())),
                 None,
                 "a rejected header must not enter the tree"
             );
@@ -678,7 +678,7 @@ mod contextual_header_tests {
             prev = header.compute_hash();
             tree.insert_header_with_hash(
                 header,
-                hash_from_header(&header),
+                Hash256::from(header.compute_hash()),
                 NodeStatus::HeaderValid,
             )?;
             tip_time = header.time;
@@ -760,7 +760,7 @@ mod contextual_header_tests {
             "a child of an invalidated header is refused, not accepted as invalid"
         );
         assert_eq!(
-            tree.lookup(hash_from_header(&child)),
+            tree.lookup(Hash256::from(child.compute_hash())),
             None,
             "the refused child must not extend the invalid subtree"
         );
@@ -797,7 +797,7 @@ mod contextual_header_tests {
         for height in 0_u32..11 {
             let header = mine_regtest(prev, height, height, 1);
             prev = header.compute_hash();
-            let hash = hash_from_header(&header);
+            let hash = Hash256::from(header.compute_hash());
             tree.insert_header_with_hash(header, hash, NodeStatus::HeaderValid)
                 .unwrap_or_else(|e| panic!("fixture header failed to insert: {e:?}"));
             tip = header;
@@ -865,7 +865,7 @@ mod contextual_header_tests {
                 assert_eq!(
                     result,
                     Err(ChainError::TimestampTooEarly {
-                        hash: hash_from_header(&header),
+                        hash: Hash256::from(header.compute_hash()),
                         timestamp: time,
                         median: 5,
                     }),
@@ -875,7 +875,7 @@ mod contextual_header_tests {
                 assert_eq!(
                     result,
                     Err(ChainError::TimestampTooFarAhead {
-                        hash: hash_from_header(&header),
+                        hash: Hash256::from(header.compute_hash()),
                         timestamp: time,
                         max_allowed: now + MAX_FUTURE_TIME_SECONDS,
                     }),

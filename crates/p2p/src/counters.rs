@@ -1,5 +1,7 @@
 //! Per-connection traffic counters.
 
+use bitcoin_rs_primitives::unix_time_secs;
+
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,7 +51,7 @@ impl PeerCounters {
         let _previous = self
             .bytes_sent
             .fetch_add(u64::try_from(bytes).unwrap_or(0), Ordering::Relaxed);
-        self.last_send.store(now_seconds(), Ordering::Relaxed);
+        self.last_send.store(unix_time_secs(), Ordering::Relaxed);
     }
 
     fn record_recv(&self, bytes: usize) {
@@ -59,7 +61,7 @@ impl PeerCounters {
         let _previous = self
             .bytes_recv
             .fetch_add(u64::try_from(bytes).unwrap_or(0), Ordering::Relaxed);
-        self.last_recv.store(now_seconds(), Ordering::Relaxed);
+        self.last_recv.store(unix_time_secs(), Ordering::Relaxed);
     }
 }
 
@@ -74,10 +76,6 @@ impl PartialEq for PeerCounters {
 }
 
 impl Eq for PeerCounters {}
-
-pub(crate) fn now_seconds() -> u64 {
-    bitcoin_rs_primitives::unix_time_secs()
-}
 
 /// A stream that counts everything passing through it.
 ///

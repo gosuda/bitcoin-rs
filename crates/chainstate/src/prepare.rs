@@ -1,6 +1,6 @@
 //! Exact serialized-body validation, transaction planning, and resolved prevout preparation.
 
-use super::scratch::SameBlockSpentSet;
+use super::SameBlockSpentSet;
 use super::{
     BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
     Chainstate, LOCAL_OVERLAY_TXID_SET_THRESHOLD, PreparedApply, ResolvedUtxoView,
@@ -8,7 +8,6 @@ use super::{
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{Block, ConsensusEncode, OutPoint, TxOut, Txid, consensus_bytes};
-use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -105,7 +104,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
     let mut saw_non_coinbase = false;
 
     for (tx_index, (tx, txid)) in block.txs.iter().zip(txids.iter().copied()).enumerate() {
-        let is_coinbase = is_coinbase_tx(tx);
+        let is_coinbase = tx.is_coinbase();
         let output_count = tx.outputs.len();
         only_coinbase &= is_coinbase;
         created_output_count = created_output_count.saturating_add(output_count);
@@ -191,7 +190,7 @@ pub(super) fn resolve_block_prevouts(
             BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
         let mut resolved = Vec::with_capacity(block.txs.len());
         for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
-            if is_coinbase_tx(tx) {
+            if tx.is_coinbase() {
                 resolved.push(Vec::new());
                 view.add_outputs(tx_index, *txid, tx.outputs.len())?;
                 continue;
@@ -217,7 +216,7 @@ pub(super) fn resolve_block_prevouts(
             .txs
             .iter()
             .map(|tx| {
-                if is_coinbase_tx(tx) {
+                if tx.is_coinbase() {
                     return Vec::new();
                 }
                 tx.inputs
@@ -242,7 +241,7 @@ fn run_non_script_checks_only(
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
         block.txs.par_iter().try_for_each(|tx| {
-            if is_coinbase_tx(tx) {
+            if tx.is_coinbase() {
                 bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
                 return Ok(());
             }
@@ -258,7 +257,7 @@ fn run_non_script_checks_only(
     }
     let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
     for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
-        if is_coinbase_tx(tx) {
+        if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx_index, *txid, tx.outputs.len())?;
             continue;

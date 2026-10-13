@@ -20,7 +20,12 @@ Owners:
   aggregate work accounting (`QueryBudget`).
 - Worker supervision and backend opening in `runtime/lifecycle.rs` and
   `runtime/startup.rs`; startup owns generation-checked publication.
-- `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
+- Durable mutation: `IndexWriter` in `crates/index/src/index/write.rs`;
+  snapshot reads: `IndexReader` in `crates/index/src/index/snapshot.rs`;
+  capability and watermark representations in
+  `crates/index/src/index/capability.rs`. The private `index.rs` facade
+  keeps their implementation internals within one module boundary;
+  `crates/index/src/lib.rs` exports their public paths.
 - Capability status: worker-owned `DerivedIndexLifecycle` in
   `crates/index/src/runtime.rs` mapped by `DerivedIndexCapability` onto the
   wire types in `crates/index/src/capabilities.rs`. There is no parallel
@@ -159,11 +164,12 @@ unneeded funding record lists when callers only require history records.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
-  `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
+  `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts the current
   durability marker only (row-format 5: big-endian heights, 43-byte live rows,
   6-byte positions — format owned by
   `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
-  and recovery full-resets the store for rebuild. No in-place upgrade path
+  and `open_writer` in `crates/index/src/runtime/startup.rs` full-resets
+  the derived store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
 - The dedicated redb store corrects the former 44-byte ScriptLive table
   declaration only when that table is empty. A populated incompatible table

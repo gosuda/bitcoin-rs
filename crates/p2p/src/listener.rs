@@ -13,7 +13,22 @@ use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
-use crate::socket::{HANDSHAKE_TIMEOUT, configure_peer_stream};
+
+/// Handshake and idle-write ceiling. Matches Bitcoin Core's 60s inactivity
+/// window for a peer that never completes version/verack.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_mins(1);
+/// Read timeout used while polling handshake and message reads.
+const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Applies the peer-socket policy: `TCP_NODELAY`, blocking I/O, and the
+/// handshake/poll timeouts.
+fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(STREAM_POLL_INTERVAL))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    Ok(())
+}
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -535,9 +550,9 @@ pub fn bind_listener(addr: SocketAddr) -> Result<TcpListener, ListenerError> {
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
 /// handshake followed by a message-dispatch loop. Socket flags come from
-/// `crate::socket::configure_peer_stream`. The handshake uses
-/// `crate::socket::HANDSHAKE_TIMEOUT`; after handshake, the message loop
-/// polls inbound reads every `crate::socket::STREAM_POLL_INTERVAL`, probing
+/// `configure_peer_stream`. The handshake uses
+/// `HANDSHAKE_TIMEOUT`; after handshake, the message loop
+/// polls inbound reads every `STREAM_POLL_INTERVAL`, probing
 /// a quiet peer with one `ping` per `PING_INTERVAL` and ending the
 /// connection once a direction is silent past `TIMEOUT_INTERVAL`.
 /// The thread terminates on:
@@ -1463,7 +1478,7 @@ impl Keepalive {
     ///   either direction alone expiring is enough here.
     ///
     /// A writer stuck on a full socket does not wait out the send silence:
-    /// [`crate::socket::HANDSHAKE_TIMEOUT`] bounds one blocking write at one
+    /// [`HANDSHAKE_TIMEOUT`] bounds one blocking write at one
     /// minute, so this branch only covers a peer that takes our writes and
     /// never answers them.
     fn next_action(&self, now: Instant) -> KeepaliveAction {
@@ -2021,9 +2036,9 @@ fn process_compact_message(
     match message {
         crate::Message::CmpctBlock(cmpct) => match compact_hints {
             Some(hints) => reconstruction.receive_cmpctblock(cmpct, identity_version, hints, now),
-            None => crate::compact_blocks::Outcome::Fallback(
-                crate::compact_blocks::native_block_hash(cmpct.compact_block.header.block_hash()),
-            ),
+            None => crate::compact_blocks::Outcome::Fallback(crate::inv::native_block_hash(
+                cmpct.compact_block.header.block_hash(),
+            )),
         },
         crate::Message::BlockTxn(txns) => reconstruction.receive_blocktxn(txns, now),
         _ => crate::compact_blocks::Outcome::Idle,
@@ -2506,7 +2521,7 @@ static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 mod session_socket_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
-    use crate::socket::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
+    use super::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
 
     #[test]
     fn session_sockets_disable_nagle() {
@@ -2608,7 +2623,7 @@ mod inbound_admission_tests {
         // The refusal closes the socket as part of the same accept step that
         // admitted the first, so the EOF is the synchronization point. The
         // read bound only guards a hang: an admitted socket would sit in the
-        // handshake read for the full `HANDSHAKE_TIMEOUT` (10 s) first.
+        // handshake read for the full `HANDSHAKE_TIMEOUT` (60 s) first.
         second.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut byte = [0u8; 1];
         let read = second.read(&mut byte)?;

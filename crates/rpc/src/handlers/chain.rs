@@ -44,13 +44,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 .node(tip.tip_id)
                 .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
         });
-    let chain = match progress.network {
-        Network::Mainnet => "main",
-        Network::Testnet3 => "test",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
-    };
+    let chain = crate::convert::chain_name(progress.network);
     let response = v31::GetBlockchainInfo {
         chain: chain.to_owned(),
         blocks: i64::from(progress.blocks),
@@ -2072,16 +2066,8 @@ mod tests {
             lock_time: LockTime::ZERO,
         };
         block.txs.push(spend);
-        let mut leaves = block
-            .txids()
-            .into_iter()
-            .map(|txid| txid.0.to_le_bytes())
-            .collect();
-        let Some(root) = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        else {
-            panic!("merkle root over two transactions");
-        };
-        block.header.merkle_root = Hash256::from_le_bytes(&root);
+        block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
+            .expect("merkle root over two transactions");
         block
     }
 
@@ -2376,14 +2362,8 @@ mod tests {
         block.header.version = -1;
         block.txs[0].version = -1;
         block.txs[1].version = i32::MIN;
-        let mut leaves = block
-            .txids()
-            .into_iter()
-            .map(|txid| txid.0.to_le_bytes())
-            .collect();
-        let root = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
+        block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
             .expect("fixture merkle root");
-        block.header.merkle_root = Hash256::from_le_bytes(&root);
         let record = BlockRecord::from_block(0, &block);
         let mut ctx = Context::new();
         ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
@@ -3888,10 +3868,6 @@ mod getchaintips_tests {
         }
     }
 
-    fn hash_from_header(header: &Header) -> Hash256 {
-        header.compute_hash().0
-    }
-
     #[test]
     fn getchaintips_returns_empty_on_fresh_context() {
         let ctx = Arc::new(Context::new());
@@ -3907,7 +3883,7 @@ mod getchaintips_tests {
     fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let genesis = synthetic_header(BlockHash::default(), 1_000_000);
-        let hash = hash_from_header(&genesis);
+        let hash = genesis.compute_hash().0;
         let tip_id = {
             let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis, NodeStatus::Active)?

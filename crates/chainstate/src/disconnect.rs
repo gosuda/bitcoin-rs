@@ -2,7 +2,7 @@
 //! durable head, and publication.
 
 use super::durable::commit_disconnect_head;
-use super::publication::{publish_applied, tx_count_delta_for};
+use super::tx_count_delta_for;
 use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
@@ -207,7 +207,7 @@ pub(super) fn disconnect_block_admitted(
         .write()
         .restore_chain_tx_count(parent_tip.tip_id, parent_tip.chain_tx_count)
         .map_err(|error| fatal(ApplyError::Chain(error)))?;
-    publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
+    handles.publish_applied(&parent_tip, crate::events::HintKind::Disconnected);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {

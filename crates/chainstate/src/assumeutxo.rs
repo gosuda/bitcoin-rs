@@ -88,12 +88,6 @@ impl ChainstateRole {
         matches!(self, Self::AssumedActive { .. })
     }
 
-    /// Returns `true` if this role is `Historical`.
-    #[must_use]
-    pub const fn is_historical(&self) -> bool {
-        matches!(self, Self::Historical { .. })
-    }
-
     /// Returns `true` if this role is `Ordinary`.
     #[must_use]
     pub const fn is_ordinary(&self) -> bool {
@@ -521,21 +515,12 @@ impl AssumeUtxoManager {
         )
     }
 
-    /// Activates a verified `AssumeUTXO` snapshot, installing snapshot UTXO and tip onto the
-    /// active chainstate, and configuring the isolated background historical validator.
+    /// Activates decoded coins without coupling portable input to native recovery metadata.
+    /// Both format entry points retain the same compiled-anchor and durable checks.
     ///
     /// # Errors
     ///
     /// Rejects untrusted heights, mismatched block hashes, or mismatched serialized UTXO commitments.
-    pub fn activate_snapshot(
-        &self,
-        snapshot: bitcoin_rs_utxo::SnapshotLoad,
-    ) -> Result<(), AssumeUtxoError> {
-        self.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)
-    }
-
-    /// Activates decoded coins without coupling portable input to native recovery metadata.
-    /// Both format entry points retain the same compiled-anchor and durable checks.
     pub fn activate_snapshot_state(
         &self,
         set: UtxoSet,

@@ -17,7 +17,7 @@ use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -907,24 +907,6 @@ fn seed_tree_chain(ctx: &Context, block: &Block) -> Block {
     linked_block
 }
 
-/// Computes the consensus merkle root over `txs` by folding hash pairs with
-/// double SHA-256, duplicating the final hash when a layer has odd length.
-fn fixture_merkle_root(txs: &[Tx]) -> Hash256 {
-    let mut layer: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while layer.len() > 1 {
-        if layer.len() % 2 == 1 {
-            layer.push(*layer.last().expect("non-empty merkle layer"));
-        }
-        layer = layer
-            .chunks(2)
-            .map(|pair| *double_sha256(&pair.concat()).as_byte_array())
-            .collect();
-    }
-    layer
-        .first()
-        .map_or_else(Hash256::default, Hash256::from_le_bytes)
-}
-
 fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
     let coinbase = Tx {
         version: 2,
@@ -941,7 +923,7 @@ fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
         }],
     };
     let txs = vec![coinbase, low_tx, high_tx];
-    let merkle_root = fixture_merkle_root(&txs);
+    let merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&txs).unwrap_or_default();
     Block {
         header: Header {
             version: 1,
@@ -1001,7 +983,8 @@ impl Fixture {
 
         ctx.chain.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
-        let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
+        let merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(std::slice::from_ref(&tx))
+            .unwrap_or_default();
         let block = Block {
             header: Header {
                 version: 1,

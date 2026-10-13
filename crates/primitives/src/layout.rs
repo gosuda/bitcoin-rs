@@ -37,7 +37,11 @@ use crate::{
 };
 
 /// Serialized block header length in bytes.
-const HEADER_LEN: u64 = 80;
+#[expect(
+    clippy::as_conversions,
+    reason = "the fixed 80-byte header fits in u64"
+)]
+const HEADER_LEN: u64 = Header::LEN as u64;
 /// Minimal serialized transaction: version, input count, output count, lock time.
 const MIN_TX_LEN: u64 = 10;
 /// Minimal serialized input: outpoint (36), script length prefix (1), sequence (4).

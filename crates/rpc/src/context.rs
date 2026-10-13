@@ -26,9 +26,6 @@ use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::time::Instant;
 
-#[cfg(test)]
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
-
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 ///
 /// RPC selects this default when no request override is supplied. Embedded
@@ -1766,7 +1763,10 @@ mod tests {
             record.header_hex(),
             consensus_bytes(&block.header).to_lower_hex_string()
         );
-        assert_eq!(record.header_hex().len(), SERIALIZED_BLOCK_HEADER_LEN * 2);
+        assert_eq!(
+            record.header_hex().len(),
+            bitcoin_rs_primitives::Header::LEN * 2
+        );
     }
 
     /// The tree's header must reach a caller even when the log has the block.

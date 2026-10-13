@@ -2,6 +2,7 @@
 
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::encode::hex_encode;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_ARTIFACT_LEN;
@@ -37,7 +38,6 @@ pub(crate) use bitcoin_rs_storage::checkpoint::UtxoArtifactV1;
 pub(crate) use bitcoin_rs_storage::checkpoint::classify_checkpoint_io;
 pub(crate) use bitcoin_rs_storage::checkpoint::corrupt_checkpoint;
 use bitcoin_rs_storage::checkpoint::decode_hex;
-pub(crate) use bitcoin_rs_storage::checkpoint::hex_encode;
 use bitcoin_rs_storage::checkpoint::network_name;
 #[cfg(test)]
 use bitcoin_rs_storage::checkpoint::open_data_dir;

@@ -15,8 +15,12 @@ timestamps and the future-drift ceiling (`current_unix_seconds`), the BIP94
 timewarp floor at an adjustment boundary, and the
 version floors of the buried deployments — returning the new `NodeId`s.
 `plan_reorg` walks parent pointers to the common ancestor and returns a `ReorgPlan`
-naming the blocks to disconnect and connect. An internal `Bip9Cache` memoizes
-versionbits deployment states per node and is invalidated on reorg. `BlockTreeNode` carries
+naming the blocks to disconnect and connect. `BlockTree` privately owns
+`Bip9Cache` in `tree.rs`, memoizing
+versionbits deployment states per node and deployment. Entries remain valid
+across branch switches because ancestry is unchanged; subtree invalidation
+removes entries for invalid nodes. `TipSnapshot` is defined at the crate root.
+`BlockTreeNode` carries
 parent, height, and header hash with a `NodeStatus` (header-valid, active, or
 off-best-chain), and every failure surfaces as a structured `ChainError` variant.
 `InitialBlockDownload` (in `ibd`) owns the process-wide initial-block-download

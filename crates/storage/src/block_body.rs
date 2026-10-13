@@ -11,11 +11,10 @@ use crate::{
 
 use std::sync::Arc;
 
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
-const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
+const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = bitcoin_rs_primitives::Header::LEN + 9;
 
 fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
-    let cursor = bytes.get(SERIALIZED_BLOCK_HEADER_LEN..)?;
+    let cursor = bytes.get(bitcoin_rs_primitives::Header::LEN..)?;
     let (count, _) = varint::decode(cursor).ok()?;
     usize::try_from(count).ok()
 }
@@ -665,7 +664,7 @@ mod metadata_tests {
         let bytes = consensus_bytes(&block);
         assert_eq!(decode_block_tx_count(&bytes), Some(block.txs.len()));
         assert_eq!(
-            decode_block_tx_count(&bytes[..SERIALIZED_BLOCK_HEADER_LEN]),
+            decode_block_tx_count(&bytes[..bitcoin_rs_primitives::Header::LEN]),
             None
         );
     }

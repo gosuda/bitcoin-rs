@@ -22,14 +22,15 @@
 //! by dropping the owner at disconnect or session cancel — a chain change
 //! cannot strand memory beyond the deadline.
 
+use crate::inv::{native_block_hash, wire_block_hash};
+
 use hashbrown::HashMap;
 use std::time::{Duration, Instant};
 
 use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
-use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
 
 /// Compact-block protocol version this node advertises: the identity
 /// profile peers use for the compact blocks they send us. Re-exported from
@@ -394,24 +395,16 @@ fn native_tx(reg: &bitcoin::Transaction) -> Option<Tx> {
     deserialize(&bitcoin::consensus::encode::serialize(reg)).ok()
 }
 
-/// Registry block hash → native block hash.
-pub(crate) fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
-    BlockHash::from(Hash256::from_le_bytes(hash.as_byte_array()))
-}
-
-fn wire_block_hash(hash: BlockHash) -> bitcoin::BlockHash {
-    bitcoin::BlockHash::from_byte_array(*hash.as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use bitcoin::bip152::{BlockTransactions, PrefilledTransaction};
     use bitcoin::blockdata::block::Block as RegistryBlock;
+    use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
     use bitcoin_rs_primitives::{
-        Amount, LockTime, OutPoint, Sequence, TxIn, TxOut, Witness, consensus_bytes,
+        Amount, Hash256, LockTime, OutPoint, Sequence, TxIn, TxOut, Witness, consensus_bytes,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;

@@ -4,6 +4,8 @@
 //! here. [`BlockTree`] answers active-chain identity; [`BlockBodySource`]
 //! supplies bodies.
 
+use crate::inv::native_block_hash;
+
 use std::sync::Arc;
 
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
@@ -593,10 +595,6 @@ impl BlockRequest {
     }
 }
 
-fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
-    BlockHash::from(Hash256::from_le_bytes(hash.as_byte_array()))
-}
-
 fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
     match *item {
         Inventory::Block(hash) | Inventory::WitnessBlock(hash) => Some(BlockRequest::Full {
@@ -637,6 +635,7 @@ fn header_for_active_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inv::wire_block_hash;
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::consensus_bytes;
@@ -695,10 +694,6 @@ mod tests {
         Ok((outcome, blocks.into_inner()))
     }
 
-    fn wire_hash(hash: BlockHash) -> WireBlockHash {
-        WireBlockHash::from_byte_array(*hash.as_bytes())
-    }
-
     /// Invalid decoded requests are ignored before invoking the query engine.
     /// Core 31.1 disconnects them; retaining the connection is deliberate.
     #[test]
@@ -727,7 +722,7 @@ mod tests {
         }
 
         let headers = seed_headers(2001);
-        let stop = wire_hash(headers[2000].compute_hash());
+        let stop = wire_block_hash(headers[2000].compute_hash());
         let query = query_with(headers)?.with_compact_filters(Some(Arc::new(Filters)));
         for command in 0..3 {
             for (kind, start, stop) in [
@@ -826,7 +821,7 @@ mod tests {
             let request = Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
                 filter_type: 0,
                 start_height: 0,
-                stop_hash: wire_hash(header.compute_hash()),
+                stop_hash: wire_block_hash(header.compute_hash()),
             });
             let mut responses = Vec::new();
             assert!(!query.serve_compact_filters(&request, &|| true, &mut |_| {
@@ -842,7 +837,7 @@ mod tests {
             assert!(query.compact_filters_ready());
             assert_eq!(responses.len(), 1);
             assert!(matches!(&responses[0], Message::CFilter(filter)
-                if filter.filter == [0] && filter.block_hash == wire_hash(header.compute_hash())));
+                if filter.filter == [0] && filter.block_hash == wire_block_hash(header.compute_hash())));
             assert!(!query.serve_compact_filters(&request, &|| false, &mut |_| {
                 panic!("backpressured peer must not receive a filter")
             })?);
@@ -852,7 +847,7 @@ mod tests {
             let request = Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
                 filter_type: 0,
                 start_height: 0,
-                stop_hash: wire_hash(stop),
+                stop_hash: wire_block_hash(stop),
             });
             assert!(matches!(
                 query.serve_compact_filters(&request, &|| true, &mut |_| Ok(())),
@@ -903,8 +898,8 @@ mod tests {
             }
         }
         let headers = seed_headers(2001);
-        let stop = wire_hash(headers[1].compute_hash());
-        let checkpoint_stop = wire_hash(headers[2000].compute_hash());
+        let stop = wire_block_hash(headers[1].compute_hash());
+        let checkpoint_stop = wire_block_hash(headers[2000].compute_hash());
         let query = query_with(headers)?.with_compact_filters(Some(Arc::new(Filters)));
         for request in [
             Message::GetCFilters(GetCFilters {
@@ -1024,7 +1019,7 @@ mod tests {
         assert_eq!(query.active_height(fork_tip), Some(2));
         assert!(query.compact_filters_ready());
         for stop in [applied_hash, fork_tip] {
-            let stop_hash = wire_hash(stop);
+            let stop_hash = wire_block_hash(stop);
             for request in [
                 Message::GetCFilters(GetCFilters {
                     filter_type: 0,
@@ -1259,7 +1254,7 @@ mod tests {
         let (outcome, blocks) = serve_collect(
             &query,
             &[
-                Inventory::Block(wire_hash(block.block_hash())),
+                Inventory::Block(wire_block_hash(block.block_hash())),
                 Inventory::Transaction(txid),
                 missing,
             ],
@@ -1311,8 +1306,8 @@ mod tests {
                     input.witness.clear();
                 }
             }
-            let legacy = Inventory::Block(wire_hash(block.block_hash()));
-            let witness = Inventory::WitnessBlock(wire_hash(block.block_hash()));
+            let legacy = Inventory::Block(wire_block_hash(block.block_hash()));
+            let witness = Inventory::WitnessBlock(wire_block_hash(block.block_hash()));
             let missing = Inventory::Block(WireBlockHash::from_byte_array([9; 32]));
             for items in [[legacy, witness, legacy], [witness, legacy, witness]] {
                 let mut served = Vec::new();
@@ -1363,8 +1358,8 @@ mod tests {
         };
         let body = consensus_bytes(&block);
         for item in [
-            Inventory::Block(wire_hash(block.block_hash())),
-            Inventory::WitnessBlock(wire_hash(block.block_hash())),
+            Inventory::Block(wire_block_hash(block.block_hash())),
+            Inventory::WitnessBlock(wire_block_hash(block.block_hash())),
         ] {
             let source = Arc::new(CountingBodySource {
                 bodies: vec![(1, block.block_hash(), body.clone())],
@@ -1440,8 +1435,8 @@ mod tests {
         };
         block.txs[0].inputs[0].witness = vec![vec![0x51; 32]].into();
         for item in [
-            Inventory::Block(wire_hash(block.block_hash())),
-            Inventory::WitnessBlock(wire_hash(block.block_hash())),
+            Inventory::Block(wire_block_hash(block.block_hash())),
+            Inventory::WitnessBlock(wire_block_hash(block.block_hash())),
         ] {
             let mut tree = BlockTree::new();
             tree.insert_node(None, header, NodeStatus::Active)?;
@@ -1472,10 +1467,13 @@ mod tests {
         let hash = headers[1].compute_hash();
         let query = query_with(headers)?;
 
-        let (outcome, blocks) = serve_collect(&query, &[Inventory::Block(wire_hash(hash))])?;
+        let (outcome, blocks) = serve_collect(&query, &[Inventory::Block(wire_block_hash(hash))])?;
 
         assert_eq!(blocks, []);
-        assert_eq!(outcome.not_found, vec![Inventory::Block(wire_hash(hash))]);
+        assert_eq!(
+            outcome.not_found,
+            vec![Inventory::Block(wire_block_hash(hash))]
+        );
         Ok(())
     }
 
@@ -1493,8 +1491,10 @@ mod tests {
         });
         let query = query_with(headers)?.with_block_body_source(body_source);
 
-        let (outcome, blocks) =
-            serve_collect(&query, &[Inventory::Block(wire_hash(block.block_hash()))])?;
+        let (outcome, blocks) = serve_collect(
+            &query,
+            &[Inventory::Block(wire_block_hash(block.block_hash()))],
+        )?;
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash(), block.block_hash());
@@ -1526,10 +1526,10 @@ mod tests {
         let query = query_with(headers)?.with_block_body_source(body_source.clone());
         let items = vec![
             unknown_a,
-            Inventory::WitnessBlock(wire_hash(blocks[0].block_hash())),
+            Inventory::WitnessBlock(wire_block_hash(blocks[0].block_hash())),
             unknown_b,
-            Inventory::WitnessBlock(wire_hash(blocks[1].block_hash())),
-            Inventory::WitnessBlock(wire_hash(blocks[2].block_hash())),
+            Inventory::WitnessBlock(wire_block_hash(blocks[1].block_hash())),
+            Inventory::WitnessBlock(wire_block_hash(blocks[2].block_hash())),
         ];
 
         let (outcome, served) = serve_collect(&query, &items)?;
@@ -1606,7 +1606,7 @@ mod tests {
         let query = query_with(headers)?.with_block_body_source(body_source.clone());
         let items: Vec<Inventory> = blocks
             .iter()
-            .map(|block| Inventory::WitnessBlock(wire_hash(block.block_hash())))
+            .map(|block| Inventory::WitnessBlock(wire_block_hash(block.block_hash())))
             .collect();
         let headroom_calls = AtomicUsize::new(0);
         let served = RefCell::new(Vec::new());
@@ -1642,7 +1642,7 @@ mod tests {
         });
         let query = query_with(headers)?.with_block_body_source(body_source.clone());
         let request = bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire_hash(deep_block.block_hash()),
+            block_hash: wire_block_hash(deep_block.block_hash()),
             indexes: vec![1],
         };
         let headroom_calls = AtomicUsize::new(0);
@@ -1679,7 +1679,7 @@ mod tests {
             body: consensus_bytes(&block),
         });
         let query = query_with(headers)?.with_block_body_source(body_source);
-        let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+        let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
 
         let mut served = Vec::new();
         let outcome = query.serve_inventory_blocks(&[item], None, &|| true, &mut |message| {
@@ -1740,7 +1740,7 @@ mod tests {
         let block = block_at(headers, height)?;
         let query = chain_at(headers, height, &block)?;
         let request = bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire_hash(block.block_hash()),
+            block_hash: wire_block_hash(block.block_hash()),
             indexes: vec![1],
         };
         Ok(query
@@ -1756,7 +1756,7 @@ mod tests {
     ) -> Result<Message, Box<dyn std::error::Error>> {
         let block = block_at(headers, height)?;
         let query = chain_at(headers, height, &block)?;
-        let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+        let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
         let mut served = Vec::new();
         query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |message| {
             served.push(message);
@@ -1778,7 +1778,7 @@ mod tests {
         let headers = seed_headers(2);
         let block = block_at(&headers, 1)?;
         let query = chain_at(&headers, 1, &block)?;
-        let wire = wire_hash(block.block_hash());
+        let wire = wire_block_hash(block.block_hash());
 
         let reply = query.block_transactions(
             &bitcoin::bip152::BlockTransactionsRequest {
@@ -1865,7 +1865,7 @@ mod tests {
 
         for version in [1_u64, 2] {
             let query = chain_at(&headers, 2, &block)?;
-            let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+            let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
             let mut served = Vec::new();
             query.serve_inventory_blocks(&[item], Some(version), &|| true, &mut |message| {
                 served.push(message);
@@ -1912,7 +1912,7 @@ mod tests {
             body: body.clone(),
         });
         let query = query_with(headers)?.with_block_body_source(source.clone());
-        let hash = wire_hash(block.block_hash());
+        let hash = wire_block_hash(block.block_hash());
         let compact_item = Inventory::CompactBlock(hash);
         for versions in [[Some(1), Some(2)], [Some(2), Some(1)], [None, Some(99)]] {
             let mut peer = Peer::new(std::io::Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
@@ -2004,7 +2004,7 @@ mod tests {
             hash: block.block_hash(),
             body: consensus_bytes(&block),
         }));
-        let hash = wire_hash(block.block_hash());
+        let hash = wire_block_hash(block.block_hash());
         for version in [None, Some(1), Some(2), Some(99)] {
             let mut peer = Peer::new(std::io::Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
             peer.state = PeerState::Ready;
@@ -2210,7 +2210,7 @@ mod tests {
             source,
         } = stale_query(1)?;
         for block in [&stale, &winner] {
-            let wire = wire_hash(block.block_hash());
+            let wire = wire_block_hash(block.block_hash());
             for item in [
                 Inventory::Block(wire),
                 Inventory::WitnessBlock(wire),
@@ -2270,7 +2270,7 @@ mod tests {
                 ..
             } = stale_query(depth)?;
             let request = BlockTransactionsRequest {
-                block_hash: wire_hash(stale.block_hash()),
+                block_hash: wire_block_hash(stale.block_hash()),
                 indexes: vec![1],
             };
             assert!(
@@ -2338,7 +2338,7 @@ mod tests {
                 best.header.time = stale.header.time + time_age;
                 best.chainwork = stale_work + ChainWork::from(work_blocks * 2_u32);
             }
-            let hash = wire_hash(stale.block_hash());
+            let hash = wire_block_hash(stale.block_hash());
             let outcome = query.serve_inventory_blocks(
                 &[Inventory::WitnessBlock(hash)],
                 None,
@@ -2378,7 +2378,7 @@ mod tests {
             query
                 .block_transactions(
                     &BlockTransactionsRequest {
-                        block_hash: wire_hash(stale.block_hash()),
+                        block_hash: wire_block_hash(stale.block_hash()),
                         indexes: vec![1]
                     },
                     Some(2),
@@ -2397,7 +2397,7 @@ mod tests {
         } = stale_query(1)?;
         query.block_body_source = None;
         let request = BlockTransactionsRequest {
-            block_hash: wire_hash(stale.block_hash()),
+            block_hash: wire_block_hash(stale.block_hash()),
             indexes: vec![1],
         };
         assert!(
@@ -2445,7 +2445,7 @@ mod tests {
             }
         }
         let request = BlockTransactionsRequest {
-            block_hash: wire_hash(block.block_hash()),
+            block_hash: wire_block_hash(block.block_hash()),
             indexes: vec![1],
         };
         assert!(matches!(
@@ -2523,7 +2523,7 @@ mod tests {
                 applied: query.applied_tip.clone(),
                 change,
             }));
-            let hash = wire_hash(stale.block_hash());
+            let hash = wire_block_hash(stale.block_hash());
             let mut messages = Vec::new();
             let outcome = query.serve_inventory_blocks(
                 &[Inventory::WitnessBlock(hash)],
@@ -2592,7 +2592,7 @@ mod tests {
                 change,
             }));
             let request = BlockTransactionsRequest {
-                block_hash: wire_hash(stale.block_hash()),
+                block_hash: wire_block_hash(stale.block_hash()),
                 indexes: vec![1],
             };
             let result = query.block_transactions(&request, Some(2), &|| true)?;

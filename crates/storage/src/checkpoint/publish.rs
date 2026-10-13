@@ -3,25 +3,28 @@ use super::CheckpointFailpoint;
 use super::format::{
     generation_name, valid_current_temp_name, valid_generation_name, valid_staging_name,
 };
-use super::fs::{CheckpointRoot, create_file, remove_known_dir};
-#[cfg(any(test, feature = "test-seam"))]
-use super::io::injected_io;
-#[cfg(any(
-    target_vendor = "apple",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "redox"
-))]
-use super::io::rename_generation;
-use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
+use super::fs::{CheckpointRoot, create_file, remove_known_dir, sync_dir};
 use super::load::read_current;
 use super::{
-    CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1, CurrentV1,
-    GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
+    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::io::Write;
+
+/// Fails with `ENOSPC` when `configured` armed `boundary`; called by the
+/// publication sequence immediately before the boundary it names.
+#[cfg(any(test, feature = "test-seam"))]
+fn injected_io(
+    configured: Option<CheckpointFailpoint>,
+    boundary: CheckpointFailpoint,
+) -> std::io::Result<()> {
+    if configured == Some(boundary) {
+        return Err(std::io::Error::from_raw_os_error(28));
+    }
+    Ok(())
+}
 
 /// Size and SHA-256 digest produced while writing one checkpoint artifact.
 pub struct ArtifactDigest {
@@ -97,7 +100,8 @@ impl CheckpointStage {
             injected_io(self.failpoint, sync_failpoint)
                 .map_err(|e| E::from(CheckpointError::from(e)))?;
         }
-        sync_file(&file).map_err(|e| E::from(e))?;
+        file.sync_all()
+            .map_err(|e| E::from(CheckpointError::from(e)))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
 }
@@ -204,14 +208,14 @@ pub fn commit_publication(
     let mut mf = create_file(&staging, MANIFEST_FILE)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::ManifestWrite)?;
-    write_file(&mut mf, &manifest_bytes)?;
+    mf.write_all(&manifest_bytes)?;
     mf.flush()?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::ManifestSync)?;
-    sync_file(&mf)?;
+    mf.sync_all()?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::StageSync)?;
-    sync_checkpoint_dir(&staging)?;
+    sync_dir(&staging)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
     #[cfg(any(
@@ -220,10 +224,10 @@ pub fn commit_publication(
         target_os = "android",
         target_os = "redox"
     ))]
-    rename_generation(&root, &paths.staging, &paths.final_dir)?;
+    root.rename_noreplace(&paths.staging, &paths.final_dir)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRootSync)?;
-    sync_root(&root)?;
+    root.sync()?;
     let reference = super::CheckpointReference {
         generation,
         manifest_sha256: Sha256::digest(&manifest_bytes).into(),
@@ -233,23 +237,23 @@ pub fn commit_publication(
         version: CURRENT_VERSION,
         generation,
         directory: paths.directory.clone(),
-        manifest_sha256: super::format::hex_encode(&reference.manifest_sha256),
+        manifest_sha256: bitcoin_rs_primitives::encode::hex_encode(&reference.manifest_sha256),
     };
     let current_bytes = serde_json::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentTempWrite)?;
-    write_file(&mut cf, &current_bytes)?;
+    cf.write_all(&current_bytes)?;
     cf.flush()?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentTempSync)?;
-    sync_file(&cf)?;
+    cf.sync_all()?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentRename)?;
-    rename_current(&root, &paths.current_temp)?;
+    root.rename(&paths.current_temp, CURRENT_FILE)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentRootSync)?;
-    sync_root(&root)?;
+    root.sync()?;
     if matches!(retention, super::CheckpointRetention::Replace) {
         cleanup_after_publication(&root, Some(&paths.directory));
     }

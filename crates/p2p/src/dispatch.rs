@@ -581,12 +581,10 @@ mod tests {
     use crate::peer::{Peer, PeerState};
     use crate::wire::{Message, PeerError};
 
-    fn block_payload_bytes(block: &Block) -> bytes::Bytes {
-        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block))
-    }
-
     fn block_payload(block: &Block) -> Message {
-        Message::BlockPayload(block_payload_bytes(block))
+        Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
+            block,
+        )))
     }
 
     #[derive(Default)]
@@ -655,7 +653,7 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(Message::BlockPayload(block_payload_bytes(found)))?;
+                serve(block_payload(found))?;
             }
             Ok(outcome)
         }
@@ -1099,7 +1097,7 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(Message::BlockPayload(block_payload_bytes(found)))?;
+                serve(block_payload(found))?;
             }
             Ok(outcome)
         }
