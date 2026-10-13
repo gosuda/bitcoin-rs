@@ -57,7 +57,7 @@ fn dispatch_get(
             return response;
         }
     }
-    public::get(handler, ctx, path, query)
+    public::get(ctx, path)
 }
 
 /// Routes Esplora raw-transaction broadcast and mempool-backend POSTs.
