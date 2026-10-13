@@ -1,12 +1,6 @@
 //! Deletion of historical block bodies and undo records, once the active
 //! chain no longer needs them.
 //!
-//! This lives in `storage` rather than in a crate of its own (issue #164)
-//! because it is a retention policy over the rows this crate already owns.
-//! Its former crate declared `bitcoin-rs-utxo`, `bitcoin-rs-chain` and
-//! `bitcoin` as dependencies and referenced none of them: the only things it
-//! ever touched were this crate and `Hash256`.
-//!
 //! [`crate::pruning::stage_block_and_undo_prune`] is the main entry point. It stages
 //! block-body and undo-row deletion together with prune-height metadata into
 //! one caller-owned atomic batch, so node wiring commits them in a single
@@ -27,7 +21,7 @@
 //! Three prune meanings stay separate. The *requested* height is operator
 //! intent (`node:pruneheight`). The *effective* line is that intent folded
 //! with reorg safety, live retention, and the byte target. The
-//! [`ExecutedFrontier`] (`node:prune_executed`) is the durable, monotonic
+//! [`crate::pruning::ExecutedFrontier`] (`node:prune_executed`) is the durable, monotonic
 //! fact of what a committed pass deleted, written in the same batch as its
 //! deletions: it is what a restart reconstructs and what refuses a lease,
 //! and no consumer infers it from the intent line.
@@ -35,11 +29,6 @@
 //! [`crate::pruning::PrunePolicy`] carries no behaviour of its own: the node builds one from
 //! configuration and hands it in, which is the policy/mechanism split this
 //! module keeps.
-//!
-//! Note that [`crate::pruning::block_body_key`] and [`crate::pruning::BLOCK_DATA_CF`] are not only pruning
-//! concerns -- they are the block-body key schema, and the node reads bodies
-//! through them on the ordinary path. That is the sharper reason this is a
-//! storage module: the schema was living in the crate that deletes rows.
 
 use alloc::sync::Arc;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
@@ -51,16 +40,14 @@ mod block_pruner;
 mod lease;
 /// Pruning policy shapes matching Bitcoin Core semantics.
 mod policy;
-/// Undo-data pruning over persisted undo rows.
-mod undo_pruner;
 
+pub use crate::undo::block_undo_key;
 pub use block_pruner::{BLOCK_DATA_CF, block_body_key};
 pub use lease::{
     HistoryAccess, HistoryLease, HistoryUnavailable, MandatoryRetention, PruneReservation,
     RetentionBudget, RetentionError, RetentionLease, RetentionRegistry,
 };
 pub use policy::PrunePolicy;
-pub use undo_pruner::block_undo_key;
 
 use crate::{BufferedWriteBatch, StorageError};
 use thiserror::Error;
@@ -207,8 +194,8 @@ impl ExecutedFrontier {
         )?;
         let undo = block_pruner::lowest_stored_height(
             store,
-            undo_pruner::BLOCK_UNDO_CF,
-            undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
+            crate::ColumnFamily::UndoData,
+            crate::undo::BLOCK_UNDO_PREFIX_BYTES,
         )?;
         let frontier = match (bodies, undo) {
             (Some(bodies), Some(undo)) => bodies.max(undo),
@@ -373,8 +360,8 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     let undo = block_pruner::prune_prefixed_rows_into_batch(
         store,
         batch,
-        undo_pruner::BLOCK_UNDO_CF,
-        undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
+        crate::ColumnFamily::UndoData,
+        crate::undo::BLOCK_UNDO_PREFIX_BYTES,
         prune_line,
         policy,
     )?;

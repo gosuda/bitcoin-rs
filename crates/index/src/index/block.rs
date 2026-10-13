@@ -47,9 +47,9 @@ impl SpentCoinScripts for NoSpentScripts {
 /// Mirrors `bitcoin_rs_consensus::MAX_SCRIPT_SIZE` as applied by the node's
 /// `build_utxo_changes`: outputs with `is_op_return()` or a script longer than
 /// this never enter the UTXO set, so they must never enter the Live view
-/// either -- #225 requires the spendability predicate to match authoritative
-/// UTXO admission exactly. Duplicated as a literal because this crate does not
-/// depend on the consensus crate; the node crate asserts the two are equal.
+/// either -- the spendability predicate matches authoritative UTXO admission
+/// exactly. Duplicated as a literal because this crate does not depend on the
+/// consensus crate; the node crate asserts the two are equal.
 pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
 
 /// Derives the capability-selected rows of one serialized block body.
@@ -292,9 +292,9 @@ pub(super) fn is_op_return_script(script: &[u8]) -> bool {
 /// PRE: `script` is one output's `script_pubkey` bytes.
 /// POST: `Some` exactly when authoritative UTXO admission accepts the output.
 /// INVARIANT: This predicate mirrors `build_utxo_changes`, which skips
-/// `is_op_return()` and scripts longer than `MAX_LIVE_SCRIPT_SIZE`. #225
-/// requires the spendability predicate to match authoritative UTXO admission
-/// exactly, so a live row never points at a coin no lookup can resolve.
+/// `is_op_return()` and scripts longer than `MAX_LIVE_SCRIPT_SIZE`. The
+/// spendability predicate matches authoritative UTXO admission exactly, so a
+/// live row never points at a coin no lookup can resolve.
 fn live_admission(script: &[u8]) -> Option<ScriptHash> {
     let admitted = !is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE;
     admitted.then(|| ScriptHash::from_script_bytes(script))

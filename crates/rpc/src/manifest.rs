@@ -1,7 +1,7 @@
 //! Machine-readable compatibility manifest for every external surface this
 //! node exposes, declared against Bitcoin Core 31.x.
 //!
-//! [`MANIFEST`] projects the single [`crate::registry::REGISTRY`] table,
+//! [`manifest::MANIFEST`] projects the single `crate::registry::REGISTRY` table,
 //! which is the source of truth for the dispatcher: a JSON-RPC method
 //! answers only when a non-`Unimplemented` RPC row carries its name, so the
 //! manifest cannot drift from what actually dispatches. The coverage gate
@@ -11,14 +11,14 @@
 //! from this table.
 //!
 //! Row semantics:
-//! - `status`: [`Status::Supported`] is differentially verified against the
+//! - `status`: [`manifest::Status::Supported`] is differentially verified against the
 //!   pinned reference and requires `reference.differential_harness` in
-//!   `crates/rpc/core-compat.toml`; [`Status::Deviation`] ships with a
+//!   `crates/rpc/core-compat.toml`; [`manifest::Status::Deviation`] ships with a
 //!   recorded difference (the `notes` field cites the source file carrying
-//!   it); [`Status::ImplementedUnverified`] ships without a comparison
-//!   against the pinned reference; [`Status::Extension`] has no Core
-//!   counterpart; [`Status::Disabled`] is reserved for parameter-level
-//!   refusal with a stable error (no row uses it); [`Status::Unimplemented`]
+//!   it); [`manifest::Status::ImplementedUnverified`] ships without a comparison
+//!   against the pinned reference; [`manifest::Status::Extension`] has no Core
+//!   counterpart; [`manifest::Status::Disabled`] is reserved for parameter-level
+//!   refusal with a stable error (no row uses it); [`manifest::Status::Unimplemented`]
 //!   is Core surface this node does not expose.
 //! - `feature`: cargo feature that must be active for the surface to exist
 //!   (empty for always-compiled surfaces).
@@ -147,7 +147,7 @@ impl Status {
 /// POST: the constant is the exact bytes of `crates/rpc/core-compat.toml`
 ///   at compile time — inside the package so `cargo package` stays whole.
 /// INVARIANT: it carries no external-surface row arrays; REGISTRY in
-///   [`crate::registry`] is the only owner of surface claims.
+///   `crate::registry` is the only owner of surface claims.
 pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 /// One declared surface.
@@ -193,7 +193,7 @@ pub(crate) const NO_WALLET: &str =
 
 /// Every external surface, declared against Core 31.x.
 ///
-/// Projection of the single [`crate::registry::REGISTRY`] table: each row's
+/// Projection of the single `crate::registry::REGISTRY` table: each row's
 /// compat metadata without the dispatch arm. The registry is the source of
 /// truth; this const exists so existing consumers that take `&[Entry]`
 /// compile unmodified.
@@ -201,7 +201,7 @@ pub use crate::registry::MANIFEST;
 
 /// Rows of one transport kind, in table order.
 ///
-/// Projects from [`crate::registry::REGISTRY`], yielding the [`Entry`] view
+/// Projects from `crate::registry::REGISTRY`, yielding the [`Entry`] view
 /// of each row.
 pub fn entries_of_kind(kind: SurfaceKind) -> impl Iterator<Item = &'static Entry> {
     crate::registry::REGISTRY
@@ -231,7 +231,7 @@ const SECTIONS: [Status; 6] = [
     Status::Unimplemented,
 ];
 
-/// Renders `docs/rpc-reference.md` deterministically from [`crate::registry::REGISTRY`].
+/// Renders `docs/rpc-reference.md` deterministically from `crate::registry::REGISTRY`.
 ///
 /// The output is a pure function of the table: fixed section order, fixed row
 /// order, and a counts footer, so a one-row change always changes the bytes

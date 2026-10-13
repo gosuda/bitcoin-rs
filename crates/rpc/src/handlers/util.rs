@@ -13,8 +13,8 @@ use corepc_types::v31;
 
 use bitcoin::hex::DisplayHex as _;
 
-use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
+use crate::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
 use crate::handlers::{
     ensure_at_most_params, params_array, required_i64, required_str, required_u64,

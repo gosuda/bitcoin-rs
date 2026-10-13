@@ -398,7 +398,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
 
 #[test]
 fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
-    // Issue #1091 regression: a well-formed next-expected body staged but
+    // Regression: a well-formed next-expected body staged but
     // never applied used to hold `apply_side_busy` (and with it stall
     // conviction, pending-timeout conviction, and the cold-front hedge)
     // forever. The 60s staged-body prune does not rescue the window — it

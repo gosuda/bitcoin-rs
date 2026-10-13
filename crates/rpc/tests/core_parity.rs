@@ -1,4 +1,4 @@
-//! Issue #78 Core-parity vertical gate: the real authenticated loopback
+//! Core-parity vertical gate: the real authenticated loopback
 //! server over a real regtest node, replaying the checked-in Core 31.1
 //! corpus under structural comparison.
 //!
@@ -346,7 +346,7 @@ fn decoded_success(
         .ok_or_else(|| support::fail(format!("{method} answered no result")).into())
 }
 
-/// The live bug (issue #1132): an explorer's status read waited on the
+/// Regression test: an explorer's status read waited on the
 /// whole-chain transition, so requests hung while a block was applying.
 /// `getblockchaininfo` must answer from the last complete applied publication
 /// with the barrier held.

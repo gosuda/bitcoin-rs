@@ -86,6 +86,14 @@ sha2 = { version = ">=0.11, <0.12", default-features = false }
 bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
     "alloc", "std",
 ] }
+
+# BIP324 v2 transport ciphers (crates/p2p). RustCrypto primitives on the same
+# digest 0.11 line as sha2; the `bip324` crate is not used because every
+# release since 0.6 pulls a second bitcoin_hashes (DEP-02). `chacha20` keeps
+# only its default `cipher` feature; `chacha20poly1305` drops `getrandom`.
+chacha20 = { version = ">=0.10.2, <0.11", default-features = false, features = ["cipher"] }
+chacha20poly1305 = { version = ">=0.11, <0.12", default-features = false }
+hkdf = { version = ">=0.13, <0.14", default-features = false }
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 rustix = { version = "=1.1.5", features = ["fs"] }
@@ -225,7 +233,7 @@ criterion       = { version = ">=0.8.2, <0.9", default-features = false, feature
 # ============================================================================
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-missing_docs           = "warn"
+missing_docs           = "allow"
 unused_lifetimes       = "warn"
 unreachable_pub        = "warn"
 

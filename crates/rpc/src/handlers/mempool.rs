@@ -7,8 +7,8 @@ use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{OutPoint, consensus_bytes};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use crate::compat::convert::{i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic};
 use crate::context::Context;
+use crate::convert::{i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic};
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, parse_txid, required_str};
 use corepc_types::v31;
@@ -33,7 +33,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         &pool,
         policy.incremental_relay_fee_sat_per_kvb,
     );
-    typed_to_sonic(&v31::GetMempoolInfo {
+    let info = v31::GetMempoolInfo {
         loaded: true,
         size: i64_saturated(stats.txs),
         bytes: i64_saturated(stats.bytes),
@@ -51,16 +51,21 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         limit_cluster_count: i64::from(policy.cluster_count),
         limit_cluster_size: i64_saturated(policy.cluster_size_vbytes),
         optimal: policy.optimal,
-    })
+    };
+    drop(pool);
+    typed_to_sonic(&info)
 }
 
 pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
-    let pool = ctx.mempool.gateway.read();
-    let entry = pool
-        .entry_by_txid(&txid)
-        .ok_or(RpcError::NotFound("transaction not in mempool"))?;
-    typed_to_sonic(&v31::GetMempoolEntry(mempool_entry_typed(entry, &pool)))
+    let response = {
+        let pool = ctx.mempool.gateway.read();
+        let entry = pool
+            .entry_by_txid(&txid)
+            .ok_or(RpcError::NotFound("transaction not in mempool"))?;
+        v31::GetMempoolEntry(mempool_entry_typed(entry, &pool))
+    };
+    typed_to_sonic(&response)
 }
 
 /// Resolve all requested outpoints against one mempool generation. Copy only
@@ -252,24 +257,22 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }
     let pool = ctx.mempool.gateway.read();
     if verbose {
-        let mut map = BTreeMap::new();
-        for txid in pool.iter_txids() {
-            if let Some(entry) = pool.entry_by_txid(&txid) {
-                map.insert(txid.to_string(), mempool_entry_typed(entry, &pool));
-            }
-        }
-        return typed_to_sonic(&v31::GetRawMempoolVerbose(map));
+        let response = v31::GetRawMempoolVerbose(mempool_entries_typed(pool.iter_entries(), &pool));
+        drop(pool);
+        return typed_to_sonic(&response);
     }
 
-    let txids: Vec<String> = pool
-        .iter_txids()
+    let txids = pool.iter_txids();
+    let sequence = pool.sequence_number();
+    drop(pool);
+    let txids = txids
         .into_iter()
         .map(|txid| txid.to_string())
-        .collect();
+        .collect::<Vec<_>>();
     if include_sequence {
         return typed_to_sonic(&v31::GetRawMempoolSequence {
             txids,
-            mempool_sequence: pool.sequence_number(),
+            mempool_sequence: sequence,
         });
     }
     typed_to_sonic(&v31::GetRawMempool(txids))
@@ -278,23 +281,55 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let verbose = optional_bool(params, 1, false)?;
-    let pool = ctx.mempool.gateway.read();
-    let Some(id) = pool.entry_id_by_txid(&txid) else {
-        return Err(RpcError::NotFound("transaction not in mempool"));
+    let txids = {
+        let pool = ctx.mempool.gateway.read();
+        let Some(id) = pool.entry_id_by_txid(&txid) else {
+            return Err(RpcError::NotFound("transaction not in mempool"));
+        };
+        let related_ids = pool.ancestor_ids_for_entry(id);
+        if verbose {
+            let response = v31::GetMempoolAncestorsVerbose(mempool_entries_typed(
+                related_ids.iter().filter_map(|id| pool.entry(*id)),
+                &pool,
+            ));
+            drop(pool);
+            return typed_to_sonic(&response);
+        }
+        related_ids
+            .iter()
+            .filter_map(|id| pool.entry(*id))
+            .map(|entry| entry.txid)
+            .collect::<Vec<_>>()
     };
-    let related_ids = pool.ancestor_ids_for_entry(id);
-    render_ancestors(&pool, &related_ids, verbose)
+    let names = txids.into_iter().map(|txid| txid.to_string()).collect();
+    typed_to_sonic(&v31::GetMempoolAncestors(names))
 }
 
 pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let verbose = optional_bool(params, 1, false)?;
-    let pool = ctx.mempool.gateway.read();
-    let Some(id) = pool.entry_id_by_txid(&txid) else {
-        return Err(RpcError::NotFound("transaction not in mempool"));
+    let txids = {
+        let pool = ctx.mempool.gateway.read();
+        let Some(id) = pool.entry_id_by_txid(&txid) else {
+            return Err(RpcError::NotFound("transaction not in mempool"));
+        };
+        let related_ids = pool.descendant_ids_for_entry(id);
+        if verbose {
+            let response = v31::GetMempoolDescendantsVerbose(mempool_entries_typed(
+                related_ids.iter().filter_map(|id| pool.entry(*id)),
+                &pool,
+            ));
+            drop(pool);
+            return typed_to_sonic(&response);
+        }
+        related_ids
+            .iter()
+            .filter_map(|id| pool.entry(*id))
+            .map(|entry| entry.txid)
+            .collect::<Vec<_>>()
     };
-    let related_ids = pool.descendant_ids_for_entry(id);
-    render_descendants(&pool, &related_ids, verbose)
+    let names = txids.into_iter().map(|txid| txid.to_string()).collect();
+    typed_to_sonic(&v31::GetMempoolDescendants(names))
 }
 
 fn mempool_entry_typed(
@@ -321,7 +356,7 @@ fn mempool_entry_typed(
         .collect::<Vec<_>>();
     spentby.sort();
     spentby.dedup();
-    let (descendantcount, ancestorcount) = entry_id.map_or((1, 1), |id| {
+    let (descendant_count, ancestor_count) = entry_id.map_or((1, 1), |id| {
         (
             pool.descendant_count_inclusive(id),
             pool.ancestor_count_inclusive(id),
@@ -344,9 +379,9 @@ fn mempool_entry_typed(
         weight: i64_saturated(entry.weight),
         time: i64_saturated(entry.time),
         height: i64::from(entry.height),
-        descendant_count: i64::from(descendantcount),
+        descendant_count: i64::from(descendant_count),
         descendant_size: i64_saturated(entry.descendant_size),
-        ancestor_count: i64::from(ancestorcount),
+        ancestor_count: i64::from(ancestor_count),
         ancestor_size: i64_saturated(entry.ancestor_size),
         chunk_weight: i64_saturated(entry.weight),
         wtxid: entry.wtxid.to_string(),
@@ -358,48 +393,13 @@ fn mempool_entry_typed(
     }
 }
 
-fn render_ancestors(
+fn mempool_entries_typed<'a>(
+    entries: impl Iterator<Item = &'a MempoolEntry>,
     pool: &bitcoin_rs_mempool::Mempool,
-    ids: &[bitcoin_rs_mempool::EntryId],
-    verbose: bool,
-) -> Result<Value, RpcError> {
-    if verbose {
-        let mut map = BTreeMap::new();
-        for id in ids {
-            if let Some(entry) = pool.entry(*id) {
-                map.insert(entry.txid.to_string(), mempool_entry_typed(entry, pool));
-            }
-        }
-        return typed_to_sonic(&v31::GetMempoolAncestorsVerbose(map));
-    }
-    let names = ids
-        .iter()
-        .filter_map(|id| pool.entry(*id))
-        .map(|entry| entry.txid.to_string())
-        .collect::<Vec<_>>();
-    typed_to_sonic(&v31::GetMempoolAncestors(names))
-}
-
-fn render_descendants(
-    pool: &bitcoin_rs_mempool::Mempool,
-    ids: &[bitcoin_rs_mempool::EntryId],
-    verbose: bool,
-) -> Result<Value, RpcError> {
-    if verbose {
-        let mut map = BTreeMap::new();
-        for id in ids {
-            if let Some(entry) = pool.entry(*id) {
-                map.insert(entry.txid.to_string(), mempool_entry_typed(entry, pool));
-            }
-        }
-        return typed_to_sonic(&v31::GetMempoolDescendantsVerbose(map));
-    }
-    let names = ids
-        .iter()
-        .filter_map(|id| pool.entry(*id))
-        .map(|entry| entry.txid.to_string())
-        .collect::<Vec<_>>();
-    typed_to_sonic(&v31::GetMempoolDescendants(names))
+) -> BTreeMap<String, v31::MempoolEntry> {
+    entries
+        .map(|entry| (entry.txid.to_string(), mempool_entry_typed(entry, pool)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -756,6 +756,16 @@ mod tests {
             array.first().and_then(|value| value.as_str()),
             Some(child_txid.as_str())
         );
+        let verbose = getmempooldescendants(&ctx, &json!([parent_txid.to_string(), true]))?;
+        let child_entry = getmempoolentry(&ctx, &json!([child_txid]))?;
+        assert_eq!(verbose.get(&child_txid), Some(&child_entry));
+        let all = getrawmempool(&ctx, &json!([true]))?;
+        assert_eq!(all.get(&child_txid), Some(&child_entry));
+        assert_eq!(
+            child_entry.get("depends"),
+            Some(&json!([parent_txid.to_string()]))
+        );
+        assert_eq!(child_entry.get("ancestorcount"), Some(&json!(2)));
         Ok(())
     }
 
@@ -783,6 +793,14 @@ mod tests {
             array.first().and_then(|value| value.as_str()),
             Some(parent_txid_string.as_str())
         );
+        let verbose = getmempoolancestors(&ctx, &json!([child_txid.to_string(), true]))?;
+        let parent_entry = getmempoolentry(&ctx, &json!([parent_txid_string]))?;
+        assert_eq!(verbose.get(&parent_txid_string), Some(&parent_entry));
+        assert_eq!(
+            parent_entry.get("spentby"),
+            Some(&json!([child_txid.to_string()]))
+        );
+        assert_eq!(parent_entry.get("descendantcount"), Some(&json!(2)));
         Ok(())
     }
 

@@ -34,7 +34,6 @@ pub fn check_sequence_lock(
         let earliest_time = prevout_mtp.saturating_add(
             relative_intervals.saturating_mul(SEQUENCE_LOCKTIME_GRANULARITY_SECONDS),
         );
-        // Time-based relative lock remains unsatisfied at the candidate MTP.
         return Err(ConsensusError::Bip {
             bip: "BIP68",
             reason: format!(
@@ -43,7 +42,6 @@ pub fn check_sequence_lock(
         });
     }
     let relative_blocks = sequence & SEQUENCE_LOCKTIME_MASK;
-    // Height-based relative lock remains unsatisfied at the candidate height.
     Err(ConsensusError::Bip {
         bip: "BIP68",
         reason: format!(

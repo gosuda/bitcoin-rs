@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn finalize_byte_identical_after_optimized_multiply_chain() {
-        // Confirms the optimized path also matches the ruint oracle through
+        // Confirms the optimized path also matches the ruint reference through
         // finalize() across a seeded operation chain.
         let mut rng = SplitMix64::new(0xf1_0a11_2e57_3072);
         for _ in 0..2_000 {

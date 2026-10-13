@@ -16,8 +16,8 @@ use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
+use crate::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -87,11 +87,12 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         return render_raw_transaction(ctx, tx, verbose, Some(&record), true);
     }
 
-    {
+    let pooled_tx = {
         let pool = ctx.mempool.gateway.read();
-        if let Some(entry) = pool.entry_by_txid(&txid) {
-            return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None, false);
-        }
+        pool.entry_by_txid(&txid).map(|entry| Arc::clone(&entry.tx))
+    };
+    if let Some(tx) = pooled_tx {
+        return render_raw_transaction(ctx, tx.as_ref(), verbose, None, false);
     }
     if let Some(derived_index) = ctx.indexes.derived_index.as_ref() {
         let tx = derived_index.transaction(&txid).map_err(RpcError::from)?;
@@ -178,15 +179,19 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     let outpoint = OutPoint::new(txid, vout_u32);
 
     if include_mempool {
-        let pool = ctx.mempool.gateway.read();
-        if pool.is_outpoint_spent(&outpoint) {
-            return Ok(Value::new_null());
-        }
-        if let Some(entry) = pool.entry_by_txid(&txid)
+        let pooled_tx = {
+            let pool = ctx.mempool.gateway.read();
+            if pool.is_outpoint_spent(&outpoint) {
+                return Ok(Value::new_null());
+            }
+            pool.entry_by_txid(&txid)
+                .map(|entry| (Arc::clone(&entry.tx), ctx.chain.applied_hash()))
+        };
+        if let Some((tx, best_block)) = pooled_tx
             && let Ok(vout) = usize::try_from(vout_u32)
-            && let Some(output) = entry.tx.outputs.get(vout)
+            && let Some(output) = tx.outputs.get(vout)
         {
-            return txout_typed(ctx, output, 0, false, ctx.chain.applied_hash());
+            return txout_typed(ctx, output, 0, false, best_block);
         }
     }
 
@@ -888,7 +893,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    use super::getrawtransaction;
+    use super::{getrawtransaction, gettxout};
     use crate::Handler;
     use crate::context::{Context, DerivedIndexQuery, TxQueryError};
     use crate::error::RpcError;
@@ -954,6 +959,16 @@ mod tests {
 
         let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
+        let output = gettxout(&ctx, &json!([txid.to_string(), 0]))?;
+        assert_eq!(output["confirmations"], json!(0));
+        assert_eq!(output["coinbase"], json!(false));
+        assert_eq!(
+            output["bestblock"],
+            json!(ctx.chain.applied_hash().to_string())
+        );
+        assert_eq!(output["value"], json!(0.000_000_5));
+        assert!(gettxout(&ctx, &json!([txid.to_string(), 0, false]))?.is_null());
+        assert!(gettxout(&ctx, &json!([txid.to_string(), 1]))?.is_null());
         Ok(())
     }
 
@@ -1531,7 +1546,7 @@ mod tests {
         }
     }
 
-    use crate::test_support::BlockBodies;
+    use crate::context::BlockBodies;
 
     #[derive(Default)]
     struct ScriptedBodySource {

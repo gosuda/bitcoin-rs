@@ -42,11 +42,12 @@ job set.
 ## Pull-request verification
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
-against any base branch, including stacked PRs, and for pushes to `main`. Its
-jobs are `fmt`, `deny` (parallel, no workspace compile), `clippy`, and three
-test lanes (`test-crates`, `test-binary`, `test-workspace`), all parallel;
-every lane fails fast at its first failing profile, so the first actionable
-failure is not delayed behind unrelated profiles (issue #1081). Every gate
+against any base branch, including stacked PRs, on merge-group requests, and
+for pushes to `main`. PR green means fast feedback only: `fmt`, `deny`,
+`clippy`, and `test-crates` passed; `test-binary` and `test-workspace` are
+skipped. Merge-group green includes those two heavy lanes and is the
+pre-main integration signal. Main checks are post-merge evidence.
+Every lane fails fast at its first failing profile. Every gate
 command lives in [`scripts/ci-pr.sh`](scripts/ci-pr.sh) -- CI, the
 pre-commit hooks, and this guide all invoke that script, so the commands
 cannot drift:
@@ -84,6 +85,29 @@ not model properties. Benchmark evidence checks run with
 
 The [pre-commit configuration](.pre-commit-config.yaml) runs the same script,
 so local hooks are the kernel-free PR gate, not the C++ full-node lane.
+
+### Merge queue and integration contract
+
+To prevent PR-green / main-red regressions, all merges to `main` must pass
+through the GitHub merge queue. Direct merges bypassing the queue are
+disallowed for standard pull requests.
+
+The merge queue enforces the integration contract on the latest combined ref
+(`merge_group`) before updating `main`:
+- **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
+  `deny`, `clippy`, and `test-crates`; `test-binary`, `test-workspace`, and
+  kernel/native checks are skipped to keep feedback fast (<3 min).
+- **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
+  `ci-gate` strictly requires `test-binary` and `test-workspace`;
+  [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) strictly requires
+  `kernel-consensus` and `full-node-compile`.
+- **Main green (`push`)**: Post-merge historical evidence. Runs extended
+  campaigns and reference verifications in [`main.yml`](.github/workflows/main.yml).
+
+Required status checks in repository branch rulesets (`ci-gate`,
+`kernel-consensus`, `full-node-compile`) enforce this boundary, guaranteeing
+that heavy integration and production compilation checks have passed on the
+current base before `main` moves forward.
 
 The production kernel/native Clippy graph runs at the merge queue in
 [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml). Full-node tests,

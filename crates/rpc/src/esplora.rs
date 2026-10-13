@@ -172,7 +172,7 @@ mod tests {
         }
     }
 
-    use crate::test_support::BlockBodies;
+    use crate::context::BlockBodies;
 
     fn transaction(input: Option<OutPoint>, output: TxOut) -> Tx {
         Tx {
@@ -215,8 +215,7 @@ mod tests {
         fixture_merkle_root(&next)
     }
 
-    /// A native one-transaction block standing in for the network genesis the
-    /// fixtures previously pulled from the rust-bitcoin crate.
+    /// A native one-transaction block standing in for the network genesis.
     fn fixture_genesis() -> Block {
         let mut block = Block {
             header: Header {

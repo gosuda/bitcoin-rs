@@ -19,7 +19,7 @@ pub(crate) mod wait;
 
 /// Enumerates the live registry names in table order.
 ///
-/// Projects from [`crate::registry::REGISTRY`], yielding only rows with a
+/// Projects from `crate::registry::REGISTRY`, yielding only rows with a
 /// bound dispatch arm. Exposed for the manifest coverage gate
 /// (`crates/rpc/tests/manifest_coverage.rs`), which asserts set equality
 /// with the shipped manifest rows in both directions.
@@ -83,7 +83,7 @@ impl Handler {
 
     /// Dispatches one Bitcoin Core-compatible JSON-RPC method.
     ///
-    /// One lookup in [`crate::registry::REGISTRY`] answers both the method
+    /// One lookup in `crate::registry::REGISTRY` answers both the method
     /// name and its dispatch arm. The registry is generated from the
     /// compatibility manifest, so a row without a dispatch arm is a method
     /// the manifest declares but this build does not ship; it answers

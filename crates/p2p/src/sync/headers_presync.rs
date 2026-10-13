@@ -84,7 +84,7 @@ pub struct HeaderSyncResult {
     /// buffer depth has been retired.
     pub ready_headers: Vec<Header>,
     /// Whether the caller should request the next batch from this peer with
-    /// [`HeadersSyncState::next_locator`].
+    /// `HeadersSyncState::next_locator`.
     pub request_more: bool,
     /// The phase after this batch.
     pub phase: HeadersSyncPhase,
@@ -407,7 +407,7 @@ impl HeadersSyncState {
     /// POST: PRESYNC releases nothing; REDOWNLOAD releases only ordered,
     ///   commitment-verified headers whose buffer depth has been retired. A
     ///   returned `request_more` means the caller should continue this sync
-    ///   with [`Self::next_locator`]; a `Final` phase means the sync is over
+    ///   with `Self::next_locator`; a `Final` phase means the sync is over
     ///   and the state is spent.
     /// INVARIANT: returned headers are continuous, commitment-checked, and
     ///   may be admitted only by the caller's committed-phase branch.

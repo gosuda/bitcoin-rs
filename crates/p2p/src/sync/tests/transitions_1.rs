@@ -56,7 +56,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
 #[test]
 fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
     // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
-    // Regression test for the #617 shape: once a node has caught up, no
+    // Regression test: once a node has caught up, no
     // connected peer has a handshake-time start_height above its applied
     // height — every peer connected while the node was at or below the
     // tip. When a new header then extends the tip (a sendheaders

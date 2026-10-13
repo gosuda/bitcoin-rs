@@ -8,7 +8,7 @@
 //! states the source resolved, keyed by `(node_id, deployment_id)`. Because a
 //! node's state is a pure function of its ancestry, entries stay correct
 //! across branch switches; entries for permanently invalid nodes are dropped
-//! by `BlockTree::invalidate_subtree` via [`Bip9Cache::invalidate_node`].
+//! by `BlockTree::invalidate_subtree` via [`Bip9Cache::invalidate_nodes`].
 
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -42,9 +42,12 @@ impl Bip9Cache {
         self.entries.read().get(&(node_id, deployment_id)).copied()
     }
 
-    /// Removes every cached deployment state for `node_id`, keeping other
-    /// nodes' entries. Used when the node's subtree is invalidated.
-    pub(crate) fn invalidate_node(&self, node_id: NodeId) {
-        self.entries.write().retain(|(id, _), _| *id != node_id);
+    /// Removes all deployment states selected by the tree's node-indexed
+    /// invalidation bitmap in one cache scan.
+    pub(crate) fn invalidate_nodes(&self, invalid: &[bool]) {
+        self.entries.write().retain(|(id, _), _| {
+            id.index()
+                .is_none_or(|index| invalid.get(index) != Some(&true))
+        });
     }
 }

@@ -29,7 +29,7 @@ pub(super) struct NodeStorage {
     /// Composition distributes it: chainstate receives the mandatory
     /// acquisition capability, the prune service and the optional index
     /// history receive what their role requires. Chainstate is not a
-    /// broker for it (#1151).
+    /// broker for it.
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }

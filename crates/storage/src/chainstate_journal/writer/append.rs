@@ -87,7 +87,7 @@ impl<S: KvStore> JournalWriter<S> {
             return self.fail_append(height, error);
         }
         #[cfg(any(test, feature = "test-seam"))]
-        if let Err(error) = self.fail_segment_append() {
+        if let Err(error) = self.failpoint(JournalWriterFailpoint::SegmentAppend) {
             return self.fail_append(height, error);
         }
 

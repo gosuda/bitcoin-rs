@@ -1,4 +1,4 @@
-//! Executor-level body/header binding interaction tests (issue #1070).
+//! Executor-level body/header binding interaction tests.
 
 use super::*;
 use crate::InboundBlock;

@@ -124,6 +124,16 @@ expiry.
 - Handshake, the connection reader, and the writer-thread clone share one
   `PeerCounters`. Timeouts stay with the listener: handshake and the message
   loop use different poll intervals.
+- A poll timeout never loses inbound bytes. `Peer::read_message` reads through
+  the peer's `wire::V1Receiver`, which keeps a partial header or payload across
+  `TimedOut`/`WouldBlock`, so the retrying handshake and message loops continue
+  the same frame instead of resuming mid-frame. The retained buffer holds only
+  received bytes: a stalled frame never pins the declared payload length.
+  Proof: `wire::tests::receiver_resumes_a_frame_split_by_poll_timeouts`,
+  `wire::tests::receiver_retains_only_received_bytes_for_a_stalled_frame`,
+  `wire::tests::receiver_restarts_at_a_frame_boundary_after_a_rejected_frame`,
+  `handshake::tests::inbound_handshake_resumes_frames_split_by_poll_timeouts`,
+  `peer::tests::socket_read_continues_a_frame_that_outlasts_the_poll_timeout`.
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 
@@ -463,7 +473,50 @@ lost-continuity break, and the disconnects every other failure costs the
 connection. `crates/p2p/benches/headers_presync.rs` measures the hashing
 bound the first pass pays per page.
 
+### `P2P-11`: BIP324 v2 transport negotiation
+
+- **Owner**: `crates/p2p/src/transport.rs` owns negotiation and the split
+  transport halves; `crates/p2p/src/bip324.rs` owns the key schedule, the
+  ciphers, the handshake state machine, the packet reader, and the message
+  type encoding.
+- **Off by default.** With `v2transport` off
+  (`P2pServiceConfig::v2_transport`), every connection is v1 and the node does
+  not advertise `NODE_P2P_V2`. With it on, the node advertises `NODE_P2P_V2`.
+- **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
+  `version` header under this node's magic hands those bytes to the v1
+  decoder, a v1 `version` header under another magic is refused, and anything
+  else is a v2 key, answered with this node's key and garbage. Nothing is sent
+  before v1 is ruled out.
+- **Outbound**: with v2 on, a manual connection, and an automatic one to an
+  address whose last known services include `NODE_P2P_V2`, start v2. When the
+  peer closes without sending a byte, the dial retries once over v1; the
+  unanswered attempt is neither a failure count nor misbehavior.
+- **One deadline**: the transport and version handshakes share the 60 s
+  handshake deadline, and a peer is never ready before its transport
+  handshake completes.
+- **Split halves**: the connection thread keeps the receive half and the
+  writer thread takes the send half when the session starts. Lease budgets
+  stay in v1 frame lengths for either transport; `CountingStream` counts the
+  bytes actually sent and received.
+- **Failures**: a transport error (no garbage terminator within the limit, an
+  authentication failure, an oversized packet) ends the connection without
+  discouraging the peer, because BIP324 does not authenticate peers. A
+  malformed message inside an authenticated packet keeps the v1 misbehavior
+  rules. A message of an empty or undefined type is dropped without
+  disconnecting.
+- **Bounds**: garbage is at most 4095 bytes; the terminator scan reads only up
+  to the terminator's earliest possible end; contents above 1 + 12 +
+  4,000,000 bytes are refused before their body is read, and a v2 payload is
+  sent only up to 4,000,000 bytes; a stalled packet retains only the bytes it
+  received.
+
 ## Live gaps
+
+- **BIP324 default and interoperability**: `v2transport` stays off until a
+  live Bitcoin Core 31.1 run records v2 in both directions (#1503), and
+  `docs/policies/p2p-compatibility.md` still lists BIP324 as unsupported.
+  With v2 off, a peer that opens with a v2 key is read as a v1 header for
+  another network and treated as misbehavior, where Core only disconnects.
 
 - **Peer lifecycle boundary**: Header-request planning and getdata fan-out
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
@@ -527,6 +580,13 @@ bound the first pass pays per page.
   constructor owns `TCP_NODELAY` (P2P-04).
 - `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
   and outbound session sockets set `TCP_NODELAY` (`P2P-04`).
+- `crates/p2p/src/listener/v2_transport_tests.rs`: v2 negotiation over
+  loopback sockets in both directions, with the remote message loop answering
+  over the session; v1 detection on a v2 listener; the single v1 retry
+  against a v1-only listener; and the handshake deadline against a silent
+  peer. The `crates/p2p/src/bip324` unit tests pin the BIP vectors, the
+  handshake misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet
+  bounds (`P2P-11`).
 - `crates/p2p/src/handshake.rs` test
   `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
   handshake writes framed version, feature, and verack bytes once and reaches

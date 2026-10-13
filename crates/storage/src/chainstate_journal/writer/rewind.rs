@@ -8,6 +8,8 @@ use super::ForkCursor;
 use super::HeadMarker;
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
+use super::JournalWriterFailpoint;
 use super::WriterState;
 use super::parse_segment_name;
 use super::segment_name;
@@ -154,7 +156,7 @@ impl<S: KvStore> JournalWriter<S> {
 
     pub(super) fn truncate_after(&self, cursor: ForkCursor) -> Result<(), JournalWriterError> {
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_rewind_truncate()?;
+        self.failpoint(JournalWriterFailpoint::RewindTruncate)?;
         let name = segment_name(cursor.generation);
         match self
             .dir

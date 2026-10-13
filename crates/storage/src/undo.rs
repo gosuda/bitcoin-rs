@@ -5,8 +5,23 @@ use std::sync::Arc;
 
 use bitcoin_rs_primitives::Hash256;
 
-use crate::pruning::block_undo_key;
 use crate::{ColumnFamily, KvStore, StorageError};
+
+pub(crate) const BLOCK_UNDO_PREFIX: u8 = b'u';
+pub(crate) const BLOCK_UNDO_PREFIX_BYTES: &[u8] = b"u";
+const HEIGHT_START: usize = 1;
+const HEIGHT_END: usize = 5;
+const KEY_LEN: usize = 37;
+
+/// Builds the canonical pruning key for stored undo data for one block.
+#[must_use]
+pub fn block_undo_key(height: u32, hash: Hash256) -> [u8; KEY_LEN] {
+    let mut key = [0_u8; KEY_LEN];
+    key[0] = BLOCK_UNDO_PREFIX;
+    key[HEIGHT_START..HEIGHT_END].copy_from_slice(&height.to_be_bytes());
+    key[HEIGHT_END..].copy_from_slice(hash.as_byte_array());
+    key
+}
 
 /// Storage for per-block UTXO undo records.
 ///

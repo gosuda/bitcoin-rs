@@ -4,6 +4,8 @@ use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
+use super::JournalWriterFailpoint;
 use super::segment_name;
 use crate::KvStore;
 use std::io::Write;
@@ -30,7 +32,7 @@ impl<S: KvStore> JournalWriter<S> {
 
     pub(super) fn write_head_atomic(&self, marker: &HeadMarker) -> Result<(), JournalWriterError> {
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_head_temp_write()?;
+        self.failpoint(JournalWriterFailpoint::HeadTempWrite)?;
         {
             let mut options = cap_std::fs::OpenOptions::new();
             options.write(true).create(true);
@@ -38,14 +40,14 @@ impl<S: KvStore> JournalWriter<S> {
             tmp.set_len(0)?;
             tmp.write_all(&marker.serialize()?)?;
             #[cfg(any(test, feature = "test-seam"))]
-            self.fail_head_temp_sync()?;
+            self.failpoint(JournalWriterFailpoint::HeadTempSync)?;
             tmp.sync_all()?;
         }
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_head_rename()?;
+        self.failpoint(JournalWriterFailpoint::HeadRename)?;
         self.dir.rename("head.json.tmp", &self.dir, "head.json")?;
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_head_dir_sync()?;
+        self.failpoint(JournalWriterFailpoint::HeadDirSync)?;
         crate::checkpoint::fs::sync_dir(&self.dir)?;
         self.record_size_metric();
         Ok(())
@@ -98,7 +100,7 @@ impl<S: KvStore> JournalWriter<S> {
         )?;
 
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_storage_flush()?;
+        self.failpoint(JournalWriterFailpoint::StorageFlush)?;
         let flush_started = Instant::now();
         let flush_result = self
             .store
@@ -109,7 +111,7 @@ impl<S: KvStore> JournalWriter<S> {
         flush_result?;
 
         #[cfg(any(test, feature = "test-seam"))]
-        self.fail_segment_sync()?;
+        self.failpoint(JournalWriterFailpoint::SegmentSync)?;
         let name = segment_name(self.segment_gen);
         let file = self
             .dir

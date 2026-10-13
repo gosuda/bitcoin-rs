@@ -197,7 +197,7 @@ impl RetentionBudget {
 ///
 /// A raw `Option` from a byte read is not a policy answer, because absence
 /// has several causes. This is the vocabulary the owner boundary uses:
-/// [`RetentionRegistry::history_from`] answers permanence, and while a
+/// `RetentionRegistry::history_from` answers permanence, and while a
 /// [`HistoryLease`] is live the owner guarantees no row at or above its
 /// floor is deleted, so a read that returns nothing under that grant is
 /// `Missing`. A consumer
@@ -343,7 +343,7 @@ impl RetentionRegistry {
     /// POST: optional pins that lag `policy_line` by more than their budget
     /// are expired first, so a stalled consumer cannot clamp the line
     /// forever; the surviving floors are then folded into the reserved line,
-    /// and [`Self::acquire`] and [`Self::history_from`] refuse floors below
+    /// and [`Self::acquire`] and `Self::history_from` refuse floors below
     /// it until the reservation commits or aborts.
     ///
     /// INVARIANT: the executed prune line advances only through
@@ -438,7 +438,7 @@ impl RetentionRegistry {
     /// Closes the history boundary: later requests answer
     /// [`HistoryUnavailable::Shutdown`] and no new pin is granted.
     ///
-    /// POST: once this returns, [`Self::history_from`] refuses every request.
+    /// POST: once this returns, `Self::history_from` refuses every request.
     /// The flag is stored under `inner` so a request that races the store is
     /// serialized: it either granted before the boundary closed or it sees
     /// the flag on entry and refuses.
@@ -469,7 +469,7 @@ impl RetentionRegistry {
 /// [`RetentionRegistry`]'s owner and its composition root. A chain transition
 /// only ever needs to pin the rows it is about to re-read, so it receives this
 /// capability rather than the registry itself: there is no path from here to
-/// reserving, committing, or closing retained history (#1151).
+/// reserving, committing, or closing retained history.
 #[derive(Clone)]
 pub struct MandatoryRetention {
     registry: Arc<RetentionRegistry>,

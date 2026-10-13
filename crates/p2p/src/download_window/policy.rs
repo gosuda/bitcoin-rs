@@ -41,9 +41,8 @@ pub(super) const NODE_NETWORK_LIMITED_MIN_BLOCKS: u32 = 288;
 /// that keeps only the retained window may have pruned two of its newest
 /// blocks by the time the request lands.
 const NODE_NETWORK_LIMITED_RACE_BUFFER: u32 = 2;
-/// `NODE_NETWORK_LIMITED` (bit 10) has no `ServiceFlags` variant in this
-/// `rust-bitcoin` version; the bit follows the protocol assignment also
-/// decoded in `PeerInfo::services_names`.
+/// `NODE_NETWORK_LIMITED` (bit 10) protocol assignment, also decoded in
+/// `PeerInfo::services_names`.
 pub(super) const NETWORK_LIMITED: u64 = 1_u64 << 10;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
@@ -127,9 +126,9 @@ pub(super) const FAST_BLOCKS_IN_TRANSIT_PER_PEER: usize = 8;
 pub(super) const FAST_MIN_PEERS_FOR_FANOUT: usize = 2;
 /// Fast-sync outbound peer target.
 ///
-/// The peer count that fully stripes [`PENDING_BUDGET`] (and thus
-/// [`PENDING_BYTE_BUDGET`], the estimated in-flight bandwidth) at
-/// [`FAST_BLOCKS_IN_TRANSIT_PER_PEER`] each. More peers would sit idle behind
+/// The peer count that fully stripes `PENDING_BUDGET` (and thus
+/// `PENDING_BYTE_BUDGET`, the estimated in-flight bandwidth) at
+/// `FAST_BLOCKS_IN_TRANSIT_PER_PEER` each. More peers would sit idle behind
 /// the window; fewer leave the stripe deeper.
 pub const FAST_OUTBOUND_PEER_TARGET: usize = PENDING_BUDGET / FAST_BLOCKS_IN_TRANSIT_PER_PEER;
 /// Initial window-blocked stalling threshold.

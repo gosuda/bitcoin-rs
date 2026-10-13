@@ -83,7 +83,7 @@ const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = Some(util::getzmqnotifications);
 #[cfg(not(feature = "zmq"))]
 const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = None;
 
-/// Declares both [`REGISTRY`] and [`MANIFEST`] from one set of row literals
+/// Declares both `REGISTRY` and [`MANIFEST`] from one set of row literals
 /// so a method is declared and bound in a single source location.
 macro_rules! declare_rows {
     (@execution) => { Execution::Immediate };
@@ -126,7 +126,7 @@ macro_rules! declare_rows {
         ];
 
         /// Every external surface, declared against Core 31.x. Projection of
-        /// [`REGISTRY`] without the dispatch arms; re-exported as
+        /// `REGISTRY` without the dispatch arms; re-exported as
         /// `manifest::MANIFEST` for consumers that take `&[Entry]`.
         pub const MANIFEST: &[Entry] = &[
             $(Entry {

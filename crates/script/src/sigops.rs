@@ -1,8 +1,6 @@
 //! Native sigop counting over scripts, transactions, and blocks.
 //!
-//! Replaces the `bitcoin::Script`/`Transaction::total_sigop_cost` counters the
-//! workspace used before the native-primitives migration. Counting semantics
-//! follow Core: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
+//! Counting semantics follow Core: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
 //! cost 1, `OP_CHECKMULTISIG`/`OP_CHECKMULTISIGVERIFY` cost 20 under legacy
 //! counting or the preceding small-integer push value under accurate counting,
 //! data pushes are skipped, and a malformed push ends the count (Core's
@@ -27,7 +25,7 @@ pub fn count_accurate(script: &[u8]) -> u32 {
 ///
 /// A P2WPKH program costs exactly 1; a P2WSH program delegates to its
 /// witness script counted accurately (multisig charges its declared key
-/// count), matching the previous `Script::count_sigops` behavior.
+/// count).
 pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
     if is_p2wpkh(script) {
         return 1;
@@ -41,8 +39,7 @@ pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
 }
 
 /// Counts the sigop cost visible without a UTXO set: legacy counts of every
-/// input's `scriptSig` and every output's `scriptPubKey` (the previous
-/// `Transaction::total_sigop_cost(|_| None)` shape).
+/// input's `scriptSig` and every output's `scriptPubKey`.
 pub fn count_tx_legacy(tx: &Tx) -> u32 {
     let mut count = 0_u32;
     for input in &tx.inputs {

@@ -67,9 +67,7 @@ pub enum ChainstateRole {
     /// Active assumed chainstate loaded from an `AssumeUTXO` snapshot at `base_height` / `base_hash`.
     /// Serves normal node consumers, but rejects reorgs at or below `base_height`.
     AssumedActive {
-        /// Block height of the snapshot base.
         base_height: u32,
-        /// Block hash of the snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
     },
@@ -77,9 +75,7 @@ pub enum ChainstateRole {
     /// up to `base_height`.
     /// Does not emit external side effects, and stops connecting blocks past `base_height`.
     Historical {
-        /// Target block height (the snapshot base).
         base_height: u32,
-        /// Target block hash.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
     },
@@ -128,12 +124,7 @@ pub enum HistoricalAdvance {
     /// The replay budget was used; another local pass must run before requesting.
     ReplayPending,
     /// The required body is not in the committed archive and must be fetched.
-    MissingBody {
-        /// Required historical block height.
-        height: u32,
-        /// Required block hash on the pinned ancestry.
-        hash: Hash256,
-    },
+    MissingBody { height: u32, hash: Hash256 },
 }
 
 /// Errors produced by `AssumeUTXO` management and validation.
@@ -149,9 +140,7 @@ pub enum AssumeUtxoError {
         applied_tip.map_or_else(|| "<none>".to_owned(), |(hash, height, count)| format!("({hash}, {height}, {count})"))
     )]
     SnapshotTipNotSettled {
-        /// Durable tip's hash, height and cumulative transaction count, if present.
         durable_tip: Option<(Hash256, u32, u64)>,
-        /// Applied tip's hash, height and cumulative transaction count, if present.
         applied_tip: Option<(Hash256, u32, u64)>,
     },
     /// Lifecycle transitions require a committed snapshot anchor.
@@ -171,61 +160,35 @@ pub enum AssumeUtxoError {
     SnapshotHeaderMissing(Hash256),
     /// A known base header must have the pinned height.
     #[error("snapshot base header height {found} does not match pinned height {expected}")]
-    SnapshotHeaderHeightMismatch {
-        /// Pinned height.
-        expected: u32,
-        /// Header height.
-        found: u32,
-    },
+    SnapshotHeaderHeightMismatch { expected: u32, found: u32 },
     /// The compiled snapshot base is outside the current best-work header ancestry.
     #[error(
         "snapshot base {base_hash} at height {base_height} is not on the best-work header chain ending at {best_header:?}"
     )]
     SnapshotBaseNotOnBestHeaderChain {
-        /// Compiled base whose snapshot would be installed.
         base_hash: Hash256,
-        /// Compiled height at which the base must be on the selected ancestry.
         base_height: u32,
-        /// Current best-work header tip, if one exists.
         best_header: Option<Hash256>,
     },
     /// Historical validation must reproduce the pinned cumulative transaction count.
     #[error("historical transaction count {found} does not match pinned count {expected}")]
-    HistoricalTransactionCountMismatch {
-        /// Pinned count.
-        expected: u64,
-        /// Reconstructed count.
-        found: u64,
-    },
+    HistoricalTransactionCountMismatch { expected: u64, found: u64 },
     /// Snapshot height is not pinned in the network parameters.
     #[error("snapshot height {0} is not pinned in AssumeUtxoData for this network")]
     UntrustedSnapshotHeight(u32),
     /// Snapshot tip hash does not match the pinned block hash.
     #[error("snapshot block hash {found} does not match pinned hash {expected}")]
-    SnapshotBlockHashMismatch {
-        /// Pinned block hash.
-        expected: Hash256,
-        /// Hash declared by the snapshot.
-        found: Hash256,
-    },
+    SnapshotBlockHashMismatch { expected: Hash256, found: Hash256 },
     /// Snapshot commitment (`hash_serialized_3`) does not match the pinned commitment.
     #[error("snapshot commitment {found} does not match pinned hash {expected}")]
-    SnapshotCommitmentMismatch {
-        /// Pinned commitment.
-        expected: Hash256,
-        /// Computed commitment.
-        found: Hash256,
-    },
+    SnapshotCommitmentMismatch { expected: Hash256, found: Hash256 },
     /// Node was previously marked as failed; refuses to start to protect operator data.
     #[error(
         "node previously failed assumeutxo validation at base height {base_height}: expected {expected_hash_serialized}, found {actual_hash_serialized}; failing closed"
     )]
     PreviouslyFailed {
-        /// Base height of failed validation.
         base_height: u32,
-        /// Expected commitment.
         expected_hash_serialized: Hash256,
-        /// Actual commitment encountered.
         actual_hash_serialized: Hash256,
     },
     /// Snapshot activation attempted while another `AssumeUTXO` operation is active.
@@ -239,11 +202,8 @@ pub enum AssumeUtxoError {
         "assumeutxo commitment mismatch at base height {base_height}: expected {expected}, actual {actual}"
     )]
     CommitmentMismatch {
-        /// Base height where mismatch was detected.
         base_height: u32,
-        /// Expected commitment.
         expected: Hash256,
-        /// Actual commitment computed from genesis.
         actual: Hash256,
     },
     /// No historical chainstate is present to perform historical operations.
@@ -254,11 +214,8 @@ pub enum AssumeUtxoError {
         "historical validation reached unexpected block hash {found} at target height {base_height}, expected {expected}"
     )]
     HistoricalTargetHashMismatch {
-        /// Target base height.
         base_height: u32,
-        /// Expected block hash.
         expected: Hash256,
-        /// Observed block hash.
         found: Hash256,
     },
     /// Chainstate mutation failed.
@@ -300,34 +257,24 @@ pub struct ChainstatesReport {
 /// Active chainstate status.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveChainstateSummary {
-    /// Role of the active chainstate.
     pub role: ChainstateRole,
-    /// Current applied tip height.
     pub height: Option<u32>,
-    /// Current applied tip block hash.
     #[serde(with = "serde_opt_hash256")]
     pub hash: Option<Hash256>,
-    /// Whether this chainstate is fully validated (`Ordinary`).
     pub validated: bool,
 }
 
 /// Historical background chainstate status.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HistoricalChainstateSummary {
-    /// Target base height of background validation.
     pub base_height: u32,
-    /// Target base block hash of background validation.
     #[serde(with = "serde_hash256")]
     pub base_hash: Hash256,
-    /// Current validated tip height.
     pub current_height: u32,
-    /// Current validated tip block hash.
     #[serde(with = "serde_hash256")]
     pub current_hash: Hash256,
-    /// Expected UTXO commitment (`hash_serialized_3`) at `base_height`.
     #[serde(with = "serde_hash256")]
     pub expected_hash_serialized: Hash256,
-    /// Validated unspent output count in the historical chainstate.
     pub validated_utxo_count: u64,
 }
 

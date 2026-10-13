@@ -120,7 +120,6 @@ impl<'a> TxSignatureChecker<'a> {
             return Ok(false);
         };
 
-        // Split the hashtype byte from the DER signature (sig is non-empty here).
         let Some((hashtype_byte, der_sig)) = sig.split_last() else {
             return Ok(false);
         };
@@ -137,7 +136,6 @@ impl<'a> TxSignatureChecker<'a> {
         };
         ecdsa_sig.normalize_s();
 
-        // Compute the sighash for the appropriate version.
         // Core's CTransactionSignatureSerializer::SerializeScriptCode removes
         // OP_CODESEPARATOR (0xab) opcode bytes from the scriptCode before
         // hashing. Segwit v0 uses BIP143 which does not have this step.
@@ -207,21 +205,18 @@ impl<'a> TxSignatureChecker<'a> {
             return Ok(false);
         }
 
-        // Schnorr signatures are 64 or 65 bytes.
         if sig.len() != 64 && sig.len() != 65 {
             return Err(ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSigSize,
             });
         }
 
-        // Parse the hashtype from the optional 65th byte (length is 64 or 65 here).
         let (schnorr_sig_bytes, hashtype_byte) = if sig.len() == 65 {
             (&sig[..64], sig[64])
         } else {
             (sig, 0x00) // SIGHASH_DEFAULT (64-byte sig)
         };
 
-        // A 65-byte signature with SIGHASH_DEFAULT (0x00) is invalid.
         if sig.len() == 65 && hashtype_byte == 0x00 {
             return Err(ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSigHashtype,
@@ -233,7 +228,6 @@ impl<'a> TxSignatureChecker<'a> {
                 code: ScriptErrCode::SchnorrSigHashtype,
             })?;
 
-        // Parse the x-only public key (32 bytes).
         if pubkey.len() != 32 {
             return Err(ScriptError::Verification(
                 "Schnorr public key must be 32 bytes".to_owned(),
@@ -282,21 +276,16 @@ impl<'a> TxSignatureChecker<'a> {
     pub(crate) fn check_locktime(&self, locktime: i64) -> bool {
         let tx_locktime = i64::from(self.tx.lock_time.to_consensus());
 
-        // Both must be the same type: below threshold = block height,
-        // at or above = timestamp.
         let same_type = (tx_locktime < i64::from(LOCKTIME_THRESHOLD))
             == (locktime < i64::from(LOCKTIME_THRESHOLD));
         if !same_type {
             return false;
         }
 
-        // The locktime must not be in the future.
         if locktime > tx_locktime {
             return false;
         }
 
-        // The input must not be finalized (sequence == SEQUENCE_FINAL disables
-        // locktime checks for that input).
         let input = match self.tx.inputs.get(self.input_index) {
             Some(inp) => inp,
             None => return false,
@@ -336,26 +325,20 @@ impl<'a> TxSignatureChecker<'a> {
             return false;
         }
 
-        // If the input's own sequence has the disable bit set, CSV cannot
-        // be used to get around it.
         if (input.sequence.to_consensus() & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
             return false;
         }
 
-        // Mask off non-consensus bits before comparing.
         let mask = i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG | SEQUENCE_LOCKTIME_MASK);
         let tx_masked = tx_sequence & mask;
         let seq_masked = sequence & mask;
 
-        // Both must be the same type: below TYPE_FLAG = block height,
-        // at or above = time-based.
         let same_type = (tx_masked < i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG))
             == (seq_masked < i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG));
         if !same_type {
             return false;
         }
 
-        // The required sequence must not exceed the input's.
         if seq_masked > tx_masked {
             return false;
         }
@@ -436,78 +419,50 @@ fn check_pubkey_encoding(
 /// Core's `IsValidSignatureEncoding`: validates the DER structure of a
 /// signature including the trailing hashtype byte.
 fn is_valid_der_encoding(sig: &[u8]) -> bool {
-    // Minimum and maximum size constraints (DER body + hashtype byte).
-    // Core checks sig.size() < 9 and sig.size() > 73.
     if sig.len() < 9 || sig.len() > 73 {
         return false;
     }
 
-    // A signature is of type 0x30 (compound).
     if sig[0] != 0x30 {
         return false;
     }
 
-    // Make sure the length covers the entire signature (excluding the
-    // compound type byte, length byte, and trailing hashtype byte).
     if usize::from(sig[1]) != sig.len() - 3 {
         return false;
     }
 
-    // Extract the length of the R element.
     let len_r = usize::from(sig[3]);
-
-    // Make sure the length of the S element is still inside the signature.
     if 5 + len_r >= sig.len() {
         return false;
     }
 
-    // Extract the length of the S element.
     let len_s = usize::from(sig[5 + len_r]);
-
-    // Verify that the length of the signature matches the sum of the
-    // length of the elements.
     if len_r + len_s + 7 != sig.len() {
         return false;
     }
 
-    // Check whether the R element is an integer.
     if sig[2] != 0x02 {
         return false;
     }
-
-    // Zero-length integers are not allowed for R.
     if len_r == 0 {
         return false;
     }
-
-    // Negative numbers are not allowed for R.
     if sig[4] & 0x80 != 0 {
         return false;
     }
-
-    // Null bytes at the start of R are not allowed, unless R would
-    // otherwise be interpreted as a negative number.
     if len_r > 1 && sig[4] == 0x00 && sig[5] & 0x80 == 0 {
         return false;
     }
 
-    // Check whether the S element is an integer.
     if sig[len_r + 4] != 0x02 {
         return false;
     }
-
-    // Zero-length integers are not allowed for S.
     if len_s == 0 {
         return false;
     }
-
-    // Negative numbers are not allowed for S.
     if sig[len_r + 6] & 0x80 != 0 {
         return false;
     }
-
-    // Null bytes at the start of S are not allowed, unless S would
-    // otherwise be interpreted as a negative number.
     if len_s > 1 && sig[len_r + 6] == 0x00 && sig[len_r + 7] & 0x80 == 0 {
         return false;
     }
@@ -531,32 +486,24 @@ fn is_low_der_signature(sig: &[u8]) -> bool {
         return false;
     }
 
-    // Strip the hashtype byte (sig is non-empty — checked by is_valid_der_encoding).
     let Some((_, der)) = sig.split_last() else {
         return false;
     };
 
-    // Extract S from the DER: sig[0]=0x30, sig[1]=len, sig[2]=0x02, sig[3]=lenR,
-    // sig[4..4+lenR]=R, sig[4+lenR]=0x02, sig[5+lenR]=lenS,
-    // sig[6+lenR..6+lenR+lenS]=S
     let len_r = usize::from(der[3]);
     let s_start = 6 + len_r;
     let s_bytes = &der[s_start..];
 
-    // The S value may have a leading zero byte for sign padding.
-    // Strip leading zeros to get the raw big-endian integer.
     let s_stripped = s_bytes
         .iter()
         .copied()
         .skip_while(|&b| b == 0x00)
         .collect::<Vec<_>>();
 
-    // If S is all zeros, it's low.
     if s_stripped.is_empty() {
         return true;
     }
 
-    // Compare against half order (big-endian).
     if s_stripped.len() > 32 {
         return false;
     }
@@ -572,23 +519,16 @@ fn is_low_der_signature(sig: &[u8]) -> bool {
 fn is_defined_hashtype(sig: &[u8]) -> bool {
     let &hashtype = sig.last().unwrap_or(&0xff);
     let masked = hashtype & (!SIGHASH_ANYONECANPAY);
-    // SIGHASH_ALL = 0x01, SIGHASH_SINGLE = 0x03
     (0x01..=0x03).contains(&masked)
 }
 
-/// Core's `IsCompressedOrUncompressedPubKey`.
 fn is_compressed_or_uncompressed_pubkey(pubkey: &[u8]) -> bool {
     is_compressed_pubkey(pubkey) || (pubkey.len() == 65 && pubkey[0] == 0x04)
 }
 
-/// Core's `IsCompressedPubKey`.
 fn is_compressed_pubkey(pubkey: &[u8]) -> bool {
     pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -605,8 +545,6 @@ mod tests {
     };
     use crate::eval::{OP_CODESEPARATOR, remove_all};
     use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
-
-    // --- Helper: build a minimal 1-input, 1-output transaction ---
 
     fn make_tx(version: i32, lock_time: u32, sequence: u32) -> Tx {
         Tx {
@@ -948,10 +886,6 @@ mod tests {
         assert!(tested > 0, "no sighash.json rows were tested");
     }
 
-    // =======================================================================
-    // ScriptErrCode Display tests
-    // =======================================================================
-
     #[test]
     fn script_err_code_display_matches_core_names() {
         use super::super::interpreter::ScriptErrCode as E;
@@ -966,8 +900,6 @@ mod tests {
         assert_eq!(E::SchnorrSig.to_string(), "SCHNORR_SIG");
         assert_eq!(E::ScriptNum.to_string(), "SCRIPTNUM");
     }
-
-    // --- utility ---
 
     fn hex_decode(s: &str) -> Vec<u8> {
         Vec::from_hex(s).unwrap_or_else(|error| panic!("bad hex: {error}"))

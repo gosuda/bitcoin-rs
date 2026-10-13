@@ -1,7 +1,7 @@
 //! Applied-chain seam for the block-download executor.
 //!
 //! The executor — download scheduling, staging, peer policy — lives in
-//! [`bitcoin_rs_p2p::sync`]. This module is the [`SyncChain`] implementation
+//! [`bitcoin_rs_p2p::sync`]. This module is the [`bitcoin_rs_p2p::sync::SyncChain`] implementation
 //! it drives: the applied-tip-mutating operations that stay in `node` under
 //! ARCH-07 (header admission under the chain-transition lock, window commit
 //! through `ChainTransition` + `ChainFollowers`, branch switch via

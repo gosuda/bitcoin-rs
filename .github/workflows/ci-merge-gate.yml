@@ -1,14 +1,15 @@
 name: ci-merge-gate
 
-# Pre-merge kernel/native lint gate (issues #1279 and #1282).
+# Pre-merge kernel/native lint gate (issues #1279, #1282, and #1537).
 #
 # The deep native/kernel lanes live in ci-main and run on `main` pushes only,
 # so a PR could merge with a kernel-gated compile break and take main down
 # immediately after (#1276 landed exactly such a break: `ScriptEngine` was
 # imported only under `cfg(not(feature = "kernel"))` while the kernel build
 # still referenced it). This workflow runs at the merge-queue boundary
-# instead: ordinary PR iteration keeps the fast portable gate in ci.yml,
-# while a broken kernel/native graph cannot enter main.
+# instead: ordinary PR iteration keeps the fast portable gate in ci.yml
+# (skipping this workflow's jobs on pull_request), while a broken
+# kernel/native graph cannot enter main.
 #
 # Clippy compiles the kernel/native targets and rejects production lint
 # warnings. The focused kernel oracle parity tests run here (issue #1511);
@@ -16,14 +17,7 @@ name: ci-merge-gate
 on:
   merge_group:
     types: [checks_requested]
-  # GitHub registers dispatchable workflows from the default branch only, so
-  # a brand-new gate file would otherwise land never-having-run. A
-  # path-scoped pull_request trigger executes the gate on PRs that touch the
-  # gate itself -- including the one that introduces it -- while ordinary
-  # PRs never see it.
   pull_request:
-    paths:
-      - '.github/workflows/ci-merge-gate.yml'
   # Manual runs for validating gate changes without queuing a merge.
   workflow_dispatch:
 
@@ -51,6 +45,7 @@ jobs:
   # kernel-gated code lives, and its clippy pass compiles every target
   # including the kernel-gated tests and examples.
   kernel-consensus:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -84,6 +79,7 @@ jobs:
   # misses dead-code and other warnings that fail ci-main after merge.
   # Keep the job id stable for the existing merge-queue required check.
   full-node-compile:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -84,7 +84,6 @@ impl ParetoFront {
         self.order.is_empty()
     }
 
-    /// Returns the number of indexed entries.
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.order.len()

@@ -1,15 +1,15 @@
 //! Block download orchestrator.
 //!
-//! Reads the applied-chain seam ([`SyncChain`]), the peer table, and the
+//! Reads the applied-chain seam ([`crate::sync::chain::SyncChain`]), the peer table, and the
 //! inbound channels and, when a peer reports a longer chain, sends
 //! `getheaders` toward that peer. Inbound `headers` batches are admitted
-//! through [`SyncChain::admit_headers`]; inbound full blocks are staged in
-//! the [`BlockStager`] and committed through [`SyncChain::commit_window`].
+//! through [`crate::sync::chain::SyncChain::admit_headers`]; inbound full blocks are staged in
+//! the `BlockStager` and committed through [`crate::sync::chain::SyncChain::commit_window`].
 //! The download executor, window, staging, and peer policy are owned by this
-//! crate; applied-tip mutation behind `SyncChain` remains a node-provided
+//! crate; applied-tip mutation behind `crate::sync::chain::SyncChain` remains a node-provided
 //! ARCH-07 seam.
 //!
-//! Each tick runs one canonical frontier reconciliation (issue #1128):
+//! Each tick runs one canonical frontier reconciliation:
 //! observe the chain frontier and the identity-bearing usable-peer set,
 //! convict or release what no longer holds work, then either schedule
 //! concrete recovery or name the reason progress is impossible.
@@ -174,7 +174,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 ///
-/// Drives the P2P-owned [`DownloadWindow`] and [`BlockStager`] against the
+/// Drives the P2P-owned `DownloadWindow` and `BlockStager` against the
 /// applied-chain seam. See `docs/contracts/architecture.md` for the
 /// download-window ownership contract.
 pub struct BlockSync {

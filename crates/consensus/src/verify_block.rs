@@ -310,7 +310,7 @@ fn witness_commitment(block: &Block) -> Option<&[u8]> {
         .map(|output| &output.script_pubkey[6..38])
 }
 
-/// Core `CheckWitnessMalleation`.
+/// Verifies witness commitment and rejects malleated witness trees.
 fn check_witness_malleation(
     block: &Block,
     expect_commitment: bool,
@@ -599,12 +599,10 @@ mod tests {
                 vec![coinbase_tx(), coinbase_tx()],
                 Err(ConsensusError::ExtraCoinbase { tx_index: 1 }),
             ),
-            // A block whose only transaction spends a real prevout.
             (
                 vec![spend_tx(1, Vec::new())],
                 Err(ConsensusError::MissingCoinbase),
             ),
-            // No coinbase AND an adjacent duplicate: the structural check wins.
             (
                 vec![duplicated.clone(), duplicated.clone()],
                 Err(ConsensusError::MissingCoinbase),
@@ -694,7 +692,6 @@ mod tests {
 
         let cases: [BindingCase; 7] = [
             (vec![valid], nonce.clone(), Ok(())),
-            // Last matching output wins in both directions.
             (vec![bogus, valid], nonce.clone(), Ok(())),
             (
                 vec![valid, bogus],
@@ -749,9 +746,6 @@ mod tests {
             for tail in 0..=2usize {
                 let mut leaves = distinct_txids(leaf_count);
                 if leaf_count >= 2 {
-                    // tail 0: clean; 1: a duplicate-tail padding self-pair
-                    // must stay unmutated; 2: a real adjacent duplicate pair
-                    // must flag it.
                     for _ in 0..tail {
                         leaves.push(leaves[1]);
                     }
@@ -785,17 +779,13 @@ mod tests {
         let (a, b) = (txid(1), txid(2));
         let one_to_six: Vec<Txid> = (1u8..=6).map(txid).collect();
         let cases: [(Vec<Txid>, bool); 8] = [
-            // Non-adjacent duplicates are honest trees.
             (vec![a, b, a], false),
             (vec![a, b, b, a], false),
-            // An odd trailing leaf is padded against itself: not a mutation.
             (vec![a, b, b], false),
             (vec![a, b, b, b], true),
             (one_to_six.clone(), false),
             // Core's ambiguous pair: same root, only the tail copy mutated.
             ((1u8..=6).chain([5, 6]).map(txid).collect(), true),
-            // All-equal odd widths: the raised branch meets equal real spine
-            // siblings in the final fold.
             (vec![txid(0x2b); 3], true),
             (vec![txid(0x2b); 7], true),
         ];
@@ -813,7 +803,6 @@ mod tests {
             );
             assert_eq!(Some(*root.as_bytes()), oracle_root(&leaves));
         }
-        // The mutated tail shares its root with the honest six-leaf tree.
         assert_eq!(
             oracle_root(&one_to_six),
             oracle_root(&(1u8..=6).chain([5, 6]).map(txid).collect::<Vec<_>>())
@@ -860,8 +849,6 @@ mod tests {
             );
         }
 
-        // A mutated tree: matching root reports the mutation, a wrong root
-        // still outranks it, and the window precheck ignores mutation.
         let duplicated = vec![txid(1), txid(1)];
         let Some((root, mutated)) = merkle_root_and_mutation_borrowed(&duplicated) else {
             panic!("merkle root over duplicated leaves");

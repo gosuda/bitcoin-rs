@@ -546,6 +546,14 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_FAST_SYNC", parse_bool]
                         toml native("fast_sync")
                     }
+                    /// Whether to attempt and accept BIP324 v2 encrypted
+                    /// connections and advertise `NODE_P2P_V2`.
+                    v2_transport as v2transport: Option<bool> {
+                        cli[#[arg(long = "v2transport", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_V2TRANSPORT", parse_bool]
+                        toml native("v2transport")
+                        conf["v2transport"]
+                    }
                 }
                 /// User-supplied RPC overrides.
                 group rpc: RpcOverrides {

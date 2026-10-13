@@ -236,7 +236,7 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     Ok(())
 }
 
-/// Retention enforcement still runs without the periodic worker (#634):
+/// Retention enforcement still runs without the periodic worker:
 /// the chainstate maintenance worker answers journal retention pressure
 /// with a checkpoint publication used purely as a compaction-base advance
 /// (`RCV-10`); the durable root stays the only recovery authority.

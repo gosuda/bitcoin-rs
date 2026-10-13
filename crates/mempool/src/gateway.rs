@@ -18,6 +18,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::entry::MempoolEntry;
+use crate::pool::Mempool;
 use bitcoin_rs_consensus::{
     ConsensusError, UtxoView, ValidationEngine, transaction_sigop_cost, verify_transaction,
 };
@@ -38,6 +39,33 @@ impl UtxoView for PrevoutMap<'_> {
             .iter()
             .find(|(op, _)| op == outpoint)
             .map(|(_, txout)| txout.clone())
+    }
+}
+
+/// Chain UTXO set with the mempool's unconfirmed outputs layered on top.
+struct MempoolUtxoView<'a, V> {
+    pool: &'a Mempool,
+    chain: &'a V,
+}
+
+impl<'a, V> MempoolUtxoView<'a, V> {
+    /// Layers `pool`'s unconfirmed outputs over `chain`.
+    #[must_use]
+    const fn new(pool: &'a Mempool, chain: &'a V) -> Self {
+        Self { pool, chain }
+    }
+}
+
+impl<V> UtxoView for MempoolUtxoView<'_, V>
+where
+    V: UtxoView,
+{
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        if let Some(entry) = self.pool.entry_by_txid(&outpoint.txid) {
+            let vout = usize::try_from(outpoint.vout).ok()?;
+            return entry.tx.outputs.get(vout).cloned();
+        }
+        self.chain.lookup(outpoint)
     }
 }
 
@@ -326,7 +354,7 @@ fn witness_strippable_failure(error: &ConsensusError, prevouts: &[(OutPoint, TxO
 
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
-use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
+use crate::pool::{MempoolError, PrioritiseError, PrioritisedTransaction};
 #[cfg(any(test, feature = "test-seam"))]
 use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
@@ -790,7 +818,7 @@ impl MempoolGateway {
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
         let chain = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(pool, &chain);
+        let view = MempoolUtxoView::new(pool, &chain);
         let standard =
             crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok();
         let prevouts: Vec<_> = if standard && !pool.contains_txid(&request.tx.txid()) {

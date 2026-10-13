@@ -7,27 +7,16 @@ use crate::ColumnFamily;
 pub enum BatchOp {
     /// Inserts or replaces `key` with `value` in `cf`.
     Put {
-        /// Target column family.
         cf: ColumnFamily,
-        /// Row key.
         key: Vec<u8>,
-        /// Row value.
         value: Bytes,
     },
     /// Deletes `key` from `cf`.
-    Delete {
-        /// Target column family.
-        cf: ColumnFamily,
-        /// Row key.
-        key: Vec<u8>,
-    },
+    Delete { cf: ColumnFamily, key: Vec<u8> },
     /// Deletes every key in `[start, end)` from `cf`.
     DeleteRange {
-        /// Target column family.
         cf: ColumnFamily,
-        /// First deleted key.
         start: Vec<u8>,
-        /// One past the last deleted key.
         end: Vec<u8>,
     },
 }

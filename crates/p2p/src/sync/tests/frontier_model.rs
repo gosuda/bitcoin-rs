@@ -1,7 +1,7 @@
-//! #1128 model/property coverage: the canonical frontier reconciler's invariant
+//! Model/property coverage: the canonical frontier reconciler's invariant
 //! over `SyncFrontier::plan`, exercised directly against synthesized frontier
 //! states, plus the connection-identity pins that close the same-address-
-//! replacement race the issue's prior attempt left open.
+//! replacement race.
 
 use super::*;
 

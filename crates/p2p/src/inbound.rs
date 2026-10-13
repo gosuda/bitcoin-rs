@@ -7,9 +7,7 @@ use bitcoin_rs_primitives::{Block, Header, Tx, consensus_bytes};
 /// `serialized` is the exact P2P message payload and matches the canonical
 /// consensus serialization of `block`.
 pub struct InboundBlock {
-    /// Decoded block.
     pub block: Block,
-    /// Wire-format block payload bytes.
     pub serialized: bytes::Bytes,
     /// Delivering connection, or `None` for local injection.
     pub source: Option<crate::PeerSource>,
@@ -43,9 +41,7 @@ pub struct InboundHeaders {
 /// identifies the delivering peer so admission origin and relay accounting
 /// can attribute the transaction correctly.
 pub struct InboundTx {
-    /// Decoded transaction.
     pub tx: Tx,
-    /// Delivering connection.
     pub source: crate::PeerSource,
 }
 

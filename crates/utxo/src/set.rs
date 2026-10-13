@@ -30,85 +30,46 @@ pub enum UtxoError {
     Scan(#[from] crate::scan::UtxoScanError),
     /// A script does not fit the snapshot and record `u16` length field.
     #[error("script_pubkey is too large for a u16 length: {len} bytes")]
-    ScriptTooLarge {
-        /// Script length in bytes.
-        len: usize,
-    },
+    ScriptTooLarge { len: usize },
     /// One encoded record could not fit in the local address space.
     #[error("encoded UTXO record exceeds addressable size at {len} bytes")]
-    RecordTooLarge {
-        /// Encoded record byte length.
-        len: usize,
-    },
+    RecordTooLarge { len: usize },
     /// Encoded UTXO record bytes are truncated, trailing, or noncanonical.
     #[error("invalid encoded UTXO record")]
     CorruptRecord,
     /// A snapshot coin must have been created no later than its base height.
     #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
-    SnapshotCoinHeightOutOfRange {
-        /// Invalid creation height.
-        height: u32,
-        /// Pinned snapshot base height.
-        snapshot_height: u32,
-    },
+    SnapshotCoinHeightOutOfRange { height: u32, snapshot_height: u32 },
     /// Snapshot I/O failed.
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
     /// Snapshot magic did not match `UTXO`.
     #[error("invalid snapshot magic {actual:#010x}")]
-    InvalidSnapshotMagic {
-        /// Observed magic.
-        actual: u32,
-    },
+    InvalidSnapshotMagic { actual: u32 },
     /// Snapshot version is not supported by this crate.
     #[error("unsupported snapshot version {version}")]
-    UnsupportedSnapshotVersion {
-        /// Observed version.
-        version: u32,
-    },
+    UnsupportedSnapshotVersion { version: u32 },
     /// Snapshot record count does not fit the local platform.
     #[error("snapshot record count {count} does not fit usize")]
-    SnapshotRecordCountTooLarge {
-        /// Record count from the header.
-        count: u64,
-    },
+    SnapshotRecordCountTooLarge { count: u64 },
     /// Strict snapshot records did not produce the declared number of records.
     #[error("strict snapshot record count mismatch: declared {declared}, actual {actual}")]
-    SnapshotRecordCountMismatch {
-        /// Record count declared by the snapshot header.
-        declared: u64,
-        /// Number of records actually retained after insertion.
-        actual: usize,
-    },
+    SnapshotRecordCountMismatch { declared: u64, actual: usize },
     /// Snapshot output count does not fit the record header.
     #[error("snapshot record has too many live outputs: {count}")]
-    SnapshotOutputCountTooLarge {
-        /// Live output count in one transaction-level record.
-        count: usize,
-    },
+    SnapshotOutputCountTooLarge { count: usize },
     /// Snapshot record serialized the same vout more than once.
     #[error("snapshot record duplicates vout {vout}")]
-    SnapshotDuplicateVout {
-        /// Duplicated output index.
-        vout: u32,
-    },
+    SnapshotDuplicateVout { vout: u32 },
     /// Snapshot shard byte does not match the key's first byte.
     #[error("snapshot shard {shard} does not match key shard {key_shard}")]
-    SnapshotShardMismatch {
-        /// Shard index serialized in the record.
-        shard: u8,
-        /// Shard implied by the key prefix.
-        key_shard: u8,
-    },
+    SnapshotShardMismatch { shard: u8, key_shard: u8 },
     /// Snapshot full txid does not match the stored key prefix.
     #[error("snapshot txid prefix does not match record key prefix")]
     SnapshotTxidPrefixMismatch,
     /// An output value exceeds the largest amount any UTXO can hold.
     #[error("output value {value} exceeds the maximum money supply")]
-    AmountOutOfRange {
-        /// Offending value in satoshis.
-        value: u64,
-    },
+    AmountOutOfRange { value: u64 },
 }
 
 // Counts the actual insertion boundary, on the decoding thread only, so
@@ -121,22 +82,16 @@ std::thread_local! {
 /// One live UTXO coin as contract consumers observe it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoCoin {
-    /// Outpoint that identifies the live coin.
     pub outpoint: OutPoint,
-    /// Output payload stored in the UTXO set.
     pub txout: TxOut,
-    /// Whether the creating transaction was coinbase.
     pub coinbase: bool,
-    /// Creating block height.
     pub height: u32,
 }
 
 /// Result of scanning a stable UTXO-set view.
 #[derive(Debug, Default)]
 pub struct UtxoScan {
-    /// Number of live coins visited during the scan.
     pub txouts: usize,
-    /// Live coins whose script matched the scan set.
     pub unspents: Vec<UtxoCoin>,
 }
 
@@ -316,7 +271,7 @@ impl UtxoSet {
     /// Attaches the coinstats listener for subsequently committed UTXO changes.
     ///
     /// The set keeps one listener slot and the node keeps one listener: the
-    /// [`CoinStatsListener`](crate::stats::CoinStatsListener) whose `MuHash` and
+    /// [`CoinStatsListener`] whose `MuHash` and
     /// accounting track every commit. Replay and recovery attach the same one.
     pub fn track_coin_stats(&mut self, listener: CoinStatsListener) {
         self.listener = Some(listener);

@@ -1,5 +1,5 @@
-//! Frontier liveness after serving peers miss the block-request timeout
-//! (issue #1153): the peers this node holds must carry the frontier.
+//! Frontier liveness after serving peers miss the block-request timeout:
+//! the peers this node holds must carry the frontier.
 
 use super::*;
 

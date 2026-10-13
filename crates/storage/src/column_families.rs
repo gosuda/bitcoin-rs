@@ -23,15 +23,11 @@ pub enum ColumnFamily {
     /// Per-block UTXO undo records, needed to disconnect a block during a reorg.
     UndoData = 9,
     /// Live script-index rows: `script-prefix || outpoint` for currently
-    /// unspent outputs (#225). Appended after every existing discriminant so
-    /// the addition is additive -- renumbering these is a breaking change
-    /// (`docs/policies/db-migration.md` 3.1).
+    /// unspent outputs.
     ScriptLive = 10,
-    /// Grouped transaction-level live coin records (T10): one row per
+    /// Grouped transaction-level live coin records: one row per
     /// transaction with live outputs, keyed by the full 256-bit txid and
-    /// valued by the lossless canonical v5 record payload. Appended after
-    /// every existing discriminant so the addition is additive -- renumbering
-    /// these is a breaking change (`docs/policies/db-migration.md` 3.1).
+    /// valued by the lossless canonical v5 record payload.
     CoinRecords = 11,
 }
 

@@ -1056,7 +1056,6 @@ impl Mempool {
         Some(&self.entries.slot(id)?.links)
     }
 
-    /// Returns the number of transactions in the mempool.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -1102,7 +1101,6 @@ impl Mempool {
         self.entry(indexed.id)
     }
 
-    /// Returns whether the pool currently holds zero entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -1252,8 +1250,7 @@ impl Mempool {
     /// connected block. A connected block ages the estimator even when the
     /// pool is empty, so this is the observable proof that `remove_for_block`
     /// fired `block_connected`.
-    ///
-    /// Test seam: the node's fee-history oracle is its only reader.
+    /// Test seam.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn estimator_last_decayed_height(&self) -> Option<u32> {
@@ -4787,7 +4784,7 @@ mod graph_tests {
             let mut part = vec![seed];
             let mut queue = vec![seed];
             while let Some(id) = queue.pop() {
-                let entry = pool.entry(id).expect("oracle walks a live entry");
+                let entry = pool.entry(id).expect("entry must exist in pool");
                 let parents = entry
                     .tx
                     .inputs

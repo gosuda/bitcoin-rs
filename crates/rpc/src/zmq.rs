@@ -27,15 +27,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ZmqTopic {
-    /// Block hash notification.
     HashBlock,
-    /// Transaction id notification.
     HashTx,
-    /// Raw serialized block notification.
     RawBlock,
-    /// Raw serialized transaction notification.
     RawTx,
-    /// Block sequence notification.
     Sequence,
 }
 
@@ -48,11 +43,8 @@ const DEFAULT_ZMQ_HWM: u32 = 1_000;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ZmqEndpointConfig {
-    /// ZMQ endpoint to bind.
     pub endpoint: String,
-    /// Notification topics published through this endpoint.
     pub topics: Vec<ZmqTopic>,
-    /// Optional override for the publisher-owned queue limit.
     #[serde(default)]
     pub hwm: Option<u32>,
 }
@@ -175,11 +167,8 @@ impl SequenceEvent {
 /// `endpoint` to the `address` key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZmqNotifier {
-    /// Topic this notifier publishes.
     pub topic: ZmqTopic,
-    /// Endpoint the PUB socket bound.
     pub endpoint: String,
-    /// PUB socket send high-water mark.
     pub hwm: u32,
 }
 

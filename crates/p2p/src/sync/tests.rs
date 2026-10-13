@@ -1082,11 +1082,6 @@ fn assert_fallback_refused_to_candidate(candidate: PeerInfo) -> TestResult {
 
 #[test]
 fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued() -> TestResult {
-    // R8 core scenario and the terminator for the U6 wedge's bounded
-    // cycle (and the first-audit ADV-2 shape: the staller is the
-    // highest-advertising peer, holding the front on claimed height it
-    // never serves). The 1-minute pending timeout can never fire inside
-    // this test, so the staller disconnect is the ONLY recovery path.
     let budget = super::SyncBudget {
         stall_timeout_initial: Duration::from_millis(100),
         ..wedge_budget(Duration::from_mins(1))

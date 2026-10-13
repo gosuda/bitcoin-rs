@@ -98,12 +98,36 @@ impl Peer {
     }
 
     pub(crate) fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), Error> {
+        if self.dropped {
+            return Err(Error::Protocol("P2P writer is closed".to_owned()));
+        }
         let cmd = message.cmd().to_owned();
         let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-        self.stream
-            .set_write_timeout(remaining(deadline)?)
-            .map_err(Error::Io)?;
-        self.stream.write_all(&frame).map_err(Error::Io)?;
+        let result = (|| {
+            let mut pending = frame.as_slice();
+            while !pending.is_empty() {
+                self.stream.set_write_timeout(remaining(deadline)?)?;
+                let written = match self.stream.write(pending) {
+                    Ok(written) => written,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(Error::Io(error)),
+                };
+                if written == 0 {
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "closed P2P writer",
+                    )));
+                }
+                pending = &pending[written..];
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // A partial frame cannot be retried on this connection.
+            self.dropped = true;
+            self.log("send-error", &format!("{cmd}: {error}"));
+            return Err(error);
+        }
         self.log("send", &cmd);
         Ok(())
     }

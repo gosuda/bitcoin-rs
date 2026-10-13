@@ -130,8 +130,6 @@ mod tests {
         assert!(!context.missing_inputs);
     }
 
-    /// Independent vectors follow BIP141's Sigops section and Core v31.1
-    /// `GetTransactionSigOpCost`; rust-bitcoin is the executable oracle.
     #[test]
     fn bip141_accounting_matches_independent_transaction_oracle() {
         assert_oracle(
@@ -184,11 +182,6 @@ mod tests {
                 script_pubkey: Script::from_bytes(p2sh()),
             },
         )];
-        // Core v31.1 CScript::GetSigOpCount(scriptSig) returns zero on
-        // any opcode above OP_16; rust-bitcoin 0.32's P2SH helper does not
-        // enforce that precondition, so Core supplies this malformed-input
-        // expectation rather than the library oracle used for valid shapes.
-        // https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp#L170-L189
         assert_eq!(
             transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
             0

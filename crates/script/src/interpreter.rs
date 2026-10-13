@@ -2,7 +2,7 @@
 //!
 //! The driver mirrors Core's `VerifyScript`/`VerifyWitnessProgram` flow: run
 //! scriptSig then scriptPubKey through the opcode evaluator, apply P2SH
-//! redeem-script evaluation, dispatch SegWit v0 spends through their witness
+//! redeem-script evaluation, dispatch `SegWit` v0 spends through their witness
 //! programs, and hand taproot key-path and script-path spends to the local
 //! BIP341/BIP342 verifier.
 
@@ -279,18 +279,10 @@ script_errors! {
 pub enum ScriptError {
     /// The requested input index was not present in the transaction.
     #[error("input index {index} out of range for {inputs} inputs")]
-    InputIndexOutOfRange {
-        /// Requested input index.
-        index: usize,
-        /// Transaction input count.
-        inputs: usize,
-    },
+    InputIndexOutOfRange { index: usize, inputs: usize },
     /// A Core vector flag name was not known by this crate.
     #[error("unknown script verify flag {name}")]
-    UnknownFlag {
-        /// Unknown flag name.
-        name: String,
-    },
+    UnknownFlag { name: String },
     /// The delegated consensus verifier rejected the script.
     #[error("script verification failed: {0}")]
     Verification(String),
@@ -299,10 +291,7 @@ pub enum ScriptError {
     TaprootPrevoutsUnavailable,
     /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
-    Invalid {
-        /// Core's script error name for this failure.
-        code: ScriptErrCode,
-    },
+    Invalid { code: ScriptErrCode },
 }
 
 /// Public script verifier for the portable posture.
@@ -389,17 +378,12 @@ pub enum PrevoutError {
     /// The supplied rows do not cover every input exactly once.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     Count {
-        /// Number of transaction inputs.
         input_count: usize,
-        /// Number of supplied prevouts.
         prevout_count: usize,
     },
     /// A row identifies a different outpoint than the corresponding input.
     #[error("prevout does not match transaction input {input_index}")]
-    Mismatch {
-        /// First input with a mismatched prevout identity.
-        input_index: usize,
-    },
+    Mismatch { input_index: usize },
 }
 
 /// Checks that resolved prevouts cover the transaction in input order.
@@ -932,9 +916,6 @@ mod tests {
         ));
     }
 
-    /// The [`Interpreter::execute_with_prevouts`] POST contract: a prevout
-    /// slice that is neither the full input set nor the single current-input
-    /// convention is refused before any evaluation.
     #[test]
     fn execute_with_prevouts_rejects_a_mismatched_prevout_slice() {
         let interpreter = Interpreter;

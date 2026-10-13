@@ -45,6 +45,7 @@ use serde_json::json;
 /// Blocks applied before the serving probes: deep enough that a request 11
 /// below the tip exists on the active chain.
 const CHAIN_LEN: u32 = 13;
+const WRITE_BUDGET: Duration = Duration::from_secs(10);
 
 /// One raw BIP152 peer: negotiates compact blocks, serves bodies it knows,
 /// and records what the node asks for and answers with.
@@ -90,75 +91,147 @@ impl CompactPeer {
     }
 
     /// Serves one block-typed inventory item from the offered chain.
-    fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<(), Error> {
+    fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<bool, Error> {
         let hash = match item {
             Inventory::WitnessBlock(hash)
             | Inventory::CompactBlock(hash)
             | Inventory::Block(hash) => *hash,
-            _ => return Ok(()),
+            _ => return Ok(false),
         };
         // The wire takes an owned body; the map keeps serving further requests.
         let Some(body) = self.blocks.get(&hash).cloned() else {
-            return self
-                .wire
-                .send(NetworkMessage::NotFound(vec![*item]), deadline);
+            self.wire
+                .send(NetworkMessage::NotFound(vec![*item]), deadline)?;
+            return Ok(true);
         };
         self.wire.log("serve", &format!("block {hash}"));
-        self.wire.send(NetworkMessage::Block(body), deadline)
+        self.wire.send(NetworkMessage::Block(body), deadline)?;
+        self.wire.log("served", &format!("block {hash}"));
+        Ok(true)
+    }
+
+    fn serve_batch(&mut self, items: &[Inventory], deadline: Instant) -> Result<(), Error> {
+        let mut completed = 0;
+        for item in items {
+            let sent = self.serve_item(item, deadline).map_err(|error| {
+                let detail = format!(
+                    "getdata send failed for {item:?}; completed {completed} sends in {} items: {error}",
+                    items.len()
+                );
+                self.wire.log("send-error", &detail);
+                Error::Protocol(detail)
+            })?;
+            if sent {
+                completed += 1;
+            }
+        }
+        self.wire.log(
+            "served-batch",
+            &format!("completed {completed} sends in {} items", items.len()),
+        );
+        Ok(())
     }
 
     /// Drains the socket until a reply satisfies `wanted`, serving every
     /// `getdata` the node issues on the way. Returns `None` at the deadline
-    /// or once the connection is gone.
+    /// while propagating transport and outbound failures.
     fn await_reply(
         &mut self,
         timeout: Duration,
         wanted: &dyn Fn(&NetworkMessage) -> bool,
-    ) -> Option<NetworkMessage> {
+    ) -> Result<Option<NetworkMessage>, Error> {
         let end = Instant::now() + timeout;
-        while Instant::now() < end && !self.wire.dropped {
-            match self.wire.recv(end) {
+        self.await_reply_until(end, end, wanted)
+    }
+
+    fn await_reply_until(
+        &mut self,
+        poll_end: Instant,
+        operation_end: Instant,
+        wanted: &dyn Fn(&NetworkMessage) -> bool,
+    ) -> Result<Option<NetworkMessage>, Error> {
+        while Instant::now() < poll_end {
+            match self.wire.recv(poll_end) {
                 Ok(message) => {
                     if wanted(&message) {
-                        return Some(message);
+                        return Ok(Some(message));
                     }
+                    let write_end = (Instant::now() + WRITE_BUDGET).min(operation_end);
                     if let NetworkMessage::GetData(items) = &message {
-                        let items = items.clone();
-                        for item in &items {
-                            let _ = self.serve_item(item, end);
-                        }
+                        self.serve_batch(items, write_end)?;
                     }
                     if let NetworkMessage::GetHeaders(_) = &message {
                         let headers = self.headers.clone();
-                        let _ = self.wire.send(NetworkMessage::Headers(headers), end);
+                        self.wire
+                            .send(NetworkMessage::Headers(headers), write_end)?;
                     }
                     if let NetworkMessage::Ping(nonce) = &message {
-                        let _ = self.wire.send(NetworkMessage::Pong(*nonce), end);
+                        self.wire.send(NetworkMessage::Pong(*nonce), write_end)?;
                     }
                 }
                 Err(error) if is_soft_recv_error(&error) => {}
-                Err(_) => return None,
+                Err(error) => return Err(error),
             }
         }
-        None
+        Ok(None)
     }
 
     /// Reads until the connection dies or `timeout` elapses. `true` means the
     /// peer was dropped; a soft timeout means it is still alive.
-    fn observe_disconnect(&mut self, timeout: Duration) -> bool {
+    fn observe_disconnect(&mut self, timeout: Duration) -> Result<bool, Error> {
         let end = Instant::now() + timeout;
         while Instant::now() < end {
             match self.wire.recv(end) {
                 Ok(NetworkMessage::Ping(nonce)) => {
-                    let _ = self.wire.send(NetworkMessage::Pong(nonce), end);
+                    self.wire.send(NetworkMessage::Pong(nonce), end)?;
                 }
                 Ok(_) => {}
                 Err(error) if is_soft_recv_error(&error) => {}
-                Err(_) => return true,
+                Err(_) => return Ok(true),
             }
         }
-        false
+        Ok(false)
     }
+}
+
+/// An expired batch must stop at the first attempted block, recording zero
+/// completed writes rather than silently attempting all 100 bodies.
+#[test]
+fn expired_block_batch_reports_first_unsent_hash() -> Result<(), Error> {
+    let node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    let mut peer = CompactPeer::connect(&node, "expired-batch", 2)?;
+    let chain = build_chain(&genesis_block(), 100, 0xB1, 1);
+    peer.offer_chain(&chain);
+    let items: Vec<_> = chain
+        .iter()
+        .map(|block| Inventory::WitnessBlock(block.block_hash()))
+        .collect();
+    let error = peer
+        .serve_batch(&items, Instant::now())
+        .expect_err("expired batch must fail");
+    let detail = error.to_string();
+    assert!(detail.contains(&chain[0].block_hash().to_string()));
+    assert!(detail.contains("completed 0 sends in 100 items"));
+    assert!(detail.contains("write deadline"));
+    assert!(peer.wire.dropped);
+    let journal = std::fs::read_to_string(
+        bitcoin_rs_e2e::node::workspace()
+            .join("target/compact-blocks-e2e/expired-batch-peer.jsonl"),
+    )?;
+    let records: Vec<serde_json::Value> = journal
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(records.iter().filter(|r| r["dir"] == "serve").count(), 1);
+    assert_eq!(records.iter().filter(|r| r["dir"] == "served").count(), 0);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r["dir"] == "send" && r["detail"] == "block")
+            .count(),
+        0
+    );
+    node.stop()
 }
 
 /// The offered block `depth` below the applied tip. `chain[0]` is height 1, so
@@ -208,7 +281,7 @@ fn synced_peer_with_len(
         {
             return Ok((node, peer, chain));
         }
-        peer.pump_serving(Duration::from_millis(400));
+        peer.pump_serving(Duration::from_millis(400), end)?;
     }
     Err(Error::Protocol(format!(
         "applied tip never reached h{chain_len}; count={}",
@@ -218,8 +291,10 @@ fn synced_peer_with_len(
 
 /// Serves every request for `dur` without waiting for a particular reply.
 impl CompactPeer {
-    fn pump_serving(&mut self, dur: Duration) {
-        self.await_reply(dur, &|_| false);
+    fn pump_serving(&mut self, dur: Duration, operation_end: Instant) -> Result<(), Error> {
+        let poll_end = (Instant::now() + dur).min(operation_end);
+        self.await_reply_until(poll_end, operation_end, &|_| false)?;
+        Ok(())
     }
 }
 
@@ -250,7 +325,7 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), Error> {
                 message,
                 NetworkMessage::CmpctBlock(_) | NetworkMessage::Block(_)
             )
-        })
+        })?
         .ok_or_else(|| Error::Protocol("no compact-bound reply".to_owned()))?;
     let NetworkMessage::CmpctBlock(cmpct) = reply else {
         return Err(Error::Protocol(format!(
@@ -286,7 +361,7 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), Error> {
                     | NetworkMessage::Block(_)
                     | NetworkMessage::NotFound(_)
             )
-        })
+        })?
         .ok_or_else(|| Error::Protocol("no deep-compact reply".to_owned()))?;
     match reply {
         NetworkMessage::Block(block) if block.block_hash() == one_deeper.block_hash() => {}
@@ -328,7 +403,7 @@ fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), Error> {
                         | NetworkMessage::Block(_)
                         | NetworkMessage::NotFound(_)
                 )
-            })
+            })?
             .ok_or_else(|| Error::Protocol(format!("no reply at depth {offset}")))?;
         let served_whole = matches!(
             &reply,
@@ -372,7 +447,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), Error> {
     peer.wire.send(NetworkMessage::Ping(4_321), deadline)?;
     let pong = peer.await_reply(Duration::from_secs(10), &|message| {
         matches!(message, NetworkMessage::Pong(_))
-    });
+    })?;
     if pong.is_none() {
         return Err(Error::Protocol(
             "the connection was already dead before the probe".to_owned(),
@@ -388,7 +463,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), Error> {
         }),
         deadline,
     )?;
-    if !peer.observe_disconnect(Duration::from_secs(10)) {
+    if !peer.observe_disconnect(Duration::from_secs(10))? {
         return Err(Error::Protocol(
             "an empty getblocktxn must drop the peer".to_owned(),
         ));
@@ -440,7 +515,7 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     let asked = peer
         .await_reply(Duration::from_secs(10), &|message| {
             matches!(message, NetworkMessage::GetData(_))
-        })
+        })?
         .ok_or_else(|| Error::Protocol("no fallback request seen".to_owned()))?;
     let NetworkMessage::GetData(items) = asked else {
         unreachable!("checked above");
@@ -470,7 +545,7 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
             node.stop()?;
             return Ok(());
         }
-        peer.pump_serving(Duration::from_millis(400));
+        peer.pump_serving(Duration::from_millis(400), served)?;
     }
     Err(Error::Protocol(format!(
         "the real body never applied: tip is {}",
@@ -483,6 +558,8 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
 /// (9be056a8a72b624dae9623b2f7bded92c2a21c91, net_processing.cpp:4333-4391).
 #[test]
 fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error> {
+    use NetworkMessage::{BlockTxn, NotFound};
+
     let (mut node, mut peer, common) = synced_peer_with_len("stale-race", 100)?;
     let parent = common.last().expect("common tip");
     let mut stale = segwit_coinbase_block(parent, 101, 0xD1);
@@ -509,13 +586,10 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
         NetworkMessage::GetData(vec![Inventory::CompactBlock(stale.block_hash())]),
         Instant::now() + Duration::from_secs(10),
     )?;
-    let Some(NetworkMessage::CmpctBlock(compact)) =
-        peer.await_reply(Duration::from_secs(10), &|m| {
-            matches!(
-                m,
-                NetworkMessage::CmpctBlock(_) | NetworkMessage::NotFound(_)
-            )
-        })
+    let Some(NetworkMessage::CmpctBlock(compact)) = peer
+        .await_reply(Duration::from_secs(10), &|m| {
+            matches!(m, NetworkMessage::CmpctBlock(_) | NotFound(_))
+        })?
     else {
         return Err(Error::Assertion(
             "expected compact stale candidate before reorg".into(),
@@ -547,12 +621,10 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
         }),
         Instant::now() + Duration::from_secs(10),
     )?;
-    let Some(NetworkMessage::BlockTxn(reply)) = peer.await_reply(Duration::from_secs(10), &|m| {
-        matches!(
-            m,
-            NetworkMessage::BlockTxn(_) | NetworkMessage::Block(_) | NetworkMessage::NotFound(_)
-        )
-    }) else {
+    let Some(BlockTxn(reply)) = peer.await_reply(Duration::from_secs(10), &|m| {
+        matches!(m, BlockTxn(_) | NetworkMessage::Block(_) | NotFound(_))
+    })?
+    else {
         return Err(Error::Assertion(
             "stored stale block must answer getblocktxn after reorg".into(),
         ));
@@ -574,9 +646,11 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
         Instant::now() + Duration::from_secs(10),
     )?;
     for expected in [&stale, &branch[0]] {
-        let Some(NetworkMessage::Block(body)) = peer.await_reply(Duration::from_secs(10), &|m| {
-            matches!(m, NetworkMessage::Block(_) | NetworkMessage::NotFound(_))
-        }) else {
+        let Some(NetworkMessage::Block(body)) = peer
+            .await_reply(Duration::from_secs(10), &|m| {
+                matches!(m, NetworkMessage::Block(_) | NotFound(_))
+            })?
+        else {
             return Err(Error::Assertion(
                 "both stored bodies at height 101 must be served".into(),
             ));
@@ -597,7 +671,7 @@ fn wait_for_peer_tip(
         if best_hash(node)? == expected.block_hash().to_string() {
             return Ok(());
         }
-        peer.pump_serving(Duration::from_millis(100));
+        peer.pump_serving(Duration::from_millis(100), end)?;
     }
     Err(Error::Assertion(format!(
         "expected tip {}, got {}",

@@ -35,69 +35,24 @@ const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYT
 /// Errors returned when decoding an undo record.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum UndoCodecError {
-    /// The record ended before a field was fully read.
     #[error("undo record truncated: wanted {wanted} more bytes, {available} available")]
-    Truncated {
-        /// Bytes the field required.
-        wanted: usize,
-        /// Bytes actually remaining.
-        available: usize,
-    },
-    /// The record was written by an incompatible format version.
+    Truncated { wanted: usize, available: usize },
     #[error("unsupported undo record version {found}, expected {expected}")]
-    UnsupportedVersion {
-        /// Version byte read from the record.
-        found: u8,
-        /// Version this binary writes.
-        expected: u8,
-    },
-    /// The record belongs to a different block than the one being disconnected.
+    UnsupportedVersion { found: u8, expected: u8 },
     #[error("undo record is for block {found}, not {expected}")]
-    BlockHashMismatch {
-        /// Hash carried by the record.
-        found: Hash256,
-        /// Hash of the block being disconnected.
-        expected: Hash256,
-    },
-    /// An output payload was not valid consensus encoding.
+    BlockHashMismatch { found: Hash256, expected: Hash256 },
     #[error("undo record contains a malformed transaction output")]
     MalformedTxOut,
-    /// Bytes remained after the final field.
     #[error("undo record has {trailing} trailing bytes")]
-    TrailingBytes {
-        /// Count of unconsumed bytes.
-        trailing: usize,
-    },
-    /// A count field claims more entries than the remaining bytes can hold.
+    TrailingBytes { trailing: usize },
     #[error("undo record claims {count} entries but only {available} bytes remain")]
-    CountTooLarge {
-        /// Entry count read from the record.
-        count: u32,
-        /// Bytes remaining when the count was read.
-        available: usize,
-    },
-    /// A query record claims more changes than its authenticated block can produce.
+    CountTooLarge { count: u32, available: usize },
     #[error("undo record claims {count} entries, exceeding the block-derived limit {limit}")]
-    BlockCountLimit {
-        /// Claimed count.
-        count: u32,
-        /// Maximum count derived from the requested block.
-        limit: usize,
-    },
-    /// The coinbase flag was neither 0 nor 1.
+    BlockCountLimit { count: u32, limit: usize },
     #[error("undo record coinbase flag {found} is not 0 or 1")]
-    InvalidCoinbase {
-        /// Byte read from the record.
-        found: u8,
-    },
-    /// The same outpoint appears twice, which a well-formed record never does.
+    InvalidCoinbase { found: u8 },
     #[error("undo record repeats outpoint {txid}:{vout}")]
-    DuplicateOutpoint {
-        /// Repeated transaction id.
-        txid: Hash256,
-        /// Repeated output index.
-        vout: u32,
-    },
+    DuplicateOutpoint { txid: Hash256, vout: u32 },
 }
 
 /// Encodes `batch` as a record bound to `block_hash`.

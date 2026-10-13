@@ -14,25 +14,16 @@ use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 /// Contextual facts for the block that would extend `previous_tip_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MiningChainContext {
-    /// Parent header hash in consensus little-endian storage order.
     pub(crate) previous_block_hash: Hash256,
-    /// Height the candidate would have.
     pub(crate) height: u32,
-    /// Versionbits candidate version: top bits set plus every `Started` or
-    /// `LockedIn` deployment bit.
     pub(crate) version: i32,
-    /// Compact target the candidate's nBits must equal.
     pub(crate) bits: CompactTarget,
     /// Earliest timestamp the candidate may carry: previous-tip MTP + 1, or,
     /// at a BIP94 adjustment boundary, the higher of that and the parent's
-    /// timestamp minus the timewarp allowance
-    /// ([`header_sync::minimum_candidate_time`]).
+    /// timestamp minus the timewarp allowance.
     pub(crate) min_time: u32,
-    /// Median time past of the previous tip over the BIP113 window.
     pub(crate) prev_median_time_past: u32,
-    /// Whether CSV (BIP68/112/113) is active at the candidate's height.
     pub(crate) csv_active: bool,
-    /// Whether Segwit (BIP141/143) is active at the candidate's height.
     pub(crate) segwit_active: bool,
 }
 

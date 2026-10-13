@@ -94,7 +94,6 @@ impl BlockFacts {
         &self.txids
     }
 
-    /// Returns the number of transactions described by these facts.
     #[must_use]
     pub fn tx_count(&self) -> usize {
         self.txids.len()
@@ -106,13 +105,11 @@ impl BlockFacts {
         self.txids
     }
 
-    /// Returns precomputed witness transaction IDs, if available.
     #[must_use]
     pub fn wtxids(&self) -> Option<&[Wtxid]> {
         self.wtxids.as_deref()
     }
 
-    /// Returns whether any transaction contains witness data.
     #[must_use]
     pub const fn has_witness(&self) -> bool {
         self.has_witness
@@ -130,7 +127,6 @@ impl BlockFacts {
         self.merkle_root
     }
 
-    /// Returns whether the transaction Merkle tree is mutated.
     #[must_use]
     pub const fn merkle_mutated(&self) -> bool {
         self.merkle_mutated

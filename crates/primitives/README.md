@@ -6,8 +6,7 @@ amount/sequence/locktime/compact-target newtypes, script and witness stacks, and
 the transaction, block, and header types with their txid/wtxid and header-hash
 computation.
 
-This crate is self-contained with respect to Bitcoin protocol primitives. It
-does not depend on `rust-bitcoin` in `[dependencies]` or `[dev-dependencies]`.
+This crate is self-contained with respect to Bitcoin protocol primitives.
 Codec, hashing, sighash, network, and identifier contracts are pinned by Core
 vectors, published genesis hashes, and golden block fixtures — not by a parallel
 type vocabulary.

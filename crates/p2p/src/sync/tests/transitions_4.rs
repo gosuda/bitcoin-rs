@@ -402,12 +402,6 @@ fn stall_eviction_does_not_disconnect_replacement_connection() -> TestResult {
 
 #[test]
 fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() -> TestResult {
-    // RE-ADV-1 byte-denominated R+P wedge: staged bytes + the stalled
-    // front's estimated bytes exhaust the staging byte headroom, so the
-    // request gate is closed while the gate itself (`staged_bytes_
-    // exhausted`) is still open. Both 1-minute timeouts are live
-    // defaults here — pre-U7 the received-prune was the only recovery;
-    // now the staller disconnect frees the wedge in well under a second.
     let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(2)?;
     install_budget(
         &sync,

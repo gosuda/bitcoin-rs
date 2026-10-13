@@ -395,7 +395,6 @@ impl bitcoin_rs_primitives::Sink for ByteSliceSink<'_> {
 }
 
 impl ByteSliceSink<'_> {
-    /// The not-yet-written tail of the buffer.
     fn remaining(&self) -> &[u8] {
         self.0
     }

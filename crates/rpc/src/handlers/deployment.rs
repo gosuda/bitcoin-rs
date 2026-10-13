@@ -10,8 +10,8 @@ use bitcoin_rs_script::VerifyFlags;
 use corepc_types::v31;
 use sonic_rs::{JsonValueTrait as _, Value};
 
-use crate::compat::convert::typed_to_sonic_omitting_nulls;
 use crate::context::Context;
+use crate::convert::typed_to_sonic_omitting_nulls;
 use crate::error::RpcError;
 
 pub(crate) fn getdeploymentinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {

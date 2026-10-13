@@ -26,20 +26,13 @@ pub(crate) use crate::script::opcode::*;
 
 /// Maximum serialized script size accepted for `Base`/`WitnessV0` evaluation.
 pub const MAX_SCRIPT_SIZE: usize = 10_000;
-/// Maximum size of one pushed stack element.
 pub(crate) const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
-/// Maximum non-push opcodes per script.
 pub(crate) const MAX_OPS_PER_SCRIPT: usize = 201;
-/// Maximum public keys in a bare multisig.
 pub(crate) const MAX_PUBKEYS_PER_MULTISIG: usize = 20;
-/// Maximum combined depth of the main and alt stacks.
 pub(crate) const MAX_STACK_SIZE: usize = Stack::MAX_DEPTH;
-/// Bytes per passed signature charged against BIP342's validation weight.
 pub(crate) const VALIDATION_WEIGHT_PER_SIGOP_PASSED: i64 = 50;
-/// BIP342 validation-weight offset accounting for the witness itself.
 pub(crate) const VALIDATION_WEIGHT_OFFSET: i64 = 50;
 
-/// Byte slice view of a stack item, in script-encoding terms.
 type Bytes = SmallVec<[u8; 32]>;
 
 /// A condition stack mirroring Core's `ConditionStack`: tracks only whether
@@ -166,7 +159,6 @@ fn script_num_serialize(value: i64) -> Bytes {
 fn cast_to_bool(bytes: &[u8]) -> bool {
     for (index, byte) in bytes.iter().enumerate() {
         if *byte != 0 {
-            // Can be negative zero.
             return !(index == bytes.len() - 1 && *byte == 0x80);
         }
     }
@@ -180,7 +172,6 @@ pub(crate) fn item_is_true(item: &ScriptItem) -> bool {
     cast_to_bool(&item_bytes(item))
 }
 
-/// Converts a [`ScriptItem`] to its byte representation.
 fn item_bytes(item: &ScriptItem) -> Cow<'_, [u8]> {
     match item {
         ScriptItem::Num(n) => Cow::Owned(script_num_serialize(*n).into_vec()),
@@ -262,7 +253,6 @@ pub(crate) fn eval_script(
         };
         let opcode_byte = match instruction {
             Instruction::PushBytes(data) => {
-                // The instruction's head byte is the push opcode.
                 let opcode_byte = script[instruction_start];
                 // Core checks push size unconditionally (interpreter.cpp:457),
                 // before testing fExec — a >520-byte push in a non-executed
@@ -356,7 +346,6 @@ pub(crate) fn eval_script(
     Ok(())
 }
 
-/// Pushes raw bytes as a stack item, bounding the stack.
 fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
     stack
         .push(ScriptItem::Bytes(SmallVec::from_slice(data)))
@@ -456,8 +445,6 @@ fn dispatch(
                         code: ScriptErrCode::UnsatisfiedLocktime,
                     });
                 }
-            } else {
-                // Not enabled; treat as NOP2.
             }
         }
         OP_CHECKSEQUENCEVERIFY => {
@@ -469,14 +456,11 @@ fn dispatch(
                         code: ScriptErrCode::NegativeLocktime,
                     });
                 }
-                // Disabled-flag operands behave as a NOP.
                 if sequence & (1 << 31) == 0 && !checker.check_sequence(sequence) {
                     return Err(ScriptError::Invalid {
                         code: ScriptErrCode::UnsatisfiedLocktime,
                     });
                 }
-            } else {
-                // Not enabled; treat as NOP3.
             }
         }
         OP_NOP1 | OP_NOP4..=OP_NOP10 => {
@@ -531,9 +515,7 @@ fn dispatch(
         OP_VERIFY => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
             let bytes = item_bytes(&top).into_owned();
-            if cast_to_bool(&bytes) {
-                // Popped above; success leaves the stack unchanged.
-            } else {
+            if !cast_to_bool(&bytes) {
                 stack.push(top).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::StackSize,
                 })?;
@@ -600,7 +582,6 @@ fn dispatch(
             })?;
         }
         OP_2ROT => {
-            // drain(6) can only succeed with a full six items.
             let mut top_six = stack.drain(6).map_err(|_| invalid_stack())?.into_iter();
             let x1 = top_six
                 .next()
@@ -895,14 +876,12 @@ fn dispatch(
     Ok(())
 }
 
-/// Underflow/invalid-depth error for stack-op dispatch.
 fn invalid_stack() -> ScriptError {
     ScriptError::Invalid {
         code: ScriptErrCode::InvalidStackOperation,
     }
 }
 
-/// Computes the digest for a hash opcode.
 fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     match op {
         OP_RIPEMD160 => SmallVec::from_slice(&ripemd160::Hash::hash(data)[..]),
@@ -1161,7 +1140,6 @@ fn check_multisig(
         args -= 1;
     }
 
-    // The dummy element is consumed without inspection.
     if stack.is_empty() {
         return Err(invalid_stack());
     }

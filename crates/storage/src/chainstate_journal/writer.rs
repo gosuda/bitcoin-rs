@@ -27,8 +27,6 @@
 
 mod append;
 mod durability;
-#[cfg(any(test, feature = "test-seam"))]
-mod failpoints;
 mod open;
 mod retention;
 mod rewind;
@@ -414,6 +412,22 @@ pub struct JournalWriter<S: KvStore> {
 }
 
 impl<S: KvStore> JournalWriter<S> {
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(super) fn failpoint(
+        &self,
+        boundary: JournalWriterFailpoint,
+    ) -> Result<(), JournalWriterError> {
+        if self.failpoint == Some(boundary) {
+            return Err(std::io::Error::from_raw_os_error(28).into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_failpoint(&mut self, failpoint: JournalWriterFailpoint) {
+        self.failpoint = Some(failpoint);
+    }
+
     #[cfg(test)]
     pub(crate) fn state(&self) -> WriterState {
         self.state

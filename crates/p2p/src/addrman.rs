@@ -963,6 +963,21 @@ impl AddressBook {
         })
     }
 
+    /// Whether `addr`'s last known service claim includes every flag in
+    /// `services`. An unknown address or service claim answers `false`.
+    pub(crate) fn advertises(
+        &self,
+        addr: SocketAddr,
+        services: bitcoin::p2p::ServiceFlags,
+    ) -> bool {
+        let manager = self.state.lock();
+        manager.by_addr.get(&canonical(addr)).is_some_and(|index| {
+            manager.stored.records[*index]
+                .services
+                .is_some_and(|known| bitcoin::p2p::ServiceFlags::from(known).has(services))
+        })
+    }
+
     /// Applies Core's failure-count connectivity threshold to the caller's
     /// persistent outbound TCP snapshot using this book's configured classifier.
     /// Connection roles and leases remain owned by the caller.

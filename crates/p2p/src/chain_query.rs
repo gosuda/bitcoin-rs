@@ -306,7 +306,7 @@ impl ChainQuery for ActiveChainQuery {
     /// transaction indexes for one block. `compact_version` is the peer's
     /// servable BIP152 profile.
     /// POST: return the `blocktxn` reply for a block within
-    /// [`MAX_BLOCKTXN_DEPTH`] of the active tip, encoded for
+    /// `MAX_BLOCKTXN_DEPTH` of the active tip, encoded for
     /// `compact_version` (v1 strips witnesses, any other profile keeps
     /// them), the whole witness-bearing `block` for a deeper one, and
     /// `None` for a block this node cannot serve or while the `headroom`

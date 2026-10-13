@@ -289,12 +289,17 @@ pub enum PeerError {
     /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
     BannedDestination(std::net::IpAddr),
+    /// The BIP324 transport failed: a malformed handshake, or a packet that
+    /// is oversized or fails authentication. BIP324 does not authenticate
+    /// peers, so this ends the connection without implicating the peer.
+    #[error(transparent)]
+    Transport(#[from] crate::transport::TransportFailure),
 }
 
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) => error,
+            Self::Io(_) | Self::Transport(_) => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -344,27 +349,56 @@ fn write_all_vectored<W: Write + ?Sized>(
     Ok(())
 }
 
-/// One encoded wire frame: the 24-byte header plus the payload `Bytes` the
-/// vectored write emits — the analogue of Core's `CSerializedNetMsg`.
+/// One encoded outbound message, the analogue of Core's `CSerializedNetMsg`:
+/// what the vectored write emits, and the payload the lease admitted.
 pub(crate) struct FramedMessage {
-    header: [u8; HEADER_LEN],
+    wire: FrameWire,
     payload: bytes::Bytes,
 }
 
+/// The bytes a frame puts on the wire around its payload.
+enum FrameWire {
+    /// The 24-byte v1 header, written before the payload.
+    V1([u8; HEADER_LEN]),
+    /// A sealed BIP324 packet, written instead of the header and payload.
+    V2(Vec<u8>),
+}
+
 impl FramedMessage {
-    /// Total wire size: header plus payload.
+    /// A BIP324 packet carrying `payload`.
+    pub(crate) const fn sealed(packet: Vec<u8>, payload: bytes::Bytes) -> Self {
+        Self {
+            wire: FrameWire::V2(packet),
+            payload,
+        }
+    }
+
+    /// The budget the lease charged for this message: the v1 frame length,
+    /// whichever transport carries it ([`wire_len`]).
     fn wire_len(&self) -> usize {
         HEADER_LEN + self.payload.len()
     }
 
-    /// The encoded payload bytes the vectored write emits.
+    /// The encoded payload bytes the frame carries.
     pub(crate) fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// Appends the slices this frame writes, in order.
+    fn push_slices<'a>(&'a self, slices: &mut Vec<IoSlice<'a>>) {
+        match &self.wire {
+            FrameWire::V1(header) => {
+                slices.push(IoSlice::new(header));
+                slices.push(IoSlice::new(&self.payload));
+            }
+            FrameWire::V2(packet) => slices.push(IoSlice::new(packet)),
+        }
+    }
 }
 
-/// Encodes `message` into its wire frame.
-pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
+/// The encoded payload of `message`, sharing a block's retained bytes, or an
+/// error when it exceeds [`MAX_MESSAGE_PAYLOAD`].
+pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerError> {
     let payload = match message {
         Message::BlockPayload(bytes) => bytes.clone(),
         other => bytes::Bytes::from(encode_payload(other)?),
@@ -372,6 +406,12 @@ pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMess
     if payload.len() > MAX_MESSAGE_PAYLOAD {
         return Err(PeerError::PayloadTooLarge(payload.len()));
     }
+    Ok(payload)
+}
+
+/// Encodes `message` into its v1 wire frame.
+pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
+    let payload = message_payload(message)?;
 
     let mut header = [0u8; HEADER_LEN];
     header[..4].copy_from_slice(&magic.to_bytes());
@@ -382,18 +422,10 @@ pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMess
             .to_le_bytes(),
     );
     header[20..24].copy_from_slice(&checksum(&payload));
-    Ok(FramedMessage { header, payload })
-}
-
-/// Encodes a burst of messages into wire frames, in order.
-pub(crate) fn encode_frames(
-    magic: Magic,
-    messages: &[Message],
-) -> Result<Vec<FramedMessage>, PeerError> {
-    messages
-        .iter()
-        .map(|message| encode_frame(magic, message))
-        .collect()
+    Ok(FramedMessage {
+        wire: FrameWire::V1(header),
+        payload,
+    })
 }
 
 /// Writes one encoded frame with a single vectored write and returns the
@@ -405,10 +437,9 @@ pub(crate) fn write_frame<W: Write + ?Sized>(
     // Header and payload ride in one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
     // segment splits and per-part syscall overhead on TcpStream).
-    write_all_vectored(
-        writer,
-        &mut [IoSlice::new(&frame.header), IoSlice::new(&frame.payload)],
-    )?;
+    let mut slices = Vec::with_capacity(2);
+    frame.push_slices(&mut slices);
+    write_all_vectored(writer, &mut slices)?;
     Ok(frame.wire_len())
 }
 
@@ -420,8 +451,7 @@ pub(crate) fn write_frames<W: Write + ?Sized>(
 ) -> Result<Vec<usize>, PeerError> {
     let mut slices = Vec::with_capacity(frames.len().saturating_mul(2));
     for frame in frames {
-        slices.push(IoSlice::new(&frame.header));
-        slices.push(IoSlice::new(&frame.payload));
+        frame.push_slices(&mut slices);
     }
     write_all_vectored(writer, &mut slices)?;
     Ok(frames.iter().map(FramedMessage::wire_len).collect())
@@ -438,6 +468,10 @@ pub fn write_message<W: Write + ?Sized>(
 }
 
 /// Read and validate a Bitcoin v1 network message.
+///
+/// One-shot: a read timeout part-way through a frame discards the bytes
+/// already consumed. Connection loops that retry poll timeouts read through
+/// [`Peer::read_message`](crate::Peer::read_message) instead.
 pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -451,9 +485,106 @@ pub(crate) fn read_message_with<R: Read>(
     expected_magic: Magic,
     observe: impl FnOnce(&str, &[u8]),
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    let mut header = [0u8; HEADER_LEN];
-    reader.read_exact(&mut header)?;
+    V1Receiver::default().read_message_with(reader, expected_magic, observe)
+}
 
+/// Receive state for one v1 byte stream that survives poll timeouts.
+///
+/// Peer sockets poll with a short read timeout, so a frame can stop arriving
+/// anywhere inside its header or payload. The receiver keeps every byte it
+/// has consumed: after `TimedOut` or `WouldBlock` the caller retries and the
+/// same frame continues, instead of the next read starting mid-frame. Every
+/// other outcome, a complete frame or a rejected one, returns the receiver
+/// to the start of a header.
+#[derive(Debug, Default)]
+pub(crate) struct V1Receiver {
+    header: [u8; HEADER_LEN],
+    header_filled: usize,
+    body: Option<PendingBody>,
+}
+
+/// A validated header whose payload is still arriving.
+#[derive(Debug)]
+struct PendingBody {
+    command: String,
+    checksum: [u8; 4],
+    /// Validated declared payload length; `payload` holds only received bytes.
+    expected: usize,
+    payload: Vec<u8>,
+}
+
+/// Largest single payload read. The retained buffer grows only with bytes
+/// actually received, so a peer that declares a huge payload then stalls
+/// cannot pin a full-size allocation.
+const RECEIVE_CHUNK: usize = 16 * 1024;
+
+impl V1Receiver {
+    /// A receiver whose first header already holds `prefix`: the bytes a
+    /// BIP324 responder read before it recognized a v1 peer.
+    pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
+        let mut receiver = Self::default();
+        let len = prefix.len().min(HEADER_LEN);
+        receiver.header[..len].copy_from_slice(&prefix[..len]);
+        receiver.header_filled = len;
+        receiver
+    }
+
+    /// Read one validated wire payload, observing it before typed decoding.
+    ///
+    /// POST: a poll-timeout I/O error keeps the partial frame for the next
+    /// call; any other result leaves the receiver at a frame boundary.
+    pub(crate) fn read_message_with<R: Read>(
+        &mut self,
+        reader: &mut R,
+        expected_magic: Magic,
+        observe: impl FnOnce(&str, &[u8]),
+    ) -> Result<(Message, bytes::Bytes), PeerError> {
+        let mut body = if let Some(body) = self.body.take() {
+            body
+        } else {
+            self.read_header(reader, expected_magic)?
+        };
+        if let Err(error) = fill_body(reader, &mut body) {
+            if is_poll_timeout(&error) {
+                self.body = Some(body);
+            }
+            return Err(error);
+        }
+        if checksum(&body.payload) != body.checksum {
+            return Err(PeerError::BadChecksum);
+        }
+
+        observe(&body.command, &body.payload);
+        let message = decode_payload(&body.command, &body.payload)?;
+        Ok((message, bytes::Bytes::from(body.payload)))
+    }
+
+    /// Completes the current header, then validates it before any payload
+    /// byte is read.
+    fn read_header<R: Read>(
+        &mut self,
+        reader: &mut R,
+        expected_magic: Magic,
+    ) -> Result<PendingBody, PeerError> {
+        if let Err(error) = fill(reader, &mut self.header, &mut self.header_filled) {
+            if !is_poll_timeout(&error) {
+                self.header_filled = 0;
+            }
+            return Err(error);
+        }
+        self.header_filled = 0;
+        pending_body(&self.header, expected_magic)
+    }
+}
+
+/// Validates a complete header and records its declared payload length:
+/// magic, command, and length are checked before any payload byte is read.
+/// The declared length never allocates; `payload` grows only with received
+/// bytes.
+fn pending_body(
+    header: &[u8; HEADER_LEN],
+    expected_magic: Magic,
+) -> Result<PendingBody, PeerError> {
     let actual_magic = Magic::from_bytes([header[0], header[1], header[2], header[3]]);
     if actual_magic != expected_magic {
         return Err(PeerError::WrongNetwork {
@@ -470,17 +601,65 @@ pub(crate) fn read_message_with<R: Read>(
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
 
-    let mut expected = [0u8; 4];
-    expected.copy_from_slice(&header[20..24]);
-    let mut payload = vec![0u8; payload_len];
-    reader.read_exact(&mut payload)?;
-    if checksum(&payload) != expected {
-        return Err(PeerError::BadChecksum);
-    }
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&header[20..24]);
+    Ok(PendingBody {
+        command,
+        checksum,
+        expected: payload_len,
+        payload: Vec::new(),
+    })
+}
 
-    observe(&command, &payload);
-    let message = decode_payload(&command, &payload)?;
-    Ok((message, bytes::Bytes::from(payload)))
+/// Reads until the declared payload is buffered, in bounded chunks so a
+/// partial frame retains only the bytes actually received. A poll timeout
+/// resumes where it stopped.
+fn fill_body<R: Read>(reader: &mut R, body: &mut PendingBody) -> Result<(), PeerError> {
+    let mut scratch = [0u8; RECEIVE_CHUNK];
+    while body.payload.len() < body.expected {
+        let wanted = scratch.len().min(body.expected - body.payload.len());
+        match reader.read(&mut scratch[..wanted]) {
+            Ok(0) => {
+                return Err(PeerError::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )));
+            }
+            Ok(read) => body.payload.extend_from_slice(&scratch[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(PeerError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+/// Reads until `buffer` is full, recording progress in `filled` so a poll
+/// timeout resumes where it stopped.
+fn fill<R: Read>(reader: &mut R, buffer: &mut [u8], filled: &mut usize) -> Result<(), PeerError> {
+    while *filled < buffer.len() {
+        match reader.read(&mut buffer[*filled..]) {
+            Ok(0) => {
+                return Err(PeerError::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )));
+            }
+            Ok(read) => *filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(PeerError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+/// The socket's poll interval elapsed; the rest of the frame may still arrive.
+fn is_poll_timeout(error: &PeerError) -> bool {
+    matches!(
+        error,
+        PeerError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
 }
 
 /// Returns the full encoded wire size of `message`: the 24-byte framing
@@ -541,7 +720,8 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
     payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(value));
 }
 
-fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
+/// Decodes a command's payload, or an unknown command into [`Message::Unknown`].
+pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
     // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
@@ -755,7 +935,9 @@ fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerErro
     Ok(raw)
 }
 
-fn read_command(raw: &[u8]) -> Result<String, PeerError> {
+/// Parses a 12-byte command field: a UTF-8 name, then only zero padding. The
+/// v1 header and the BIP324 long message type share this encoding.
+pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
     let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|byte| *byte != 0) {
         return Err(PeerError::InvalidCommand(
@@ -843,6 +1025,88 @@ mod tests {
         });
         assert!(matches!(result, Err(PeerError::BadChecksum)));
         assert!(!observed_bad_checksum);
+    }
+
+    #[test]
+    fn receiver_resumes_a_frame_split_by_poll_timeouts() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+        use std::io::ErrorKind;
+
+        let mut ping = Vec::new();
+        write_message(&mut ping, Magic::REGTEST, &super::Message::Ping(42))?;
+        let mut pong = Vec::new();
+        write_message(&mut pong, Magic::REGTEST, &super::Message::Pong(7))?;
+        // The ping stops arriving once inside its header and once inside its payload.
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(ping[..10].to_vec()),
+            Inbound::Stall(ErrorKind::TimedOut),
+            Inbound::Bytes(ping[10..HEADER_LEN + 3].to_vec()),
+            Inbound::Stall(ErrorKind::WouldBlock),
+            Inbound::Bytes([&ping[HEADER_LEN + 3..], pong.as_slice()].concat()),
+        ]);
+
+        let mut receiver = super::V1Receiver::default();
+        for stall in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+            assert!(
+                matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
+                "a stall surfaces as a retryable timeout, got {result:?}"
+            );
+        }
+        let (first, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(first, super::Message::Ping(42));
+        let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(second, super::Message::Pong(7));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, OrFail, StallingStream};
+        use std::io::ErrorKind;
+
+        // A peer declares a maximum-size payload, delivers a fragment, then
+        // stalls: the retained buffer holds received bytes, not the declared
+        // length.
+        let dribble = [7u8; 100];
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(dribble.to_vec()),
+            Inbound::Stall(ErrorKind::TimedOut),
+        ]);
+        let mut receiver = super::V1Receiver::default();
+        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+        assert!(
+            matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
+            "a stall surfaces as a retryable timeout, got {result:?}"
+        );
+        let body = receiver
+            .body
+            .as_ref()
+            .or_fail("the partial frame is retained across the timeout");
+        assert_eq!(body.payload.len(), dribble.len());
+        assert!(
+            body.payload.capacity() <= super::RECEIVE_CHUNK,
+            "no full-size allocation is retained for a stalled declared payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), PeerError> {
+        let mut corrupt = Vec::new();
+        write_message(&mut corrupt, Magic::REGTEST, &super::Message::Ping(1))?;
+        corrupt[HEADER_LEN] ^= 1;
+        let mut valid = Vec::new();
+        write_message(&mut valid, Magic::REGTEST, &super::Message::Pong(2))?;
+        let mut stream = Cursor::new([corrupt, valid].concat());
+
+        let mut receiver = super::V1Receiver::default();
+        let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+        assert!(matches!(rejected, Err(PeerError::BadChecksum)));
+        let (message, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+        assert_eq!(message, super::Message::Pong(2));
+        Ok(())
     }
 
     #[test]

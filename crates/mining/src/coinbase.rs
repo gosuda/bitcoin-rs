@@ -22,33 +22,19 @@ pub enum MiningError {
     CoinbaseValueOverflow,
     /// The immutable snapshot contains an invalid ancestor position.
     #[error("snapshot entry {entry} names missing ancestor {ancestor}")]
-    MissingAncestor {
-        /// Snapshot position of the entry.
-        entry: usize,
-        /// Invalid ancestor position.
-        ancestor: u32,
-    },
+    MissingAncestor { entry: usize, ancestor: u32 },
     /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
     FeeOverflow,
     /// Candidate scalar arithmetic exceeded its supported width.
     #[error("candidate {field} overflows its supported width")]
-    CandidateScalarOverflow {
-        /// Scalar that overflowed.
-        field: &'static str,
-    },
+    CandidateScalarOverflow { field: &'static str },
     /// Coinbase reservation already exhausts a configured block limit.
     #[error("coinbase reservation exhausts the {field} limit")]
-    CapacityExhausted {
-        /// Limit that the coinbase alone exhausted.
-        field: &'static str,
-    },
+    CapacityExhausted { field: &'static str },
     /// Exhausted `max_tries` without meeting the compact target.
     #[error("failed to meet compact target in {tries} nonce attempts")]
-    Unsolved {
-        /// Nonce attempts consumed.
-        tries: u64,
-    },
+    Unsolved { tries: u64 },
 }
 
 /// Builds the coinbase paying `payout`, optionally committing to `SegWit`.

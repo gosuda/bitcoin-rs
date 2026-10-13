@@ -1,23 +1,22 @@
 //! Running UTXO-set statistics over the live set.
 //!
 //! This is derived computation over the authoritative UTXO state that
-//! [`crate::set`] owns, which is why it lives here rather than in a crate of
-//! its own (issue #164). It reads the live set and folds it; it never decides
+//! [`crate::set`] owns. It reads the live set and folds it; it never decides
 //! what the live set contains. The rewind accounts for
 //! [`owed derived state`](../../../CONCEPTS.md#owed-derived-state) when a block
 //! disconnects.
 //!
-//! [`MuHash3072`] is Bitcoin Core's 3072-bit `MuHash` as a running
+//! [`stats::MuHash3072`] is Bitcoin Core's 3072-bit `MuHash` as a running
 //! numerator/denominator (`insert`, `remove`, `combine`, `finalize_hash`
-//! yielding the Core-compatible `uint256`). [`CoinStats`] folds the live set --
+//! yielding the Core-compatible `uint256`). [`stats::CoinStats`] folds the live set --
 //! `insert_utxo` and `remove_utxo` feed the accumulator and the scalar tallies
 //! -- and serializes to a stable byte layout (`to_bytes`/`from_bytes`).
-//! [`CoinStatsListener`] keeps stats behind a lock, applies the block-level
+//! [`stats::CoinStatsListener`] keeps stats behind a lock, applies the block-level
 //! delta in `finish_block`, and exposes `rewind_block` as the explicit inverse
-//! for disconnects. [`CoinStatsAccumulator`] serves checkpoint traversals:
+//! for disconnects. [`stats::CoinStatsAccumulator`] serves checkpoint traversals:
 //! `with_parallel_muhash` buffers exact coin preimages and combines ordered
 //! insert-only partial `MuHash` values, while `without_muhash` skips hashing
-//! entirely. [`scan_coin_stats`] recomputes stats on demand from a
+//! entirely. [`stats::scan_coin_stats`] recomputes stats on demand from a
 //! [`crate::UtxoSetView`] (Core's on-demand model, no rolling listener
 //! required).
 //!

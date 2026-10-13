@@ -196,7 +196,7 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
 
 /// The executed prune frontier is a durable fact, not process state: after a
 /// SIGKILL the restarted node still observes the exact boundary committed by
-/// the killed process: deleted rows stay gone and retained rows remain (#1151).
+/// the killed process: deleted rows stay gone and retained rows remain.
 #[test]
 fn pruned_frontier_survives_sigkill_and_preserves_boundary() -> Result<()> {
     const FRONTIER: u32 = 12;

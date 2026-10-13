@@ -86,13 +86,8 @@ pub(super) fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
     candidate.best_known_height > current.best_known_height
 }
 
-/// Fallback, single deep peer: the highest peer that may serve block bodies
-/// and that the window does not currently soft-block (expired pendings /
-/// staller cooldown) fills the window; a soft-blocked peer serves only as
-/// the last resort when no alternative exists. Without the preference, a
-/// disconnected staller that reconnects with an inflated demonstrated
-/// best-known height would out-sort every honest peer and re-acquire the
-/// window front (RE-ADV-2 / first-audit ADV-2).
+/// Select the highest body-serving peer outside cooldown, using a soft-blocked
+/// peer only as a last resort so a reconnecting staller cannot reclaim the front.
 fn fallback_request_peer(
     candidates: &[FanoutCandidate],
     request_peer_limit: usize,
@@ -204,20 +199,8 @@ impl ChainSyncState {
     }
 }
 
-/// Whether the chain-sync rule applies to `peer`.
-///
-/// PRE: `now` is this tick's monotonic stamp.
-/// POST: return true exactly for an outbound, not operator-pinned,
-///   full-relay connection older than `MINIMUM_CONNECT_TIME`.
-/// INVARIANT: an inbound connection is never timed out, because we did not
-///   choose it; neither is a manual one, because the operator did — Core
-///   gates the rule on `IsOutboundOrBlockRelayConn()`, which excludes
-///   `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Neither is a
-///   block-relay-only one, which is never asked to bring us a chain: Core
-///   times out both outbound classes
-///   (`ConsiderEviction`, `net_processing.cpp:5498-5550`); keeping the
-///   block-relay population out of the rule is a documented divergence, so a
-///   connection we dialed for blocks alone is never replaced by this timer.
+/// Only outbound, unpinned full-relay peers are subject to this timer;
+/// block-relay-only peers remain exempt.
 pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
     !peer.info.inbound
         && !peer.manual
@@ -225,27 +208,9 @@ pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
         && now.saturating_duration_since(peer.connected_at) >= MINIMUM_CONNECT_TIME
 }
 
-/// Advances one connection's chain-sync record and names the action owed.
-///
-/// PRE: `peer` is a subject connection (`chain_sync_subject`), `tip_height` is
-///   our heaviest header height, and `protected_count` is how many
-///   connections already hold protection.
-/// POST: return `Some(Probe)` once a connection has sat below `tip_height` for
-///   `CHAIN_SYNC_TIMEOUT`, `Some(Evict)` when `HEADERS_RESPONSE_TIME` passes
-///   after that probe, and `None` otherwise. A connection that DEMONSTRATED a
-///   tip at or above `tip_height` has its window cleared and, while fewer
-///   than `MAX_OUTBOUND_PEERS_TO_PROTECT` hold it, takes protection, which it
-///   keeps for the life of the connection. A connection that only CLAIMED a
-///   height in its handshake is armed like any other: the claim is the
-///   remote's word, not evidence. Reaching the benchmark recorded at the last
-///   arm restarts the window against the current tip.
-/// INVARIANT: this is Core's `ConsiderEviction`
-///   (`net_processing.cpp:5498-5550`) with the chainwork comparison replaced
-///   by the demonstrated height the scheduler already carries, because that
-///   height is the fact this node requests bodies on. Protection and the
-///   catch-up clear read `demonstrated_height`, never the handshake claim,
-///   as Core reads `pindexBestKnownBlock` and not `nStartingHeight`
-///   (`net_processing.cpp:3203-3210`).
+/// Clears the window only when the peer demonstrates catch-up. Handshake
+/// height claims do not earn protection; reaching the armed benchmark starts
+/// a fresh window against the current tip.
 pub(super) fn consider_eviction(
     peer: &UsablePeer,
     state: &mut ChainSyncState,
@@ -321,8 +286,6 @@ impl BlockSync {
     /// Releases every scheduler ownership fact whose connection left the
     /// live session set: one sweep keyed on connection identity.
     ///
-    /// PRE: the caller holds no scheduler lock.
-    /// POST: every scheduler ownership fact names a live connection.
     /// INVARIANT: lock order is peer table, then scheduler; the snapshot and
     ///   the release see the same live set.
     fn release_unowned_sessions(&self) {
@@ -335,7 +298,7 @@ impl BlockSync {
     /// convict one owner, evict one stuck staged body, or fire one bounded
     /// cold-front hedge.
     ///
-    /// R8: window-blocked staller detection, the #1091 apply-side
+    /// R8: window-blocked staller detection, the apply-side
     /// suppression bound, and the pending-timeout fallback all read the
     /// same `next_required` body the scheduler requests — the frontier
     /// cannot disagree with itself about which block is required next.
@@ -405,13 +368,6 @@ impl BlockSync {
     /// Performs the blame action of [`BlockedDecision`]: disconnect the
     /// convicted exact owner and report the reason on the frozen operator
     /// counters.
-    ///
-    /// PRE: `owner` names the exact connection the window convicted.
-    /// POST: at most one connection is disconnected; a dead owner makes
-    ///      the disconnect a no-op.
-    /// INVARIANT: the counter names (`node.sync.staller_disconnects`,
-    ///      `node.sync.pending_timeout_disconnects`) are operator-visible
-    ///      and frozen.
     fn disconnect_convicted(
         &self,
         owner: PeerSource,
@@ -441,7 +397,7 @@ impl BlockSync {
         }
     }
 
-    /// Issue #1091 escalation: evict the stuck staged body for
+    /// Evict the stuck staged body for
     /// refetch, without blaming any peer.
     ///
     /// Fired on [`BlockedDecision::EvictStaged`] after the apply-side
@@ -559,7 +515,7 @@ impl BlockSync {
         // demonstrated best-known height (handshake snapshot, raised as
         // the peer hands us accepted headers) rather than the handshake
         // value alone — a long-lived at-tip peer would otherwise become
-        // ineligible for every newly announced block (#617). Per-request
+        // ineligible for every newly announced block. Per-request
         // truncation by `peer_best_height` still bounds the damage of a
         // stale value. `peer_can_serve_height` also keeps a limited-service
         // peer inside its retained range. With nothing required the clause
@@ -604,11 +560,6 @@ impl BlockSync {
     /// Runs the window's request-mode decision under the scheduler lock and
     /// marks the candidates the window soft-blocks.
     ///
-    /// PRE: `candidates` are the collected fan-out candidates, unmarked, and
-    ///   no scheduler lock is held.
-    /// POST: every candidate carries its soft-block mark and the return is
-    ///   the request-peer scan limit, the fan-out activity, and the cold
-    ///   preference.
     /// INVARIANT: the tree guard precedes the scheduler lock.
     fn window_selection_limits(
         &self,
@@ -653,9 +604,6 @@ impl BlockSync {
     /// Runs the chain-sync rule over this tick's connections and performs the
     /// actions it names.
     ///
-    /// PRE: `frontier` is the observation made at `now`.
-    /// POST: every subject connection is armed, probed, or retired, and a
-    ///   retired connection keeps no record.
     /// INVARIANT: the probe send and the disconnect happen outside the
     ///   scheduler lock, and a probe that never left the node restores the
     ///   record it was about to change, so the rule retries instead of
@@ -704,12 +652,6 @@ impl BlockSync {
     }
 
     /// Retires a connection the chain-sync rule condemned.
-    ///
-    /// PRE: `source` names the connection the rule chose to retire.
-    /// POST: the connection is gone, and the retirement is counted only when
-    ///   it was still live.
-    /// INVARIANT: `node.sync.chain_sync_disconnects` is the operator-visible
-    ///   name for this reason and never changes once published.
     fn retire_chain_sync_peer(&self, source: PeerSource) {
         if self.peer_table.disconnect_source(source) {
             metrics::counter!("node.sync.chain_sync_disconnects").increment(1);
@@ -722,11 +664,6 @@ impl BlockSync {
 
     /// Asks one connection for headers once and reports whether the request
     /// is now outstanding.
-    ///
-    /// PRE: `source` names a live subject connection.
-    /// POST: return true when a `getheaders` was sent or an identical one is
-    ///   already pending for this locator, false when nothing was sent and
-    ///   nothing is pending.
     /// INVARIANT: a suppression counts only when the pending request it
     ///   suppressed is the very question the response window waits on. The
     ///   frontier-owned outcome sent nothing at all, so it neither counts a

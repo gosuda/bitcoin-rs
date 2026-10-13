@@ -168,8 +168,7 @@ impl Worker {
             // (preserving the reader's prefetch state), prepare blocks in
             // parallel across the rayon pool, then push prepared blocks into
             // the batch in height order. The single-writer commit and
-            // watermark publish remain the only ordering points (#209
-            // invariants).
+            // watermark publish remain the only ordering points.
             let mut remaining = identities;
             while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(

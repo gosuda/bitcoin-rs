@@ -25,8 +25,8 @@ use super::model::{
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
-use crate::compat::convert;
 use crate::context::Context;
+use crate::convert;
 use crate::handlers::Handler;
 use crate::rest::{
     Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,

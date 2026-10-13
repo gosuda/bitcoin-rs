@@ -12,7 +12,7 @@
 //!
 //! BIP152 identity direction: a peer serializes the compact blocks it sends
 //! us with the version we advertised in our own `sendcmpct`
-//! ([`COMPACT_BLOCK_VERSION`], v2 = wtxid identity, witness-bearing
+//! ([`compact_blocks::COMPACT_BLOCK_VERSION`], v2 = wtxid identity, witness-bearing
 //! prefills). Conversely, we serve peers at the version they recorded with
 //! us (`CompactBlockNegotiation::servable_version`, used by the chain
 //! query). The two directions are independent; decoding incoming compact
@@ -385,7 +385,7 @@ fn place_prefills(compact: &HeaderAndShortIds, total: usize) -> Option<Vec<Optio
     Some(filled)
 }
 
-/// Registry (rust-bitcoin) block header → primitives header.
+/// Registry block header → primitives header.
 pub(crate) fn native_header(reg: &bitcoin::blockdata::block::Header) -> Option<Header> {
     deserialize(&bitcoin::consensus::encode::serialize(reg)).ok()
 }

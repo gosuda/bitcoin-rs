@@ -198,6 +198,34 @@ fn verbose_transaction_versions_match_core_for_accepted_blocks() {
     assert_eq!(node_stale["in_active_chain"], false);
     assert!(node_stale.get("time").is_none());
     assert!(node_stale.get("blocktime").is_none());
+
+    let core_stale_v2 = core
+        .rpc("getrawtransaction", &json!([txid, 2, hash]))
+        .expect("Core stale v2");
+    let node_stale_v2 = node
+        .rpc("getrawtransaction", &json!([txid, 2, hash]))
+        .expect("native stale v2");
+    compare_reply(
+        "stale explicit-block transaction verbosity 2",
+        &core_stale_v2,
+        &node_stale_v2,
+    )
+    .expect("stale v2 metadata retained");
+    assert_eq!(node_stale_v2["version"], u32::MAX);
+    assert_eq!(node_stale_v2["confirmations"], 0);
+    assert_eq!(node_stale_v2["in_active_chain"], false);
+    assert!(node_stale_v2.get("time").is_none());
+    assert!(node_stale_v2.get("blocktime").is_none());
+    assert!(node_stale_v2.get("fee").is_none());
+    assert!(
+        node_stale_v2["vin"]
+            .as_array()
+            .and_then(|vin| vin.first())
+            .and_then(|input| input.get("prevout"))
+            .is_none(),
+        "coinbase input carries no prevout"
+    );
+
     core.stop().expect("Core stop");
     node.stop().expect("native stop");
 }

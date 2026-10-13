@@ -49,7 +49,7 @@ pub enum IndexCapability {
     /// `ScriptIndex` scripthash funding and spending rows.
     ScriptHistory,
     /// `ScriptIndex` live-output rows: one row per currently unspent outpoint,
-    /// filed under its script (#225). Rebuildable from the authoritative UTXO
+    /// filed under its script. Rebuildable from the authoritative UTXO
     /// set alone, unlike history.
     ScriptLive,
 }
@@ -123,9 +123,9 @@ impl IndexCapability {
 /// Named subset of [`IndexCapability`]: one prepared transition, an
 /// enabled configuration, or one query requirement.
 ///
-/// PRE: build only from the named constants, [`Self::insert`], or
+/// PRE: build only from the named constants, `Self::insert`, or
 /// `FromIterator`.
-/// POST: [`Self::contains`], [`Self::iter`], and [`Self::leftover`] answer
+/// POST: `Self::contains`, `Self::iter`, and [`Self::leftover`] answer
 /// over the selected capabilities.
 /// INVARIANT: bit `capability.index()` is set iff `capability` is selected;
 /// `to_mask` persists exactly this byte, so the on-disk reset-marker
@@ -210,8 +210,7 @@ impl IndexCapabilities {
     /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
     /// bit 2 is set.
     pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
-        // A pre-#225 marker never carries bit 2, and reading one with the bit
-        // absent is exactly right: the store had no live rows to reset.
+        // An older marker without bit 2 has no live rows to reset.
         if mask == 0 || mask & !0b111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
@@ -228,12 +227,8 @@ impl FromIterator<IndexCapability> for IndexCapabilities {
 /// Durable cursors for the independently ready index capabilities.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexWatermarks {
-    /// Transaction lookup cursor.
     pub tx_lookup: Option<IndexWatermark>,
-    /// `ScriptIndex` history cursor.
     pub script_history: Option<IndexWatermark>,
-    /// `ScriptIndex` live-output cursor. Independent of history by design:
-    /// a ready live view stays queryable while history backfills (#225).
     pub script_live: Option<IndexWatermark>,
 }
 
@@ -444,7 +439,7 @@ mod tests {
     }
 
     /// The reset marker round-trips byte-identically and refuses an empty
-    /// mask and any bit above bit 2 (the pre-#225 marker rule).
+    /// mask and any bit above bit 2.
     #[test]
     fn reset_marker_mask_round_trips_and_refuses_invalid_masks() {
         for selection in [

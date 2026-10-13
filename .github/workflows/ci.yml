@@ -119,7 +119,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: process-compatibility-binary-${{ github.run_attempt }}
-          path: target/process-harness/**
+          path: |
+            target/process-harness/**
+            target/compact-blocks-e2e/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -152,15 +154,17 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: process-compatibility-workspace-${{ github.run_attempt }}
-          path: target/process-harness/**
+          path: |
+            target/process-harness/**
+            target/compact-blocks-e2e/**
           if-no-files-found: warn
           retention-days: 7
 
-  # ── Single required check ────────────────────────────────────────
+  # ── Aggregate CI result ────────────────────────────────────────
   #
-  # On PRs: gates fmt, deny, clippy, test-crates.
-  # On merge/main: also gates test-binary, test-workspace.
-  # This is the one status check configured in the GitHub ruleset.
+  # PR green is fast feedback only: fmt, deny, clippy, test-crates.
+  # Merge-group green includes test-binary/test-workspace before main.
+  # Main green is post-merge evidence.
 
   ci-gate:
     if: always()
@@ -207,3 +211,14 @@ jobs:
             exit 1
           fi
           echo "Gate passed."
+          case "${{ github.event_name }}" in
+            pull_request)
+              echo 'Fast PR checks passed. Binary/workspace tests were skipped and run on merge-group requests and main pushes.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            merge_group)
+              echo 'Fast and heavy integration checks passed for this merge-group commit. Production/kernel results are reported by ci-merge-gate.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            push)
+              echo 'Fast and heavy checks passed as post-merge main evidence.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac

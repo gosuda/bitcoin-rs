@@ -22,13 +22,9 @@ pub use crate::undo_codec::UndoCodecError;
 /// One UTXO output to add, owning a `TxOut` or borrowing it from a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoAdd<T = TxOut> {
-    /// Outpoint being created.
     pub outpoint: OutPoint,
-    /// Output payload.
     pub txout: T,
-    /// Whether the creating transaction is coinbase.
     pub coinbase: bool,
-    /// Creating block height.
     pub height: u32,
 }
 
@@ -90,13 +86,11 @@ impl<T> BlockChanges<T> {
         self.removes.push(outpoint);
     }
 
-    /// Returns the number of add operations.
     #[must_use]
     pub const fn add_count(&self) -> usize {
         self.adds.len()
     }
 
-    /// Returns the number of remove operations.
     #[must_use]
     pub const fn remove_count(&self) -> usize {
         self.removes.len()

@@ -1,4 +1,4 @@
-//! BIP431 / Core 31.1 TRUC topology checks over the admitted graph.
+//! BIP431 TRUC topology checks over the admitted graph.
 
 use bitcoin_rs_primitives::{Tx, Txid};
 use hashbrown::HashSet;

@@ -7,19 +7,13 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Transaction signature checker: ECDSA, Schnorr, locktime, and sequence verification.
 mod checker;
-/// The opcode evaluator: the bounded stack machine behind the interpreter.
 mod eval;
-/// Script verification wrapper.
 mod interpreter;
-/// Native script parsing, classification, and building helpers.
 mod script;
 /// Signature operation counters.
 pub mod sigops;
-/// Bounded script stack with Core's 1000-item maximum depth.
 mod stack;
-/// Taproot verification helpers.
 mod taproot;
 
 pub use checker::check_signature_encoding;

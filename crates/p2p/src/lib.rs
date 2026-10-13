@@ -3,6 +3,8 @@
 
 /// Persistent, bounded peer discovery and automatic address selection.
 pub(crate) mod addrman;
+/// BIP324 v2 transport cryptography: key schedule and packet ciphers.
+pub(crate) mod bip324;
 /// Outbound block announcements: headers-first, high-bandwidth compact, inv fallback.
 pub mod block_announce;
 /// Out-of-order inbound block staging bounded by the download window budget.
@@ -50,14 +52,14 @@ pub(crate) mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// A connection's v1 or BIP324 v2 transport and its negotiation.
+pub(crate) mod transport;
 /// Connection-bound transaction request and relay policy.
 pub(crate) mod tx_policy;
 /// Bounded transaction announcements and their peer relay worker.
 pub(crate) mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
-/// BIP339 wtxid-relay state.
-pub(crate) mod wtxid;
 
 #[cfg(test)]
 mod test_support;
@@ -76,7 +78,9 @@ pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use peer::{CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState};
+pub use peer::{
+    CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState, WtxidRelayState,
+};
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
@@ -84,12 +88,12 @@ pub use service::{
     P2pServiceError,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use transport::{TransportFailure, TransportProtocol};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
     RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
-pub use wtxid::WtxidRelayState;
 
 pub use download_window::default_sync_budget;
 

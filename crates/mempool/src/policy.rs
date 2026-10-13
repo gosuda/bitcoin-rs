@@ -43,12 +43,7 @@ pub enum PolicyError {
     FeeArithmetic,
     /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
-    BelowMinRelayFee {
-        /// The transaction's effective `fee_rate` in sat/kvB.
-        tx_rate: u64,
-        /// The configured min-relay-fee floor.
-        min_rate: u64,
-    },
+    BelowMinRelayFee { tx_rate: u64, min_rate: u64 },
     /// The transaction would join a cluster holding too many transactions.
     #[error("too many transactions in cluster")]
     ClusterCountLimit,
@@ -81,8 +76,7 @@ pub struct MempoolPolicySnapshot {
     /// Fee-rate increment the eviction-floor projection and BIP125 rule 4
     /// (`RbfError::Rule4InsufficientIncrementalFee`) quote, in sat/kvB.
     pub incremental_relay_fee_sat_per_kvb: u64,
-    /// Replacements do not require BIP125 signaling, so this is always
-    /// `true`. Other replacement policy differences remain under #639.
+    /// Replacements do not require BIP125 signaling, so this is always `true`.
     pub full_rbf: bool,
     /// The graph owner computes exact optimal chunks for immutable snapshots.
     pub optimal: bool,

@@ -32,25 +32,15 @@ const PARALLEL_MUHASH_MAX_LANES: usize = 32;
 /// Exact byte length of the stable `CoinStats` encoding.
 pub const COIN_STATS_ENCODED_LEN: usize = 804;
 
-/// Why a [`CoinStats::rewind_block`] was refused.
+/// Why a `CoinStats::rewind_block` was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CoinStatsRewindError {
     /// The stats are not at the block being disconnected.
     #[error("coinstats are at height {found}, not the disconnected height {expected}")]
-    HeightMismatch {
-        /// Height the caller is disconnecting.
-        expected: u32,
-        /// Height the stats currently record.
-        found: u32,
-    },
+    HeightMismatch { expected: u32, found: u32 },
     /// The rewind would take `tx_count` below zero.
     #[error("rewind of {tx_delta} transactions exceeds the recorded count {tx_count}")]
-    TxCountUnderflow {
-        /// Transactions currently recorded.
-        tx_count: u64,
-        /// Transactions the rewind would remove.
-        tx_delta: u64,
-    },
+    TxCountUnderflow { tx_count: u64, tx_delta: u64 },
 }
 
 /// Incremental UTXO set statistics.
@@ -58,15 +48,12 @@ pub enum CoinStatsRewindError {
 pub struct CoinStats {
     /// `MuHash3072` accumulator over live coins.
     pub muhash: MuHash3072,
-    /// Current chain height.
     pub height: u32,
     /// Sum of live output values in satoshis.
     pub total_amount: u64,
     /// Database-independent UTXO bogo-size.
     pub bogo_size: u64,
-    /// Number of transactions represented by the current stats.
     pub tx_count: u64,
-    /// Number of live UTXOs.
     pub utxo_count: u64,
 }
 
@@ -685,7 +672,7 @@ impl CoinStatsListener {
             .rewind_block(disconnected_height, parent_height, tx_delta)
     }
 
-    /// [`CoinStats::check_rewind`] against the current stats.
+    /// `CoinStats::check_rewind` against the current stats.
     pub fn check_rewind(
         &self,
         disconnected_height: u32,

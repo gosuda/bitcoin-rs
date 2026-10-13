@@ -315,7 +315,7 @@ fn redb_txindex_snapshot_seeks_cover_fixed_key_families() -> TestResult<()> {
         (ColumnFamily::Funding, 12, true),
         (ColumnFamily::Spending, 12, true),
         (ColumnFamily::BlockHeaders, 80, false),
-        (ColumnFamily::ScriptLive, 44, false),
+        (ColumnFamily::ScriptLive, 43, false),
     ] {
         let prefix = b"samepref";
         let earlier = vec![0_u8; width];

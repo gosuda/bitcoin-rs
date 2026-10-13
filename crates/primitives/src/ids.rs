@@ -3,7 +3,7 @@
 //! Each newtype is `#[repr(transparent)]` over [`Hash256`] and deliberately implements **no**
 //! `Deref`: mixing a [`Txid`] with a [`Wtxid`] or a [`BlockHash`] is a compile error rather
 //! than a silent coercion. Storage seams that need the raw 32-byte consensus encoding call
-//! `as_bytes()`; packed key layouts are unchanged.
+//! `as_bytes()`.
 
 use core::fmt;
 use core::str::FromStr;

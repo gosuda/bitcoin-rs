@@ -7,8 +7,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 
-use crate::wire::{Message, PeerError, write_message};
-use crate::wtxid::WtxidRelayState;
+use crate::wire::{Message, PeerError};
 
 /// Peer connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +31,24 @@ pub struct PeerCapabilities {
     pub send_headers: bool,
     /// Peer supports BIP155 addrv2 messages.
     pub addr_v2: bool,
+}
+
+/// BIP339 wtxid-relay negotiation state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WtxidRelayState {
+    peer_advertised: bool,
+}
+
+impl WtxidRelayState {
+    /// Mark that the remote peer sent `wtxidrelay`.
+    pub(crate) const fn mark_peer_supported(&mut self) {
+        self.peer_advertised = true;
+    }
+
+    /// Return true if the remote peer advertised BIP339 support.
+    pub const fn peer_supported(self) -> bool {
+        self.peer_advertised
+    }
 }
 
 /// BIP152 compact-block protocol version this node speaks and advertises.
@@ -124,11 +141,27 @@ pub struct Peer<S> {
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
+    /// Receive half of the transport, with any partial frame or packet kept
+    /// across poll timeouts.
+    recv: crate::transport::RecvTransport,
+    /// Send half of the transport, until the connection's writer thread takes it.
+    send: Option<crate::transport::SendTransport>,
+    /// The transport this connection negotiated.
+    transport: crate::transport::TransportProtocol,
 }
 
 impl<S> Peer<S> {
-    /// Create a peer over `stream`.
+    /// Create a v1 peer over `stream`.
     pub fn new(stream: S, magic: Magic) -> Self {
+        Self::with_transport(stream, magic, crate::transport::Negotiated::v1(magic))
+    }
+
+    /// Create a peer over `stream` speaking the `negotiated` transport.
+    pub(crate) fn with_transport(
+        stream: S,
+        magic: Magic,
+        negotiated: crate::transport::Negotiated,
+    ) -> Self {
         Self {
             stream,
             state: PeerState::Disconnected,
@@ -140,7 +173,21 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             net_trace: None,
+            recv: negotiated.recv,
+            send: Some(negotiated.send),
+            transport: negotiated.protocol,
         }
+    }
+
+    /// The transport this connection negotiated.
+    pub const fn transport(&self) -> crate::TransportProtocol {
+        self.transport
+    }
+
+    /// Hands the send half to the connection's writer thread. Later sends
+    /// through this peer fail.
+    pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
+        self.send.take()
     }
 
     /// Attaches the `net:*` probe context captured at the connection root.
@@ -157,33 +204,36 @@ impl<S> Peer<S> {
 }
 
 impl<S: Read + Write> Peer<S> {
-    /// Write one outbound message.
+    /// Write one outbound message through the connection's transport.
     ///
-    /// Returns the framed wire length so handshake accounting can charge the
-    /// same bytes `write_message` emitted, without encoding the payload twice.
+    /// Returns the v1 frame length, the budget a lease charges for the
+    /// message whichever transport carries it.
     ///
-    /// With a `net:*` probe context attached, the frame is encoded once and
-    /// `net:outbound_message` observes its payload before the write attempt,
-    /// the way Core's `CSerializedNetMsg` is shared by its send path and the
-    /// probe.
+    /// The message is encoded once, and `net:outbound_message` observes its
+    /// payload before the write attempt, the way Core's `CSerializedNetMsg` is
+    /// shared by its send path and the probe.
     pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
-        if self.net_trace.is_some() {
-            let frame = crate::wire::encode_frame(self.magic, message)?;
-            crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
-            return crate::wire::write_frame(&mut self.stream, &frame);
-        }
-        write_message(&mut self.stream, self.magic, message)
+        let transport = self.send.as_mut().ok_or(PeerError::Protocol(
+            "send transport moved to the writer thread",
+        ))?;
+        let frame = transport.encode(message)?;
+        crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
+        crate::wire::write_frame(&mut self.stream, &frame)
     }
 }
 
 impl<S: Read> Peer<S> {
-    /// Read one framed message.
+    /// Read one message through the connection's transport.
+    ///
+    /// A poll timeout part-way through a frame or packet keeps the bytes
+    /// already read, so retrying after `TimedOut` or `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
         let net_trace = self.net_trace.as_ref();
-        crate::wire::read_message_with(&mut self.stream, self.magic, |command, payload| {
-            crate::net_trace::inbound_message(net_trace, command, payload);
-        })
-        .map_err(PeerError::inbound)
+        self.recv
+            .read_message(&mut self.stream, self.magic, |command, payload| {
+                crate::net_trace::inbound_message(net_trace, command, payload);
+            })
+            .map_err(PeerError::inbound)
     }
 }
 
@@ -252,6 +302,7 @@ pub(crate) const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::write_message;
 
     #[test]
     fn compact_negotiation_ignores_versions_we_do_not_advertise() {
@@ -347,6 +398,49 @@ mod tests {
 
         assert_eq!(message, Message::Pong(2));
         assert!(!payload.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn socket_read_continues_a_frame_that_outlasts_the_poll_timeout() -> Result<(), PeerError> {
+        use std::io::ErrorKind;
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let mut sender = TcpStream::connect(listener.local_addr()?)?;
+        let (receiver, _) = listener.accept()?;
+        receiver.set_read_timeout(Some(Duration::from_millis(20)))?;
+        let mut frame = Vec::new();
+        write_message(&mut frame, Magic::REGTEST, &Message::Ping(5))?;
+        let (head, tail) = frame.split_at(10);
+        let tail = tail.to_vec();
+        sender.write_all(head)?;
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            sender.write_all(&tail)
+        });
+
+        let mut peer = Peer::new(receiver, Magic::REGTEST);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stalls = 0_usize;
+        let message = loop {
+            match peer.read_message() {
+                Ok((message, _)) => break message,
+                Err(PeerError::Io(error))
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                        && Instant::now() < deadline =>
+                {
+                    stalls += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        late.join()
+            .map_err(|_| PeerError::Protocol("late writer panicked"))??;
+
+        assert_eq!(message, Message::Ping(5));
+        assert!(stalls > 0, "the read timed out mid-frame at least once");
         Ok(())
     }
 }

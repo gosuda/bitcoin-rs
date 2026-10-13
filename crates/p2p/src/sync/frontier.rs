@@ -1,4 +1,4 @@
-//! Canonical sync-frontier reconciliation (issue #1128).
+//! Canonical sync-frontier reconciliation.
 //!
 //! The reconciler answers one question per tick: is the canonical
 //! next-required body owned by a live connection, staged, or applying — and
@@ -110,7 +110,7 @@ pub(crate) struct UsablePeer {
 ///   connection below the frontier for its whole life: its later
 ///   `getheaders` replies follow the same losing branch, so the probe meant
 ///   to restore capability replays headers this node already holds, and the
-///   frontier starves on peers it never asks (issue #1153).
+///   frontier starves on peers it never asks.
 #[must_use]
 pub(crate) fn body_capability(claimed: i32, active_height: Option<u32>) -> Option<u32> {
     match (u32::try_from(claimed).ok(), active_height) {

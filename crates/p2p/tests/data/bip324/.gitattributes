@@ -1,0 +1,3 @@
+# The upstream BIP324 CSVs use CRLF line endings. Store them byte-for-byte so
+# the committed blobs keep the SHA-256 digests recorded in README.md.
+*.csv -text

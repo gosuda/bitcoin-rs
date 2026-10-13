@@ -18,6 +18,8 @@ impl Default for ScriptItem {
 }
 
 /// Bounded script stack with Core's 1000-item maximum depth.
+///
+/// Depth indices are 0-based from the top of the stack (`0` is the top item).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Stack {
     items: ArrayVec<[ScriptItem; Self::MAX_DEPTH]>,
@@ -27,13 +29,11 @@ impl Stack {
     /// Maximum stack depth permitted by consensus script evaluation.
     pub(crate) const MAX_DEPTH: usize = 1000;
 
-    /// Creates an empty stack.
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Pushes one item, rejecting capacity overflow instead of panicking.
     pub(crate) fn push(&mut self, item: ScriptItem) -> Result<(), StackError> {
         match self.items.try_push(item) {
             Some(_) => Err(StackError::Overflow),
@@ -41,17 +41,14 @@ impl Stack {
         }
     }
 
-    /// Pops the top item.
     pub(crate) fn pop(&mut self) -> Result<ScriptItem, StackError> {
         self.items.pop().ok_or(StackError::Underflow)
     }
 
-    /// Returns the top item without removing it.
     pub(crate) fn peek(&self) -> Result<&ScriptItem, StackError> {
         self.items.last().ok_or(StackError::Underflow)
     }
 
-    /// Returns an item at `depth`, where zero is the top item.
     pub(crate) fn peek_at(&self, depth: usize) -> Result<&ScriptItem, StackError> {
         self.items
             .get(
@@ -64,7 +61,6 @@ impl Stack {
             .ok_or(StackError::Underflow)
     }
 
-    /// Removes and returns an item at `depth`, where zero is the top item.
     pub(crate) fn remove_at(&mut self, depth: usize) -> Result<ScriptItem, StackError> {
         let index = self
             .items
@@ -75,7 +71,6 @@ impl Stack {
         Ok(self.items.remove(index))
     }
 
-    /// Inserts an item at `depth`, where zero places it on top.
     pub(crate) fn insert_at(&mut self, depth: usize, item: ScriptItem) -> Result<(), StackError> {
         if depth > self.items.len() {
             return Err(StackError::Underflow);
@@ -88,7 +83,6 @@ impl Stack {
         Ok(())
     }
 
-    /// Swaps the items at the given depths (0 = top, 1 = second-from-top, …).
     pub(crate) fn swap_at(&mut self, depth_a: usize, depth_b: usize) -> Result<(), StackError> {
         let len = self.items.len();
         if depth_a >= len || depth_b >= len {
@@ -98,13 +92,11 @@ impl Stack {
         Ok(())
     }
 
-    /// Moves the item at `depth` to the top.
     pub(crate) fn roll(&mut self, depth: usize) -> Result<(), StackError> {
         let item = self.remove_at(depth)?;
         self.push(item)
     }
 
-    /// Removes the top `count` items, preserving their stack order.
     pub(crate) fn drain(&mut self, count: usize) -> Result<Vec<ScriptItem>, StackError> {
         if count > self.items.len() {
             return Err(StackError::Underflow);
@@ -113,19 +105,16 @@ impl Stack {
         Ok(self.items.drain(start..).collect())
     }
 
-    /// Returns the number of stack items.
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Returns true when the stack is empty.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    /// Removes all stack items.
     pub(crate) fn clear(&mut self) {
         self.items.clear();
     }
@@ -159,9 +148,6 @@ mod tests {
         assert_eq!(stack.push(ScriptItem::Num(1)), Err(StackError::Overflow));
     }
 
-    /// `peek_at`, `remove_at`, and `roll` use top-relative depth (`0` is the
-    /// top); an out-of-range depth returns `StackError::Underflow` and leaves
-    /// the stack unchanged.
     #[test]
     fn invalid_depths_return_underflow_without_mutating() -> Result<(), StackError> {
         for len in [0, 1, Stack::MAX_DEPTH] {

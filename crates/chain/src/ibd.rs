@@ -34,7 +34,7 @@ impl InitialBlockDownload {
     /// Whether the applied chain still counts as initial block download.
     ///
     /// Synced requires both at least `network`'s `nMinimumChainWork` and a tip
-    /// no older than [`MAX_TIP_AGE_SECONDS`]: work alone would trust a stale
+    /// no older than `MAX_TIP_AGE_SECONDS`: work alone would trust a stale
     /// chain, recency alone a cheap one claiming a recent timestamp. `now` is
     /// UNIX seconds from the caller, and `network` is read per call, so a
     /// network assigned after construction is honored.

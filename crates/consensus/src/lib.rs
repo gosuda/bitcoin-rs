@@ -76,153 +76,67 @@ pub enum ScriptEngine {
 /// Consensus validation error.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConsensusError {
-    /// A transaction has no inputs.
     #[error("transaction has no inputs")]
     EmptyInputs,
-    /// A transaction has no outputs.
     #[error("transaction has no outputs")]
     EmptyOutputs,
-    /// Coinbase scriptSig length is outside the consensus-allowed 2..=100 byte
-    /// range.
     #[error("coinbase scriptSig length {len} outside allowed range 2..=100 bytes")]
-    CoinbaseScriptSigSize {
-        /// Observed coinbase scriptSig length in bytes.
-        len: usize,
-    },
-    /// A non-coinbase transaction contains a null previous output.
+    CoinbaseScriptSigSize { len: usize },
     #[error("non-coinbase transaction input {input_index} spends a null outpoint")]
-    NullPrevout {
-        /// Input index containing the null outpoint.
-        input_index: usize,
-    },
-    /// A transaction spends the same previous output more than once.
+    NullPrevout { input_index: usize },
     #[error("transaction contains duplicate input {input_index}")]
-    DuplicateInput {
-        /// Input index that repeats an earlier outpoint.
-        input_index: usize,
-    },
-    /// A required UTXO was not present in the supplied view.
+    DuplicateInput { input_index: usize },
     #[error("missing prevout for input {input_index}")]
-    MissingPrevout {
-        /// Input index whose previous output is unavailable.
-        input_index: usize,
-    },
-    /// Total output value exceeds Bitcoin's maximum money supply.
+    MissingPrevout { input_index: usize },
     #[error("transaction output value exceeds max money")]
     OutputValueOverflow,
-    /// Total input value is smaller than total output value.
     #[error("transaction spends {input_value} sats but creates {output_value} sats")]
-    InputsLessThanOutputs {
-        /// Total input value in satoshis.
-        input_value: u64,
-        /// Total output value in satoshis.
-        output_value: u64,
-    },
-    /// Script verification failed.
+    InputsLessThanOutputs { input_value: u64, output_value: u64 },
     #[error("script verification failed at input {input_index}: {reason}")]
     Script {
-        /// Input index that failed script verification.
         input_index: usize,
-        /// Script failure reason.
         reason: String,
-        /// The engine that rejected the script.
         engine: ScriptEngine,
     },
-    /// Sigop cost exceeds consensus maximum.
     #[error("sigop cost {cost} exceeds max {max}")]
-    SigopsLimit {
-        /// Observed sigop cost.
-        cost: u32,
-        /// Consensus maximum.
-        max: u32,
-    },
-    /// Block has no transactions.
+    SigopsLimit { cost: u32, max: u32 },
     #[error("block has no transactions")]
     EmptyBlock,
-    /// First transaction is not coinbase.
     #[error("block first transaction is not coinbase")]
     MissingCoinbase,
-    /// A non-first transaction is coinbase.
     #[error("block transaction {tx_index} is coinbase outside position 0")]
-    ExtraCoinbase {
-        /// Transaction index.
-        tx_index: usize,
-    },
-    /// Block merkle tree has a duplicate subtree mutation.
+    ExtraCoinbase { tx_index: usize },
     #[error("block merkle tree contains a duplicate transaction mutation")]
     MerkleMutation,
-    /// Block merkle root does not match transaction ids.
     #[error("block merkle root mismatch")]
     MerkleRoot,
-    /// The coinbase claims more than the subsidy plus the fees the block earned.
     #[error("coinbase pays {paid} sats but only {allowed} sats are available")]
-    CoinbaseAmount {
-        /// Total value the coinbase outputs claim.
-        paid: u64,
-        /// Block subsidy plus the fees of the block's other transactions.
-        allowed: u64,
-    },
-    /// Summing a block's values overflowed the satoshi range.
+    CoinbaseAmount { paid: u64, allowed: u64 },
     #[error("block value total overflows the satoshi range")]
     BlockValueOverflow,
-    /// Coinbase witness reserved nonce is missing or the wrong size.
     #[error("coinbase witness reserved nonce is missing or the wrong size")]
     WitnessNonceSize,
-    /// Witness data is present without a BIP141 commitment, or before `SegWit`.
     #[error("unexpected witness data")]
     UnexpectedWitness,
-    /// Block witness commitment does not match.
     #[error("block witness commitment mismatch")]
     WitnessCommitment,
-    /// Block weight exceeds consensus maximum.
     #[error("block weight {weight} exceeds max {max}")]
-    BlockWeight {
-        /// Observed block weight.
-        weight: u64,
-        /// Consensus maximum block weight.
-        max: u64,
-    },
-    /// BIP rule check failed.
+    BlockWeight { weight: u64, max: u64 },
     #[error("{bip}: {reason}")]
-    Bip {
-        /// BIP identifier.
-        bip: &'static str,
-        /// Failure reason.
-        reason: String,
-    },
-    /// Block-level verification received the wrong number of prevout rows.
+    Bip { bip: &'static str, reason: String },
     #[error("block prevout matrix has {actual} rows for {expected} transactions")]
-    PrevoutMatrixSize {
-        /// Number of block transactions that require rows.
-        expected: usize,
-        /// Number of supplied prevout rows.
-        actual: usize,
-    },
-    /// A transaction's script checks received the wrong number of prevout rows.
+    PrevoutMatrixSize { expected: usize, actual: usize },
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     PrevoutCount {
-        /// Number of transaction inputs.
         input_count: usize,
-        /// Number of supplied prevout rows.
         prevout_count: usize,
     },
-    /// Resolved prevouts identify the wrong transaction input: a caller wiring
-    /// error, not a script verdict or proof that a block is invalid.
     #[error("prevout does not match transaction input {input_index}")]
-    PrevoutMismatch {
-        /// First input whose supplied prevout identity differs.
-        input_index: usize,
-    },
-    /// The requested [`ValidationEngine`] is not compiled into this build.
+    PrevoutMismatch { input_index: usize },
     #[error("unsupported validation engine: {engine}")]
-    UnsupportedEngine {
-        /// The refused engine.
-        engine: ValidationEngine,
-    },
-    /// Kernel path failed or is not configured for the requested operation.
+    UnsupportedEngine { engine: ValidationEngine },
     #[error("kernel validation failed: {0}")]
     Kernel(String),
-    /// Consensus encoding or decoding failed.
     #[error("consensus encoding failed: {0}")]
     Encoding(String),
 }

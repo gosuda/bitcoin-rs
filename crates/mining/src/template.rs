@@ -20,13 +20,9 @@ use crate::policy::select_packages;
 /// The mining crate never takes node locks or re-derives consensus state.
 #[derive(Clone, Debug)]
 pub struct CandidateContext {
-    /// Parent tip hash in consensus little-endian storage order.
     pub previous_block_hash: Hash256,
-    /// Height the candidate would have.
     pub height: u32,
-    /// Versionbits candidate version.
     pub version: i32,
-    /// Compact target the candidate header must carry (`nBits`).
     pub bits: CompactTarget,
     /// Earliest legal timestamp: the minimum the chain context resolved — the
     /// previous MTP + 1, or at a BIP94 adjustment boundary the higher of that
@@ -36,11 +32,8 @@ pub struct CandidateContext {
     pub current_time: u32,
     /// BIP113 locktime cutoff already resolved by the caller.
     pub locktime_cutoff: u32,
-    /// Network whose subsidy schedule applies.
     pub network: Network,
-    /// Whether CSV (BIP68/112/113) is active at `height`.
     pub csv_active: bool,
-    /// Whether BIP141 is active at `height`.
     pub segwit_active: bool,
     /// Maximum whole-block weight, including the header, transaction count, and coinbase.
     pub max_weight: u64,

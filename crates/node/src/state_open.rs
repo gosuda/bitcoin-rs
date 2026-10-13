@@ -302,12 +302,22 @@ impl NodeState {
                 // advertises `NODE_NETWORK_LIMITED` instead of
                 // `NODE_NETWORK` (Core `init.cpp:2022-2026`); witness relay
                 // is unaffected.
-                local_services: if config.storage.prune_target_mb > 0 {
-                    bitcoin::p2p::ServiceFlags::WITNESS
-                        | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
-                } else {
-                    bitcoin::p2p::ServiceFlags::WITNESS | bitcoin::p2p::ServiceFlags::NETWORK
+                local_services: {
+                    let history = if config.storage.prune_target_mb > 0 {
+                        bitcoin::p2p::ServiceFlags::WITNESS
+                            | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+                    } else {
+                        bitcoin::p2p::ServiceFlags::WITNESS | bitcoin::p2p::ServiceFlags::NETWORK
+                    };
+                    // BIP324: a v2-capable node advertises it, as Core does
+                    // whenever `-v2transport` is on.
+                    if config.p2p.v2_transport {
+                        history | bitcoin::p2p::ServiceFlags::P2P_V2
+                    } else {
+                        history
+                    }
                 },
+                v2_transport: config.p2p.v2_transport,
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
             chainstate.shutdown_reader(),
@@ -385,7 +395,7 @@ impl NodeState {
         // marker retirement (`docs/contracts/recovery.md`). A node that
         // starts on a torn chainstate builds on it, and every block it adds
         // makes the damage harder to find; a recovery that fails closed
-        // retains the marker and stops startup (#655).
+        // retains the marker and stops startup.
         match bitcoin_rs_chainstate::recover_disconnect_marker(&chainstate) {
             Ok(()) => {}
             Err(error @ bitcoin_rs_chainstate::ApplyError::DurableHeadGapUnrecoverable { .. }) => {

@@ -3,8 +3,6 @@
 
 extern crate alloc;
 
-/// Mempool outputs layered over confirmed coin lookup.
-mod accept;
 /// Shared resolved-input accounting.
 mod accounting;
 /// Shared transaction preparation, retries, and gateway lifecycle queries.
@@ -33,7 +31,7 @@ mod pareto;
 mod policy;
 /// Mempool indexes and mutation API.
 mod pool;
-/// Core 31.1 replacement fee and graph policy.
+/// Replacement fee and graph policy (BIP125 / Core rules).
 mod rbf;
 /// Cloneable read-only capability over the mempool.
 mod reader;
