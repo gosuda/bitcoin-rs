@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
@@ -13,6 +14,9 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+const MAX_BACKEND_BULK_BODY_BYTES: usize = 16 * 1_024;
+const MAX_ACTIVE_BACKEND_REQUESTS: usize = 4;
+static ACTIVE_BACKEND_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 
@@ -158,6 +162,26 @@ impl Drop for ConnectionPermit {
     }
 }
 
+/// Limits backend projection work independently of the shared HTTP worker pool.
+struct BackendPermit;
+
+impl BackendPermit {
+    fn try_acquire() -> Option<Self> {
+        ACTIVE_BACKEND_REQUESTS
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |active| {
+                (active < MAX_ACTIVE_BACKEND_REQUESTS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for BackendPermit {
+    fn drop(&mut self) {
+        ACTIVE_BACKEND_REQUESTS.fetch_sub(1, Ordering::Release);
+    }
+}
+
 struct RpcStop(Arc<Handler>);
 
 impl Drop for RpcStop {
@@ -192,6 +216,11 @@ fn serve_connection(
                 write_response(reader.get_mut(), &response, false, CorsPolicy::Disabled)?;
                 return Ok(());
             }
+            Err(RequestReadError::EsploraBodyTooLarge) => {
+                let response = crate::rest::bad_request("Esplora request body too large");
+                write_response(reader.get_mut(), &response, false, CorsPolicy::Disabled)?;
+                return Ok(());
+            }
             Err(RequestReadError::Io(error)) => {
                 let rpc_error = RpcError::InvalidRequest("malformed http request");
                 let response =
@@ -221,7 +250,31 @@ fn dispatch_http_request(
     rest_enabled: bool,
 ) -> io::Result<bool> {
     let keep_alive = request.keep_alive;
-    match classify(&request.method, &request.path) {
+    let route = classify(&request.method, &request.path);
+    let _backend_permit = if matches!(
+        &route,
+        HttpRoute::EsploraGet {
+            surface: HttpSurface::EsploraBackend,
+            ..
+        } | HttpRoute::EsploraPost {
+            surface: HttpSurface::EsploraBackend,
+            ..
+        }
+    ) {
+        // The backend namespace is for the mempool service, not public explorers.
+        if !auth.validate_header(request.authorization.as_deref()) {
+            write_status(stream, 401, "Unauthorized", b"unauthorized", false)?;
+            return Ok(true);
+        }
+        let Some(permit) = BackendPermit::try_acquire() else {
+            write_status(stream, 503, "Service Unavailable", b"backend busy", false)?;
+            return Ok(true);
+        };
+        Some(permit)
+    } else {
+        None
+    };
+    match route {
         HttpRoute::Rest { path, query } => {
             let response = crate::rest::route(handler.context(), path, query, rest_enabled);
             write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
@@ -358,6 +411,7 @@ fn read_headers(
 enum RequestReadError {
     Io(io::Error),
     RestBodyTooLarge,
+    EsploraBodyTooLarge,
 }
 
 impl From<io::Error> for RequestReadError {
@@ -427,6 +481,14 @@ fn read_request(
         && content_length > crate::rest::MAX_GETUTXOS_BODY_BYTES
     {
         return Err(RequestReadError::RestBodyTooLarge);
+    }
+    let backend_path = crate::esplora::namespace(split_path_query(path).0)
+        .is_some_and(|(surface, _)| surface == crate::esplora::Surface::Backend);
+    if backend_path
+        && ((method == "POST" && content_length > MAX_BACKEND_BULK_BODY_BYTES)
+            || (method == "GET" && content_length != 0))
+    {
+        return Err(RequestReadError::EsploraBodyTooLarge);
     }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
@@ -903,6 +965,56 @@ mod tests {
         client.read_to_end(&mut response)?;
         let _result = join.join().expect("server thread");
         Ok(response)
+    }
+
+    #[test]
+    fn backend_esplora_requires_rpc_credentials() -> std::io::Result<()> {
+        for (method, path, body, authorization, expected) in [
+            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "", 401),
+            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "Authorization: Basic invalid\r\n", 401),
+            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "Authorization: Basic dXNlcjpwYXNz\r\n", 200),
+            ("POST", "/esplora/internal/txs", "[]".as_bytes(), "", 401),
+            ("POST", "/esplora/internal/txs", "[]".as_bytes(), "Authorization: Basic dXNlcjpwYXNz\r\n", 200),
+            ("GET", "/api/mempool/txids", "".as_bytes(), "", 200),
+        ] {
+            let mut request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            request.extend_from_slice(body);
+            let response = rest_wire_request(&request, false)?;
+            assert!(
+                response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()),
+                "{method} {path}: {}",
+                String::from_utf8_lossy(&response)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_backend_body_is_rejected_before_read() -> std::io::Result<()> {
+        let request = format!(
+            "POST /esplora/internal/txs HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_BACKEND_BULK_BODY_BYTES + 1
+        );
+        let response = rest_wire_request(request.as_bytes(), false)?;
+        assert!(response.starts_with(b"HTTP/1.1 400 Bad Request"));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_work_budget_is_bounded() {
+        // A separate instance avoids depending on unrelated concurrent tests.
+        let mut permits = Vec::new();
+        for _ in 0..MAX_ACTIVE_BACKEND_REQUESTS {
+            permits.push(BackendPermit::try_acquire());
+        }
+        assert!(permits.iter().all(Option::is_some));
+        assert!(BackendPermit::try_acquire().is_none());
+        drop(permits);
+        assert!(BackendPermit::try_acquire().is_some());
     }
 
     #[test]
