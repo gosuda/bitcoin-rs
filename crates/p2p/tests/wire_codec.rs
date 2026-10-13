@@ -62,8 +62,9 @@ type FrameBuilder = fn(usize) -> Result<Vec<u8>, PeerError>;
 
 /// Per-command decode caps (Core 31.1 `MAX_INV_SZ`, `MAX_ADDR_TO_SEND`,
 /// `MAX_LOCATOR_SZ`, `MAX_HEADERS_RESULTS`): a frame carrying exactly the
-/// cap decodes with every entry, and one entry more is refused with the
-/// command's protocol error before the entries are materialized.
+/// cap decodes with every entry. A larger frame is rejected at the header
+/// when its encoded size exceeds the command limit; otherwise the decoder
+/// rejects the extra entry before materializing it.
 #[test]
 fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), PeerError> {
     let cases: [(&str, FrameBuilder, usize, &str); 8] = [
@@ -134,7 +135,13 @@ fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), Peer
         );
 
         match read_message(&mut Cursor::new(frame(cap + 1)?), Magic::BITCOIN) {
-            Err(PeerError::Misbehavior(message)) => assert_eq!(message, refusal, "{command}"),
+            // The fixed-width commands exceed the header's byte bound
+            // before decoding. Variable-width addrv2 still reaches its
+            // entry-count guard.
+            Err(PeerError::PayloadTooLarge(_)) if command != "addrv2" => {}
+            Err(PeerError::Misbehavior(message)) if command == "addrv2" => {
+                assert_eq!(message, refusal, "{command}");
+            }
             other => panic!("{command} above the cap must be refused, got {other:?}"),
         }
     }
