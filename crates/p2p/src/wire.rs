@@ -927,8 +927,7 @@ mod tests {
 
     use super::{
         HEADER_LEN, MAX_BLOCK_PAYLOAD, MAX_MESSAGE_PAYLOAD, MAX_TX_PAYLOAD, PeerError,
-        encode_payload, read_message, wire_len,
-        write_message,
+        encode_payload, read_message, wire_len, write_message,
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
