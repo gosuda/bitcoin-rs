@@ -87,6 +87,12 @@ pub enum DecodeError {
     /// witness data).
     #[error("superfluous segwit encoding: witness flag set but no witnesses present")]
     SuperfluousWitness,
+    /// The decoded record metadata and owned descriptors exceed the parsing budget.
+    #[error("decoded record metadata exceeds its resource budget")]
+    ResourceLimitExceeded,
+    /// A fallible record reservation failed before materialization.
+    #[error("cannot reserve decoded record storage")]
+    AllocationFailed,
     /// A decoded value did not consume the entire input buffer.
     #[error("{remaining} trailing byte(s) after decoded value")]
     TrailingBytes {
