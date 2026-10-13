@@ -622,7 +622,7 @@ struct PendingBody {
     expected: usize,
     payload: Vec<u8>,
     deadline: Instant,
-    /// Drop releases the declared body length from the shared budget.
+    /// Drop releases the received body bytes from the shared budget.
     _reservation: Option<IncompleteV1Reservation>,
 }
 
@@ -1188,6 +1188,41 @@ mod tests {
         assert!(!extra.charge(1), "aggregate capacity was exhausted");
         drop(reservations);
         assert!(extra.charge(MAX_MESSAGE_PAYLOAD));
+    }
+
+    #[test]
+    fn header_alone_does_not_exhaust_incomplete_frame_budget() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+        use std::io::ErrorKind;
+
+        let budget = Arc::new(IncompleteV1Budget::default());
+        let mut receiver = super::V1Receiver::default();
+        receiver.set_budget(
+            Arc::clone(&budget),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Stall(ErrorKind::TimedOut),
+        ]);
+        assert!(matches!(
+            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
+            Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
+        ));
+        assert!(receiver.body.is_some());
+        assert_eq!(budget.state.lock().total, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn budget_exhaustion_and_deadline_are_not_peer_misbehavior() {
+        for error in [
+            PeerError::IncompleteFrameBudgetExceeded,
+            PeerError::IncompleteFrameDeadlineExceeded,
+        ] {
+            assert!(!error.is_misbehavior());
+            assert!(!PeerError::inbound(error).is_misbehavior());
+        }
     }
 
     #[test]
