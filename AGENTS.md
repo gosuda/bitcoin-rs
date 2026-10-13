@@ -7,4 +7,5 @@
 - Before changing consensus, persistence, or concurrency, inspect the owning contracts and the tests that exercise success, failure, commit, recovery, and lock-order behavior.
 - Preserve operator data. Schema changes must use the documented migration or replay path and must never reset data implicitly.
 - Run the smallest meaningful verification for the changed surface. Broad integration, reference, platform, and performance campaigns belong to their owning CI or evidence workflows.
+- Changes affecting synchronization must identify the impacted `SYNC-*` clauses in [the Node synchronization contract](docs/contracts/synchronization.md), preserve their owning domain contracts, and run the smallest relevant behavioral proofs before merge; record any proof gaps explicitly.
 - Describe implemented behavior as implemented and target design as target design. Do not claim correctness, compatibility, durability, or performance without the evidence owned by that claim.
