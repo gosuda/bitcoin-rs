@@ -413,8 +413,11 @@ impl<'a> Projection<'a> {
             .chain
             .block_body_bytes(&record)
             .ok_or_else(|| service_unavailable("block body unavailable"))?;
-        let block =
-            deserialize(&bytes).map_err(|_| internal_error("stored block body is corrupt"))?;
+        let block = deserialize::<Block>(&bytes)
+            .map_err(|_| internal_error("stored block body is corrupt"))?;
+        if block.block_hash() != record.hash {
+            return Err(internal_error("stored block body identity mismatch"));
+        }
         Ok((record, block))
     }
 

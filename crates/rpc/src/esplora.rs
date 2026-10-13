@@ -2495,6 +2495,13 @@ mod tests {
         }
         ctx.indexes.esplora_tx_index = None;
         assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 503);
+        // Reused block bodies must pass the same identity check as an index
+        // fallback read; a decodable body under the wrong key is corruption.
+        block.header.nonce = block.header.nonce.wrapping_add(1);
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        }));
+        assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 500);
     }
 
     struct FailingParentIndex {
