@@ -301,7 +301,7 @@ fn empty_witness_items_remain_valid_wire_data() {
 
 #[test]
 fn amplified_witness_count_fails_before_span_growth() {
-    let bytes = empty_witness_tx(1_100_000);
+    let bytes = empty_witness_tx(4_000_001);
     assert!(matches!(
         ParsedTransaction::parse_exact(&bytes),
         Err(DecodeError::ResourceLimitExceeded)
@@ -314,7 +314,7 @@ fn amplified_witness_count_fails_before_span_growth() {
 
 #[test]
 fn block_transactions_share_one_decoded_metadata_budget() {
-    let tx = empty_witness_tx(600_000);
+    let tx = empty_witness_tx(2_000_000);
     assert!(ParsedTransaction::parse_exact(&tx).is_ok());
 
     let mut bytes = vec![0_u8; 80]; // syntactically valid block header

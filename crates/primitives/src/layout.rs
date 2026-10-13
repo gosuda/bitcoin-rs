@@ -53,11 +53,13 @@ const MIN_WITNESS_ITEM_LEN: u64 = 1;
 /// Fixed serialized input outpoint length: 32-byte txid plus 4-byte vout.
 const OUTPOINT_LEN: u64 = 36;
 
-/// Maximum combined decoded-record overhead for a transaction or a block.
-/// Includes borrowed layout entries and the owned transaction descriptors
-/// that materialization creates while the layout remains live. Serialized
-/// script bytes are already bounded by the input image, not this budget.
-const MAX_DECODED_METADATA_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum layout and owned-record overhead for a consensus-sized block.
+/// Of all record types, empty witness items have the greatest ratio of
+/// descriptor bytes to minimum wire bytes (one prefix byte). This ceiling
+/// therefore admits every block within the 4,000,000-byte consensus bound
+/// without making resource accounting an extra consensus validity rule.
+const MAX_DECODED_METADATA_BYTES: usize =
+    4_000_000 * (size_of::<ByteSpan>() + size_of::<Vec<u8>>());
 
 /// A checked byte range within one parsed image.
 ///

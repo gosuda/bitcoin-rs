@@ -28,6 +28,9 @@ pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
 /// within the 400,000-weight-unit standardness policy cannot exceed this
 /// many serialized bytes; block validation remains consensus-based.
 pub const MAX_TX_PAYLOAD: usize = 400_000;
+/// Blocks larger than 4,000,000 serialized bytes cannot satisfy the
+/// consensus maximum block weight, even if all bytes were witness data.
+pub const MAX_BLOCK_PAYLOAD: usize = 4_000_000;
 /// Maximum control messages coalesced into one vectored write.
 pub(crate) const MAX_WRITE_BURST: usize = 8;
 
@@ -46,10 +49,10 @@ pub(crate) const HEADER_LEN: usize = 24;
 const COMMAND_LEN: usize = 12;
 
 fn max_payload_for(command: &str) -> usize {
-    if command == "tx" {
-        MAX_TX_PAYLOAD
-    } else {
-        MAX_MESSAGE_PAYLOAD
+    match command {
+        "tx" => MAX_TX_PAYLOAD,
+        "block" => MAX_BLOCK_PAYLOAD,
+        _ => MAX_MESSAGE_PAYLOAD,
     }
 }
 
@@ -923,7 +926,8 @@ mod tests {
     use bitcoin::p2p::Magic;
 
     use super::{
-        HEADER_LEN, MAX_MESSAGE_PAYLOAD, MAX_TX_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
+        HEADER_LEN, MAX_BLOCK_PAYLOAD, MAX_MESSAGE_PAYLOAD, MAX_TX_PAYLOAD, PeerError,
+        encode_payload, read_message, wire_len,
         write_message,
     };
 
@@ -1122,6 +1126,21 @@ mod tests {
         let oversize = MAX_TX_PAYLOAD + 1;
         let mut header = header_declaring(oversize)?;
         header[4..16].copy_from_slice(b"tx\0\0\0\0\0\0\0\0\0\0");
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header),
+        };
+        assert!(matches!(
+            read_message(&mut reader, Magic::REGTEST),
+            Err(PeerError::PayloadTooLarge(len)) if len == oversize
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn block_header_rejects_oversized_payload_before_reading_body() -> Result<(), PeerError> {
+        let oversize = MAX_BLOCK_PAYLOAD + 1;
+        let mut header = header_declaring(oversize)?;
+        header[4..16].copy_from_slice(b"block\0\0\0\0\0\0\0");
         let mut reader = HeaderOnlyReader {
             header: Cursor::new(header),
         };
