@@ -43,8 +43,9 @@ retain only response rows. Request size, row ordering, duplicates and omitted
 missing IDs keep their existing semantics. Transactions
 already selected through the mempool or verified index queries may supply
 those outputs. A decoded block may supply them only when its header identity
-matches the requested record, its transactions pass the existing merkle-root
-and mutation checks, it belongs to the applied chain, and the transaction
+matches the requested record, its transactions pass the existing merkle-root,
+mutation and witness-commitment checks using activation at that block's ancestry,
+it belongs to the applied chain, and the transaction
 index is healthy and caught up. The readiness snapshot is consulted once only
 when the batch can reuse an in-block parent; ordinary parent queries otherwise
 enforce their own readiness checks. Losing
@@ -57,6 +58,8 @@ Proof: `crates/rpc/src/esplora.rs` tests
 `history_resolves_shared_parents_once_per_page`,
 `batch_reuses_selected_transactions_and_mempool_parents`,
 `block_page_reuses_parent_outside_the_selected_page`,
+`block_transactions_reject_corrupt_witness_commitments`,
+`block_witness_binding_observes_activation`,
 `block_parent_reuse_checks_readiness_only_when_needed`,
 `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`, and
 `parent_query_errors_and_republication_never_yield_a_cached_success`

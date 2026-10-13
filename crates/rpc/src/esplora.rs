@@ -2262,7 +2262,7 @@ mod tests {
         reason = "first, later, mixed and missing pages share one history fixture"
     )]
     fn history_resolves_shared_parents_once_per_page() {
-        let parent = paying_transaction(&[null_outpoint()], &vec![(125, vec![0x52]); 62]);
+        let parent = paying_transaction(&[OutPoint::null()], &vec![(125, vec![0x52]); 62]);
         let transactions = (0_u32..30)
             .map(|n| {
                 paying_transaction(
@@ -2374,7 +2374,7 @@ mod tests {
     #[test]
     fn batch_reuses_selected_transactions_and_mempool_parents() {
         let parent =
-            paying_transaction(&[null_outpoint()], &[(125, vec![0x51]), (175, vec![0x52])]);
+            paying_transaction(&[OutPoint::null()], &[(125, vec![0x51]), (175, vec![0x52])]);
         let child = paying_transaction(
             &[
                 OutPoint::new(parent.txid(), 0),
@@ -2402,6 +2402,14 @@ mod tests {
             .expect("mempool prevouts");
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].fee, 50);
+        assert_eq!(
+            values[0].vin[0].prevout.as_ref().expect("vout 0").value,
+            125
+        );
+        assert_eq!(
+            values[0].vin[1].prevout.as_ref().expect("vout 1").value,
+            175
+        );
         assert!(!values[0].status.confirmed);
         assert_eq!(
             serde_json::to_value(&values[0]).expect("first"),
@@ -2415,6 +2423,14 @@ mod tests {
             .transaction_values([(&child, None), (&parent, None)], None)
             .expect("selected parent");
         assert_eq!(values[0].fee, 50);
+        assert_eq!(
+            values[0].vin[0].prevout.as_ref().expect("vout 0").value,
+            125
+        );
+        assert_eq!(
+            values[0].vin[1].prevout.as_ref().expect("vout 1").value,
+            175
+        );
         assert_eq!(values[1].txid, parent.txid().to_string());
         let missing = paying_transaction(&[OutPoint::new(parent.txid(), 2)], &[(1, vec![0x51])]);
         let response = Projection::new(&ctx)
@@ -2429,7 +2445,7 @@ mod tests {
         let parent = block.txs[0].clone();
         let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x51])]);
         block.txs.push(child.clone());
-        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
         let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
@@ -2501,6 +2517,102 @@ mod tests {
     }
 
     #[test]
+    fn block_transactions_reject_corrupt_witness_commitments() {
+        use bitcoin_rs_primitives::encode::double_sha256;
+        let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
+        let mut child =
+            paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
+        child.inputs[0].witness = vec![vec![0x42]].into();
+        let mut block = fixture_genesis();
+        block.txs[0].inputs[0].witness = vec![vec![0; 32]].into();
+        // The coinbase wtxid is zero in the witness tree. Its reserved value
+        // is also zero, so the two folds below bind the child's witness.
+        let mut leaves = vec![[0; 32], *child.wtxid().as_bytes()];
+        let root = bitcoin_rs_consensus::compute_merkle_root(&mut leaves).expect("witness root");
+        let commitment = double_sha256(&[root.as_slice(), &[0; 32]].concat());
+        block.txs[0].outputs.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: [
+                &[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed],
+                commitment.to_le_bytes().as_slice(),
+            ]
+            .concat()
+            .into(),
+        });
+        block.txs.push(child);
+        block.header.merkle_root = merkle_root(&block.txs).expect("merkle root");
+        let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+        let mut ctx = Context::new();
+        ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        ctx.chain.add_block(record.clone());
+        let tip = {
+            let mut tree = ctx.chain.block_tree.write();
+            tree.insert_node(None, block.header, NodeStatus::Active)
+                .expect("header");
+            tree.tip().expect("tip")
+        };
+        ctx.chain.applied_tip.store(Some(tip));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: vec![parent],
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        }));
+        let response = block_txs(&ctx, &record.hash.to_string(), 1);
+        assert_eq!(response.status, 200);
+        let values: Vec<Value> = serde_json::from_slice(&response.body).expect("block page");
+        assert_eq!(values[0]["vin"][0]["witness"], json!(["42"]));
+        for (tx_index, witness) in [(1, vec![vec![0x43]]), (0, vec![vec![1; 32]]), (0, vec![])] {
+            let mut corrupt = block.clone();
+            corrupt.txs[tx_index].inputs[0].witness = witness.into();
+            assert_eq!(corrupt.block_hash(), block.block_hash());
+            assert_eq!(corrupt.txids(), block.txids());
+            ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+                bodies: vec![(0, record.hash, consensus_bytes(&corrupt))],
+            }));
+            assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 500);
+        }
+    }
+
+    #[test]
+    fn block_witness_binding_observes_activation() {
+        let mut block = fixture_genesis();
+        // Before activation, an OP_RETURN resembling a witness commitment
+        // does not require a reserved value. Afterwards its absence is corrupt.
+        block.txs[0].outputs.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed], &[0; 32][..]]
+                .concat()
+                .into(),
+        });
+        block.header.merkle_root = merkle_root(&block.txs).expect("merkle root");
+        let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+        let mut ctx = Context::new();
+        ctx.chain.add_block(record.clone());
+        ctx.chain
+            .block_tree
+            .write()
+            .insert_node(None, block.header, NodeStatus::Active)
+            .expect("header");
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        }));
+        for (network, expected) in [
+            (bitcoin_rs_primitives::Network::Mainnet, true),
+            (bitcoin_rs_primitives::Network::Regtest, false),
+        ] {
+            ctx.chain.chain_network = network;
+            assert_eq!(
+                Projection::new(&ctx)
+                    .required_block(&record.hash.to_string())
+                    .is_ok(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn block_parent_reuse_checks_readiness_only_when_needed() {
         struct ReadinessIndex {
             parent: Tx,
@@ -2526,7 +2638,7 @@ mod tests {
                 })
             }
         }
-        let parent = paying_transaction(&[null_outpoint()], &[(125, vec![0x51])]);
+        let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
         let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
         let checks = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
@@ -2566,9 +2678,9 @@ mod tests {
 
     #[test]
     fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
-        let mut first = paying_transaction(&[null_outpoint()], &[(125, vec![0x51])]);
+        let mut first = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
         first.inputs[0].witness = vec![vec![0x42; 1024]].into();
-        let second = paying_transaction(&[null_outpoint()], &[(175, vec![0x52])]);
+        let second = paying_transaction(&[OutPoint::null()], &[(175, vec![0x52])]);
         let missing = Txid::default();
         let ids = [first.txid(), missing, second.txid(), first.txid()].repeat(30);
         let body = serde_json::to_vec(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
@@ -2732,7 +2844,7 @@ mod tests {
             header: Header {
                 version: 1,
                 prev_blockhash: genesis.compute_hash(),
-                merkle_root: fixture_merkle_root(&[transaction.txid()]),
+                merkle_root: Hash256::from(transaction.txid()),
                 time: 2_000,
                 bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,

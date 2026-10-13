@@ -4,8 +4,8 @@ use core::str::FromStr as _;
 use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_consensus::verify_merkle_root_with_txids;
+use bitcoin_rs_chain::{TipSnapshot, softfork_state};
+use bitcoin_rs_consensus::check_block_body_binding;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
@@ -433,8 +433,18 @@ impl<'a> Projection<'a> {
         if block.block_hash() != record.hash {
             return Err(internal_error("stored block body identity mismatch"));
         }
-        verify_merkle_root_with_txids(&block, &block.txids())
-            .map_err(|_| internal_error("stored block transaction commitment mismatch"))?;
+        // Activation belongs to this block's ancestry, including when the
+        // requested block is on a losing branch, rather than today's tip.
+        let segwit_active = {
+            let tree = self.ctx.chain.block_tree.read();
+            let parent = tree
+                .node_by_hash(Hash256::from(record.hash))
+                .and_then(|node| node.parent);
+            softfork_state(&tree, self.ctx.chain.chain_network, parent, record.height).segwit_active
+        };
+        check_block_body_binding(&block, segwit_active).map_err(|_| {
+            internal_error("stored block transaction or witness commitment mismatch")
+        })?;
         Ok((record, block))
     }
 
