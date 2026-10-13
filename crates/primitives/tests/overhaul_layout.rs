@@ -313,6 +313,25 @@ fn amplified_witness_count_fails_before_span_growth() {
 }
 
 #[test]
+fn worst_case_record_overhead_fits_wire_derived_budget() {
+    use std::mem::size_of;
+
+    use bitcoin_rs_primitives::layout::{InputLayout, OutputLayout};
+    use bitcoin_rs_primitives::{TxIn, TxOut};
+
+    // The budget charges metadata plus owned descriptors per record. Each
+    // record also has a minimum number of wire bytes, so witness items
+    // with their one-byte prefixes must remain the most expensive case.
+    let per_wire_byte = size_of::<ByteSpan>() + size_of::<Vec<u8>>();
+    assert!(size_of::<InputLayout>() + size_of::<TxIn>() <= 41 * per_wire_byte);
+    assert!(size_of::<OutputLayout>() + size_of::<TxOut>() <= 9 * per_wire_byte);
+    assert!(
+        size_of::<ParsedTransaction<'static>>() + size_of::<Tx>() + size_of::<ByteSpan>()
+            <= 10 * per_wire_byte
+    );
+}
+
+#[test]
 fn block_transactions_share_one_decoded_metadata_budget() {
     let tx = empty_witness_tx(2_000_000);
     assert!(ParsedTransaction::parse_exact(&tx).is_ok());

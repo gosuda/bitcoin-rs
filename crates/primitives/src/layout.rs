@@ -217,7 +217,7 @@ impl DecodeBudget {
             return Err(DecodeError::ResourceLimitExceeded);
         }
         storage
-            .try_reserve_exact(count)
+            .try_reserve(count)
             .map_err(|_| DecodeError::AllocationFailed)?;
         self.remaining -= needed;
         Ok(())
