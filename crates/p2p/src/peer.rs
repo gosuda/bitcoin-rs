@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -179,6 +179,17 @@ impl<S> Peer<S> {
             recv: negotiated.recv,
             send: Some(negotiated.send),
             transport: negotiated.protocol,
+        }
+    }
+
+    /// Apply the shared v1 partial-frame budget before reading from this peer.
+    pub(crate) fn set_v1_frame_budget(
+        &mut self,
+        budget: Arc<crate::wire::IncompleteV1Budget>,
+        ip: IpAddr,
+    ) {
+        if let crate::transport::RecvTransport::V1(receiver) = &mut self.recv {
+            receiver.set_budget(budget, ip);
         }
     }
 

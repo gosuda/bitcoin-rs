@@ -150,6 +150,8 @@ pub struct ConnectionShared {
     /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
     /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
     pub max_inbound: usize,
+    /// One start-scoped admission budget for all incomplete v1 message bodies.
+    pub(crate) incomplete_v1_budget: Arc<crate::wire::IncompleteV1Budget>,
     /// The services this node advertises in every `version`, inbound or
     /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
     /// when pruned (Core `init.cpp:2022-2026`).
@@ -220,6 +222,7 @@ impl ConnectionShared {
             block_sync: extras.block_sync,
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
+            incomplete_v1_budget: Arc::new(crate::wire::IncompleteV1Budget::default()),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
         }
@@ -886,6 +889,7 @@ fn dial(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.set_v1_frame_budget(Arc::clone(&shared.incomplete_v1_budget), addr.ip());
     peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
         lease.node_id(),
         addr,
@@ -1181,6 +1185,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.set_v1_frame_budget(Arc::clone(&shared.incomplete_v1_budget), peer_addr.ip());
     peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
         lease.node_id(),
         peer_addr,

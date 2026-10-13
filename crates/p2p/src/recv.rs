@@ -8,6 +8,7 @@
 //! this machinery; each maps the `io::Error` onto its own error type.
 
 use std::io::{self, Read};
+use std::time::Instant;
 
 /// Largest single read into a message body. The retained buffer grows only
 /// with bytes actually received, so a peer that declares a large body then
@@ -49,8 +50,38 @@ pub(crate) fn fill_growing<R: Read>(
     buffer: &mut Vec<u8>,
     len: usize,
 ) -> io::Result<()> {
+    fill_growing_checked(reader, buffer, len, || Ok(()))
+}
+
+/// A growing read that also checks an absolute frame-completion deadline
+/// before every blocking read, including a stream that never poll-times out.
+pub(crate) fn fill_growing_until<R: Read>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    len: usize,
+    deadline: Instant,
+) -> io::Result<()> {
+    fill_growing_checked(reader, buffer, len, || {
+        if Instant::now() >= deadline {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "v1 body completion deadline exceeded",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn fill_growing_checked<R: Read>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    len: usize,
+    mut check_deadline: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
     let mut scratch = [0u8; RECEIVE_CHUNK];
     while buffer.len() < len {
+        check_deadline()?;
         let wanted = (len - buffer.len()).min(RECEIVE_CHUNK);
         match reader.read(&mut scratch[..wanted]) {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),

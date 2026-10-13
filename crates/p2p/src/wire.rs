@@ -1,6 +1,11 @@
+use std::collections::{HashMap, hash_map::Entry};
 use std::io::{IoSlice, Read, Write};
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes;
+use parking_lot::Mutex;
 
 use bitcoin::consensus::encode::{self, Decodable};
 use bitcoin::p2p::Magic;
@@ -24,6 +29,14 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+
+/// Combined declared capacity of incomplete v1 payloads across one P2P start.
+const MAX_INCOMPLETE_V1_BYTES: usize = 128 * 1024 * 1024;
+/// One source IP cannot occupy the entire incomplete-frame budget.
+const MAX_INCOMPLETE_V1_BYTES_PER_IP: usize = MAX_MESSAGE_PAYLOAD;
+/// An incomplete frame cannot persist for the general 20-minute idle window.
+const V1_BODY_DEADLINE: Duration = Duration::from_mins(2);
+
 /// Maximum control messages coalesced into one vectored write.
 pub(crate) const MAX_WRITE_BURST: usize = 8;
 
@@ -276,6 +289,12 @@ pub enum PeerError {
     /// Payload checksum did not match the header checksum.
     #[error("invalid payload checksum")]
     BadChecksum,
+    /// Retaining another incomplete v1 body would exceed the shared budget.
+    #[error("incomplete v1 frame budget exhausted")]
+    IncompleteFrameBudgetExceeded,
+    /// A v1 body did not complete within the frame deadline.
+    #[error("incomplete v1 frame completion deadline exceeded")]
+    IncompleteFrameDeadlineExceeded,
     /// A connection-local operational or non-punitive policy condition ended processing.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
@@ -301,7 +320,10 @@ pub enum PeerError {
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) => error,
+            Self::Io(_)
+            | Self::Transport(_)
+            | Self::IncompleteFrameBudgetExceeded
+            | Self::IncompleteFrameDeadlineExceeded => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -481,6 +503,70 @@ pub fn read_message<R: Read>(
     V1Receiver::default().read_message_with(reader, expected_magic, |_, _| {})
 }
 
+/// Budget for concurrently incomplete legacy frames in one P2P start epoch.
+///
+/// Reserve the declared body length before reading it. Actual retained bytes
+/// never exceed the reserved length, even when a peer stalls before sending
+/// anything; reserving at the header prevents concurrent peers from growing
+/// past the shared limit. A reservation is released on completion, rejection,
+/// deadline expiry, or receiver drop.
+#[derive(Debug, Default)]
+pub(crate) struct IncompleteV1Budget {
+    state: Mutex<IncompleteV1State>,
+}
+
+#[derive(Debug, Default)]
+struct IncompleteV1State {
+    total: usize,
+    by_ip: HashMap<IpAddr, usize>,
+}
+
+#[derive(Debug)]
+struct IncompleteV1Reservation {
+    budget: Arc<IncompleteV1Budget>,
+    ip: IpAddr,
+    bytes: usize,
+}
+
+impl IncompleteV1Budget {
+    /// PRE: `bytes` passed the v1 header limit. POST: success owns exactly
+    /// `bytes` of both global and source-IP capacity until the guard drops.
+    fn try_reserve(self: &Arc<Self>, ip: IpAddr, bytes: usize) -> Option<IncompleteV1Reservation> {
+        let mut state = self.state.lock();
+        let source_used = state.by_ip.get(&ip).copied().unwrap_or(0);
+        if bytes > MAX_INCOMPLETE_V1_BYTES.saturating_sub(state.total)
+            || bytes > MAX_INCOMPLETE_V1_BYTES_PER_IP.saturating_sub(source_used)
+        {
+            return None;
+        }
+        state.total += bytes;
+        state.by_ip.insert(ip, source_used + bytes);
+        Some(IncompleteV1Reservation {
+            budget: Arc::clone(self),
+            ip,
+            bytes,
+        })
+    }
+}
+
+impl Drop for IncompleteV1Reservation {
+    fn drop(&mut self) {
+        let mut state = self.budget.state.lock();
+        state.total -= self.bytes;
+        match state.by_ip.entry(self.ip) {
+            Entry::Occupied(mut entry) => {
+                let remaining = *entry.get() - self.bytes;
+                if remaining == 0 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() = remaining;
+                }
+            }
+            Entry::Vacant(_) => unreachable!("incomplete frame reservation lost its source"),
+        }
+    }
+}
+
 /// Receive state for one v1 byte stream that survives poll timeouts.
 ///
 /// Peer sockets poll with a short read timeout, so a frame can stop arriving
@@ -494,6 +580,7 @@ pub(crate) struct V1Receiver {
     header: [u8; HEADER_LEN],
     header_filled: usize,
     body: Option<PendingBody>,
+    source_budget: Option<(Arc<IncompleteV1Budget>, IpAddr)>,
 }
 
 /// A validated header whose payload is still arriving.
@@ -504,9 +591,18 @@ struct PendingBody {
     /// Validated declared payload length; `payload` holds only received bytes.
     expected: usize,
     payload: Vec<u8>,
+    deadline: Instant,
+    /// Drop releases the declared body length from the shared budget.
+    _reservation: Option<IncompleteV1Reservation>,
 }
 
 impl V1Receiver {
+    /// Attach the start-scoped budget before processing any message.
+    pub(crate) fn set_budget(&mut self, budget: Arc<IncompleteV1Budget>, ip: IpAddr) {
+        assert!(self.body.is_none(), "cannot budget an already pending v1 body");
+        self.source_budget = Some((budget, ip));
+    }
+
     /// A receiver whose first header already holds `prefix`: the bytes a
     /// BIP324 responder read before it recognized a v1 peer.
     pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
@@ -532,11 +628,22 @@ impl V1Receiver {
         } else {
             self.read_header(reader, expected_magic)?
         };
-        if let Err(error) = crate::recv::fill_growing(reader, &mut body.payload, body.expected) {
+        if Instant::now() >= body.deadline {
+            return Err(PeerError::IncompleteFrameDeadlineExceeded);
+        }
+        if let Err(error) =
+            crate::recv::fill_growing_until(reader, &mut body.payload, body.expected, body.deadline)
+        {
+            if Instant::now() >= body.deadline {
+                return Err(PeerError::IncompleteFrameDeadlineExceeded);
+            }
             if crate::recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             }
             return Err(error.into());
+        }
+        if Instant::now() >= body.deadline {
+            return Err(PeerError::IncompleteFrameDeadlineExceeded);
         }
         if checksum(&body.payload) != body.checksum {
             return Err(PeerError::BadChecksum);
@@ -561,7 +668,17 @@ impl V1Receiver {
             return Err(error.into());
         }
         self.header_filled = 0;
-        pending_body(&self.header, expected_magic)
+        let mut body = pending_body(&self.header, expected_magic)?;
+        if body.expected > 0
+            && let Some((budget, ip)) = &self.source_budget
+        {
+            body._reservation = Some(
+                budget
+                    .try_reserve(*ip, body.expected)
+                    .ok_or(PeerError::IncompleteFrameBudgetExceeded)?,
+            );
+        }
+        Ok(body)
     }
 }
 
@@ -585,7 +702,7 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if payload_len > MAX_MESSAGE_PAYLOAD {
+    if payload_len > command_payload_limit(&command) {
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
 
@@ -596,7 +713,27 @@ fn pending_body(
         checksum,
         expected: payload_len,
         payload: Vec::new(),
+        deadline: Instant::now() + V1_BODY_DEADLINE,
+        _reservation: None,
     })
+}
+
+/// Header-level bounds for known commands, without waiting for full decoding.
+/// Unknown extension commands keep the original v1 wire ceiling.
+fn command_payload_limit(command: &str) -> usize {
+    match command {
+        "verack" | "mempool" | "sendheaders" | "getaddr" | "filterclear" | "wtxidrelay"
+        | "sendaddrv2" => 0,
+        "ping" | "pong" | "feefilter" => 8,
+        "sendcmpct" => 9,
+        "version" => 1024,
+        "headers" => MAX_HEADERS_MESSAGE_COUNT * 81 + 3,
+        "inv" | "getdata" | "notfound" => MAX_INV_PER_MSG * 36 + 3,
+        "addr" => MAX_ADDR_MESSAGE_COUNT * 30 + 3,
+        "addrv2" => MAX_ADDR_MESSAGE_COUNT * 1024 + 3,
+        "getblocks" | "getheaders" => 4 + 3 + MAX_LOCATOR_HASHES * 32 + 32,
+        _ => MAX_MESSAGE_PAYLOAD,
+    }
 }
 
 /// Returns the full encoded wire size of `message`: the 24-byte framing
@@ -901,14 +1038,17 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use bitcoin::consensus::encode::serialize;
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
 
     use super::{
-        HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
-        write_message,
+        HEADER_LEN, IncompleteV1Budget, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload,
+        read_message, wire_len, write_message,
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
@@ -926,13 +1066,13 @@ mod tests {
         }
     }
 
-    /// Build a regtest `ping` wire header declaring `payload_len` bytes of payload.
+    /// Build a regtest `block` wire header declaring `payload_len` bytes of payload.
     fn header_declaring(payload_len: usize) -> Result<Vec<u8>, PeerError> {
         let len = u32::try_from(payload_len)
             .map_err(|_| PeerError::Protocol("payload length does not fit in u32"))?;
         let mut header = Vec::with_capacity(HEADER_LEN);
         header.extend_from_slice(&Magic::REGTEST.to_bytes());
-        header.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+        header.extend_from_slice(b"block\0\0\0\0\0\0\0");
         header.extend_from_slice(&len.to_le_bytes());
         header.extend_from_slice(&[0u8; 4]); // checksum (never reached / wrong on purpose)
         Ok(header)
@@ -966,6 +1106,115 @@ mod tests {
         );
         assert!(matches!(result, Err(PeerError::BadChecksum)));
         assert!(!observed_bad_checksum);
+    }
+
+    #[test]
+    fn command_limits_reject_oversized_controls_at_the_header() -> Result<(), PeerError> {
+        let mut header = header_declaring(9)?;
+        header[4..16].copy_from_slice(b"ping\0\0\0\0\0\0\0\0");
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header),
+        };
+        assert!(matches!(
+            read_message(&mut reader, Magic::REGTEST),
+            Err(PeerError::PayloadTooLarge(9))
+        ));
+
+        let mut header = header_declaring(8)?;
+        header[4..16].copy_from_slice(b"ping\0\0\0\0\0\0\0\0");
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header),
+        };
+        assert!(matches!(
+            read_message(&mut reader, Magic::REGTEST),
+            Err(PeerError::Io(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn frame_budget_counts_declared_bytes_without_allocating_them() {
+        let budget = Arc::new(IncompleteV1Budget::default());
+        let mut reservations = Vec::new();
+        for octet in 1..=4 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
+            let reservation = budget
+                .try_reserve(ip, MAX_MESSAGE_PAYLOAD)
+                .expect("four maximum-sized frames fit the global budget");
+            reservations.push(reservation);
+            assert!(
+                budget.try_reserve(ip, 1).is_none(),
+                "one IP cannot hold more than a maximum-sized frame"
+            );
+        }
+        let fifth = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        assert!(budget.try_reserve(fifth, 1).is_none());
+        drop(reservations);
+        assert!(budget.try_reserve(fifth, MAX_MESSAGE_PAYLOAD).is_some());
+    }
+
+    #[test]
+    fn stalled_frame_releases_its_budget_on_deadline() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+        use std::io::ErrorKind;
+
+        let budget = Arc::new(IncompleteV1Budget::default());
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut receiver = super::V1Receiver::default();
+        receiver.set_budget(Arc::clone(&budget), ip);
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(vec![7; 100]),
+            Inbound::Stall(ErrorKind::TimedOut),
+        ]);
+        assert!(matches!(
+            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
+            Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
+        ));
+        assert!(budget.try_reserve(ip, 1).is_none());
+        let Some(body) = receiver.body.as_mut() else {
+            return Err(PeerError::Protocol("stalled frame was not retained"));
+        };
+        body.deadline = Instant::now() - Duration::from_secs(1);
+        assert!(matches!(
+            receiver.read_message_with(&mut std::io::empty(), Magic::REGTEST, |_, _| {}),
+            Err(PeerError::IncompleteFrameDeadlineExceeded)
+        ));
+        assert!(receiver.body.is_none());
+        assert!(budget.try_reserve(ip, MAX_MESSAGE_PAYLOAD).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn second_receiver_cannot_read_a_body_while_its_source_is_at_limit() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, StallingStream};
+        use std::io::ErrorKind;
+
+        let budget = Arc::new(IncompleteV1Budget::default());
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut first = super::V1Receiver::default();
+        first.set_budget(Arc::clone(&budget), ip);
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Stall(ErrorKind::WouldBlock),
+        ]);
+        assert!(matches!(
+            first.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
+            Err(PeerError::Io(error)) if error.kind() == ErrorKind::WouldBlock
+        ));
+
+        let mut second = super::V1Receiver::default();
+        second.set_budget(Arc::clone(&budget), ip);
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+        };
+        assert!(matches!(
+            second.read_message_with(&mut reader, Magic::REGTEST, |_, _| {}),
+            Err(PeerError::IncompleteFrameBudgetExceeded)
+        ));
+        drop(first);
+        assert!(budget.try_reserve(ip, MAX_MESSAGE_PAYLOAD).is_some());
+        Ok(())
     }
 
     #[test]
