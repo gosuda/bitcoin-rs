@@ -16,7 +16,7 @@ use crate::handlers::Handler;
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
 const MAX_BACKEND_BULK_BODY_BYTES: usize = 16 * 1_024;
 const MAX_ACTIVE_BACKEND_REQUESTS: usize = 4;
-static ACTIVE_BACKEND_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+static BACKEND_WORK_LIMITER: BackendWorkLimiter = BackendWorkLimiter::new();
 
 pub(crate) const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 
@@ -163,22 +163,28 @@ impl Drop for ConnectionPermit {
 }
 
 /// Limits backend projection work independently of the shared HTTP worker pool.
-struct BackendPermit;
+struct BackendWorkLimiter(AtomicUsize);
 
-impl BackendPermit {
-    fn try_acquire() -> Option<Self> {
-        ACTIVE_BACKEND_REQUESTS
+impl BackendWorkLimiter {
+    const fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+
+    fn try_acquire(&self) -> Option<BackendPermit<'_>> {
+        self.0
             .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |active| {
                 (active < MAX_ACTIVE_BACKEND_REQUESTS).then_some(active + 1)
             })
             .ok()
-            .map(|_| Self)
+            .map(|_| BackendPermit(self))
     }
 }
 
-impl Drop for BackendPermit {
+struct BackendPermit<'a>(&'a BackendWorkLimiter);
+
+impl Drop for BackendPermit<'_> {
     fn drop(&mut self) {
-        ACTIVE_BACKEND_REQUESTS.fetch_sub(1, Ordering::Release);
+        self.0.0.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -266,7 +272,7 @@ fn dispatch_http_request(
             write_status(stream, 401, "Unauthorized", b"unauthorized", false)?;
             return Ok(true);
         }
-        let Some(permit) = BackendPermit::try_acquire() else {
+        let Some(permit) = BACKEND_WORK_LIMITER.try_acquire() else {
             write_status(stream, 503, "Service Unavailable", b"backend busy", false)?;
             return Ok(true);
         };
@@ -1006,15 +1012,15 @@ mod tests {
 
     #[test]
     fn backend_work_budget_is_bounded() {
-        // A separate instance avoids depending on unrelated concurrent tests.
+        let limiter = BackendWorkLimiter::new();
         let mut permits = Vec::new();
         for _ in 0..MAX_ACTIVE_BACKEND_REQUESTS {
-            permits.push(BackendPermit::try_acquire());
+            permits.push(limiter.try_acquire());
         }
         assert!(permits.iter().all(Option::is_some));
-        assert!(BackendPermit::try_acquire().is_none());
+        assert!(limiter.try_acquire().is_none());
         drop(permits);
-        assert!(BackendPermit::try_acquire().is_some());
+        assert!(limiter.try_acquire().is_some());
     }
 
     #[test]
