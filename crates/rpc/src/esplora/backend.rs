@@ -24,7 +24,6 @@ use crate::rest::Response;
 use crate::rest::{bad_request, internal_error, json_ok, service_unavailable, text_response};
 use sonic_rs::json as sonic_json;
 
-
 const DEFAULT_MEMPOOL_PAGE: usize = 25;
 const MAX_MEMPOOL_PAGE: usize = 100;
 const MAX_BULK_ITEMS: usize = 64;
@@ -201,7 +200,10 @@ fn select_mempool_page<'a>(
 }
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
-    let text_ids = match bulk_strings(body, "transaction request body must be a JSON array of txids") {
+    let text_ids = match bulk_strings(
+        body,
+        "transaction request body must be a JSON array of txids",
+    ) {
         Ok(ids) => ids,
         Err(response) => return response,
     };
@@ -501,7 +503,8 @@ mod pagination_tests {
 
     #[test]
     fn backend_serialization_stops_at_the_response_budget() {
-        let response = bounded_json_array(std::iter::once(Ok("x".repeat(MAX_BACKEND_RESPONSE_BYTES))));
+        let oversized = "x".repeat(MAX_BACKEND_RESPONSE_BYTES);
+        let response = bounded_json_array(std::iter::once(Ok(oversized)));
         assert_eq!(response.status, 503);
         assert!(response.body.len() < 128);
     }
