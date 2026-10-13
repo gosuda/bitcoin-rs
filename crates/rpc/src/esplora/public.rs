@@ -447,9 +447,9 @@ pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
 }
 
 pub(super) fn block_transaction_values<'a>(
-    ctx: &Context,
+    ctx: &'a Context,
     record: &bitcoin_rs_index::block_log::BlockRecord,
-    transactions: impl IntoIterator<Item = &'a Tx>,
+    transactions: impl IntoIterator<Item = &'a Tx> + 'a,
 ) -> Result<Vec<TransactionValue>, Response> {
     block_transaction_rows(ctx, record, transactions).collect()
 }
