@@ -1,5 +1,5 @@
 use std::collections::{HashMap, hash_map::Entry};
-use std::io::{IoSlice, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -503,13 +503,12 @@ pub fn read_message<R: Read>(
     V1Receiver::default().read_message_with(reader, expected_magic, |_, _| {})
 }
 
-/// Budget for concurrently incomplete legacy frames in one P2P start epoch.
+/// Budget for received bytes retained in incomplete legacy v1 frames.
 ///
-/// Reserve the declared body length before reading it. Actual retained bytes
-/// never exceed the reserved length, even when a peer stalls before sending
-/// anything; reserving at the header prevents concurrent peers from growing
-/// past the shared limit. A reservation is released on completion, rejection,
-/// deadline expiry, or receiver drop.
+/// Accounting occurs after each successful socket read and before its bytes
+/// enter the pending payload. An attacker must actually send the bytes they
+/// retain: a declared length alone costs no shared capacity. Every charged
+/// byte is released on completion, rejection, deadline expiry, or peer drop.
 #[derive(Debug, Default)]
 pub(crate) struct IncompleteV1Budget {
     state: Mutex<IncompleteV1State>,
@@ -528,29 +527,40 @@ struct IncompleteV1Reservation {
     bytes: usize,
 }
 
-impl IncompleteV1Budget {
-    /// PRE: `bytes` passed the v1 header limit. POST: success owns exactly
-    /// `bytes` of both global and source-IP capacity until the guard drops.
-    fn try_reserve(self: &Arc<Self>, ip: IpAddr, bytes: usize) -> Option<IncompleteV1Reservation> {
-        let mut state = self.state.lock();
-        let source_used = state.by_ip.get(&ip).copied().unwrap_or(0);
-        if bytes > MAX_INCOMPLETE_V1_BYTES.saturating_sub(state.total)
-            || bytes > MAX_INCOMPLETE_V1_BYTES_PER_IP.saturating_sub(source_used)
-        {
-            return None;
-        }
-        state.total += bytes;
-        state.by_ip.insert(ip, source_used + bytes);
-        Some(IncompleteV1Reservation {
-            budget: Arc::clone(self),
+impl IncompleteV1Reservation {
+    fn new(budget: Arc<IncompleteV1Budget>, ip: IpAddr) -> Self {
+        Self {
+            budget,
             ip,
-            bytes,
-        })
+            bytes: 0,
+        }
+    }
+
+    /// POST: success accounts exactly `received` additional retained bytes
+    /// in both the aggregate and source-IP budgets.
+    fn charge(&mut self, received: usize) -> bool {
+        if received == 0 {
+            return true;
+        }
+        let mut state = self.budget.state.lock();
+        let source_used = state.by_ip.get(&self.ip).copied().unwrap_or(0);
+        if received > MAX_INCOMPLETE_V1_BYTES.saturating_sub(state.total)
+            || received > MAX_INCOMPLETE_V1_BYTES_PER_IP.saturating_sub(source_used)
+        {
+            return false;
+        }
+        state.total += received;
+        state.by_ip.insert(self.ip, source_used + received);
+        self.bytes += received;
+        true
     }
 }
 
 impl Drop for IncompleteV1Reservation {
     fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
         let mut state = self.budget.state.lock();
         state.total -= self.bytes;
         match state.by_ip.entry(self.ip) {
@@ -564,6 +574,26 @@ impl Drop for IncompleteV1Reservation {
             }
             Entry::Vacant(_) => unreachable!("incomplete frame reservation lost its source"),
         }
+    }
+}
+
+/// Charges every successful body read before appending it to the pending Vec.
+struct BudgetedReader<'a, R> {
+    reader: &'a mut R,
+    reservation: &'a mut Option<IncompleteV1Reservation>,
+    denied: bool,
+}
+
+impl<R: Read> Read for BudgetedReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        if let Some(reservation) = self.reservation.as_mut()
+            && !reservation.charge(read)
+        {
+            self.denied = true;
+            return Err(io::Error::other("incomplete v1 frame budget exhausted"));
+        }
+        Ok(read)
     }
 }
 
@@ -631,9 +661,20 @@ impl V1Receiver {
         if Instant::now() >= body.deadline {
             return Err(PeerError::IncompleteFrameDeadlineExceeded);
         }
-        if let Err(error) =
-            crate::recv::fill_growing_until(reader, &mut body.payload, body.expected, body.deadline)
-        {
+        let mut tracked = BudgetedReader {
+            reader,
+            reservation: &mut body._reservation,
+            denied: false,
+        };
+        if let Err(error) = crate::recv::fill_growing_until(
+            &mut tracked,
+            &mut body.payload,
+            body.expected,
+            body.deadline,
+        ) {
+            if tracked.denied {
+                return Err(PeerError::IncompleteFrameBudgetExceeded);
+            }
             if Instant::now() >= body.deadline {
                 return Err(PeerError::IncompleteFrameDeadlineExceeded);
             }
@@ -672,11 +713,7 @@ impl V1Receiver {
         if body.expected > 0
             && let Some((budget, ip)) = &self.source_budget
         {
-            body._reservation = Some(
-                budget
-                    .try_reserve(*ip, body.expected)
-                    .ok_or(PeerError::IncompleteFrameBudgetExceeded)?,
-            );
+            body._reservation = Some(IncompleteV1Reservation::new(Arc::clone(budget), *ip));
         }
         Ok(body)
     }
@@ -1133,24 +1170,24 @@ mod tests {
     }
 
     #[test]
-    fn frame_budget_counts_declared_bytes_without_allocating_them() {
+    fn frame_budget_accounts_received_bytes_across_sources() {
         let budget = Arc::new(IncompleteV1Budget::default());
         let mut reservations = Vec::new();
         for octet in 1..=4 {
             let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
-            let reservation = budget
-                .try_reserve(ip, MAX_MESSAGE_PAYLOAD)
-                .expect("four maximum-sized frames fit the global budget");
+            let mut reservation =
+                super::IncompleteV1Reservation::new(Arc::clone(&budget), ip);
+            assert!(reservation.charge(MAX_MESSAGE_PAYLOAD));
             reservations.push(reservation);
-            assert!(
-                budget.try_reserve(ip, 1).is_none(),
-                "one IP cannot hold more than a maximum-sized frame"
-            );
+
+            let mut extra = super::IncompleteV1Reservation::new(Arc::clone(&budget), ip);
+            assert!(!extra.charge(1), "source IP is at its capacity");
         }
         let fifth = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        assert!(budget.try_reserve(fifth, 1).is_none());
+        let mut extra = super::IncompleteV1Reservation::new(Arc::clone(&budget), fifth);
+        assert!(!extra.charge(1), "aggregate capacity was exhausted");
         drop(reservations);
-        assert!(budget.try_reserve(fifth, MAX_MESSAGE_PAYLOAD).is_some());
+        assert!(extra.charge(MAX_MESSAGE_PAYLOAD));
     }
 
     #[test]
@@ -1171,7 +1208,7 @@ mod tests {
             receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
         ));
-        assert!(budget.try_reserve(ip, 1).is_none());
+        assert_eq!(budget.state.lock().total, 100);
         let Some(body) = receiver.body.as_mut() else {
             return Err(PeerError::Protocol("stalled frame was not retained"));
         };
@@ -1181,39 +1218,47 @@ mod tests {
             Err(PeerError::IncompleteFrameDeadlineExceeded)
         ));
         assert!(receiver.body.is_none());
-        assert!(budget.try_reserve(ip, MAX_MESSAGE_PAYLOAD).is_some());
+        assert_eq!(budget.state.lock().total, 0);
         Ok(())
     }
 
     #[test]
-    fn second_receiver_cannot_read_a_body_while_its_source_is_at_limit() -> Result<(), PeerError> {
+    fn second_receiver_rejects_a_body_when_its_source_is_at_limit() -> Result<(), PeerError> {
         use crate::test_support::{Inbound, StallingStream};
         use std::io::ErrorKind;
 
         let budget = Arc::new(IncompleteV1Budget::default());
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let mut first = super::V1Receiver::default();
-        first.set_budget(Arc::clone(&budget), ip);
+        let mut held = super::IncompleteV1Reservation::new(Arc::clone(&budget), ip);
+        assert!(held.charge(MAX_MESSAGE_PAYLOAD));
+
+        let mut receiver = super::V1Receiver::default();
+        receiver.set_budget(Arc::clone(&budget), ip);
         let mut stream = StallingStream::new([
             Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(vec![7]),
+        ]);
+        assert!(matches!(
+            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
+            Err(PeerError::IncompleteFrameBudgetExceeded)
+        ));
+        assert!(receiver.body.is_none());
+        drop(held);
+
+        let mut receiver = super::V1Receiver::default();
+        receiver.set_budget(Arc::clone(&budget), ip);
+        let mut stream = StallingStream::new([
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(vec![7]),
             Inbound::Stall(ErrorKind::WouldBlock),
         ]);
         assert!(matches!(
-            first.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
+            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {}),
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::WouldBlock
         ));
-
-        let mut second = super::V1Receiver::default();
-        second.set_budget(Arc::clone(&budget), ip);
-        let mut reader = HeaderOnlyReader {
-            header: Cursor::new(header_declaring(MAX_MESSAGE_PAYLOAD)?),
-        };
-        assert!(matches!(
-            second.read_message_with(&mut reader, Magic::REGTEST, |_, _| {}),
-            Err(PeerError::IncompleteFrameBudgetExceeded)
-        ));
-        drop(first);
-        assert!(budget.try_reserve(ip, MAX_MESSAGE_PAYLOAD).is_some());
+        assert_eq!(budget.state.lock().total, 1);
+        drop(receiver);
+        assert_eq!(budget.state.lock().total, 0);
         Ok(())
     }
 
