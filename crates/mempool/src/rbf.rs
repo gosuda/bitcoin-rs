@@ -198,7 +198,7 @@ pub(crate) struct ReplacementInputs {
 
 pub(crate) struct PreparedPoolChange {
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-seam"))]
     pub(crate) evicted: Vec<EntryId>,
     pub(crate) removals: Vec<(EntryId, RemovalReason)>,
     pub(crate) entry: Option<crate::pool::PreparedInsert>,
@@ -212,6 +212,7 @@ impl ReplacementInputs {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
                 stamp: self.stamp,
+                #[cfg(any(test, feature = "test-seam"))]
                 evicted: Vec::new(),
                 removals: Vec::new(),
                 entry: Some(self.entry),
@@ -280,10 +281,15 @@ impl ReplacementInputs {
                 (id, reason)
             })
             .collect();
-        let mut evicted: Vec<_> = self.evicted.into_iter().collect();
-        evicted.sort_unstable();
+        #[cfg(any(test, feature = "test-seam"))]
+        let evicted = {
+            let mut evicted: Vec<_> = self.evicted.into_iter().collect();
+            evicted.sort_unstable();
+            evicted
+        };
         Ok(PreparedPoolChange {
             stamp: self.stamp,
+            #[cfg(any(test, feature = "test-seam"))]
             evicted,
             removals,
             entry: Some(self.entry),

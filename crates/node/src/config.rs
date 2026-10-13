@@ -53,12 +53,6 @@ impl ScriptIndexMode {
         !matches!(self, Self::Disabled)
     }
 
-    /// Whether historical funding/spending rows are maintained.
-    #[must_use]
-    pub const fn keeps_history(self) -> bool {
-        matches!(self, Self::Full)
-    }
-
     /// Derived-index capabilities this mode and txindex jointly enable.
     ///
     /// PRE: none.

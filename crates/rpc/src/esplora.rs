@@ -115,10 +115,9 @@ mod tests {
     use std::time::Duration;
 
     use bitcoin::hex::DisplayHex as _;
-    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::{NodeStatus, regtest_fixture::merkle_root};
     use bitcoin_rs_index::ScriptHash;
     use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
-    use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
         Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
@@ -197,30 +196,6 @@ mod tests {
         }
     }
 
-    /// Core's null outpoint: zero txid, `u32::MAX` vout.
-    fn null_outpoint() -> OutPoint {
-        OutPoint::null()
-    }
-
-    /// Folds txids into the block merkle root the consensus encoder builds,
-    /// so fixture blocks carry self-consistent identity.
-    fn fixture_merkle_root(txids: &[Txid]) -> Hash256 {
-        if let [single] = txids {
-            return single.0;
-        }
-        let next = txids
-            .chunks(2)
-            .map(|pair| {
-                let right = pair.get(1).unwrap_or(&pair[0]);
-                let mut bytes = [0_u8; 64];
-                bytes[..32].copy_from_slice(pair[0].as_bytes());
-                bytes[32..].copy_from_slice(right.as_bytes());
-                Txid(double_sha256(&bytes))
-            })
-            .collect::<Vec<_>>();
-        fixture_merkle_root(&next)
-    }
-
     /// A native one-transaction block standing in for the network genesis.
     fn fixture_genesis() -> Block {
         let mut block = Block {
@@ -233,14 +208,14 @@ mod tests {
                 nonce: 1,
             },
             txs: vec![transaction(
-                Some(null_outpoint()),
+                Some(OutPoint::null()),
                 TxOut {
                     value: Amount::from_sat(5_000_000_000),
                     script_pubkey: vec![0x51].into(),
                 },
             )],
         };
-        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
         block
     }
 
@@ -575,7 +550,7 @@ mod tests {
             },
         );
         transaction.inputs.push(TxIn {
-            previous_output: null_outpoint(),
+            previous_output: OutPoint::null(),
             script_sig: vec![1, 1].into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -591,7 +566,7 @@ mod tests {
             },
             txs: vec![transaction.clone()],
         };
-        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
         let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
         let txid = transaction.txid();
         let mut context = Context::new();
@@ -1109,7 +1084,7 @@ mod tests {
             nonce,
         };
         let coinbase = transaction(
-            Some(null_outpoint()),
+            Some(OutPoint::null()),
             TxOut {
                 value: Amount::from_sat(5_000_000_000),
                 script_pubkey: vec![0x51].into(),
@@ -1963,7 +1938,7 @@ mod tests {
         let tx = Tx {
             version: 2,
             inputs: vec![TxIn {
-                previous_output: null_outpoint(),
+                previous_output: OutPoint::null(),
                 script_sig: Script::new(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
@@ -2238,7 +2213,7 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            !outspend(&projection, null_outpoint())
+            !outspend(&projection, OutPoint::null())
                 .expect("outspend query")
                 .spent
         );
@@ -2739,7 +2714,7 @@ mod tests {
         // encoded into a decodable body (the 0x00 vin count reads as the
         // segwit marker, matching Core), so required_block would reject it.
         let transaction = transaction(
-            Some(null_outpoint()),
+            Some(OutPoint::null()),
             TxOut {
                 value: Amount::from_sat(125),
                 script_pubkey: vec![0x51].into(),

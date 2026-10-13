@@ -9,6 +9,7 @@
 use std::io::Cursor;
 
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::encode::hex_encode;
 use bitcoin_rs_utxo::read_snapshot_strict_v4;
 
 /// A fixed v4 snapshot captured from an earlier build.
@@ -29,14 +30,6 @@ fn txid(seed: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use core::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
-}
-
 /// The load direction: v4 bytes must still decode to the same consensus values.
 #[test]
 fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {
@@ -50,12 +43,14 @@ fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {
         "the MuHash trailer must survive the load byte for byte"
     );
     assert_eq!(
-        hex(&loaded
-            .set
-            .lock_stable_view()
-            .hash_serialized_3()
-            .expect("hash")
-            .to_le_bytes()),
+        hex_encode(
+            &loaded
+                .set
+                .lock_stable_view()
+                .hash_serialized_3()
+                .expect("hash")
+                .to_le_bytes()
+        ),
         GOLDEN_HASH_HEX,
         "a v4 snapshot no longer hashes to what the v4 build computed"
     );

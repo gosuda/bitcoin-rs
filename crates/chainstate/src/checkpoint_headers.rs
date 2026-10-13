@@ -10,7 +10,7 @@ use thiserror::Error;
 const HEADER_MAGIC: [u8; 8] = *b"BRSHEAD\0";
 pub(super) const HEADER_VERSION: u32 = 1;
 pub(super) const HEADER_PREFIX_LEN: usize = 56;
-const HEADER_LEN: usize = 80;
+const HEADER_LEN: usize = Header::LEN;
 const BEST_CHAIN_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/best\0";
 const APPLIED_PREFIX_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/applied\0";
 

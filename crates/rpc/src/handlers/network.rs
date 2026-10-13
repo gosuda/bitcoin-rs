@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -320,7 +320,7 @@ pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Val
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let banned = ctx.network.p2p.banned();
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_time_secs();
     let entries = banned
         .iter()
         .map(|entry| {
@@ -499,7 +499,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let count = optional_u64(params, 0, 1)?;
 
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_time_secs();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 

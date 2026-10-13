@@ -2167,6 +2167,12 @@ fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(SpendingKey, EntryId)> 
     let key = SpendingKey::from(outpoint);
     (key, EntryId::MIN)..=(key, EntryId::MAX)
 }
+
+#[cfg(test)]
+fn txid_of(bytes: [u8; 32]) -> Txid {
+    Txid::from(bitcoin_rs_primitives::Hash256::from_le_bytes(&bytes))
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
@@ -2176,16 +2182,6 @@ mod tests {
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
     use super::*;
-
-    /// Native txid for a raw 32-byte fixture id.
-    fn txid_of(bytes: [u8; 32]) -> Txid {
-        Txid::from(Hash256::from_le_bytes(&bytes))
-    }
-
-    /// Native consensus-byte txid for change-record comparisons.
-    fn hash_of(txid: &Txid) -> Hash256 {
-        Hash256::from_le_bytes(txid.as_bytes())
-    }
 
     /// The txid of every change in a mutation result, in commit order.
     fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
@@ -2468,7 +2464,7 @@ mod tests {
         assert_floor(&pool, Some(1_500), "block inclusion of one duplicate min");
 
         let evicted = pool.evict_below_fee_rate(2_000);
-        assert_eq!(change_txids(&evicted), vec![hash_of(&low_b_txid)]);
+        assert_eq!(change_txids(&evicted), vec![Hash256::from(low_b_txid)]);
         assert_floor(&pool, Some(5_000), "evict_below remaining min");
 
         let mined = tx(4, Vec::new());
@@ -2908,7 +2904,7 @@ mod tests {
         assert_eq!(
             removed.changes,
             vec![MutationChange {
-                txid: hash_of(&parent_txid),
+                txid: Hash256::from(parent_txid),
                 outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
             }]
         );
@@ -3232,7 +3228,7 @@ mod tests {
         assert_eq!(
             removed.changes,
             vec![MutationChange {
-                txid: hash_of(&parent_txid),
+                txid: Hash256::from(parent_txid),
                 outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
             }]
         );
@@ -3453,7 +3449,7 @@ mod tests {
 
         let evicted = pool.evict_below_fee_rate(5_000);
 
-        assert_eq!(change_txids(&evicted), vec![hash_of(&low_txid)]);
+        assert_eq!(change_txids(&evicted), vec![Hash256::from(low_txid)]);
         assert!(!pool.contains_txid(&low_txid));
         assert!(pool.contains_txid(&high_txid));
         Ok(())
@@ -3958,14 +3954,9 @@ mod spend_index_tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
 
     use super::*;
-
-    /// Native txid for a raw 32-byte fixture id.
-    fn txid_of(bytes: [u8; 32]) -> Txid {
-        Txid::from(Hash256::from_le_bytes(&bytes))
-    }
 
     fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
         Tx {

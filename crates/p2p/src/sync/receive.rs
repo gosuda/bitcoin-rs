@@ -140,6 +140,12 @@ impl BlockSync {
             let Ok(inbound) = self.inbound_blocks_rx.try_recv() else {
                 return true;
             };
+            if inbound
+                .source
+                .is_some_and(|source| !self.peer_table.is_current(source))
+            {
+                continue;
+            }
             let Some(inbound) = self.receive_historical(inbound) else {
                 continue;
             };

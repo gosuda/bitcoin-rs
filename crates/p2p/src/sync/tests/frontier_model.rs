@@ -266,11 +266,13 @@ fn live_pending_header_request_awaits_its_connection() {
         vec![usable(9001, 100, None)],
     );
     frontier.usable_peers[0].source = source;
-    frontier.header_request = Some(super::super::PendingHeaderRequest {
+    frontier.header_request = Some(super::super::HeaderRequest {
         source,
+        kind: super::super::HeaderRequestKind::Frontier,
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        state: super::super::HeaderRequestState::AwaitingResponse,
     });
     frontier.header_request_live = true;
     assert_eq!(frontier.plan().header_action, HeaderAction::AwaitPending);
@@ -284,11 +286,13 @@ fn probe_rotates_past_the_dead_pending_owner() {
         Some(BodyState::Unowned),
         vec![usable(9001, 100, None), usable(9007, 100, None)],
     );
-    frontier.header_request = Some(super::super::PendingHeaderRequest {
+    frontier.header_request = Some(super::super::HeaderRequest {
         source: dead_owner,
+        kind: super::super::HeaderRequestKind::Frontier,
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        state: super::super::HeaderRequestState::AwaitingResponse,
     });
     frontier.header_request_live = super::super::frontier::header_request_live(
         frontier.header_request,
@@ -370,11 +374,13 @@ proptest::proptest! {
         });
         let owner = usable_peers.first().map(|peer| peer.source);
         let header_request = if let (true, Some(source)) = (pending_live, owner) {
-            Some(super::super::PendingHeaderRequest {
+            Some(super::super::HeaderRequest {
                 source,
+                kind: super::super::HeaderRequestKind::Frontier,
                 locator_tip_hash: hash(0x01),
                 target_height: 9,
                 requested_at: Instant::now(),
+                state: super::super::HeaderRequestState::AwaitingResponse,
             })
         } else {
             None

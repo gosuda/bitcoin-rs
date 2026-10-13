@@ -48,8 +48,6 @@ pub(crate) mod peer_table;
 pub(crate) mod recv;
 /// Runtime owner for P2P control state and workers.
 pub(crate) mod service;
-/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
-pub(crate) mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.

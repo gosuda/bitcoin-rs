@@ -59,6 +59,7 @@ clippy_profiles() {
   # row).
   profile "clippy: workspace (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
+      --features bitcoin-rs-index/silent-payments \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
       --exclude bitcoin-rs-node \
       -- -D warnings
@@ -74,6 +75,8 @@ clippy_profiles() {
 }
 
 test_crates_profiles() {
+  profile "test: bitcoin-rs-index (silent-payments codec)" \
+    cargo_test -p bitcoin-rs-index --features silent-payments --test silent_payments
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.

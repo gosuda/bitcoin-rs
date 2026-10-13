@@ -543,7 +543,9 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     if script.len() > 10_000 {
         return 0;
     }
-    let script_size = varint_size(script.len()).saturating_add(script.len());
+    let script_size =
+        bitcoin_rs_primitives::varint::encoded_len(u64::try_from(script.len()).unwrap_or(u64::MAX))
+            .saturating_add(script.len());
     let size = if is_op_return(script) {
         0
     } else if is_witness_program(script) {
@@ -613,18 +615,6 @@ pub fn push_int(value: i64) -> Vec<u8> {
         _ => {}
     }
     push_data(&bytes)
-}
-
-const fn varint_size(value: usize) -> usize {
-    if value < 0xfd {
-        1
-    } else if value <= 0xffff {
-        3
-    } else if value <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]

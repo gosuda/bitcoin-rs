@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::rand::{RngCore, SeedableRng as _};
 use bitcoin_rs_mempool::MempoolGateway;
-use bitcoin_rs_primitives::{Txid, Wtxid};
+use bitcoin_rs_primitives::{Amount, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 use super::{Identity, TxPolicy};
@@ -20,7 +20,6 @@ const MAX_PENDING: usize = 100_000;
 const MAX_KNOWN: usize = 5_000;
 const MAX_BATCH: usize = 1_000;
 const INVENTORY_TARGET: usize = 70;
-const MAX_MONEY: u64 = 2_100_000_000_000_000;
 
 /// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus
 /// bound address bytes and port. Socket scope/flow and the remote address/port
@@ -287,7 +286,7 @@ impl PeerTable {
         let Ok(rate) = u64::try_from(rate) else {
             return;
         };
-        if rate > MAX_MONEY {
+        if rate > Amount::MAX_MONEY.to_sat() {
             return;
         }
         let sessions = self.usable_peers();
@@ -338,7 +337,14 @@ impl PeerTable {
                 &pool,
                 policy.incremental_relay_fee_sat_per_kvb,
             );
-            (if ibd { MAX_MONEY } else { floor }, minimum)
+            (
+                if ibd {
+                    Amount::MAX_MONEY.to_sat()
+                } else {
+                    floor
+                },
+                minimum,
+            )
         };
         let sessions = {
             let mut policy = self.tx_policy.lock();
@@ -368,7 +374,7 @@ impl PeerTable {
                 let peer = relay
                     .entry(source)
                     .or_insert_with(|| RelayPeer::new(now, inbound, inbound_inv, rng));
-                if info.version >= 70_013 && minimum <= MAX_MONEY {
+                if info.version >= 70_013 && minimum <= Amount::MAX_MONEY.to_sat() {
                     if let Some(rate) = peer.filter_due(now, floor, minimum, ibd, rng) {
                         let message = Message::FeeFilter(i64::try_from(rate).unwrap_or(i64::MAX));
                         if self.send(source, message).is_err() {
@@ -1168,7 +1174,7 @@ mod tests {
         assert!(peer.next_filter <= now + Duration::from_secs(300));
         peer.next_filter = now;
         assert!(
-            peer.filter_due(now, MAX_MONEY, 1000, true, &mut rng)
+            peer.filter_due(now, Amount::MAX_MONEY.to_sat(), 1000, true, &mut rng)
                 .is_some()
         );
         assert!(

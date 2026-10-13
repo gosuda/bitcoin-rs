@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::{Block, OutPoint, Txid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::UtxoSet;
-use crate::contract::{OutputSource, is_coinbase_tx};
+use crate::contract::OutputSource;
 use crate::set::UtxoCoin;
 
 /// The committed UTXO set plus the net effect of window blocks already prepared.
@@ -49,7 +49,7 @@ impl<'u> WindowOverlay<'u> {
             return Ok(());
         }
         for (tx, &txid) in block.txs.iter().zip(txids) {
-            let coinbase = is_coinbase_tx(tx);
+            let coinbase = tx.is_coinbase();
             for (vout, txout) in (0u32..).zip(&tx.outputs) {
                 let script = &txout.script_pubkey;
                 let outpoint = OutPoint::new(txid, vout);

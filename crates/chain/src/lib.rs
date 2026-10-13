@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// BIP9 deployment-state memoization cache.
-mod bip9_cache;
 /// Neutral block-body read seam.
 mod block_body;
 /// Cumulative chain transaction count arithmetic.
@@ -23,8 +21,6 @@ mod progress;
 pub mod regtest_fixture;
 /// Reorganization planning.
 mod reorg;
-/// Best-tip snapshot type.
-mod tip;
 /// Read-only active-tip notification contract.
 mod tip_wait;
 /// One transition domain split into mutation and stable-read roles.
@@ -54,7 +50,26 @@ pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
-pub use tip::TipSnapshot;
+/// Atomic best-tip snapshot published to lock-free readers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TipSnapshot {
+    /// Node id of the best tip.
+    pub tip_id: NodeId,
+    /// Best tip height.
+    pub height: u32,
+    /// Accumulated work through the best tip.
+    pub chainwork: ChainWork,
+    /// Best tip header hash.
+    pub hash: Hash256,
+    /// Cumulative transaction count through this tip.
+    ///
+    /// An applied-tip snapshot carries the count its durable commit
+    /// certified. A header-tip snapshot copies its tree node's
+    /// known-or-unknown count, so a header tip may legitimately be ahead of
+    /// the applied chain and count differently.
+    pub chain_tx_count: ChainTxCount,
+}
+
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,

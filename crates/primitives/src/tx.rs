@@ -43,6 +43,14 @@ pub struct Tx {
 }
 
 impl Tx {
+    /// Returns true for exactly one input spending the null outpoint.
+    ///
+    /// This identifies the coinbase shape; it does not validate the transaction.
+    #[must_use]
+    pub fn is_coinbase(&self) -> bool {
+        self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
+    }
+
     /// Returns true when any input carries BIP144 witness data.
     #[must_use]
     pub fn has_witness(&self) -> bool {
@@ -127,6 +135,25 @@ mod tests {
             }],
             lock_time: crate::LockTime::from_consensus(42),
         }
+    }
+
+    #[test]
+    fn coinbase_shape_requires_one_input_and_the_exact_null_outpoint() {
+        let mut tx = Tx::default();
+        assert!(!tx.is_coinbase());
+        tx.inputs.push(TxIn {
+            previous_output: OutPoint::null(),
+            ..TxIn::default()
+        });
+        assert!(tx.is_coinbase());
+        tx.inputs.push(tx.inputs[0].clone());
+        assert!(!tx.is_coinbase());
+        tx.inputs.truncate(1);
+        tx.inputs[0].previous_output = OutPoint::new(Txid::default(), 0);
+        assert!(!tx.is_coinbase());
+        tx.inputs[0].previous_output =
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), u32::MAX);
+        assert!(!tx.is_coinbase());
     }
 
     #[test]

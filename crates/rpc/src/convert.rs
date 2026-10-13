@@ -37,6 +37,18 @@ pub(crate) const fn bitcoin_network(network: Network) -> bitcoin::Network {
     }
 }
 
+/// Core RPC chain spelling, distinct from checkpoint and evidence identities.
+#[must_use]
+pub(crate) const fn chain_name(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "main",
+        Network::Testnet3 => "test",
+        Network::Testnet4 => "testnet4",
+        Network::Signet => "signet",
+        Network::Regtest => "regtest",
+    }
+}
+
 /// Saturating `u64 -> i64` for Core wire counters typed as `i64`.
 #[must_use]
 pub(crate) fn i64_saturated(value: u64) -> i64 {
@@ -63,8 +75,9 @@ pub(crate) fn i32_saturated(value: i64) -> i32 {
 
 /// Converts satoshis to the BTC float carried by the versioned Core types.
 ///
-/// Consensus bounds money at 2.1e15 sat, well inside the 2^53 range where
-/// `f64` is exact, so the division is value-exact.
+/// Consensus bounds money at 2.1e15 sat, within the range where integer
+/// conversion to `f64` is exact. Division by 100,000,000 can still round
+/// because many BTC fractions are not exactly representable in binary.
 #[must_use]
 pub(crate) fn sat_to_btc(sats: u64) -> f64 {
     signed_sat_to_btc(i128::from(sats))
@@ -86,11 +99,7 @@ pub(crate) fn signed_sat_to_i64(sats: i128) -> i64 {
 #[must_use]
 pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
     let clamped = signed_sat_to_i64(sats);
-    let magnitude = clamped.unsigned_abs();
-    let high = u32::try_from(magnitude >> 32).unwrap_or(u32::MAX);
-    let low = u32::try_from(magnitude & 0xffff_ffff).unwrap_or(u32::MAX);
-    let value = f64::from(high).mul_add(4_294_967_296.0, f64::from(low));
-    (if clamped.is_negative() { -value } else { value }) / 100_000_000.0
+    bitcoin_rs_primitives::i64_to_f64(clamped) / 100_000_000.0
 }
 
 /// Expands a compact `nBits` into its 64-character lowercase target hex, the

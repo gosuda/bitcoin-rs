@@ -58,6 +58,7 @@ impl EvictionInputs {
         }
         Ok(crate::rbf::PreparedPoolChange {
             stamp: self.stamp,
+            #[cfg(any(test, feature = "test-seam"))]
             evicted: Vec::new(),
             removals,
             entry: None,

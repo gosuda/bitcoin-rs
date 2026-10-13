@@ -1,4 +1,4 @@
-//! Consensus encoding and hashing helpers for the native protocol types.
+//! Consensus encoding, hashing, and byte presentation for native protocol types.
 //!
 //! Encoding writes into an infallible [`Sink`] — no `io::Write`, no encode-time
 //! `Result`. Decoding still yields a typed [`DecodeError`]. Segwit marker/flag
@@ -8,6 +8,18 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
+
+/// Encodes bytes in their input order as lowercase hexadecimal without separators.
+#[must_use]
+pub fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
 
 /// Byte sink used by consensus encoding. Writes cannot fail.
 pub trait Sink {
@@ -377,9 +389,15 @@ impl ConsensusDecode for Block {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use super::{ConsensusEncode, DecodeError, deserialize, varint};
+    use super::{ConsensusEncode, DecodeError, deserialize, hex_encode, varint};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+
+    #[test]
+    fn hex_encoding_preserves_byte_order_and_lowercase() {
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0x00, 0x01, 0xab, 0xfe, 0xff]), "0001abfeff");
+    }
 
     fn sample_header_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();

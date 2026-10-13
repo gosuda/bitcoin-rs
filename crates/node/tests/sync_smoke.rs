@@ -11,7 +11,6 @@ use bitcoin_rs_primitives::{
     Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
 use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
 use parking_lot::RwLock;
@@ -215,10 +214,10 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, Box<dyn std::erro
             let txid = tx.txid();
             for (vout, txout) in tx.outputs.iter().enumerate() {
                 let outpoint = OutPoint::new(txid, u32::try_from(vout)?);
-                stats.insert_utxo(&outpoint, txout, height, is_coinbase_tx(tx));
-                live_outputs.insert(outpoint, (txout.clone(), height, is_coinbase_tx(tx)));
+                stats.insert_utxo(&outpoint, txout, height, tx.is_coinbase());
+                live_outputs.insert(outpoint, (txout.clone(), height, tx.is_coinbase()));
             }
-            if is_coinbase_tx(tx) {
+            if tx.is_coinbase() {
                 continue;
             }
             for input in &tx.inputs {

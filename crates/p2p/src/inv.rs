@@ -1,9 +1,21 @@
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_mempool::PeerToken;
-use bitcoin_rs_primitives::{Hash256, Txid};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Txid};
 
 #[cfg(test)]
 use crate::wire::Message;
+
+/// Converts a peer-wire block identity without reversing its consensus bytes.
+pub(crate) fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
+    use bitcoin::hashes::Hash as _;
+    BlockHash::from(Hash256::from_le_bytes(hash.as_byte_array()))
+}
+
+/// Converts a native block identity into the peer-wire representation.
+pub(crate) fn wire_block_hash(hash: BlockHash) -> bitcoin::BlockHash {
+    use bitcoin::hashes::Hash as _;
+    bitcoin::BlockHash::from_byte_array(*hash.as_bytes())
+}
 
 /// Maximum inventory vectors accepted in one message.
 pub const MAX_INV_PER_MSG: usize = 50_000;

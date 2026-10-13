@@ -345,8 +345,7 @@ pub(crate) enum WriterState {
 
 /// Advances a chain transaction count by one record's transactions,
 /// preserving the unknown marker: zero means unknown unless the base is
-/// genesis-empty (base height 0, no chain below it to total — the same rule
-/// as `bitcoin_rs_chainstate::publication::advanced_chain_tx_count_from`).
+/// genesis-empty (base height 0, no chain below it to total).
 /// A fresh log counts its first record; adding a suffix to an unknown base
 /// would fabricate a chain total, so unknown stays unknown through the
 /// writer and the replay side compares the preserved value.

@@ -189,6 +189,10 @@ pub(crate) enum AdmissionMode {
     PackageTest,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Admission stages keep their owned facts inline without an additional heap allocation."
+)]
 enum ReplacementStage {
     Rejected,
     PackageTest,

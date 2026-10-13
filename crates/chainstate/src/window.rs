@@ -5,7 +5,6 @@ use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
 use super::prepare::{parse_block_for_apply, plan_block_transactions, resolve_block_prevouts};
-use super::publication::publish_applied;
 use super::{
     BlockProvenance, BlockValidationContext, BlockValidationProof, Chainstate, ConnectOutcome,
     PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
@@ -174,11 +173,7 @@ impl WindowGroup {
             .pending
             .drain(..)
             .map(|pending| {
-                publish_applied(
-                    handles,
-                    &pending.outcome.tip,
-                    crate::events::HintKind::Connected,
-                );
+                handles.publish_applied(&pending.outcome.tip, crate::events::HintKind::Connected);
                 pending.outcome
             })
             .collect::<Vec<_>>();

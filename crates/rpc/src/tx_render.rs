@@ -89,7 +89,7 @@ pub(crate) fn transaction_json(
     let size = tx.total_size();
     let weight = tx.weight();
     let vsize = tx.vsize();
-    let coinbase = is_coinbase(tx);
+    let coinbase = tx.is_coinbase();
     let vin: Vec<Value> = tx
         .inputs
         .iter()
@@ -141,7 +141,7 @@ pub(crate) fn transaction_json_with_spends(
 ) -> Result<Value, crate::error::RpcError> {
     use crate::error::RpcError;
     let mut value = transaction_json(tx, network, None);
-    let Some(coins) = coins.filter(|_| !is_coinbase(tx)) else {
+    let Some(coins) = coins.filter(|_| !tx.is_coinbase()) else {
         return Ok(value);
     };
     if coins.len() != tx.inputs.len() {
@@ -281,12 +281,6 @@ fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
         "n": n,
         "scriptPubKey": script_pub_key_json(&output.script_pubkey, network)
     })
-}
-
-/// A one-input, null-prevout transaction (Core's `IsCoinBase`).
-#[must_use]
-pub(crate) fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Core's disassembly uses decimal short pushes and omits push-opcode labels.
@@ -512,11 +506,6 @@ mod tests {
 
     use sonic_rs::JsonValueTrait;
 
-    /// Core's null outpoint: zero txid, `u32::MAX` vout.
-    fn null_outpoint() -> OutPoint {
-        OutPoint::null()
-    }
-
     fn sample_tx() -> Tx {
         Tx {
             version: 2,
@@ -580,26 +569,26 @@ mod tests {
     fn one_input_null_prevout_is_coinbase() {
         let mut tx = sample_tx();
         tx.inputs.push(TxIn {
-            previous_output: null_outpoint(),
+            previous_output: OutPoint::null(),
             script_sig: vec![1, 2, 3].into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         });
-        assert!(is_coinbase(&tx));
+        assert!(tx.is_coinbase());
         tx.inputs.push(TxIn {
-            previous_output: null_outpoint(),
+            previous_output: OutPoint::null(),
             script_sig: Script::new(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         });
-        assert!(!is_coinbase(&tx));
+        assert!(!tx.is_coinbase());
     }
 
     #[test]
     fn coinbase_input_renders_hex_coinbase_field() {
         let mut tx = sample_tx();
         tx.inputs.push(TxIn {
-            previous_output: null_outpoint(),
+            previous_output: OutPoint::null(),
             script_sig: vec![0x51].into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
