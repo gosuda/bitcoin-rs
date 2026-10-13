@@ -24,6 +24,10 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+/// Maximum serialized `tx` payload accepted for relay. A transaction
+/// within the 400,000-weight-unit standardness policy cannot exceed this
+/// many serialized bytes; block validation remains consensus-based.
+pub const MAX_TX_PAYLOAD: usize = 400_000;
 /// Maximum control messages coalesced into one vectored write.
 pub(crate) const MAX_WRITE_BURST: usize = 8;
 
@@ -40,6 +44,14 @@ pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
 pub(crate) const HEADER_LEN: usize = 24;
 
 const COMMAND_LEN: usize = 12;
+
+fn max_payload_for(command: &str) -> usize {
+    if command == "tx" {
+        MAX_TX_PAYLOAD
+    } else {
+        MAX_MESSAGE_PAYLOAD
+    }
+}
 
 /// Bitcoin P2P message payload.
 ///
@@ -268,10 +280,8 @@ pub enum PeerError {
         /// Actual magic bytes.
         actual: Magic,
     },
-    /// A payload, declared by a peer or about to be sent, exceeds its
-    /// transport's bound: [`MAX_MESSAGE_PAYLOAD`] for a v1 frame, 4,000,000
-    /// bytes for a BIP324 packet.
-    #[error("payload length {0} exceeds the transport's payload bound")]
+    /// A payload exceeds its command-specific or transport size bound.
+    #[error("payload length {0} exceeds the command or transport payload bound")]
     PayloadTooLarge(usize),
     /// Payload checksum did not match the header checksum.
     #[error("invalid payload checksum")]
@@ -405,7 +415,7 @@ pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerErr
         Message::BlockPayload(bytes) => bytes.clone(),
         other => bytes::Bytes::from(encode_payload(other)?),
     };
-    if payload.len() > MAX_MESSAGE_PAYLOAD {
+    if payload.len() > max_payload_for(message.command().as_ref()) {
         return Err(PeerError::PayloadTooLarge(payload.len()));
     }
     Ok(payload)
@@ -585,7 +595,7 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if payload_len > MAX_MESSAGE_PAYLOAD {
+    if payload_len > max_payload_for(&command) {
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
 
@@ -627,6 +637,9 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .map_err(encode::Error::from)?
         }
     };
+    if payload_len > max_payload_for(message.command().as_ref()) {
+        return Err(PeerError::PayloadTooLarge(payload_len));
+    }
     HEADER_LEN
         .checked_add(payload_len)
         .ok_or(PeerError::PayloadTooLarge(usize::MAX))
@@ -659,6 +672,9 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
 
 /// Decodes a command's payload, or an unknown command into [`Message::Unknown`].
 pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
+    if payload.len() > max_payload_for(command) {
+        return Err(PeerError::PayloadTooLarge(payload.len()));
+    }
     // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
@@ -907,7 +923,7 @@ mod tests {
     use bitcoin::p2p::Magic;
 
     use super::{
-        HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
+        HEADER_LEN, MAX_MESSAGE_PAYLOAD, MAX_TX_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
         write_message,
     };
 
@@ -1099,6 +1115,36 @@ mod tests {
                 _ => "expected PayloadTooLarge for oversized payload length",
             })),
         }
+    }
+
+    #[test]
+    fn tx_header_rejects_oversized_payload_before_reading_body() -> Result<(), PeerError> {
+        let oversize = MAX_TX_PAYLOAD + 1;
+        let mut header = header_declaring(oversize)?;
+        header[4..16].copy_from_slice(b"tx\0\0\0\0\0\0\0\0\0\0");
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header),
+        };
+        assert!(matches!(
+            read_message(&mut reader, Magic::REGTEST),
+            Err(PeerError::PayloadTooLarge(len)) if len == oversize
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tx_payload_limit_applies_before_native_decoding() {
+        let oversized = vec![0_u8; MAX_TX_PAYLOAD + 1];
+        assert!(matches!(
+            super::decode_payload("tx", &oversized),
+            Err(PeerError::PayloadTooLarge(len)) if len == oversized.len()
+        ));
+
+        let at_limit = vec![0_u8; MAX_TX_PAYLOAD];
+        assert!(matches!(
+            super::decode_payload("tx", &at_limit),
+            Err(PeerError::NativeDecode(_))
+        ));
     }
 
     #[test]
