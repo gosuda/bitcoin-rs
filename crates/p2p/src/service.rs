@@ -51,6 +51,8 @@ fn feeler_delay(uniform: u64) -> Duration {
     Duration::from_micros(micros)
 }
 
+/// At most 64 queued wire pages (2,000 headers each) across all connections.
+const DEFAULT_INBOUND_HEADERS_QUEUE_LIMIT: usize = 64;
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
 /// Core's automatic-connection maximum, `-maxconnections`
@@ -404,7 +406,8 @@ impl P2pService {
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
-        let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (inbound_headers_tx, inbound_headers_rx) =
+            crossbeam_channel::bounded(DEFAULT_INBOUND_HEADERS_QUEUE_LIMIT);
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         let address_book = crate::addrman::AddressBook::open(

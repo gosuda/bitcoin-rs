@@ -31,6 +31,8 @@ fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Bitcoin Core's sendheaders announcements carry at most eight headers.
+const MAX_UNSOLICITED_HEADERS_ANNOUNCEMENT: usize = 8;
 
 /// Maximum backoff for transient accept errors (ECONNABORTED, EMFILE, …).
 /// Bounded so the listener recovers quickly once the pressure clears.
@@ -318,6 +320,9 @@ impl ConnectionShared {
         self.session_cancel.load()
     }
 
+    /// Forward wire pages without blocking the socket reader. A full queue
+    /// evicts the flooding source; body-carried headers instead wait for room
+    /// so a previously accepted block never loses its admission header.
     fn send_headers(
         &self,
         source: crate::PeerSource,
@@ -325,15 +330,70 @@ impl ConnectionShared {
         wire_response: bool,
         body_fetch_owned: bool,
     ) {
-        if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
+        if self.is_session_cancelled() {
+            return;
+        }
+        // BIP130 announcements need no request, but bulk download pages do.
+        // Compare exact connection identity so a reconnect cannot inherit
+        // its predecessor's outstanding getheaders.
+        if wire_response
+            && headers.len() > MAX_UNSOLICITED_HEADERS_ANNOUNCEMENT
+            && self
+                .block_sync
+                .as_ref()
+                .is_some_and(|sync| !sync.expects_headers_response(source))
+        {
+            tracing::warn!(
+                peer_addr = %source.addr,
+                count = headers.len(),
+                "p2p unsolicited bulk headers; disconnecting"
+            );
+            self.peer_table.disconnect_source(source);
+            return;
+        }
+        let mut inbound = crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
             body_fetch_owned,
-        }) {
-            tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound headers channel disconnected");
-        } else {
-            wake_sync(self.wake_tx.as_ref());
+        };
+        if wire_response {
+            match self.headers_tx.try_send(inbound) {
+                Ok(()) => wake_sync(self.wake_tx.as_ref()),
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        peer_addr = %source.addr,
+                        "p2p inbound headers queue saturated; disconnecting"
+                    );
+                    self.peer_table.disconnect_source(source);
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    tracing::warn!(
+                        peer_addr = %source.addr,
+                        "p2p inbound headers channel disconnected"
+                    );
+                }
+            }
+            return;
+        }
+        loop {
+            if self.is_session_cancelled() {
+                return;
+            }
+            match self.headers_tx.send_timeout(inbound, POLL_INTERVAL) {
+                Ok(()) => {
+                    wake_sync(self.wake_tx.as_ref());
+                    return;
+                }
+                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    tracing::warn!(
+                        peer_addr = %source.addr,
+                        "p2p inbound headers channel disconnected"
+                    );
+                    return;
+                }
+            }
         }
     }
 
@@ -4724,3 +4784,28 @@ mod discouragement_tests {
 
 #[cfg(test)]
 mod v2_transport_tests;
+
+#[cfg(test)]
+mod inbound_header_limits_tests {
+    use super::*;
+
+    #[test]
+    fn full_wire_headers_queue_evicts_sender_without_blocking() {
+        let peers = Arc::new(crate::PeerTable::new());
+        let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
+        let shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);
+        let addr = SocketAddr::from(([127, 0, 0, 1], 18_343));
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        peers.register(addr, lease.clone());
+        let source = lease.source(addr);
+
+        assert!(peers.is_current(source));
+        shared.send_headers(source, Vec::new(), true, false);
+        assert_eq!(headers_rx.len(), 1);
+        shared.send_headers(source, Vec::new(), true, false);
+        assert_eq!(headers_rx.len(), 1);
+        assert!(!peers.is_current(source));
+    }
+}
