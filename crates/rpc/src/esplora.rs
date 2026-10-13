@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn fee_estimate_conversion_preserves_the_exact_relay_floor() {
         assert_eq!(
-            fee_rate_sat_per_vbyte(0.000_01).to_bits(),
+            fee_rate_sat_per_vbyte(crate::convert::sat_to_btc(1_000)).to_bits(),
             1.0_f64.to_bits()
         );
     }
