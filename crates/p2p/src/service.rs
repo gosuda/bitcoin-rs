@@ -157,8 +157,8 @@ impl P2pServiceConfig {
     /// PRE: none.
     /// POST: returns `max_peer_connections` minus both outbound slot counts,
     ///   clamped at zero.
-    /// INVARIANT: this is the only inbound capacity derivation; the listener
-    ///   refuses admission at the result, it never evicts.
+    /// INVARIANT: this is the only global inbound capacity derivation; the
+    ///   peer table enforces it together with source-diversity admission.
     #[must_use]
     pub(crate) fn max_inbound(&self) -> usize {
         self.max_peer_connections
