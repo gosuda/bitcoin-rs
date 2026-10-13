@@ -38,12 +38,21 @@ mixed-tip page.
 Transaction rendering resolves a distinct parent at most once per response,
 retaining only referenced outputs until rendering finishes. Transactions
 already selected through the mempool or verified index queries may supply
-those outputs. A decoded block may supply them only when it belongs to the
-applied chain and the transaction index is healthy and caught up. Losing
+those outputs. A decoded block may supply them only when its identity matches
+the requested record, it belongs to the applied chain, and the transaction
+index is healthy and caught up. Losing
 branch bodies do not substitute for authoritative parent history. Missing,
 pruned, unavailable and corrupt required data retain their explicit errors.
 Read-only backend POST batches use the same applied-tip publication fence
 as GET responses.
+
+Proof: `crates/rpc/src/esplora.rs` tests
+`history_resolves_shared_parents_once_per_page`,
+`batch_reuses_selected_transactions_and_mempool_parents`,
+`block_page_reuses_parent_outside_the_selected_page`, and
+`parent_query_errors_and_republication_never_yield_a_cached_success`
+exercise parent reuse, response fields/order, explicit data errors and
+the applied-tip fence across GET and read-only POST requests.
 
 - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.
 - Checkpoint hashes: `GET /block-height/{h}` (BDK walks this while
@@ -117,10 +126,6 @@ as GET responses.
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
 - `crates/rpc/src/server.rs` tests `wf_02_classify_splits_rest_esplora_and_json_rpc` (existing)
 - `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
-- `crates/rpc/src/esplora.rs` tests `history_resolves_shared_parents_once_per_page`,
-  `batch_reuses_selected_transactions_and_mempool_parents`,
-  `block_page_reuses_parent_outside_the_selected_page`, and
-  `parent_query_errors_and_republication_never_yield_a_cached_success`.
 
 ## Vocabulary
 
