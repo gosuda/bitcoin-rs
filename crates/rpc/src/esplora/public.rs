@@ -476,22 +476,13 @@ pub(super) fn block_transaction_values(
         })
         .collect::<Result<Vec<_>, Response>>()?;
     // A decoded losing-branch block is not authoritative prevout history.
-    // Reusing an active body must also respect index health and watermarks;
-    // otherwise the ordinary parent queries retain their explicit errors.
-    let reusable = block_status.is_some()
-        && transactions.iter().any(|(tx, _)| {
-            tx.inputs
-                .iter()
-                .any(|input| !input.previous_output.is_null())
-        })
-        && ctx
-            .indexes
-            .esplora_tx_index
-            .as_ref()
-            .is_some_and(|index| index.index_info().is_ok_and(|info| info.synced));
     projection.transaction_values(
         transactions,
-        Some(if reusable { block.txs.as_slice() } else { &[] }),
+        Some(if block_status.is_some() {
+            block.txs.as_slice()
+        } else {
+            &[]
+        }),
     )
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {

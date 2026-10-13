@@ -20,6 +20,10 @@ use crate::rest::Response;
 use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
 
+// Bound retained transaction bodies without imposing a client-visible limit
+// on backend POST requests. Completed batches keep only their response rows.
+const TRANSACTION_BATCH_SIZE: usize = 25;
+
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     Some(match parts.as_slice() {
@@ -146,31 +150,39 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
         Err(response) => return response,
     };
     let projection = Projection::new(ctx);
-    let transactions = match ids
-        .into_iter()
-        .filter_map(|id| {
+    let mut values = Vec::new();
+    for ids in ids.chunks(TRANSACTION_BATCH_SIZE) {
+        let mut transactions = std::collections::HashMap::new();
+        for id in ids {
+            if transactions.contains_key(id) {
+                continue;
+            }
             let transaction = if mempool_only {
                 ctx.mempool
                     .gateway
                     .read()
-                    .transaction_by_txid(&id)
+                    .transaction_by_txid(id)
                     .map(|transaction| ((*transaction).clone(), None))
             } else {
-                match projection.transaction(&id) {
+                match projection.transaction(id) {
                     Ok(transaction) => transaction,
-                    Err(response) => return Some(Err(response)),
+                    Err(response) => return response,
                 }
             };
-            transaction.map(Ok)
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(transactions) => transactions,
-        Err(response) => return response,
-    };
-    projection
-        .transaction_values(transactions.iter().map(|(tx, status)| (tx, *status)), None)
-        .map_or_else(|r| r, json_ok)
+            transactions.insert(*id, transaction);
+        }
+        let selected = ids.iter().filter_map(|id| {
+            transactions
+                .get(id)
+                .and_then(Option::as_ref)
+                .map(|(tx, status)| (tx, *status))
+        });
+        match projection.transaction_values(selected, None) {
+            Ok(batch) => values.extend(batch),
+            Err(response) => return response,
+        }
+    }
+    json_ok(values)
 }
 
 fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {

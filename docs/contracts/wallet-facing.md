@@ -35,12 +35,19 @@ Every read captures the applied-tip publication and answers from one coherent vi
 moved chain generation returns the declared unavailable response, never a
 mixed-tip page.
 
-Transaction rendering resolves a distinct parent at most once per response,
-retaining only referenced outputs until rendering finishes. Transactions
+Transaction rendering resolves a distinct parent at most once per response
+or bounded backend POST batch, retaining only referenced outputs until that
+batch finishes. Backend POST transaction requests render at most 25 requested
+IDs at a time and share duplicate bodies within each batch; completed batches
+retain only response rows. Request size, row ordering, duplicates and omitted
+missing IDs keep their existing semantics. Transactions
 already selected through the mempool or verified index queries may supply
-those outputs. A decoded block may supply them only when its identity matches
-the requested record, it belongs to the applied chain, and the transaction
-index is healthy and caught up. Losing
+those outputs. A decoded block may supply them only when its header identity
+matches the requested record, its transactions pass the existing merkle-root
+and mutation checks, it belongs to the applied chain, and the transaction
+index is healthy and caught up. The readiness snapshot is consulted once only
+when the batch can reuse an in-block parent; ordinary parent queries otherwise
+enforce their own readiness checks. Losing
 branch bodies do not substitute for authoritative parent history. Missing,
 pruned, unavailable and corrupt required data retain their explicit errors.
 Read-only backend POST batches use the same applied-tip publication fence
@@ -49,7 +56,9 @@ as GET responses.
 Proof: `crates/rpc/src/esplora.rs` tests
 `history_resolves_shared_parents_once_per_page`,
 `batch_reuses_selected_transactions_and_mempool_parents`,
-`block_page_reuses_parent_outside_the_selected_page`, and
+`block_page_reuses_parent_outside_the_selected_page`,
+`block_parent_reuse_checks_readiness_only_when_needed`,
+`backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`, and
 `parent_query_errors_and_republication_never_yield_a_cached_success`
 exercise parent reuse, response fields/order, explicit data errors and
 the applied-tip fence across GET and read-only POST requests.

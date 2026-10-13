@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_consensus::verify_merkle_root_with_txids;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
@@ -207,12 +208,12 @@ impl<'a> Projection<'a> {
         confirmation.map_or_else(TransactionStatus::unconfirmed, TransactionStatus::from)
     }
 
-    /// Resolves each distinct parent once for this response. Retain only the
+    /// Resolves each distinct parent once for this batch. Retain only the
     /// referenced outputs, not unrelated parent inputs, witnesses or outputs.
     /// By default the selected transactions are already resolved from the
     /// mempool or verified index queries. Block routes override the parent
-    /// candidates with the decoded active block, or an empty slice for a
-    /// stale block / unavailable index.
+    /// candidates with the verified active block, or an empty slice for a
+    /// stale block. Reuse also requires a ready transaction index.
     pub(super) fn transaction_values<'t>(
         &self,
         transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
@@ -247,6 +248,20 @@ impl<'a> Projection<'a> {
             for (tx, _, txid) in &transactions {
                 retain(*txid, *tx);
             }
+        }
+        // Consult the authoritative snapshot once, and only if this batch
+        // can actually reuse an in-block parent. Otherwise ordinary parent
+        // queries enforce index health and watermarks themselves.
+        if block_parents.is_some()
+            && !available.is_empty()
+            && !self
+                .ctx
+                .indexes
+                .esplora_tx_index
+                .as_ref()
+                .is_some_and(|index| index.index_info().is_ok_and(|info| info.synced))
+        {
+            available.clear();
         }
         let mut prevouts = Vec::with_capacity(outpoints.len());
         for points in outpoints.chunk_by(|left, right| left.txid == right.txid) {
@@ -418,6 +433,8 @@ impl<'a> Projection<'a> {
         if block.block_hash() != record.hash {
             return Err(internal_error("stored block body identity mismatch"));
         }
+        verify_merkle_root_with_txids(&block, &block.txids())
+            .map_err(|_| internal_error("stored block transaction commitment mismatch"))?;
         Ok((record, block))
     }
 

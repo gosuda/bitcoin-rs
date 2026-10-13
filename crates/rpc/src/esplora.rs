@@ -350,6 +350,14 @@ mod tests {
             Ok(None)
         }
 
+        fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+            Ok(self
+                .transactions
+                .iter()
+                .any(|tx| tx.txid() == *txid)
+                .then_some(0))
+        }
+
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
             Ok(crate::context::DerivedIndexInfo {
                 synced: true,
@@ -2435,7 +2443,7 @@ mod tests {
         assert_eq!(values[1].txid, parent.txid().to_string());
         let missing = paying_transaction(&[OutPoint::new(parent.txid(), 2)], &[(1, vec![0x51])]);
         let response = Projection::new(&ctx)
-            .transaction_values([(&missing, None)], Some(std::slice::from_ref(&parent)))
+            .transaction_values([(&missing, None), (&parent, None)], None)
             .expect_err("missing output");
         assert_eq!(response.status, 503);
     }
@@ -2473,6 +2481,19 @@ mod tests {
         assert_eq!(values[0]["fee"], parent.outputs[0].value.to_sat() - 100);
         assert_eq!(values[0]["status"]["block_hash"], record.hash.to_string());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        // Header identity alone cannot authenticate transaction bodies.
+        // Keep that header but replace both sides of a parent/child pair.
+        let mut corrupt = block.clone();
+        corrupt.txs[0].outputs[0].value = Amount::from_sat(999);
+        corrupt.txs[1].inputs[0].previous_output = OutPoint::new(corrupt.txs[0].txid(), 0);
+        assert_eq!(corrupt.block_hash(), block.block_hash());
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&corrupt))],
+        }));
+        assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 500);
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        }));
         let stale_record =
             bitcoin_rs_index::block_log::BlockRecord::synthetic(0, BlockHash::default());
         ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
@@ -2502,6 +2523,128 @@ mod tests {
             bodies: vec![(0, record.hash, consensus_bytes(&block))],
         }));
         assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 500);
+    }
+
+    #[test]
+    fn block_parent_reuse_checks_readiness_only_when_needed() {
+        struct ReadinessIndex {
+            parent: Tx,
+            checks: Arc<AtomicUsize>,
+            synced: bool,
+        }
+        impl crate::context::DerivedIndexQuery for ReadinessIndex {
+            fn transaction(&self, _: &Txid) -> Result<Option<Tx>, TxQueryError> {
+                if self.synced {
+                    Ok(Some(self.parent.clone()))
+                } else {
+                    Err(TxQueryError::Retry)
+                }
+            }
+            fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+                Ok(None)
+            }
+            fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+                self.checks.fetch_add(1, Ordering::Relaxed);
+                Ok(crate::context::DerivedIndexInfo {
+                    synced: self.synced,
+                    best_block_height: 0,
+                })
+            }
+        }
+        let parent = paying_transaction(&[null_outpoint()], &[(125, vec![0x51])]);
+        let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        ctx.indexes.esplora_tx_index = Some(Arc::new(ReadinessIndex {
+            parent: parent.clone(),
+            checks: Arc::clone(&checks),
+            synced: true,
+        }));
+        // An external parent uses its ordinary checked lookup. Merely having
+        // non-coinbase inputs must not open a separate readiness snapshot.
+        let values = Projection::new(&ctx)
+            .transaction_values([(&child, None)], Some(std::slice::from_ref(&child)))
+            .expect("external parent");
+        assert_eq!(values[0].fee, 25);
+        assert_eq!(checks.load(Ordering::Relaxed), 0);
+        let values = Projection::new(&ctx)
+            .transaction_values(
+                [(&child, None), (&child, None)],
+                Some(std::slice::from_ref(&parent)),
+            )
+            .expect("in-block parent");
+        assert_eq!(values[0].fee, 25);
+        assert_eq!(values[1].fee, 25);
+        assert_eq!(checks.load(Ordering::Relaxed), 1);
+        // A successful index_info response with synced=false is still not
+        // authority to bypass the normal unavailable parent lookup.
+        ctx.indexes.esplora_tx_index = Some(Arc::new(ReadinessIndex {
+            parent: parent.clone(),
+            checks: Arc::clone(&checks),
+            synced: false,
+        }));
+        let error = Projection::new(&ctx)
+            .transaction_values([(&child, None)], Some(std::slice::from_ref(&parent)))
+            .expect_err("index behind tip");
+        assert_eq!(error.status, 503);
+    }
+
+    #[test]
+    fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
+        let mut first = paying_transaction(&[null_outpoint()], &[(125, vec![0x51])]);
+        first.inputs[0].witness = vec![vec![0x42; 1024]].into();
+        let second = paying_transaction(&[null_outpoint()], &[(175, vec![0x52])]);
+        let missing = Txid::default();
+        let ids = [first.txid(), missing, second.txid(), first.txid()].repeat(30);
+        let body = serde_json::to_vec(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .expect("request");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                0,
+                BlockHash::default(),
+            ));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: vec![first.clone(), second.clone()],
+            calls: Arc::clone(&calls),
+        }));
+        let ctx = Arc::new(ctx);
+        let handler = Handler::new(Arc::clone(&ctx));
+        let response = backend_route_post(&handler, "/internal/txs", &body);
+        assert_eq!(response.status, 200);
+        let rows: Vec<Value> = serde_json::from_slice(&response.body).expect("batch");
+        let expected = ids.iter().filter(|id| **id != missing).collect::<Vec<_>>();
+        assert_eq!(rows.len(), expected.len());
+        for (row, id) in rows.iter().zip(&expected) {
+            assert_eq!(row["txid"], id.to_string());
+            assert_eq!(row["status"]["confirmed"], true);
+        }
+        assert_eq!(rows[0], rows[2]);
+        assert_eq!(rows[0]["vin"][0]["witness"], json!(["42".repeat(1024)]));
+        assert!(
+            calls.load(Ordering::Relaxed) < ids.len() / 2,
+            "duplicate IDs must share body resolution within bounded batches"
+        );
+        for tx in [first, second] {
+            ctx.mempool
+                .gateway
+                .pool()
+                .write()
+                .insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0, 0))
+                .expect("pool entry");
+        }
+        calls.store(0, Ordering::Relaxed);
+        let response = backend_route_post(&handler, "/internal/mempool/txs", &body);
+        assert_eq!(response.status, 200);
+        let mempool: Vec<Value> = serde_json::from_slice(&response.body).expect("pool batch");
+        assert_eq!(mempool.len(), rows.len());
+        for (mut row, expected) in mempool.into_iter().zip(rows) {
+            assert_eq!(row["status"]["confirmed"], false);
+            row["status"] = expected["status"].clone();
+            assert_eq!(row, expected);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     struct FailingParentIndex {
@@ -2614,7 +2757,7 @@ mod tests {
             header: Header {
                 version: 1,
                 prev_blockhash: genesis.compute_hash(),
-                merkle_root: Hash256::default(),
+                merkle_root: fixture_merkle_root(&[transaction.txid()]),
                 time: 2_000,
                 bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
