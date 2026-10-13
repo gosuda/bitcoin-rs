@@ -710,9 +710,7 @@ impl V1Receiver {
         }
         self.header_filled = 0;
         let mut body = pending_body(&self.header, expected_magic)?;
-        if body.expected > 0
-            && let Some((budget, ip)) = &self.source_budget
-        {
+        if body.expected > 0 && let Some((budget, ip)) = &self.source_budget {
             body._reservation = Some(IncompleteV1Reservation::new(Arc::clone(budget), *ip));
         }
         Ok(body)
@@ -1175,8 +1173,7 @@ mod tests {
         let mut reservations = Vec::new();
         for octet in 1..=4 {
             let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
-            let mut reservation =
-                super::IncompleteV1Reservation::new(Arc::clone(&budget), ip);
+            let mut reservation = super::IncompleteV1Reservation::new(Arc::clone(&budget), ip);
             assert!(reservation.charge(MAX_MESSAGE_PAYLOAD));
             reservations.push(reservation);
 
@@ -1197,10 +1194,7 @@ mod tests {
 
         let budget = Arc::new(IncompleteV1Budget::default());
         let mut receiver = super::V1Receiver::default();
-        receiver.set_budget(
-            Arc::clone(&budget),
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-        );
+        receiver.set_budget(Arc::clone(&budget), IpAddr::V4(Ipv4Addr::LOCALHOST));
         let mut stream = StallingStream::new([
             Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
             Inbound::Stall(ErrorKind::TimedOut),
