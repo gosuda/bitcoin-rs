@@ -67,8 +67,14 @@ fn dispatch_get(
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
     if surface == Surface::Backend {
+        let ctx = handler.context();
+        let projection = Projection::new(&ctx);
+        let chain_view = projection.capture_chain_view();
         if let Some(response) = backend::post(handler, path, body) {
-            return response;
+            return match projection.ensure_chain_view(chain_view.as_ref()) {
+                Ok(()) => response,
+                Err(response) => response,
+            };
         }
     }
     public::post(handler, path, body)
@@ -2253,8 +2259,9 @@ mod tests {
         ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
 
         let rendered = Projection::new(&ctx)
-            .transaction_value(&child, None)
+            .transaction_values([(&child, None)], None)
             .expect("prevout indexed");
+        let rendered = &rendered[0];
         assert_eq!(rendered.fee, 25);
         assert_eq!(
             rendered.vin[0]
@@ -2264,6 +2271,315 @@ mod tests {
                 .value,
             125
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "first, later, mixed and missing pages share one history fixture"
+    )]
+    fn history_resolves_shared_parents_once_per_page() {
+        let parent = paying_transaction(&[null_outpoint()], &vec![(125, vec![0x52]); 62]);
+        let transactions = (0_u32..30)
+            .map(|n| {
+                paying_transaction(
+                    &[
+                        OutPoint::new(parent.txid(), n * 2),
+                        OutPoint::new(parent.txid(), n * 2 + 1),
+                    ],
+                    &[(200, vec![0x51])],
+                )
+            })
+            .collect::<Vec<_>>();
+        let records = transactions
+            .iter()
+            .enumerate()
+            .map(|(n, tx)| ScriptHistoryRecord {
+                txid: tx.txid(),
+                height: u32::try_from(n + 1).expect("height"),
+            })
+            .collect::<Vec<_>>();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        for record in &records {
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
+        }
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
+            history: records.clone(),
+            funding: vec![],
+            unspent: vec![],
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: transactions
+                .iter()
+                .cloned()
+                .chain([parent.clone()])
+                .collect(),
+            calls: Arc::clone(&calls),
+        }));
+        for (cursor, expected) in [
+            (None, &transactions[5..]),
+            (Some(records[5].txid.to_string()), &transactions[..5]),
+        ] {
+            calls.store(0, Ordering::Relaxed);
+            let response = history(&ctx, ScriptHash::new(&[0x51]), cursor.as_deref(), false);
+            assert_eq!(response.status, 200);
+            let values: Vec<Value> = serde_json::from_slice(&response.body).expect("page");
+            assert_eq!(calls.load(Ordering::Relaxed), expected.len() + 1);
+            assert_eq!(values.len(), expected.len());
+            for (value, tx) in values.iter().zip(expected.iter().rev()) {
+                assert_eq!(value["txid"], tx.txid().to_string());
+                assert_eq!(value["fee"], 50);
+                assert_eq!(value["status"]["confirmed"], true);
+                for (input, original) in value["vin"]
+                    .as_array()
+                    .expect("inputs")
+                    .iter()
+                    .zip(&tx.inputs)
+                {
+                    assert_eq!(input["txid"], parent.txid().to_string());
+                    assert_eq!(input["vout"], { original.previous_output.vout });
+                    assert_eq!(input["prevout"]["value"], 125);
+                    assert_eq!(input["prevout"]["scriptpubkey"], "52");
+                }
+            }
+        }
+        let unconfirmed = paying_transaction(
+            &[
+                OutPoint::new(parent.txid(), 60),
+                OutPoint::new(parent.txid(), 61),
+            ],
+            &[(200, vec![0x51])],
+        );
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(
+                Arc::new(unconfirmed.clone()),
+                100,
+                1_000,
+                1,
+                0,
+                0,
+            ))
+            .expect("mixed page");
+        calls.store(0, Ordering::Relaxed);
+        let mixed = history(&ctx, ScriptHash::new(&[0x51]), None, true);
+        assert_eq!(mixed.status, 200);
+        let mixed: Vec<Value> = serde_json::from_slice(&mixed.body).expect("mixed page");
+        assert_eq!(mixed.len(), CHAIN_PAGE + 1);
+        assert_eq!(mixed[0]["txid"], unconfirmed.txid().to_string());
+        assert_eq!(mixed[0]["status"]["confirmed"], false);
+        assert_eq!(mixed[0]["fee"], 50);
+        assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE + 1);
+        // A later request must not retain a successful parent lookup.
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions,
+            calls,
+        }));
+        assert_eq!(
+            history(&ctx, ScriptHash::new(&[0x51]), None, false).status,
+            503
+        );
+    }
+
+    #[test]
+    fn batch_reuses_selected_transactions_and_mempool_parents() {
+        let parent =
+            paying_transaction(&[null_outpoint()], &[(125, vec![0x51]), (175, vec![0x52])]);
+        let child = paying_transaction(
+            &[
+                OutPoint::new(parent.txid(), 0),
+                OutPoint::new(parent.txid(), 1),
+            ],
+            &[(250, vec![0x53])],
+        );
+        let ctx = Context::new();
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(
+                Arc::new(parent.clone()),
+                100,
+                1_000,
+                1,
+                0,
+                0,
+            ))
+            .expect("parent");
+        let projection = Projection::new(&ctx);
+        let values = projection
+            .transaction_values([(&child, None), (&child, None)], None)
+            .expect("mempool prevouts");
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].fee, 50);
+        assert!(!values[0].status.confirmed);
+        assert_eq!(
+            serde_json::to_value(&values[0]).expect("first"),
+            serde_json::to_value(&values[1]).expect("duplicate")
+        );
+        // A transaction captured for the response can supply another row's
+        // prevouts even after it has left the live pool. No body clone or
+        // second index query is needed for that already verified parent.
+        let ctx = Context::new();
+        let values = Projection::new(&ctx)
+            .transaction_values([(&child, None), (&parent, None)], None)
+            .expect("selected parent");
+        assert_eq!(values[0].fee, 50);
+        assert_eq!(values[1].txid, parent.txid().to_string());
+        let missing = paying_transaction(&[OutPoint::new(parent.txid(), 2)], &[(1, vec![0x51])]);
+        let response = Projection::new(&ctx)
+            .transaction_values([(&missing, None)], Some(std::slice::from_ref(&parent)))
+            .expect_err("missing output");
+        assert_eq!(response.status, 503);
+    }
+
+    #[test]
+    fn block_page_reuses_parent_outside_the_selected_page() {
+        let mut block = fixture_genesis();
+        let parent = block.txs[0].clone();
+        let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x51])]);
+        block.txs.push(child.clone());
+        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        ctx.chain.add_block(record.clone());
+        let tip = {
+            let mut tree = ctx.chain.block_tree.write();
+            tree.insert_node(None, block.header, NodeStatus::Active)
+                .expect("tip");
+            tree.tip().expect("tip")
+        };
+        ctx.chain.applied_tip.store(Some(tip));
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        }));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: block.txs.clone(),
+            calls: Arc::clone(&calls),
+        }));
+        let response = block_txs(&ctx, &record.hash.to_string(), 1);
+        assert_eq!(response.status, 200);
+        let values: Vec<Value> = serde_json::from_slice(&response.body).expect("block page");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["txid"], child.txid().to_string());
+        assert_eq!(values[0]["fee"], parent.outputs[0].value.to_sat() - 100);
+        assert_eq!(values[0]["status"]["block_hash"], record.hash.to_string());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let stale_record =
+            bitcoin_rs_index::block_log::BlockRecord::synthetic(0, BlockHash::default());
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: vec![],
+            calls,
+        }));
+        let response = super::public::block_transaction_values(&ctx, &stale_record, &block, 1, 1)
+            .expect_err("stale body cannot supply parents");
+        assert_eq!(response.status, 503);
+        for (error, status) in [
+            (TxQueryError::Retry, 503),
+            (TxQueryError::Storage("corrupt".into()), 500),
+        ] {
+            ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
+                error: Some(error),
+                republish: None,
+                parent: parent.clone(),
+            }));
+            assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, status);
+        }
+        ctx.indexes.esplora_tx_index = None;
+        assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, 503);
+    }
+
+    struct FailingParentIndex {
+        error: Option<TxQueryError>,
+        republish: Option<bitcoin_rs_chain::TipReader>,
+        parent: Tx,
+    }
+
+    impl crate::context::DerivedIndexQuery for FailingParentIndex {
+        fn transaction(&self, _: &Txid) -> Result<Option<Tx>, TxQueryError> {
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            if let Some(reader) = &self.republish {
+                if let Some(tip) = reader.load_full() {
+                    reader.store(Some(Arc::new((*tip).clone())));
+                }
+            }
+            Ok(Some(self.parent.clone()))
+        }
+        fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+            Ok(None)
+        }
+        fn transaction_height(&self, _: &Txid) -> Result<Option<u32>, TxQueryError> {
+            Ok(Some(0))
+        }
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            self.error.clone().map_or(Err(TxQueryError::Retry), Err)
+        }
+    }
+
+    #[test]
+    fn parent_query_errors_and_republication_never_yield_a_cached_success() {
+        let block = fixture_genesis();
+        let parent = block.txs[0].clone();
+        let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x51])]);
+        let mut ctx = Context::new();
+        ctx.chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+                0, &block,
+            ));
+        let tip = {
+            let mut tree = ctx.chain.block_tree.write();
+            tree.insert_node(None, block.header, NodeStatus::Active)
+                .expect("tip");
+            tree.tip().expect("tip")
+        };
+        ctx.chain.applied_tip.store(Some(tip));
+        for (error, status) in [
+            (Some(TxQueryError::Retry), 503),
+            (Some(TxQueryError::Unavailable("pruned".into())), 503),
+            (Some(TxQueryError::Storage("corrupt".into())), 500),
+        ] {
+            ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
+                error,
+                republish: Some(ctx.chain.applied_tip.clone()),
+                parent: parent.clone(),
+            }));
+            let response = Projection::new(&ctx)
+                .transaction_values([(&child, None), (&child, None)], None)
+                .expect_err("must not publish success");
+            assert_eq!(response.status, status);
+        }
+        ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
+            error: None,
+            republish: Some(ctx.chain.applied_tip.clone()),
+            parent: parent.clone(),
+        }));
+        let child_id = child.txid();
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 0, 0))
+            .expect("child");
+        // The read-only backend POST also fences transaction selection,
+        // before the request-local parent renderer starts its own work.
+        let handler = Handler::new(Arc::new(ctx));
+        assert_eq!(route(&handler, &format!("/tx/{child_id}"), "").status, 503);
+        let response = backend_route_post(
+            &handler,
+            "/internal/txs",
+            &serde_json::to_vec(&[parent.txid().to_string()]).expect("request"),
+        );
+        assert_eq!(response.status, 503);
     }
 
     #[test]

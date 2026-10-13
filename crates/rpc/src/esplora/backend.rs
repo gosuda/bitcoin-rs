@@ -49,7 +49,7 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, block.txs.iter()).map_or_else(|r| r, json_ok)
+    block_transaction_values(ctx, &record, &block, 0, usize::MAX).map_or_else(|r| r, json_ok)
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
@@ -87,10 +87,8 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             .collect::<Vec<_>>()
     };
     let projection = Projection::new(ctx);
-    transactions
-        .into_iter()
-        .map(|transaction| projection.transaction_value(&transaction, None))
-        .collect::<Result<Vec<_>, _>>()
+    projection
+        .transaction_values(transactions.iter().map(|tx| (tx.as_ref(), None)), None)
         .map_or_else(|r| r, json_ok)
 }
 
@@ -148,7 +146,8 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
         Err(response) => return response,
     };
     let projection = Projection::new(ctx);
-    ids.into_iter()
+    let transactions = match ids
+        .into_iter()
         .filter_map(|id| {
             let transaction = if mempool_only {
                 ctx.mempool
@@ -162,10 +161,15 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
                     Err(response) => return Some(Err(response)),
                 }
             };
-            transaction
-                .map(|(transaction, status)| projection.transaction_value(&transaction, status))
+            transaction.map(Ok)
         })
         .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(transactions) => transactions,
+        Err(response) => return response,
+    };
+    projection
+        .transaction_values(transactions.iter().map(|(tx, status)| (tx, *status)), None)
         .map_or_else(|r| r, json_ok)
 }
 

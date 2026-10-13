@@ -207,10 +207,92 @@ impl<'a> Projection<'a> {
         confirmation.map_or_else(TransactionStatus::unconfirmed, TransactionStatus::from)
     }
 
-    pub(super) fn transaction_value(
+    /// Resolves each distinct parent once for this response. Retain only the
+    /// referenced outputs, not unrelated parent inputs, witnesses or outputs.
+    /// By default the selected transactions are already resolved from the
+    /// mempool or verified index queries. Block routes override the parent
+    /// candidates with the decoded active block, or an empty slice for a
+    /// stale block / unavailable index.
+    pub(super) fn transaction_values<'t>(
+        &self,
+        transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
+        block_parents: Option<&'t [Tx]>,
+    ) -> Result<Vec<TransactionValue>, Response> {
+        let transactions = transactions
+            .into_iter()
+            .map(|(tx, status)| (tx, status, tx.txid()))
+            .collect::<Vec<_>>();
+        let mut outpoints = transactions
+            .iter()
+            .flat_map(|(tx, _, _)| &tx.inputs)
+            .map(|input| input.previous_output)
+            .filter(|outpoint| !outpoint.is_null())
+            .collect::<Vec<_>>();
+        outpoints.sort_unstable_by_key(|point| (point.txid, point.vout));
+        outpoints.dedup();
+        let mut available = std::collections::HashMap::new();
+        let mut retain = |txid, tx| {
+            if outpoints
+                .binary_search_by_key(&txid, |point| point.txid)
+                .is_ok()
+            {
+                available.insert(txid, tx);
+            }
+        };
+        if let Some(parents) = block_parents {
+            for tx in parents {
+                retain(tx.txid(), tx);
+            }
+        } else {
+            for (tx, _, txid) in &transactions {
+                retain(*txid, *tx);
+            }
+        }
+        let mut prevouts = Vec::with_capacity(outpoints.len());
+        for points in outpoints.chunk_by(|left, right| left.txid == right.txid) {
+            let txid = points[0].txid;
+            let mut collect = |tx: &Tx| -> Result<(), Response> {
+                for point in points {
+                    let output = tx
+                        .outputs
+                        .get(usize::try_from(point.vout).unwrap_or(usize::MAX))
+                        .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
+                    prevouts.push((*point, output.clone()));
+                }
+                Ok(())
+            };
+            if let Some(tx) = available.get(&txid) {
+                collect(tx)?;
+                continue;
+            }
+            // Arc capture releases the pool guard before output copying.
+            let mempool = self.ctx.mempool.gateway.read().transaction_by_txid(&txid);
+            if let Some(tx) = mempool {
+                collect(&tx)?;
+            } else {
+                let index =
+                    self.ctx.indexes.esplora_tx_index.as_ref().ok_or_else(|| {
+                        service_unavailable("transaction lookup index is disabled")
+                    })?;
+                let tx = index
+                    .transaction(&txid)
+                    .map_err(query_error)?
+                    .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
+                collect(&tx)?;
+            }
+        }
+        transactions
+            .into_iter()
+            .map(|(tx, status, txid)| self.transaction_value(tx, txid, status, &prevouts))
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn transaction_value(
         &self,
         transaction: &Tx,
+        txid: Txid,
         confirmation: Option<Confirmation>,
+        prevouts: &[(OutPoint, TxOut)],
     ) -> Result<TransactionValue, Response> {
         let mut input_value = 0_u64;
         let mut inputs = Vec::with_capacity(transaction.inputs.len());
@@ -220,19 +302,22 @@ impl<'a> Projection<'a> {
             let previous = if coinbase {
                 None
             } else {
-                let output = self
-                    .prevout(&previous_output)?
+                let output = prevouts
+                    .binary_search_by_key(
+                        &(previous_output.txid, previous_output.vout),
+                        |(point, _)| (point.txid, point.vout),
+                    )
+                    .ok()
+                    .map(|index| &prevouts[index].1)
                     .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
                 input_value = input_value.saturating_add(output.value.to_sat());
                 Some(output)
             };
-            let (redeem, witness_script) = inner_scripts(input, previous.as_ref());
+            let (redeem, witness_script) = inner_scripts(input, previous);
             inputs.push(TransactionInput {
                 txid: previous_output.txid.to_string(),
                 vout: previous_output.vout,
-                prevout: previous
-                    .as_ref()
-                    .map(|output| self.transaction_output(output)),
+                prevout: previous.map(|output| self.transaction_output(output)),
                 scriptsig: input.script_sig.to_lower_hex_string(),
                 scriptsig_asm: convert::script_asm(&input.script_sig),
                 witness: (!input.witness.is_empty()).then(|| {
@@ -258,7 +343,7 @@ impl<'a> Projection<'a> {
             sum.saturating_add(output.value.to_sat())
         });
         Ok(TransactionValue {
-            txid: transaction.txid().to_string(),
+            txid: txid.to_string(),
             version: transaction.version.cast_unsigned(),
             locktime: transaction.lock_time.to_consensus(),
             vin: inputs,
@@ -279,34 +364,6 @@ impl<'a> Projection<'a> {
             scriptpubkey_address: convert::script_address(script, self.ctx.chain.chain_network),
             value: output.value.to_sat(),
         }
-    }
-
-    pub(super) fn prevout(&self, outpoint: &OutPoint) -> Result<Option<TxOut>, Response> {
-        if let Some(transaction) = self
-            .ctx
-            .mempool
-            .gateway
-            .read()
-            .transaction_by_txid(&outpoint.txid)
-        {
-            return Ok(transaction
-                .outputs
-                .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
-                .cloned());
-        }
-        let index = self
-            .ctx
-            .indexes
-            .esplora_tx_index
-            .as_ref()
-            .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
-        let Some(transaction) = index.transaction(&outpoint.txid).map_err(query_error)? else {
-            return Ok(None);
-        };
-        Ok(transaction
-            .outputs
-            .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
-            .cloned())
     }
 
     pub(super) fn block_value(
