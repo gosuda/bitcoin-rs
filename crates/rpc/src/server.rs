@@ -975,12 +975,14 @@ mod tests {
 
     #[test]
     fn backend_esplora_requires_rpc_credentials() -> std::io::Result<()> {
+        let valid_auth = "Authorization: Basic dXNlcjpwYXNz\r\n";
+        let invalid_auth = "Authorization: Basic invalid\r\n";
         for (method, path, body, authorization, expected) in [
             ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "", 401),
-            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "Authorization: Basic invalid\r\n", 401),
-            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), "Authorization: Basic dXNlcjpwYXNz\r\n", 200),
+            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), invalid_auth, 401),
+            ("GET", "/esplora/internal/mempool/txs", "".as_bytes(), valid_auth, 200),
             ("POST", "/esplora/internal/txs", "[]".as_bytes(), "", 401),
-            ("POST", "/esplora/internal/txs", "[]".as_bytes(), "Authorization: Basic dXNlcjpwYXNz\r\n", 200),
+            ("POST", "/esplora/internal/txs", "[]".as_bytes(), valid_auth, 200),
             ("GET", "/api/mempool/txids", "".as_bytes(), "", 200),
         ] {
             let mut request = format!(
