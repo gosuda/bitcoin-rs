@@ -583,9 +583,10 @@ owned by [wallet-facing.md](wallet-facing.md).
 - Projection uses `typed_to_sonic_omitting_nulls`.
 
 
-### `API-26`: `estimatesmartfee` Core `conf_target` and `estimate_mode`
+### `API-26`: `estimatesmartfee` parameters and Esplora fee estimates
 
-- **Owner**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`.
+- **Owners**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`;
+  Esplora `/fee-estimates` in `crates/rpc/src/esplora/public.rs`.
 - `conf_target` must be in `1..=1008` (Core `MAX_CONFIRM_TARGET`). Otherwise
   `-8` `Invalid conf_target, must be between 1 and 1008`.
 - `estimate_mode` is optional, case-insensitive `UNSET` / `ECONOMICAL` /
