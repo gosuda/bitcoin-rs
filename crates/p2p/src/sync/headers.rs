@@ -1076,6 +1076,8 @@ impl BlockSync {
     ///   retained the batch, in which case the drain already consumed the
     ///   wire request and this call sent the state-cursor continuation or ran
     ///   the fault path.
+    /// A stale wire batch also returns `None` before sync state or admission
+    /// is touched.
     /// INVARIANT: a body-carried header is deferred below the work floor
     ///   only after standalone `PoW` and contextual validation pass; wire
     ///   batches reach admission below the floor only as
@@ -1088,7 +1090,7 @@ impl BlockSync {
         wire_response: bool,
         batch_len: usize,
     ) -> Option<HeaderAdmission> {
-        if source.is_some_and(|source| !self.peer_table.is_current(source)) {
+        if wire_response && source.is_some_and(|source| !self.peer_table.is_current(source)) {
             return None;
         }
         if headers.is_empty() {

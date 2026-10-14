@@ -45,6 +45,7 @@ const DEFAULT_ZMQ_HWM: u32 = 1_000;
 pub struct ZmqEndpointConfig {
     pub endpoint: String,
     pub topics: Vec<ZmqTopic>,
+    /// Maximum queued outbound messages, in `1..=i32::MAX`; zero is unbounded in libzmq.
     #[serde(default)]
     pub hwm: Option<u32>,
 }
@@ -75,10 +76,14 @@ pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<()> {
             "duplicate ZMQ endpoint: {}",
             config.endpoint
         );
+        let hwm = config.effective_hwm();
         ensure!(
-            i32::try_from(config.effective_hwm()).is_ok(),
-            "ZMQ HWM exceeds libzmq's signed SNDHWM range: {}",
-            config.effective_hwm()
+            hwm > 0,
+            "ZMQ HWM must be positive; zero disables libzmq's queue limit"
+        );
+        ensure!(
+            i32::try_from(hwm).is_ok(),
+            "ZMQ HWM exceeds libzmq's signed SNDHWM range: {hwm}"
         );
         let mut topics = StdHashSet::new();
         for topic in &config.topics {
@@ -567,6 +572,33 @@ mod tests {
             endpoint: endpoint.into(),
             topics,
             hwm: Some(hwm),
+        }
+    }
+
+    #[test]
+    fn rejects_zero_zmq_hwm_before_socket_binding() {
+        let config = ZmqEndpointConfig {
+            endpoint: "inproc://bitcoin-rs-zmq-zero-hwm".to_owned(),
+            topics: vec![ZmqTopic::RawBlock],
+            hwm: Some(0),
+        };
+        let Err(error) = validate_endpoint_configs(std::slice::from_ref(&config)) else {
+            panic!("zero HWM must fail configuration validation");
+        };
+        assert!(
+            error.to_string().contains("ZMQ HWM must be positive"),
+            "{error}"
+        );
+
+        #[cfg(feature = "zmq")]
+        {
+            let Err(error) = SocketZmqPublisher::bind(&[config]) else {
+                panic!("zero HWM must also fail socket binding");
+            };
+            assert!(
+                error.to_string().contains("ZMQ HWM must be positive"),
+                "{error}"
+            );
         }
     }
 
