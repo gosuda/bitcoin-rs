@@ -1,6 +1,6 @@
 //! The ordered durable commit between chain mutation and publication.
 use super::error::ApplyError;
-use super::publication::{publish_applied, tx_count_delta_for};
+use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint};
@@ -492,7 +492,7 @@ fn rewind_one_step(
             "the disconnect marker did not record the rewind",
         ),
     })?;
-    publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
+    handles.publish_applied(&parent_tip, crate::events::HintKind::Disconnected);
     Ok(())
 }
 

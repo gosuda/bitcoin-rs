@@ -189,19 +189,28 @@ fn apply_cache_horizon_capped_by_pending_budget() -> TestResult {
 fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
-        source: crate::PeerSource::for_test(peer_addr),
-        locator_tip_hash: Hash256::default(),
-        target_height: 1,
-        requested_at: Instant::now(),
-    });
+    let source = crate::PeerSource::for_test(peer_addr);
+    {
+        let mut scheduler = sync.scheduler.lock();
+        scheduler.headers_sync.entry(source).or_default().request =
+            Some(super::super::HeaderRequest {
+                source,
+                kind: super::super::HeaderRequestKind::Frontier,
+                locator_tip_hash: Hash256::default(),
+                target_height: 1,
+                requested_at: Instant::now(),
+                state: super::super::HeaderRequestState::AwaitingResponse,
+            });
+        scheduler.header_request_owner = Some(source);
+    }
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 1));
     let source = current_source(&sync.peer_table, peer_addr);
     sync.on_peer_ready(source);
     assert!(
-        sync.scheduler.lock().header_request.is_none(),
+        sync.scheduler.lock().header_request().is_none(),
         "replacement readiness must release the dead predecessor's request"
     );
+    assert!(sync.scheduler.lock().headers_sync.is_empty());
     Ok(())
 }
 
@@ -214,18 +223,28 @@ fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> TestResult {
     sync.peer_table.register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
     let replacement = current_source(&sync.peer_table, peer_addr);
-    sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
-        source: replacement,
-        locator_tip_hash: Hash256::default(),
-        target_height: 1,
-        requested_at: Instant::now(),
-    });
+    {
+        let mut scheduler = sync.scheduler.lock();
+        scheduler
+            .headers_sync
+            .entry(replacement)
+            .or_default()
+            .request = Some(super::super::HeaderRequest {
+            source: replacement,
+            kind: super::super::HeaderRequestKind::Frontier,
+            locator_tip_hash: Hash256::default(),
+            target_height: 1,
+            requested_at: Instant::now(),
+            state: super::super::HeaderRequestState::AwaitingResponse,
+        });
+        scheduler.header_request_owner = Some(replacement);
+    }
     sync.on_peer_ready(stale.source(peer_addr));
     sync.on_peer_ready(replacement);
     assert!(
         sync.scheduler
             .lock()
-            .header_request
+            .header_request()
             .is_some_and(|request| request.source == replacement),
         "neither a stale callback nor the sweep may release the live connection's request"
     );

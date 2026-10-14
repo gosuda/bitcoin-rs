@@ -280,7 +280,7 @@ pub(crate) fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPol
     }
     if policy
         .ibd
-        .is_active(crate::counters::now_seconds(), policy.network)
+        .is_active(bitcoin_rs_primitives::unix_time_secs(), policy.network)
     {
         return false;
     }
@@ -305,7 +305,7 @@ pub(crate) fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u
     if peer.services & network != 0
         || policy
             .ibd
-            .is_active(crate::counters::now_seconds(), policy.network)
+            .is_active(bitcoin_rs_primitives::unix_time_secs(), policy.network)
     {
         return 0;
     }

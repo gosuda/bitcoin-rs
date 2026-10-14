@@ -144,7 +144,7 @@ const CHAIN_SYNC_TIMEOUT: Duration = Duration::from_mins(20);
 
 /// How long the answer to that probe is awaited: `HEADERS_RESPONSE_TIME` is
 /// 2 * 60 seconds, as Core sets it (`net_processing.cpp:103`).
-const HEADERS_RESPONSE_TIME: Duration = Duration::from_mins(2);
+pub(super) const HEADERS_RESPONSE_TIME: Duration = Duration::from_mins(2);
 
 /// How many tip-reaching outbound connections are never retired. Core's
 /// `MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT` (`net_processing.cpp:107`).
@@ -663,17 +663,13 @@ impl BlockSync {
     }
 
     /// Asks one connection for headers once and reports whether the request
-    /// is now outstanding.
-    /// INVARIANT: a suppression counts only when the pending request it
-    ///   suppressed is the very question the response window waits on. The
-    ///   frontier-owned outcome sent nothing at all, so it neither counts a
-    ///   probe nor arms a response window, and no connection is retired for
-    ///   ignoring a request it never received.
+    /// reached the wire.
+    /// INVARIANT: only a sent probe arms a response window.
     pub(super) fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier) -> bool {
-        match self.send_chain_sync_probe(frontier, source) {
-            GetheadersOutcome::Sent | GetheadersOutcome::Suppressed => true,
-            GetheadersOutcome::FrontierOwned | GetheadersOutcome::Failed => false,
-        }
+        matches!(
+            self.send_chain_sync_probe(frontier, source),
+            GetheadersOutcome::Sent,
+        )
     }
 }
 

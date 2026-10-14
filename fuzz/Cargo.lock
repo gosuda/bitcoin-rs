@@ -183,6 +183,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-index"
+version = "0.14.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin",
+ "bitcoin-rs-chain",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "bitcoin-rs-utxo",
+ "bitcoin_hashes",
+ "compact_str",
+ "crossbeam-channel",
+ "hashbrown",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "sha2",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
 name = "bitcoin-rs-mempool"
 version = "0.14.0"
 dependencies = [
@@ -207,6 +230,7 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
@@ -402,6 +426,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -458,6 +491,19 @@ name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+
+[[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "static_assertions",
+ "zmij",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -1191,6 +1237,12 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"

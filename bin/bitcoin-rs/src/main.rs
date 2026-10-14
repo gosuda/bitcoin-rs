@@ -217,6 +217,27 @@ mod tests {
         assert!(!config.p2p.fast_sync);
     }
 
+    #[test]
+    fn v2_transport_defaults_off_and_enables_from_every_surface() {
+        let config = resolved(&["bitcoin-rs"], &[]);
+        assert!(!config.p2p.v2_transport);
+
+        let config = resolved(&["bitcoin-rs", "--v2transport"], &[]);
+        assert!(config.p2p.v2_transport);
+
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_V2_TRANSPORT", "true")]);
+        assert!(config.p2p.v2_transport);
+
+        for (flag, text) in [
+            ("--config", "v2_transport = true\n"),
+            ("--bitcoin-conf", "v2transport=1\n"),
+        ] {
+            let config = load_file(flag, text, &[], std::iter::empty())
+                .unwrap_or_else(|error| panic!("valid {flag} configuration: {error}"));
+            assert!(config.p2p.v2_transport, "{flag}");
+        }
+    }
+
     /// Startup failure for `validation.engine = "kernel"` on a
     /// build without bitcoinkernel support. The engine selection is resolved
     /// and checked during configuration — before the data directory, chain

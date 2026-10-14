@@ -8,6 +8,13 @@ fn script_index_capabilities_match_the_storage_contract() {
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
     assert_eq!(derived_index_capabilities(&config), IndexCapabilities::NONE);
+    assert!(!config.indexes.blockfilterindex);
+    config.indexes.blockfilterindex = true;
+    assert_eq!(
+        derived_index_capabilities(&config),
+        IndexCapabilities::COMPACT_FILTERS
+    );
+    config.indexes.blockfilterindex = false;
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     assert_eq!(
@@ -17,7 +24,10 @@ fn script_index_capabilities_match_the_storage_contract() {
     );
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Full;
-    assert_eq!(derived_index_capabilities(&config), IndexCapabilities::ALL);
+    assert_eq!(
+        derived_index_capabilities(&config),
+        IndexCapabilities::TX_AND_SCRIPTS
+    );
 
     config.indexes.txindex = true;
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
@@ -42,6 +52,7 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
 
     assert!(state.chain_followers().derived_index().is_none());
+    assert!(state.compact_filter_query().is_none());
     assert!(
         state.derived_index_query().is_none(),
         "txindex disabled by default"
@@ -358,7 +369,7 @@ fn open_rejects_txindex_with_pruning() -> anyhow::Result<()> {
     assert!(
         error
             .to_string()
-            .contains("transaction and script indexing are not compatible with -prune"),
+            .contains("indexing are not compatible with -prune"),
         "unexpected error: {error:#}"
     );
     Ok(())

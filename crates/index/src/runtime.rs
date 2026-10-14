@@ -95,6 +95,7 @@ pub struct DerivedIndexRuntime {
     pub(super) failed: AtomicBool,
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
+    compact_filter_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
 
@@ -108,6 +109,7 @@ impl DerivedIndexRuntime {
             failed: AtomicBool::new(false),
             wake_tx,
             failure_message: RwLock::new(None),
+            compact_filter_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
         }
     }
@@ -146,6 +148,15 @@ impl DerivedIndexRuntime {
         self.failed.store(true, Ordering::Release);
     }
 
+    /// Unavailable filter history disables only that capability for this run.
+    /// Preserve its durable rows so a restart can retry after history is restored.
+    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
+        tracing::error!(%error, "compact filter index unavailable; other indexes continue");
+        *self.compact_filter_failure.write() = Some(error.to_string().into());
+        self.publish_leg(IndexCapabilities::COMPACT_FILTERS, ReconcileLeg::Forward);
+        self.wake();
+    }
+
     /// Reads the wake revision.
     #[must_use]
     pub(crate) fn revision(&self) -> u64 {
@@ -168,6 +179,30 @@ impl DerivedIndexRuntime {
     #[must_use]
     pub(crate) fn failure_message(&self) -> Option<CompactString> {
         self.failure_message.read().clone()
+    }
+}
+
+impl crate::CompactFilterQuery for DerivedIndexQueryAdapter {
+    fn block_filter(&self, hash: Hash256) -> Result<Option<crate::BasicFilter>, TxQueryError> {
+        crate::CompactFilterQuery::block_filter(self.load_engine()?.as_ref(), hash)
+    }
+    fn for_each_filter(
+        &self,
+        start: u32,
+        stop: Hash256,
+        step: u32,
+        emit: &mut dyn FnMut(Hash256, crate::BasicFilter) -> bool,
+    ) -> Result<Option<[u8; 32]>, TxQueryError> {
+        crate::CompactFilterQuery::for_each_filter(
+            self.load_engine()?.as_ref(),
+            start,
+            stop,
+            step,
+            emit,
+        )
+    }
+    fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
+        crate::CompactFilterQuery::filter_index_info(self.load_engine()?.as_ref())
     }
 }
 

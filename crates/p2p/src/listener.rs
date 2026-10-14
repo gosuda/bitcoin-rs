@@ -13,7 +13,22 @@ use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
-use crate::socket::{HANDSHAKE_TIMEOUT, configure_peer_stream};
+
+/// Handshake and idle-write ceiling. Matches Bitcoin Core's 60s inactivity
+/// window for a peer that never completes version/verack.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_mins(1);
+/// Read timeout used while polling handshake and message reads.
+const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Applies the peer-socket policy: `TCP_NODELAY`, blocking I/O, and the
+/// handshake/poll timeouts.
+fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(STREAM_POLL_INTERVAL))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    Ok(())
+}
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -147,6 +162,21 @@ pub struct ConnectionShared {
 }
 
 impl ConnectionShared {
+    fn advertised_services(&self) -> ServiceFlags {
+        let services = ServiceFlags::from(
+            self.local_services.to_u64() & !ServiceFlags::COMPACT_FILTERS.to_u64(),
+        );
+        if self
+            .chain_query
+            .as_deref()
+            .is_some_and(crate::ChainQuery::compact_filters_ready)
+        {
+            services | ServiceFlags::COMPACT_FILTERS
+        } else {
+            services
+        }
+    }
+
     /// Construct the complete wiring for one start epoch.
     ///
     /// PRE: The stores belong to the same P2P start epoch. `extras` carries
@@ -520,9 +550,9 @@ pub fn bind_listener(addr: SocketAddr) -> Result<TcpListener, ListenerError> {
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
 /// handshake followed by a message-dispatch loop. Socket flags come from
-/// `crate::socket::configure_peer_stream`. The handshake uses
-/// `crate::socket::HANDSHAKE_TIMEOUT`; after handshake, the message loop
-/// polls inbound reads every `crate::socket::STREAM_POLL_INTERVAL`, probing
+/// `configure_peer_stream`. The handshake uses
+/// `HANDSHAKE_TIMEOUT`; after handshake, the message loop
+/// polls inbound reads every `STREAM_POLL_INTERVAL`, probing
 /// a quiet peer with one `ping` per `PING_INTERVAL` and ending the
 /// connection once a direction is silent past `TIMEOUT_INTERVAL`.
 /// The thread terminates on:
@@ -946,7 +976,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
         nonce,
         start_height,
         lease.role(),
-        shared.local_services,
+        shared.advertised_services(),
     );
     for message in outbound_messages {
         peer.send(&message)?;
@@ -1159,7 +1189,7 @@ fn run_handshake(
         &mut peer,
         nonce,
         0,
-        shared.local_services,
+        shared.advertised_services(),
         &lease,
         handshake_deadline,
     ) {
@@ -1448,7 +1478,7 @@ impl Keepalive {
     ///   either direction alone expiring is enough here.
     ///
     /// A writer stuck on a full socket does not wait out the send silence:
-    /// [`crate::socket::HANDSHAKE_TIMEOUT`] bounds one blocking write at one
+    /// [`HANDSHAKE_TIMEOUT`] bounds one blocking write at one
     /// minute, so this branch only covers a peer that takes our writes and
     /// never answers them.
     fn next_action(&self, now: Instant) -> KeepaliveAction {
@@ -1628,6 +1658,33 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
 
         compact_reconstruction.prune(Instant::now());
+
+        // Retry publication on the existing socket poll, keeping ping, inbound
+        // traffic and lease cancellation responsive while the index catches up.
+        if let Some((request, deadline)) = peer.pending_filter_request.take()
+            && let Some(chain) = shared.chain_query.as_deref()
+        {
+            if Instant::now() >= deadline {
+                return Err(crate::wire::PeerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "compact filter index publication timed out",
+                )));
+            }
+            if !chain.serve_compact_filters(
+                &request,
+                &|| !lease.is_cancelled() && budget.has_block_production_headroom(),
+                &mut |response| {
+                    lease
+                        .send(response)
+                        .map(|()| keepalive.record_send(Instant::now()))
+                        .map_err(|_| {
+                            crate::wire::PeerError::Protocol("outbound queue closed or saturated")
+                        })
+                },
+            )? {
+                peer.pending_filter_request = Some((request, deadline));
+            }
+        }
 
         let read_result = peer.read_message();
         if lease.is_cancelled() {
@@ -1979,9 +2036,9 @@ fn process_compact_message(
     match message {
         crate::Message::CmpctBlock(cmpct) => match compact_hints {
             Some(hints) => reconstruction.receive_cmpctblock(cmpct, identity_version, hints, now),
-            None => crate::compact_blocks::Outcome::Fallback(
-                crate::compact_blocks::native_block_hash(cmpct.compact_block.header.block_hash()),
-            ),
+            None => crate::compact_blocks::Outcome::Fallback(crate::inv::native_block_hash(
+                cmpct.compact_block.header.block_hash(),
+            )),
         },
         crate::Message::BlockTxn(txns) => reconstruction.receive_blocktxn(txns, now),
         _ => crate::compact_blocks::Outcome::Idle,
@@ -2464,7 +2521,7 @@ static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 mod session_socket_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
-    use crate::socket::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
+    use super::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
 
     #[test]
     fn session_sockets_disable_nagle() {
@@ -2566,7 +2623,7 @@ mod inbound_admission_tests {
         // The refusal closes the socket as part of the same accept step that
         // admitted the first, so the EOF is the synchronization point. The
         // read bound only guards a hang: an admitted socket would sit in the
-        // handshake read for the full `HANDSHAKE_TIMEOUT` (10 s) first.
+        // handshake read for the full `HANDSHAKE_TIMEOUT` (60 s) first.
         second.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut byte = [0u8; 1];
         let read = second.read(&mut byte)?;
@@ -2739,6 +2796,21 @@ mod writer_shutdown_tests {
 
     fn ping_len() -> usize {
         crate::wire::wire_len(&crate::Message::Ping(9)).expect("ping encodes")
+    }
+
+    #[test]
+    fn unbacked_filter_service_bit_is_removed_from_handshake() {
+        let mut shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.local_services |= bitcoin::p2p::ServiceFlags::COMPACT_FILTERS;
+        assert!(
+            !shared
+                .advertised_services()
+                .has(bitcoin::p2p::ServiceFlags::COMPACT_FILTERS)
+        );
     }
 
     fn peer_info(addr: SocketAddr, start_height: i32) -> crate::PeerInfo {

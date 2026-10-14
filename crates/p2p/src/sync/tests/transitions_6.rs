@@ -216,17 +216,18 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> Tes
     peers.register(addr, lease.clone());
     peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
     sync.tick();
-    assert!(sync.scheduler.lock().header_request.is_some());
+    assert!(sync.scheduler.lock().header_request().is_some());
 
     assert!(!peers.register(addr, lease));
     sync.reconcile_peer_sessions();
-    assert!(sync.scheduler.lock().header_request.is_some());
+    assert!(sync.scheduler.lock().header_request().is_some());
 
     let (new_tx, _new_rx) = unbounded::<Message>();
     let replacement = PeerLease::new(new_tx);
     peers.register(addr, replacement.clone());
     peers.publish_info(addr, &replacement, synthetic_peer(addr, 8));
     sync.reconcile_peer_sessions();
-    assert!(sync.scheduler.lock().header_request.is_none());
+    assert!(sync.scheduler.lock().header_request().is_none());
+    assert!(sync.scheduler.lock().headers_sync.is_empty());
     Ok(())
 }

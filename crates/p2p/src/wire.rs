@@ -268,8 +268,10 @@ pub enum PeerError {
         /// Actual magic bytes.
         actual: Magic,
     },
-    /// Peer advertised a payload larger than the configured bound.
-    #[error("payload length {0} exceeds 32 MiB bound")]
+    /// A payload, declared by a peer or about to be sent, exceeds its
+    /// transport's bound: [`MAX_MESSAGE_PAYLOAD`] for a v1 frame, 4,000,000
+    /// bytes for a BIP324 packet.
+    #[error("payload length {0} exceeds the transport's payload bound")]
     PayloadTooLarge(usize),
     /// Payload checksum did not match the header checksum.
     #[error("invalid payload checksum")]
@@ -476,16 +478,7 @@ pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    read_message_with(reader, expected_magic, |_, _| {})
-}
-
-/// Read one validated wire payload, observing it before typed decoding.
-pub(crate) fn read_message_with<R: Read>(
-    reader: &mut R,
-    expected_magic: Magic,
-    observe: impl FnOnce(&str, &[u8]),
-) -> Result<(Message, bytes::Bytes), PeerError> {
-    V1Receiver::default().read_message_with(reader, expected_magic, observe)
+    V1Receiver::default().read_message_with(reader, expected_magic, |_, _| {})
 }
 
 /// Receive state for one v1 byte stream that survives poll timeouts.
@@ -513,11 +506,6 @@ struct PendingBody {
     payload: Vec<u8>,
 }
 
-/// Largest single payload read. The retained buffer grows only with bytes
-/// actually received, so a peer that declares a huge payload then stalls
-/// cannot pin a full-size allocation.
-const RECEIVE_CHUNK: usize = 16 * 1024;
-
 impl V1Receiver {
     /// A receiver whose first header already holds `prefix`: the bytes a
     /// BIP324 responder read before it recognized a v1 peer.
@@ -544,11 +532,11 @@ impl V1Receiver {
         } else {
             self.read_header(reader, expected_magic)?
         };
-        if let Err(error) = fill_body(reader, &mut body) {
-            if is_poll_timeout(&error) {
+        if let Err(error) = crate::recv::fill_growing(reader, &mut body.payload, body.expected) {
+            if crate::recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             }
-            return Err(error);
+            return Err(error.into());
         }
         if checksum(&body.payload) != body.checksum {
             return Err(PeerError::BadChecksum);
@@ -566,11 +554,11 @@ impl V1Receiver {
         reader: &mut R,
         expected_magic: Magic,
     ) -> Result<PendingBody, PeerError> {
-        if let Err(error) = fill(reader, &mut self.header, &mut self.header_filled) {
-            if !is_poll_timeout(&error) {
+        if let Err(error) = crate::recv::fill(reader, &mut self.header, &mut self.header_filled) {
+            if !crate::recv::is_poll_timeout(&error) {
                 self.header_filled = 0;
             }
-            return Err(error);
+            return Err(error.into());
         }
         self.header_filled = 0;
         pending_body(&self.header, expected_magic)
@@ -609,57 +597,6 @@ fn pending_body(
         expected: payload_len,
         payload: Vec::new(),
     })
-}
-
-/// Reads until the declared payload is buffered, in bounded chunks so a
-/// partial frame retains only the bytes actually received. A poll timeout
-/// resumes where it stopped.
-fn fill_body<R: Read>(reader: &mut R, body: &mut PendingBody) -> Result<(), PeerError> {
-    let mut scratch = [0u8; RECEIVE_CHUNK];
-    while body.payload.len() < body.expected {
-        let wanted = scratch.len().min(body.expected - body.payload.len());
-        match reader.read(&mut scratch[..wanted]) {
-            Ok(0) => {
-                return Err(PeerError::Io(std::io::Error::from(
-                    std::io::ErrorKind::UnexpectedEof,
-                )));
-            }
-            Ok(read) => body.payload.extend_from_slice(&scratch[..read]),
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(PeerError::Io(error)),
-        }
-    }
-    Ok(())
-}
-
-/// Reads until `buffer` is full, recording progress in `filled` so a poll
-/// timeout resumes where it stopped.
-fn fill<R: Read>(reader: &mut R, buffer: &mut [u8], filled: &mut usize) -> Result<(), PeerError> {
-    while *filled < buffer.len() {
-        match reader.read(&mut buffer[*filled..]) {
-            Ok(0) => {
-                return Err(PeerError::Io(std::io::Error::from(
-                    std::io::ErrorKind::UnexpectedEof,
-                )));
-            }
-            Ok(read) => *filled += read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(PeerError::Io(error)),
-        }
-    }
-    Ok(())
-}
-
-/// The socket's poll interval elapsed; the rest of the frame may still arrive.
-fn is_poll_timeout(error: &PeerError) -> bool {
-    matches!(
-        error,
-        PeerError::Io(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            )
-    )
 }
 
 /// Returns the full encoded wire size of `message`: the 24-byte framing
@@ -1010,7 +947,7 @@ mod tests {
         frame.extend_from_slice(&super::checksum(&[]));
 
         let mut observed = None;
-        let result = super::read_message_with(
+        let result = super::V1Receiver::default().read_message_with(
             &mut Cursor::new(&frame),
             Magic::REGTEST,
             |command, payload| observed = Some((command.to_owned(), payload.to_vec())),
@@ -1020,9 +957,13 @@ mod tests {
 
         frame[20] ^= 1;
         let mut observed_bad_checksum = false;
-        let result = super::read_message_with(&mut Cursor::new(frame), Magic::REGTEST, |_, _| {
-            observed_bad_checksum = true;
-        });
+        let result = super::V1Receiver::default().read_message_with(
+            &mut Cursor::new(frame),
+            Magic::REGTEST,
+            |_, _| {
+                observed_bad_checksum = true;
+            },
+        );
         assert!(matches!(result, Err(PeerError::BadChecksum)));
         assert!(!observed_bad_checksum);
     }
@@ -1086,7 +1027,7 @@ mod tests {
             .or_fail("the partial frame is retained across the timeout");
         assert_eq!(body.payload.len(), dribble.len());
         assert!(
-            body.payload.capacity() <= super::RECEIVE_CHUNK,
+            body.payload.capacity() <= crate::recv::RECEIVE_CHUNK,
             "no full-size allocation is retained for a stalled declared payload"
         );
         Ok(())

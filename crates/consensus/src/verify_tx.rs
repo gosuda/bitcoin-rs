@@ -58,18 +58,13 @@ pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
 
 /// Checks coinbase scriptSig consensus bounds.
 pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
-    if let Some(input) = tx.inputs.first().filter(|_| is_coinbase(tx)) {
+    if let Some(input) = tx.inputs.first().filter(|_| tx.is_coinbase()) {
         let len = input.script_sig.len();
         if !(MIN_COINBASE_SCRIPT_SIG_SIZE..=MAX_COINBASE_SCRIPT_SIG_SIZE).contains(&len) {
             return Err(ConsensusError::CoinbaseScriptSigSize { len });
         }
     }
     Ok(())
-}
-
-/// Returns `true` for the one-input, null-prevout coinbase shape.
-pub(crate) fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Checks whether a transaction may spend a coinbase output at `spend_height`.
@@ -164,7 +159,7 @@ struct TxPrep {
 
 /// Rejects null or repeated input outpoints outside coinbase transactions.
 pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
-    if is_coinbase(tx) {
+    if tx.is_coinbase() {
         return Ok(());
     }
     let mut seen = HashSet::new();
@@ -204,7 +199,7 @@ fn prepare_tx_checks(
     }
 
     let output_value = total_output_value(tx)?;
-    if is_coinbase(tx) {
+    if tx.is_coinbase() {
         verify_coinbase_script_sig_size(tx)?;
         return Ok(None);
     }

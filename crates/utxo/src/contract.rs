@@ -191,12 +191,6 @@ pub struct DisconnectReceipt {
     pub restored_parents: Vec<Txid>,
 }
 
-/// Returns true when `tx` is a coinbase: one input with the null outpoint.
-#[must_use]
-pub fn is_coinbase_tx(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
-}
-
 /// Lookup for the full resolved coin of a spent output, including creation
 /// metadata.
 ///
@@ -363,7 +357,7 @@ pub fn decode_undo_record_for_block(
     let inputs = block
         .txs
         .iter()
-        .filter(|tx| !is_coinbase_tx(tx))
+        .filter(|tx| !tx.is_coinbase())
         .map(|tx| tx.inputs.len())
         .sum::<usize>();
     let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
@@ -393,7 +387,7 @@ pub fn block_spent_outputs(
     let mut earlier: hashbrown::HashMap<Txid, (&Tx, bool)> = hashbrown::HashMap::new();
     let mut spent = Vec::with_capacity(block.txs.len());
     for tx in &block.txs {
-        let coinbase = is_coinbase_tx(tx);
+        let coinbase = tx.is_coinbase();
         let mut inputs = Vec::with_capacity(if coinbase { 0 } else { tx.inputs.len() });
         if !coinbase {
             for input in &tx.inputs {
@@ -526,7 +520,7 @@ pub fn build_block_changes<'a>(
     let mut totals = BlockValueTotals::default();
     for (tx, txid) in block.txs.iter().zip(txids) {
         let txid = *txid;
-        let coinbase = is_coinbase_tx(tx);
+        let coinbase = tx.is_coinbase();
         for (vout_idx, txout) in tx.outputs.iter().enumerate() {
             let value = txout.value.to_sat();
             let vout =

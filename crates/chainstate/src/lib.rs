@@ -17,7 +17,7 @@ use bitcoin_rs_storage::InMemoryUndoStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_utxo::contract::{SpentOutputLookup, is_coinbase_tx};
+use bitcoin_rs_utxo::contract::SpentOutputLookup;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
@@ -25,7 +25,6 @@ use disconnect::disconnect_block_admitted;
 pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use scratch::SameBlockSpentSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use window::{PublishMode, apply_window_admitted};
@@ -35,7 +34,6 @@ mod connect;
 mod disconnect;
 mod durable;
 mod prepare;
-mod publication;
 mod tip_wait;
 mod window;
 pub use prepare::bytes_are_block;
@@ -58,7 +56,6 @@ mod journal;
 mod maintenance;
 pub mod recovery;
 pub mod reorg;
-mod scratch;
 
 /// Historical script-verification policy owned by authoritative chainstate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +119,13 @@ pub struct JournalBootstrap {
     /// Cumulative transaction count through the durable base.
     pub chain_tx_count: u64,
     pub config: ChainstateJournalConfig,
+}
+
+type SameBlockSpentSet = hashbrown::HashSet<OutPoint>;
+
+/// The transaction-count delta contributed by one block.
+fn tx_count_delta_for(block: &Block) -> u64 {
+    u64::try_from(block.txs.len()).unwrap_or(u64::MAX)
 }
 
 const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
@@ -577,6 +581,16 @@ impl<'a> ChainTransition<'a> {
 }
 
 impl Chainstate {
+    /// Publishes one applied tip and records the chain event that names it.
+    fn publish_applied(&self, tip: &TipSnapshot, kind: crate::events::HintKind) {
+        {
+            let _gate = self.tip_notification.gate.lock();
+            self.applied_tip.store(Some(Arc::new(tip.clone())));
+            self.tip_notification.changed.notify_all();
+        }
+        self.chain_events.record(kind, tip.height, tip.hash);
+    }
+
     /// Creates the production service from lower-layer capabilities.
     #[must_use]
     pub fn from_parts(mut parts: ChainstateParts) -> Self {
@@ -702,11 +716,7 @@ impl Chainstate {
         self.utxo.replace_from(snapshot_set);
         stats.tx_count = pinned.chain_tx_count;
         self.coin_stats.reset(stats);
-        crate::publication::publish_applied(
-            self,
-            &tip_snapshot,
-            crate::events::HintKind::Connected,
-        );
+        self.publish_applied(&tip_snapshot, crate::events::HintKind::Connected);
         *self.role.write() = ChainstateRole::AssumedActive {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
@@ -1626,7 +1636,7 @@ impl ResolvedUtxoView {
         let candidates = block
             .txs
             .iter()
-            .filter(|tx| !is_coinbase_tx(tx))
+            .filter(|tx| !tx.is_coinbase())
             .flat_map(|tx| &tx.inputs)
             .filter(|input| same_block.is_none_or(|set| !set.contains(&input.previous_output)))
             .map(|input| input.previous_output);

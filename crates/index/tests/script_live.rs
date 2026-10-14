@@ -158,7 +158,7 @@ impl Chain {
     ) -> Result<[u8; 32], IndexError> {
         let (body, hash) = block_bytes(self.tip, txdata);
         let prepared = self.writer.prepare_block_with_spent_scripts(
-            IndexCapabilities::ALL,
+            IndexCapabilities::TX_AND_SCRIPTS,
             self.height,
             hash,
             &body,
@@ -223,8 +223,10 @@ fn persistent_writer_live_roundtrip<S: KvStore>(
     assert_eq!(
         writer.watermarks()?,
         IndexWatermarks {
+            compact_filters: None,
             tx_lookup: (capabilities != IndexCapabilities::SCRIPT_LIVE).then_some(funding_tip),
-            script_history: (capabilities == IndexCapabilities::ALL).then_some(funding_tip),
+            script_history: (capabilities == IndexCapabilities::TX_AND_SCRIPTS)
+                .then_some(funding_tip),
             script_live: (capabilities != IndexCapabilities::TX_LOOKUP).then_some(funding_tip),
         }
     );
@@ -390,7 +392,7 @@ fn seed_live_and_reopen<S: KvStore>(
 fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         IndexCapabilities::TX_LOOKUP,
     ] {
         let temp = tempfile::TempDir::new()?;
@@ -407,7 +409,7 @@ fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Erro
 fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         IndexCapabilities::TX_LOOKUP,
     ] {
         let temp = tempfile::TempDir::new()?;
@@ -424,7 +426,7 @@ fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>
 fn fjall_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         IndexCapabilities::TX_LOOKUP,
     ] {
         let temp = tempfile::TempDir::new()?;
@@ -485,7 +487,7 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     anchor2.insert(o0, &wallet);
     let (body2, hash2) = block_bytes(chain.tip, vec![coinbase(2), sweep]);
     let prepared = chain.writer.prepare_block_with_spent_scripts(
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         chain.height,
         hash2,
         &body2,
@@ -510,7 +512,7 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     };
     commit_rollback_one_with_spent_scripts(
         &mut chain.writer,
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         Some(prev),
         &body2,
         &anchor2,
@@ -546,7 +548,7 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), Box<dyn std::error::Err
 
     let (body, hash) = block_bytes(chain.tip, vec![coinbase(1), creator]);
     let prepared = chain.writer.prepare_block_with_spent_scripts(
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         chain.height,
         hash,
         &body,
@@ -570,7 +572,7 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), Box<dyn std::error::Err
     };
     commit_rollback_one_with_spent_scripts(
         &mut chain.writer,
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         Some(prev),
         &body,
         &anchor,
@@ -668,7 +670,7 @@ fn unresolvable_spends_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
     let (body, hash) = block_bytes(chain.tip, vec![coinbase(1), tx]);
 
     let unresolved = chain.writer.prepare_block_with_spent_scripts(
-        IndexCapabilities::ALL,
+        IndexCapabilities::TX_AND_SCRIPTS,
         chain.height,
         hash,
         &body,
@@ -683,10 +685,12 @@ fn unresolvable_spends_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         "a spend the anchor cannot resolve must refuse the block: {unresolved_err:?}"
     );
 
-    let anchorless =
-        chain
-            .writer
-            .prepare_block_for(IndexCapabilities::ALL, chain.height, hash, &body);
+    let anchorless = chain.writer.prepare_block_for(
+        IndexCapabilities::TX_AND_SCRIPTS,
+        chain.height,
+        hash,
+        &body,
+    );
     let anchorless_err = anchorless.err();
     assert!(
         matches!(anchorless_err, Some(IndexError::MissingSpentScripts)),
@@ -906,6 +910,7 @@ fn leftover_capabilities_are_persisted_families_outside_the_selection() {
         hash: [1_u8; 32],
     };
     let watermarks = IndexWatermarks {
+        compact_filters: None,
         tx_lookup: Some(cursor),
         script_history: Some(cursor),
         script_live: Some(cursor),
@@ -914,5 +919,9 @@ fn leftover_capabilities_are_persisted_families_outside_the_selection() {
         IndexCapabilities::SCRIPT_LIVE.leftover(watermarks),
         IndexCapabilities::HISTORICAL
     );
-    assert!(IndexCapabilities::ALL.leftover(watermarks).is_empty());
+    assert!(
+        IndexCapabilities::TX_AND_SCRIPTS
+            .leftover(watermarks)
+            .is_empty()
+    );
 }

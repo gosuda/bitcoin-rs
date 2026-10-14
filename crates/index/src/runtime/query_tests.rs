@@ -341,6 +341,68 @@ fn unusable_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+#[test]
+fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::CompactFilterQuery;
+    let block = Network::Regtest.genesis_block();
+    let hash = Hash256::from(block.block_hash());
+    let transaction = block.txs[0].clone();
+    let txid = transaction.txid();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: vec![scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(&txid),
+            vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+            true,
+        )],
+        watermark: None,
+    })?;
+    fixture
+        .runtime
+        .fail_compact_filters(&DerivedIndexWorkerError::UndoUnavailable { height: 1, hash });
+    assert!(matches!(
+        fixture.engine.block_filter(hash),
+        Err(TxQueryError::Unavailable(_))
+    ));
+    assert!(!fixture.engine.filter_index_info()?.synced);
+    assert!(fixture.engine.index_info()?.synced);
+    assert_eq!(fixture.engine.transaction(&txid)?, Some(transaction));
+    assert!(!fixture.runtime.should_stop());
+    let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Serving(
+        Arc::new(fixture.engine.clone()),
+    )));
+    let status = DerivedIndexCapability::new(
+        Some(lifecycle.clone()),
+        Some(fixture.runtime.clone()),
+        IndexCapabilities::ALL,
+    );
+    for leg in [
+        ReconcileLeg::Forward,
+        ReconcileLeg::Rebuilding,
+        ReconcileLeg::RollingBack {
+            from_height: 1,
+            to_height: 0,
+        },
+    ] {
+        fixture
+            .runtime
+            .publish_leg(IndexCapabilities::COMPACT_FILTERS, leg);
+        assert_eq!(status.capability().state, CapabilityState::Ready);
+    }
+    let filters_only = DerivedIndexCapability::new(
+        Some(lifecycle),
+        Some(fixture.runtime),
+        IndexCapabilities::COMPACT_FILTERS,
+    )
+    .capability();
+    assert!(!filters_only.enabled);
+    assert_eq!(filters_only.state, CapabilityState::Disabled);
+    Ok(())
+}
+
 fn scan_response(
     cf: ColumnFamily,
     prefix: impl Into<Vec<u8>>,

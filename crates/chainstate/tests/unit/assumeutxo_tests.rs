@@ -154,13 +154,7 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
         (110, Hash256::default()),
         (110, pinned.block_hash),
     ] {
-        let load = SnapshotLoad {
-            set: UtxoSet::new(),
-            height,
-            tip_hash: hash,
-            muhash_trailer: [0xff; 384],
-        };
-        let Err(error) = manager.activate_snapshot(load) else {
+        let Err(error) = manager.activate_snapshot_state(UtxoSet::new(), hash, height) else {
             return Err("untrusted snapshot accepted".into());
         };
         match height {

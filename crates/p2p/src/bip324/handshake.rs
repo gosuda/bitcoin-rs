@@ -16,16 +16,17 @@ use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use super::TransportError;
 use super::keys::{GARBAGE_TERMINATOR_LEN, KeyMaterial, Role, Session, shared_secret};
 use super::packet::{RecvCipher, SendCipher};
-use super::reader::{PacketReader, fill, is_poll_timeout, read_up_to};
+use super::reader::{PacketReader, is_poll_timeout};
+use crate::recv::{fill, read_up_to};
 
 /// Bytes of an `ElligatorSwift` public key encoding.
-pub(crate) const ELLSWIFT_LEN: usize = 64;
+const ELLSWIFT_LEN: usize = 64;
 
 /// Most garbage either side may send before its garbage terminator.
-pub(crate) const MAX_GARBAGE_LEN: usize = 4095;
+const MAX_GARBAGE_LEN: usize = 4095;
 
 /// Bytes a responder compares against a v1 `version` header.
-pub(crate) const V1_PREFIX_LEN: usize = 16;
+const V1_PREFIX_LEN: usize = 16;
 
 /// The command field of a v1 `version` header.
 const V1_VERSION_COMMAND: &[u8; 12] = b"version\0\0\0\0\0";

@@ -482,16 +482,6 @@ impl MandatoryRetention {
         Self { registry }
     }
 
-    /// Builds a detached capability over a private in-memory registry.
-    ///
-    /// For facades with no durable prune families: nothing else can reserve
-    /// or commit against this registry, so the pin it grants is authoritative
-    /// only for the facade that holds it.
-    #[must_use]
-    pub fn in_memory() -> Self {
-        Self::new(Arc::new(RetentionRegistry::new()))
-    }
-
     /// Acquires a lease pinning rows at `floor` and above against pruning.
     ///
     /// Fails when the floor is below the executed prune line or below the

@@ -1,13 +1,13 @@
 # Indexing contract
 
-**Contract version: 1.1** (2025-02-14)
+**Contract version: 1.2** (2026-10-13)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
 rebuilds.
 
-This version adds the scheduling requirements in `IDX-08`; changes to those
-requirements must update this clause and its executable proof together.
+Changes to capability, persistence or scheduling requirements must update the
+owning clause and its executable proof together.
 
 Owners:
 - `DerivedIndexRuntime` and worker state in `crates/index/src/runtime.rs`;
@@ -20,7 +20,12 @@ Owners:
   aggregate work accounting (`QueryBudget`).
 - Worker supervision and backend opening in `runtime/lifecycle.rs` and
   `runtime/startup.rs`; startup owns generation-checked publication.
-- `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
+- Durable mutation: `IndexWriter` in `crates/index/src/index/write.rs`;
+  snapshot reads: `IndexReader` in `crates/index/src/index/snapshot.rs`;
+  capability and watermark representations in
+  `crates/index/src/index/capability.rs`. The private `index.rs` facade
+  keeps their implementation internals within one module boundary;
+  `crates/index/src/lib.rs` exports their public paths.
 - Capability status: worker-owned `DerivedIndexLifecycle` in
   `crates/index/src/runtime.rs` mapped by `DerivedIndexCapability` onto the
   wire types in `crates/index/src/capabilities.rs`. There is no parallel
@@ -62,6 +67,11 @@ only scheduling mechanics.
   `DerivedIndexRuntime` worker thread. Enabling both permits both capability row
   families to share a single block-body parse and atomic forward commit batch
   when their watermarks are aligned.
+- CLI `--blockfilterindex` (env `BITCOIN_RS_BLOCKFILTERINDEX`, configuration
+  `blockfilterindex=1`) enables `CompactFilters` in that same worker and store.
+  It defaults to false and enables neither transaction lookup nor script indexes.
+  With all indexes off, no derived worker or index namespace is opened. Filter
+  generation runs only for this capability, asynchronously after validation.
 
 ### `IDX-02`: Capability advertisement and Core compatibility
 
@@ -74,10 +84,23 @@ only scheduling mechanics.
   routes without advertising Core `txindex` unless `--txindex` is also set.
 - `getindexinfo` reports `synced: true` if and only if the advertised
   capability watermark matches the height and block hash of the active chain tip.
+- Compact filters appear as `basic block filter index` in `getindexinfo`.
+  `NODE_COMPACT_FILTERS` is added to new P2P handshakes and `getnetworkinfo` only
+  while this index is healthy and caught up. Existing connections cannot change
+  their version message; every filter request still checks query readiness.
 - `getcapabilities` reports one compiled txindex row. A missing worker is
   `enabled: false` / `Disabled`; an attached worker supplies the row through
   `DerivedIndexCapabilitySource`. Proof: `crates/index/src/capabilities.rs` tests
   `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
+  This row covers transaction/script capabilities only; filter-only operation
+  leaves it disabled. Filter progress, reconciliation and local failures do not
+  change that row. Filter status is reported by `getindexinfo` and service flags.
+  Proof: `crates/index/src/runtime/query_tests.rs` test
+  `filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`;
+  `crates/rpc/tests/handler_smoke.rs` test
+  `compact_filter_rpc_exposes_only_enabled_ready_data`;
+  `crates/p2p/src/listener.rs` test
+  `unbacked_filter_service_bit_is_removed_from_handshake`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
 `script-hash-prefix || full-outpoint`; the prefix is only a scan accelerator.
@@ -145,11 +168,12 @@ history transition closed; no secondary coin set is introduced.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
-  `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
+  `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts the current
   durability marker only (row-format 6: newest-first unified ScriptHistory,
   43-byte live rows, and 6-byte positions — format owned by
   `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
-  and recovery full-resets the store for rebuild. No in-place upgrade path
+  and `open_writer` in `crates/index/src/runtime/startup.rs` full-resets
+  the derived store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
 - The dedicated redb store corrects the former 44-byte ScriptLive table
   declaration only when that table is empty. A populated incompatible table
@@ -168,7 +192,8 @@ history transition closed; no secondary coin set is introduced.
   and `commit_block` require an explicit `SpentCoinScripts` source for external
   inputs; the block itself supplies earlier same-block outputs. Anchorless
   `prepare_block_for` and rollback calls support TxLookup only and refuse
-  ScriptHistory/ScriptLive with `MissingSpentScripts`. An unresolved input in
+  ScriptHistory, ScriptLive and CompactFilters with `MissingSpentScripts`. An
+  unresolved input in
   an explicit source returns `MissingSpentCoin` before any rows are committed.
   `commit_block` prepares all historical rows and commits them with the watermark in one
   store batch; its successful return is the commit point and implies the rows
@@ -230,8 +255,14 @@ history transition closed; no secondary coin set is introduced.
   chain.
 - A missing or unreadable undo record is fatal for `ScriptHistory`, because a
   block body does not contain the script of a spent previous output; the worker
-  fails closed instead of publishing incomplete history. For `ScriptLive` alone,
-  it resets that capability and reseeds from the authoritative UTXO view.
+  fails closed instead of publishing incomplete history. `CompactFilters`
+  instead becomes unavailable for this run: a current UTXO snapshot cannot
+  recreate spent scripts for historical filters. Its durable rows and watermark
+  are preserved, its queries refuse and its status is unsynced; sibling indexes
+  and validation continue. Restore the required history and restart to retry
+  filter reconciliation. For `ScriptLive` alone, the worker resets that
+  capability and reseeds from the authoritative UTXO view; `TxLookup` uses
+  body-only rollback.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
   rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
   and the watermark stamp are ordinary fenced writes (reset, revision, and
@@ -241,6 +272,69 @@ history transition closed; no secondary coin set is introduced.
   storage failure or panic marks the worker as failed (`publish_failed`) and
   stops the worker. Block validation, UTXO commits, and chainstate progress
   continue unimpeded: the apply path never depends on index writes.
+
+### Compact-filter data and serving
+
+`index/filters.rs` selects BIP158 basic-filter scripts and owns BIP157 hash/header
+commitments. `bitcoin::bip158::GcsFilterWriter` owns deduplication and encoding
+(P=19, M=784931), without a second block decode. Proof: its pinned Core-vector
+and same-block-spend tests in `index/filters.rs`.
+Inputs are distinct nonempty output scripts excluding
+OP_RETURN, plus nonempty spent-prevout scripts. Same-block spends resolve from
+the parsed block before consulting the existing authoritative undo record.
+Genesis outputs and oversized scripts follow BIP158, not UTXO admission rules.
+There is no second UTXO set or consensus-validation path.
+
+The existing format-5 `UtxoMeta` table gains an additive namespace:
+`01 46 || block_hash` stores `filter_hash || filter_header || serialized_filter`
+(hashes in wire byte order); watermark key `00 46` stores the usual height/hash.
+Rows, header-chain advancement, cursor and watermark commit atomically through
+the existing writer fence. No storage table or schema conversion is introduced.
+Selective reset deletes only this prefix and watermark; rollback removes the
+disconnected block's row before reconnecting the active branch.
+
+Activation after IBD backfills from genesis using the existing bounded batches.
+All required block bodies and undo records must be retained. Pruning and
+`blockfilterindex` are rejected together at configuration time. An already
+pruned prefix or missing undo makes only filters unavailable; a filter watermark is never
+anchored above missing history. Restore complete history before enabling it.
+
+`getblockfilter` serves only basic filters on the applied active chain. Unlike
+Core, disconnected filters are not retained for stale-block RPC lookups. A
+disabled index returns RPC -1, a malformed hash returns -8, an unknown block or filter type returns -5, and
+catch-up/reconciliation returns RPC -1 with a retry reason rather than a
+partial filter or waiting for the index to synchronize.
+
+The query engine captures immutable block identities and one index snapshot
+without acquiring chain-transition authority. P2P resolves filter stop hashes
+against the applied chain; a competing headers-only branch does not change which
+filters are servable. Proof: `crates/p2p/src/chain_query.rs` test
+`compact_filters_follow_applied_chain_when_competing_headers_lead`.
+P2P streams at most one filter payload at a time under the send-headroom gate;
+header/checkpoint replies retain
+only commitments. Requests are bounded to 1,000 filters, 2,000 hashes, or 100,000
+checkpoint headers (below the 4 MB envelope). If the tip changes during streaming,
+already-sent filters still belong to the captured stop chain. A completed range
+is not replayed; an interrupted prefix closes the connection instead of silently
+abandoning the tail. Disabled, unavailable, unknown, non-basic and oversized requests
+receive no filter answer.
+For decoded non-basic types, unknown/unapplied stops, inverted ranges and
+oversized ranges, bitcoin-rs deliberately keeps the connection open without
+discouragement; Core 31.1 disconnects these requests. Proof:
+`crates/p2p/src/chain_query.rs` test
+`invalid_compact_filter_requests_are_ignored_without_querying_the_index` and
+`tools/compact-filter-interop/run.py` wire checks (response bytes and connection
+outcome are recorded separately).
+To bridge a just-announced tip and asynchronous publication, a valid P2P request
+can be deferred for up to five seconds while publication or send headroom is
+pending. The existing socket poll retries one pending request per connection, so inbound traffic, ping
+and cancellation remain responsive. A second pending filter request or an expired
+deadline closes the connection. No response is replayed after streaming a payload;
+chain validation never waits and filters are never generated synchronously.
+
+Pinned Core vectors, durable reset/reopen tests, and the opt-in public-interface
+Core/Kyoto runner are described in
+[`tools/compact-filter-interop/README.md`](../../tools/compact-filter-interop/README.md).
 
 ## Live gaps
 

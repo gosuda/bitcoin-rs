@@ -41,6 +41,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; aggregate byte totals, negotiated transaction-relay preference, and received minimum_fee_filter are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted (crates/rpc/src/handlers/network.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
+| `getblockfilter` | 0.14.0 | Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md. |
 | `getchainstates` | 0.12.0 | Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs. |
 | `getdeploymentinfo` | 0.12.0 | Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting. |
 | `loadtxoutset` | 0.12.0 | Imports bounded Core v2 files against compiled network pins through node-owned fenced activation; refuses a nonempty mempool or an invalid/off-best-chain base. Preserves fee prioritisation and queues bounded native orphan rechecks. Malformed input returns -22. See API-33 and the mempool owner docs/contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing. dumptxoutset export remains unimplemented. |
@@ -111,7 +112,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
-| `getblockfilter` | n/a | BIP157/158 compact block filters and the filter index are not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
 | `getdescriptoractivity` | n/a | No wallet/scan index to serve it. |
 | `getmempoolcluster` | n/a | Cluster mempool tracking not implemented. |
@@ -119,7 +119,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `preciousblock` | n/a | No manual block-preference surface. |
 | `reconsiderblock` | n/a | No manual reorg-control surface. |
 | `savemempool` | n/a | Mempool dump/reload persistence not implemented. |
-| `scanblocks` | n/a | No BIP157/158 filter index to scan. |
+| `scanblocks` | n/a | Scanning is not implemented; optional basic filters are available through getblockfilter. |
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
@@ -239,4 +239,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 30, Implemented (unverified) 57, Extension 2, Disabled 0, Unimplemented 86 - total 175.
+Row counts: Supported 0, Deviation 31, Implemented (unverified) 57, Extension 2, Disabled 0, Unimplemented 85 - total 175.

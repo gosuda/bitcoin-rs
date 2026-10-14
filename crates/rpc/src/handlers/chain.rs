@@ -44,13 +44,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 .node(tip.tip_id)
                 .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
         });
-    let chain = match progress.network {
-        Network::Mainnet => "main",
-        Network::Testnet3 => "test",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
-    };
+    let chain = crate::convert::chain_name(progress.network);
     let response = v31::GetBlockchainInfo {
         chain: chain.to_owned(),
         blocks: i64::from(progress.blocks),
@@ -1154,6 +1148,52 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     })
 }
 
+pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["blockhash", "filtertype"])?;
+    let params = bound.as_ref();
+    let hash =
+        parse_hash(required_str(params, 0, "block hash is required")?).map_err(
+            |error| match error {
+                RpcError::InvalidParams(message) => RpcError::InvalidParameter(message.into()),
+                error => error,
+            },
+        )?;
+    let args = params_array(params)?;
+    if args.len() > 2 {
+        return Err(RpcError::InvalidParams(
+            "expected blockhash and optional filtertype",
+        ));
+    }
+    if let Some(kind) = args.get(1).filter(|value| !value.is_null()) {
+        let kind = kind
+            .as_str()
+            .ok_or_else(|| RpcError::InvalidType("filtertype must be a string".into()))?;
+        if kind != "basic" {
+            return Err(RpcError::InvalidAddressOrKey("Unknown filtertype".into()));
+        }
+    }
+    if ctx.chain.block_tree.read().lookup(hash).is_none() {
+        return Err(RpcError::NotFound("Block not found"));
+    }
+    let index = ctx
+        .indexes
+        .compact_filters
+        .as_ref()
+        .ok_or_else(|| RpcError::Misc("Index is not enabled for filtertype basic".into()))?;
+    let filter = index.block_filter(hash).map_err(|error| {
+        use bitcoin_rs_index::TxQueryError;
+        match error {
+            TxQueryError::Retry => RpcError::Misc("Block filter index is still catching up; retry later".into()),
+            TxQueryError::Unavailable(reason) | TxQueryError::Storage(reason) =>
+                RpcError::Misc(format!("Block filter index unavailable: {reason}")),
+        }
+    })?.ok_or_else(|| RpcError::Misc("Filter not found. This could be because the block was not connected to the active chain.".into()))?;
+    Ok(json!({
+        "filter": filter.filter.to_lower_hex_string(),
+        "header": Hash256::from_le_bytes(&filter.header).to_string_be(),
+    }))
+}
+
 pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let index_name = if params.is_null() {
         None
@@ -1171,6 +1211,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         .indexes
         .derived_index
         .as_ref()
+        .filter(|_| index_name.as_deref().is_none_or(|name| name == "txindex"))
         .map(|derived_index| derived_index.index_info())
         .transpose()?;
     let txindex_entry = txindex_entry.map(|info| v31::GetIndexInfoName {
@@ -1180,6 +1221,20 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     let mut indexes = alloc::collections::BTreeMap::new();
     if let Some(entry) = txindex_entry {
         indexes.insert("txindex".to_owned(), entry);
+    }
+    if let Some(filters) = &ctx.indexes.compact_filters
+        && index_name
+            .as_deref()
+            .is_none_or(|name| name == "basic block filter index")
+        && let Ok(info) = filters.filter_index_info()
+    {
+        indexes.insert(
+            "basic block filter index".to_owned(),
+            v31::GetIndexInfoName {
+                synced: info.synced,
+                best_block_height: info.best_block_height,
+            },
+        );
     }
     // Core answers a named request with only that index; an unknown name
     // yields an empty object, as does a name for a disabled index.
@@ -2011,16 +2066,8 @@ mod tests {
             lock_time: LockTime::ZERO,
         };
         block.txs.push(spend);
-        let mut leaves = block
-            .txids()
-            .into_iter()
-            .map(|txid| txid.0.to_le_bytes())
-            .collect();
-        let Some(root) = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        else {
-            panic!("merkle root over two transactions");
-        };
-        block.header.merkle_root = Hash256::from_le_bytes(&root);
+        block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
+            .expect("merkle root over two transactions");
         block
     }
 
@@ -2315,14 +2362,8 @@ mod tests {
         block.header.version = -1;
         block.txs[0].version = -1;
         block.txs[1].version = i32::MIN;
-        let mut leaves = block
-            .txids()
-            .into_iter()
-            .map(|txid| txid.0.to_le_bytes())
-            .collect();
-        let root = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
+        block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
             .expect("fixture merkle root");
-        block.header.merkle_root = Hash256::from_le_bytes(&root);
         let record = BlockRecord::from_block(0, &block);
         let mut ctx = Context::new();
         ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
@@ -3827,10 +3868,6 @@ mod getchaintips_tests {
         }
     }
 
-    fn hash_from_header(header: &Header) -> Hash256 {
-        header.compute_hash().0
-    }
-
     #[test]
     fn getchaintips_returns_empty_on_fresh_context() {
         let ctx = Arc::new(Context::new());
@@ -3846,7 +3883,7 @@ mod getchaintips_tests {
     fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let genesis = synthetic_header(BlockHash::default(), 1_000_000);
-        let hash = hash_from_header(&genesis);
+        let hash = genesis.compute_hash().0;
         let tip_id = {
             let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis, NodeStatus::Active)?

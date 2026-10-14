@@ -12,10 +12,11 @@ mod index;
 pub mod query_api;
 /// Derived-index reconciliation phase and exact capability watermark alignment.
 pub mod reconcile;
-/// Open-time recovery for disposable derived index storage.
-mod recovery;
 /// Asynchronous durable derived-index runtime.
 pub mod runtime;
+/// Experimental, keyless BIP352 public scan material (no durable index or HTTP routes).
+#[cfg(feature = "silent-payments")]
+pub mod silent_payments;
 /// Stable electrs-shaped row types.
 pub mod types;
 /// Object-safe, fenced access to the durable index writer.
@@ -27,15 +28,16 @@ pub use capabilities::{
 };
 pub(crate) use index::NoSpentScripts;
 pub use index::{
-    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
-    MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry,
-    ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    BasicFilter, BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError,
+    IndexReader, IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter,
+    Indexer, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock,
+    ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot,
 };
 pub use query_api::{
-    DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryPage,
-    ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord,
-    TxQueryError,
+    CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,
+    ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
+    ScriptIndexSnapshot, SpendingRecord, TxQueryError,
 };
 pub use types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow, ScriptLiveRow,

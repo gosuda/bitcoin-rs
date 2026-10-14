@@ -14,7 +14,7 @@ pub(crate) const HEIGHT_SIZE: usize = 4;
 /// Serialized byte length of a hash-prefix row.
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 /// Serialized byte length of a Bitcoin block header.
-pub const HEADER_ROW_SIZE: usize = 80;
+pub const HEADER_ROW_SIZE: usize = bitcoin_rs_primitives::Header::LEN;
 /// Exclusive upper bound of a packed 24-bit field (`offset`, `length`, or live `vout`).
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 

@@ -158,6 +158,7 @@ fn bind_rpc(
             derived_index: state.derived_index_query(),
             esplora_tx_index: None,
             script_index: state.script_index_query(),
+            compact_filters: state.compact_filter_query(),
             derived_index_status: Some(state.derived_index_status()),
         },
         network: rpc_network_handles(state),
@@ -571,7 +572,8 @@ pub(crate) fn start_node(
             chainstate.applied_tip_reader(),
             state.config().network,
         )
-        .with_block_body_source(Arc::clone(&block_body_source)),
+        .with_block_body_source(Arc::clone(&block_body_source))
+        .with_compact_filters(state.compact_filter_query()),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();

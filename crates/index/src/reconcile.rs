@@ -94,11 +94,11 @@ pub(crate) enum ReconcileLeg {
 
 /// Reconciliation legs of every capability the worker owns.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReconcilePhase([ReconcileLeg; 3]);
+pub(crate) struct ReconcilePhase([ReconcileLeg; 4]);
 
 impl ReconcilePhase {
     /// Every capability moving forward.
-    pub(crate) const FORWARD: Self = Self([ReconcileLeg::Forward; 3]);
+    pub(crate) const FORWARD: Self = Self([ReconcileLeg::Forward; 4]);
 
     /// Returns the phase with `leg` assigned to every capability in
     /// `capabilities`.

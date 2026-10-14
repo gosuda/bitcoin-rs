@@ -156,8 +156,7 @@ pub(crate) fn establish<S: Read + Write>(
             Ok(Step::V1(prefix)) => {
                 return Ok(Negotiated {
                     recv: RecvTransport::V1(V1Receiver::with_prefix(&prefix)),
-                    send: SendTransport::V1(magic),
-                    protocol: TransportProtocol::V1,
+                    ..Negotiated::v1(magic)
                 });
             }
             Ok(Step::Established(session)) => {

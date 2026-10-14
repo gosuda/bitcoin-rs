@@ -6,6 +6,12 @@
 
 ## Clauses
 
+The optional BIP352 public scan codec is a library experiment, described in
+[silent-payments.md](../silent-payments.md). It adds no dispatch entries or
+network endpoints to `REGISTRY`/`MANIFEST`: draft `/getinfo` and
+`/tweaks/:blockheight` are not served. It is neither a Core RPC nor a finalized
+index-server protocol compatibility claim.
+
 ### `API-01`: Single manifest owner
 
 

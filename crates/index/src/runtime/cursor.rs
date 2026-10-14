@@ -21,6 +21,11 @@ impl Worker {
     /// publisher briefly lags `applied_tip` inside one commit, so a disagreeing
     /// snapshot simply skips the write; the next caught-up pass retries.
     pub(super) fn persist_chain_cursor(&self) -> Result<CursorCommit, DerivedIndexWorkerError> {
+        // The shared advisory cursor cannot claim alignment of a failed filter
+        // capability. Its own watermark remains the restart authority.
+        if self.runtime.compact_filter_failure.read().is_some() {
+            return Ok(CursorCommit::Settled);
+        }
         let (fence, watermarks) = match self.writer.fenced_watermarks() {
             Ok(snapshot) => snapshot,
             Err(IndexError::ResetInProgress) => return Ok(CursorCommit::ResetRejected),
@@ -116,6 +121,9 @@ impl Worker {
         result: Option<IndexWatermark>,
         mut watermarks: IndexWatermarks,
     ) -> Option<[u8; crate::reconcile::CURSOR_BYTE_LEN]> {
+        if self.runtime.compact_filter_failure.read().is_some() {
+            return None;
+        }
         let snapshot = self.chain_events.cursor();
         let result = result?;
         if result.height != snapshot.height || result.hash != snapshot.hash.to_le_bytes() {

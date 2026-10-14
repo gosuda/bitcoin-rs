@@ -9,13 +9,13 @@ use super::cipher::{AuthFailed, FsChaCha20, FsChaCha20Poly1305, LENGTH_FIELD_LEN
 pub(crate) const HEADER_LEN: usize = 1;
 
 /// Header bit marking a decoy packet the receiver discards.
-pub(crate) const IGNORE_BIT: u8 = 1 << 7;
+const IGNORE_BIT: u8 = 1 << 7;
 
 /// Largest contents length the 3-byte length field can express.
-pub(crate) const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
+const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 
 /// Bytes a packet adds to its contents: length field, header byte and tag.
-pub(crate) const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
+const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
 /// A packet could not be sealed or opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

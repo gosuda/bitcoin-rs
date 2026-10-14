@@ -94,9 +94,9 @@ domains = ["offline", "p2p"]
 seams = [
   "crates/node/src/apply.rs",
   "crates/chain/src/header_sync.rs",
-  "crates/chain/src/bip9_cache.rs",
+  "crates/chain/src/tree.rs",
   "crates/consensus/src/bip9.rs",
-  "crates/consensus/src/bip113.rs",
+  "crates/consensus/src/lib.rs",
 ]
 histogram = "node.window.context_seconds"
 disposition = "blocked"

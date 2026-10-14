@@ -3,14 +3,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
-pub const MAX_SCRIPT_SIZE: usize = 10_000;
+pub use bitcoin_rs_script::MAX_SCRIPT_SIZE;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
 /// block's timestamp at a difficulty-adjustment boundary (`MAX_TIMEWARP`, Core
 /// `src/consensus/consensus.h:30-37`).
 pub const MAX_TIMEWARP: u32 = 600;
 
-/// BIP113 median-time-past checks.
-mod bip113;
 /// BIP30 duplicate-transaction checks.
 pub mod bip30;
 /// BIP34 coinbase height checks.
@@ -40,7 +38,32 @@ pub use bip9::{
     CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
     SoftforkState, compute_state, deployment_params,
 };
-pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
+/// Number of blocks spanned by median-time-past.
+pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
+
+/// BIP113 locktime-cutoff selection: the one rule every caller shares.
+#[must_use]
+pub const fn locktime_cutoff(
+    csv_active: bool,
+    prev_median_time_past: u32,
+    candidate_time: u32,
+) -> u32 {
+    if csv_active {
+        prev_median_time_past
+    } else {
+        candidate_time
+    }
+}
+
+#[cfg(test)]
+mod bip113_tests {
+    #[test]
+    fn locktime_cutoff_rule_switches_on_csv_activation() {
+        assert_eq!(super::locktime_cutoff(true, 500, 999), 500);
+        assert_eq!(super::locktime_cutoff(false, 500, 999), 999);
+    }
+}
+
 pub use block_view::{BlockFacts, BlockView};
 pub use engine::ValidationEngine;
 pub use sigops::transaction_sigop_cost;

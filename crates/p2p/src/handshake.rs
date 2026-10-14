@@ -220,7 +220,7 @@ pub(crate) fn next_handshake_step<S: Read>(
 /// read: a protocol error for a revoked lease, a timeout after `deadline`.
 /// INVARIANT: This function counts no bytes; the stream the caller wraps
 /// (`CountingStream` on live connections) owns socket byte accounting.
-pub(crate) fn read_handshake_message<S: Read>(
+fn read_handshake_message<S: Read>(
     peer: &mut Peer<S>,
     lease: &PeerLease,
     deadline: Instant,

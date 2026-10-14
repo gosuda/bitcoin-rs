@@ -23,7 +23,11 @@ const BLOCK_FILE_PREFIX: &str = "blk";
 const BLOCK_FILE_SUFFIX: &str = ".dat";
 const FILE_MAX_HEIGHT_PREFIX: &[u8; 7] = b"blkfile";
 const RECORD_HEADER_LEN: usize = 44;
-const RECORD_HEADER_LEN_U64: u64 = 44;
+#[expect(
+    clippy::as_conversions,
+    reason = "the fixed 44-byte record header fits in u64"
+)]
+const RECORD_HEADER_LEN_U64: u64 = RECORD_HEADER_LEN as u64;
 const BLOCK_READER_BUFFER_BYTES: usize = 256 << 10;
 
 /// A fixed-width pointer to a framed block body in a flat file.

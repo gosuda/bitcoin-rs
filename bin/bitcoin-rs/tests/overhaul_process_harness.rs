@@ -110,10 +110,9 @@ fn start(binary: Kind) -> ProcessNode {
 }
 
 /// API-01/API-02: Core 31.1 omits inapplicable pruning and signet fields.
-/// Only that response-shape claim is compared; this node does not ship Core's
-/// block-filter RPC and must continue to report method-not-found for it.
+/// The optional compact-filter RPC must remain unavailable until enabled.
 #[test]
-fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
+fn chaininfo_optional_fields_follow_core_with_blockfilters_disabled() {
     for (kind, rest_flag) in [(Kind::Core, "-rest=1"), (Kind::BitcoinRs, "--rest=true")] {
         let mut node = ProcessNode::spawn_with(
             kind,
@@ -153,8 +152,8 @@ fn chaininfo_optional_fields_follow_core_without_claiming_blockfilters() {
         if kind == Kind::BitcoinRs {
             let error = node
                 .rpc("getblockfilter", &json!([rpc["bestblockhash"], "basic"]))
-                .expect_err("block filters are inventoried but unimplemented");
-            assert!(matches!(error, Error::Rpc { code: -32_601, .. }), "{error}");
+                .expect_err("block filters are disabled by default");
+            assert!(matches!(error, Error::Rpc { code: -1, .. }), "{error}");
         }
         node.stop().expect("node stop");
         assert_reaped(pid);

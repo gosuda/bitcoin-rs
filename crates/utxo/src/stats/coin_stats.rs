@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use crate::listener::{UtxoChangeEvents, UtxoCommittedEvent, UtxoInserted, UtxoRemoved};
 use crate::snapshot::{SnapshotCoin, SnapshotCoinObserver};
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+use bitcoin_rs_primitives::{OutPoint, TxOut, varint};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -839,29 +839,9 @@ fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
 #[inline]
 fn encode_value_and_script_into(out: &mut Vec<u8>, value: u64, script_pubkey: &[u8]) {
     out.extend_from_slice(&value.to_le_bytes());
-    encode_compact_size_into(out, script_pubkey.len());
+    let script_len = u64::try_from(script_pubkey.len()).unwrap_or(u64::MAX);
+    out.extend_from_slice(varint::encode(script_len).as_slice());
     out.extend_from_slice(script_pubkey);
-}
-
-#[inline]
-fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
-    if len < 0xfd {
-        out.push(u8::try_from(len).unwrap_or(0));
-        return;
-    }
-    if let Ok(word_len) = u16::try_from(len) {
-        out.push(0xfd);
-        out.extend_from_slice(&word_len.to_le_bytes());
-        return;
-    }
-    if let Ok(dword_len) = u32::try_from(len) {
-        out.push(0xfe);
-        out.extend_from_slice(&dword_len.to_le_bytes());
-        return;
-    }
-    let qword_len = u64::try_from(len).unwrap_or(u64::MAX);
-    out.push(0xff);
-    out.extend_from_slice(&qword_len.to_le_bytes());
 }
 
 #[inline]
@@ -891,21 +871,10 @@ fn coin_hash_encoded_len(script_len: usize) -> usize {
     OUTPOINT_BYTES
         .saturating_add(4)
         .saturating_add(AMOUNT_ENCODED_BYTES)
-        .saturating_add(compact_size_len(script_len))
+        .saturating_add(varint::encoded_len(
+            u64::try_from(script_len).unwrap_or(u64::MAX),
+        ))
         .saturating_add(script_len)
-}
-
-#[inline]
-const fn compact_size_len(len: usize) -> usize {
-    if len < 0xfd {
-        1
-    } else if len <= 0xffff {
-        3
-    } else if len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]

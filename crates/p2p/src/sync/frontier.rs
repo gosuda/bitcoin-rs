@@ -22,8 +22,7 @@ use bitcoin_rs_primitives::Hash256;
 use crate::PeerInfo;
 use crate::connection::PeerSource;
 
-use super::HEADER_REQUEST_TIMEOUT;
-use super::PendingHeaderRequest;
+use super::HeaderRequest;
 
 /// The canonical next-required body: the block the apply frontier commits
 /// next — the applied tip's successor on the active branch, or the first
@@ -152,7 +151,7 @@ pub(crate) struct SyncFrontier {
     /// State of `chain.next_required`, `None` when none is required.
     pub body_state: Option<BodyState>,
     /// The outstanding header request, if any.
-    pub header_request: Option<PendingHeaderRequest>,
+    pub header_request: Option<HeaderRequest>,
     /// Whether `header_request` is unexpired and owned by a usable
     /// connection — the identity-exact liveness the scheduler waits on.
     pub header_request_live: bool,
@@ -334,12 +333,12 @@ impl SyncFrontier {
 /// Whether `header_request` is live: unexpired and owned by a peer in the
 /// usable set.
 pub(crate) fn header_request_live(
-    header_request: Option<PendingHeaderRequest>,
+    header_request: Option<HeaderRequest>,
     usable_peers: &[UsablePeer],
     now: Instant,
 ) -> bool {
     header_request.is_some_and(|request| {
-        now.saturating_duration_since(request.requested_at) < HEADER_REQUEST_TIMEOUT
+        now.saturating_duration_since(request.requested_at) < request.timeout()
             && usable_peers
                 .iter()
                 .any(|peer| peer.source == request.source)

@@ -98,6 +98,7 @@ fn script_index_is_valid_without_core_txindex() -> Result<()> {
         indexes: bitcoin_rs_node::IndexOverrides {
             script_index: Some(ScriptIndexMode::Full),
             txindex: Some(false),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -120,7 +121,13 @@ fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
     let config = resolve(&[&layer])?;
     assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
     assert!(config.indexes.script_index.is_enabled());
-    assert!(!config.indexes.script_index.keeps_history());
+    assert_eq!(
+        config
+            .indexes
+            .script_index
+            .enabled_capabilities(config.indexes.txindex),
+        bitcoin_rs_index::IndexCapabilities::SCRIPT_LIVE
+    );
     Ok(())
 }
 
@@ -257,6 +264,17 @@ fn resolved_zmq_hwm_is_validated() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("ZMQ HWM exceeds libzmq"));
+
+    config.notifications.zmq[0].hwm = Some(0);
+    let Err(error) = config.validate() else {
+        panic!("zero disables libzmq's outbound queue limit");
+    };
+    assert!(error.to_string().contains("ZMQ HWM must be positive"));
+
+    for hwm in [Some(1), Some(2_147_483_647), None] {
+        config.notifications.zmq[0].hwm = hwm;
+        assert!(config.validate().is_ok(), "valid ZMQ HWM rejected: {hwm:?}");
+    }
 }
 
 #[test]

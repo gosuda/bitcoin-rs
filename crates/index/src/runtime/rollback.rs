@@ -134,7 +134,10 @@ impl Worker {
         // body load and the live-anchor lookup.
         let lease = match self.history.request_history(watermark.height) {
             Ok(lease) => lease,
-            Err(HistoryUnavailable::Pruned { .. }) => {
+            Err(error @ HistoryUnavailable::Pruned { .. }) => {
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    return Err(DerivedIndexWorkerError::HistoryUnavailable(error));
+                }
                 return Err(DerivedIndexWorkerError::MissingBody {
                     height: watermark.height,
                     hash: watermark_hash,
@@ -144,7 +147,8 @@ impl Worker {
         };
         let body = self.load_body(watermark.height, watermark_hash, &lease)?;
         let anchor = (capabilities.contains(IndexCapability::ScriptHistory)
-            || capabilities.contains(IndexCapability::ScriptLive))
+            || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters))
         .then(|| self.live_anchor(watermark.height, watermark.hash))
         .transpose()?;
         lease.release();
@@ -227,6 +231,11 @@ impl Worker {
         height: u32,
         hash_bytes: [u8; 32],
     ) -> Result<UndoScripts, DerivedIndexWorkerError> {
+        if height == 0 {
+            return Ok(UndoScripts {
+                scripts: hashbrown::HashMap::new(),
+            });
+        }
         let hash = Hash256::from_le_bytes(&hash_bytes);
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);

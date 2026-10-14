@@ -44,6 +44,10 @@ pub struct ScriptLiveScan {
 
 /// Point-in-time, typed view of durable `TxIndex` rows.
 pub trait TxIndexSnapshot: Send + Sync {
+    /// Reads one persisted basic filter from the same snapshot as its watermark.
+    fn compact_filter(&self, _hash: &[u8; 32]) -> Result<Option<super::BasicFilter>, IndexError> {
+        Ok(None)
+    }
     /// Loads one capability's exact durable watermark from this snapshot.
     fn capability_watermark(
         &self,
@@ -126,6 +130,9 @@ impl StoreTxIndexSnapshot<'_> {
 }
 
 impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
+    fn compact_filter(&self, hash: &[u8; 32]) -> Result<Option<super::BasicFilter>, IndexError> {
+        super::filters::read(self.snapshot.as_ref(), hash)
+    }
     fn capability_watermark(
         &self,
         capability: IndexCapability,

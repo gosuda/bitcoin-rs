@@ -313,7 +313,7 @@ pub(crate) fn evaluate_one(
 
     let reject = if pool.contains_txid(&txid) {
         Some(AcceptanceRejectReason::AlreadyInMempool)
-    } else if is_coinbase(tx) || context.missing_inputs {
+    } else if tx.is_coinbase() || context.missing_inputs {
         Some(AcceptanceRejectReason::MissingInputs)
     } else if let Err(err) = is_standard_tx(tx, policy) {
         Some(AcceptanceRejectReason::NonStandard(err))
@@ -350,12 +350,6 @@ pub(crate) fn evaluate_one(
             .and_then(|rate| u64::try_from(rate).ok()),
         reject_reason: reject,
     }
-}
-
-/// Returns true if `tx` is a coinbase transaction: exactly one input whose
-/// previous output is the null outpoint (zero txid, `vout == u32::MAX`).
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Minimum non-witness serialization Core relays, `tx-size-small`.
@@ -409,9 +403,11 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
             let Some(limit) = policy.max_datacarrier_bytes else {
                 return Err(StandardnessError::DataCarrierDisabled);
             };
-            let serialized_script_bytes = compact_size_len(script.len())
-                .checked_add(script.len())
-                .ok_or(StandardnessError::DataCarrierSizeOverflow)?;
+            let serialized_script_bytes = bitcoin_rs_primitives::varint::encoded_len(
+                u64::try_from(script.len()).unwrap_or(u64::MAX),
+            )
+            .checked_add(script.len())
+            .ok_or(StandardnessError::DataCarrierSizeOverflow)?;
             datacarrier_bytes = datacarrier_bytes
                 .checked_add(serialized_script_bytes)
                 .ok_or(StandardnessError::DataCarrierSizeOverflow)?;
@@ -459,19 +455,6 @@ pub(crate) fn tx_has_dust_outputs(tx: &Tx, dust_relay_fee: u64) -> bool {
     tx.outputs
         .iter()
         .any(|output| is_dust(output, dust_relay_fee))
-}
-
-#[inline]
-const fn compact_size_len(len: usize) -> usize {
-    if len < 0xfd {
-        1
-    } else if len <= 0xffff {
-        3
-    } else if len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]
@@ -706,7 +689,11 @@ mod tests {
         let limit = [&first, &second]
             .into_iter()
             .fold(0_usize, |total, script| {
-                total + super::compact_size_len(script.len()) + script.len()
+                total
+                    + bitcoin_rs_primitives::varint::encoded_len(
+                        u64::try_from(script.len()).unwrap_or(u64::MAX),
+                    )
+                    + script.len()
             });
         tx.outputs = vec![
             TxOut {

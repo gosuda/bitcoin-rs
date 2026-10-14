@@ -548,10 +548,10 @@ macro_rules! option_rows {
                     }
                     /// Whether to attempt and accept BIP324 v2 encrypted
                     /// connections and advertise `NODE_P2P_V2`.
-                    v2_transport as v2transport: Option<bool> {
+                    v2_transport as v2_transport: Option<bool> {
                         cli[#[arg(long = "v2transport", num_args = 0..=1, default_missing_value = "true")]]
-                        env["BITCOIN_RS_V2TRANSPORT", parse_bool]
-                        toml native("v2transport")
+                        env["BITCOIN_RS_V2_TRANSPORT", parse_bool]
+                        toml native("v2_transport")
                         conf["v2transport"]
                     }
                 }
@@ -600,6 +600,13 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_TXINDEX", parse_bool]
                         toml native("txindex")
                         conf["txindex"]
+                    }
+                    /// Enable the optional BIP158 basic-filter index and BIP157 serving.
+                    blockfilterindex as blockfilterindex: Option<bool> {
+                        cli[#[arg(long = "blockfilterindex", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_BLOCKFILTERINDEX", parse_bool]
+                        toml native("blockfilterindex")
+                        conf["blockfilterindex"]
                     }
                     /// Script index mode.
                     script_index as script_index: Option<ScriptIndexMode> {

@@ -5,13 +5,14 @@
 //! retries and the same packet continues. Every other error is fatal for the
 //! connection.
 
-use std::io::{self, Read};
+use std::io::Read;
 
 use bytes::Bytes;
 
 use super::TransportError;
 use super::cipher::{LENGTH_FIELD_LEN, TAG_LEN};
 use super::packet::{HEADER_LEN, RecvCipher};
+use crate::recv;
 
 /// Largest message payload a v2 peer accepts: Bitcoin Core's
 /// `MAX_PROTOCOL_MESSAGE_LENGTH`.
@@ -21,11 +22,6 @@ pub(crate) const MAX_PAYLOAD_LEN: usize = 4_000_000;
 /// type, and a payload of up to [`MAX_PAYLOAD_LEN`] bytes, as Bitcoin Core
 /// accepts.
 pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_PAYLOAD_LEN;
-
-/// Largest single read into a packet body. The body grows only by the bytes
-/// that arrive, so a peer that declares a large packet and stalls holds what
-/// it has sent, not the declared length.
-const RECEIVE_CHUNK: usize = 16 * 1024;
 
 /// Reads one direction's packets: the receiving ciphers, the AAD owed by the
 /// first packet, and any partially received packet.
@@ -72,11 +68,11 @@ impl PacketReader {
             } else {
                 self.read_length(reader)?
             };
-            if let Err(error) = fill_growing(reader, &mut body.bytes, body.len) {
-                if is_poll_timeout(&error) {
+            if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
+                if recv::is_poll_timeout(&error) {
                     self.body = Some(body);
                 }
-                return Err(error);
+                return Err(error.into());
             }
             let aad = core::mem::take(&mut self.aad);
             let opened = self.cipher.open(&aad, &mut body.bytes)?;
@@ -91,11 +87,11 @@ impl PacketReader {
     /// Completes and decrypts the next length field. The cipher advances only
     /// once all three bytes are in.
     fn read_length<R: Read>(&mut self, reader: &mut R) -> Result<PendingBody, TransportError> {
-        if let Err(error) = fill(reader, &mut self.field, &mut self.field_filled) {
-            if !is_poll_timeout(&error) {
+        if let Err(error) = recv::fill(reader, &mut self.field, &mut self.field_filled) {
+            if !recv::is_poll_timeout(&error) {
                 self.field_filled = 0;
             }
-            return Err(error);
+            return Err(error.into());
         }
         self.field_filled = 0;
         let contents_len = self.cipher.decrypt_length(self.field);
@@ -109,78 +105,9 @@ impl PacketReader {
     }
 }
 
-/// Reads until `buffer` is full, recording progress in `filled`.
-pub(crate) fn fill<R: Read>(
-    reader: &mut R,
-    buffer: &mut [u8],
-    filled: &mut usize,
-) -> Result<(), TransportError> {
-    while *filled < buffer.len() {
-        match reader.read(&mut buffer[*filled..]) {
-            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
-            Ok(read) => *filled += read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-/// Appends at most `limit` bytes from one successful read to `buffer`.
-pub(crate) fn read_up_to<R: Read>(
-    reader: &mut R,
-    buffer: &mut Vec<u8>,
-    limit: usize,
-) -> Result<(), TransportError> {
-    let start = buffer.len();
-    buffer.resize(start + limit, 0);
-    loop {
-        match reader.read(&mut buffer[start..]) {
-            Ok(0) => {
-                buffer.truncate(start);
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-            }
-            Ok(read) => {
-                buffer.truncate(start + read);
-                return Ok(());
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => {
-                buffer.truncate(start);
-                return Err(error.into());
-            }
-        }
-    }
-}
-
-/// Reads until `buffer` holds `len` bytes, at most [`RECEIVE_CHUNK`] per read.
-/// Each read lands in a scratch buffer and only the bytes read are appended,
-/// so a stall leaves no spare capacity reserved for bytes that never came.
-fn fill_growing<R: Read>(
-    reader: &mut R,
-    buffer: &mut Vec<u8>,
-    len: usize,
-) -> Result<(), TransportError> {
-    let mut scratch = [0u8; RECEIVE_CHUNK];
-    while buffer.len() < len {
-        let wanted = (len - buffer.len()).min(RECEIVE_CHUNK);
-        match reader.read(&mut scratch[..wanted]) {
-            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
-            Ok(read) => buffer.extend_from_slice(&scratch[..read]),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-/// The socket's poll interval elapsed; the rest may still arrive.
+/// The socket's poll interval elapsed; the rest of the packet may still arrive.
 pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
-    matches!(
-        error,
-        TransportError::Io(error)
-            if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
-    )
+    matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
 
 #[cfg(test)]
@@ -188,8 +115,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{self, Read};
 
-    use super::{MAX_RECV_CONTENTS_LEN, PacketReader, RECEIVE_CHUNK, is_poll_timeout};
+    use super::{MAX_RECV_CONTENTS_LEN, PacketReader, is_poll_timeout};
     use crate::bip324::packet::{RecvCipher, SendCipher};
+    use crate::recv::RECEIVE_CHUNK;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 

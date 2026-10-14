@@ -1,6 +1,5 @@
 //! Consensus transaction sigop-cost accounting.
 
-use crate::verify_tx::is_coinbase;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
@@ -13,7 +12,7 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
     let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
-    if is_coinbase(tx) {
+    if tx.is_coinbase() {
         return cost;
     }
     let mut cursor = 0;

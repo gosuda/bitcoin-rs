@@ -16,8 +16,8 @@ use super::Worker;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
 use crate::PreparedBatchLimits;
-use crate::recovery::open_writer;
 use crate::writer::TxIndexWriter;
+use crate::{IndexError, IndexWriter};
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
@@ -31,6 +31,32 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// Opens an `IndexWriter` with legacy/unsupported-format recovery.
+///
+/// Any marker older than the current format 5 full-resets for rebuild: every
+/// row family changed, so no in-place upgrade path exists. Cursorless legacy
+/// tables reset the same way.
+fn open_writer<S>(store: &Arc<S>, generation: u64) -> Result<IndexWriter<S>, IndexError>
+where
+    S: bitcoin_rs_storage::KvStore,
+{
+    match IndexWriter::open(Arc::clone(store), generation) {
+        Ok(writer) => Ok(writer),
+        Err(
+            error @ (IndexError::LegacyCursorlessIndex
+            | IndexError::UnsupportedTxIndexFormatVersion { .. }),
+        ) => {
+            tracing::warn!(
+                %error,
+                "resetting incompatible derived transaction index for rebuild"
+            );
+            IndexWriter::reset_index(store.as_ref(), generation)?;
+            IndexWriter::open(Arc::clone(store), generation)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// Worker-owned open: opens the store, constructs writer/reader/engine,
 /// publishes lifecycle, and runs reconciliation — all behind one

@@ -131,6 +131,7 @@ impl ServerHarness {
             indexes: IndexHandles {
                 derived_index: state.derived_index_query(),
                 script_index: state.script_index_query(),
+                compact_filters: state.compact_filter_query(),
                 esplora_tx_index: None,
                 derived_index_status: Some(state.derived_index_status()),
             },

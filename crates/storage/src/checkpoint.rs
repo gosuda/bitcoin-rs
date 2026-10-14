@@ -2,14 +2,13 @@
 
 mod format;
 pub mod fs;
-mod io;
 mod load;
 mod publish;
 
 #[cfg(test)]
 mod tests;
 
-pub use format::{decode_hex, hex_encode, network_name};
+pub use format::{decode_hex, network_name};
 pub use fs::{
     CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
     read_file, sync_dir,

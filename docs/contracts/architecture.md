@@ -58,6 +58,10 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     dispositions and reorg outcomes, without enabling backend features. Node
     retains transition settlement and follower dispatch; P2P consumes these
     outcomes for scheduling, retry and peer policy through `SyncChain`.
+    P2P consumes optional compact-filter queries from `index` through
+    `CompactFilterQuery`; index owns generation, persistence and readiness.
+    This same-layer edge does not enable storage backend features or create
+    another index runtime in P2P.
   - In Layer 4, the footprint package is an offline Linux
     filesystem utility with no node/runtime-workspace or storage-engine
     dependencies. `bitcoin-rs-snapshot` is an offline Core-file inspector and

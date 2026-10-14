@@ -211,6 +211,13 @@ fn pending_rows_for_block_with_header(
     if capabilities.contains(IndexCapability::ScriptLive) {
         push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
     }
+    if capabilities.contains(IndexCapability::CompactFilters) {
+        let hash = encode::double_sha256(header_bytes).to_le_bytes();
+        rows.filter_rows.push((
+            hash,
+            super::filters::build(&parsed, height, &hash, spent_scripts)?,
+        ));
+    }
     Ok((rows, header_row))
 }
 
@@ -331,6 +338,7 @@ impl<S: KvStore> IndexWriter<S> {
     ) -> Result<PreparedBlock, IndexError> {
         if capabilities.contains(IndexCapability::ScriptHistory)
             || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters)
         {
             return Err(IndexError::MissingSpentScripts);
         }
@@ -338,7 +346,8 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Prepares capability-selected rows with the exact external spent scripts
-    /// required by `ScriptHistory` occurrences and `ScriptLive` deletes.
+    /// required by `ScriptHistory` occurrences, `ScriptLive` deletes, and
+    /// `CompactFilters` construction.
     pub fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,

@@ -100,8 +100,9 @@ impl Worker {
         // lives no row at or above `start_height` is deleted, so a body that
         // reads back absent is transient absence rather than lost history,
         // and the pass never has to re-derive a prune line. A refusal is the
-        // owner's typed answer: `Pruned` is permanent and routes to a rebuild
-        // from what remains, while `Reserved` and the transient answers only
+        // owner's typed answer: `Pruned` disables filters (their header chain
+        // needs the full prefix); other indexes rebuild from what remains.
+        // `Reserved` and the transient answers only
         // wait — a reservation can abort and release its range, and a missing
         // row can still arrive.
         let pass_history = match self.history.request_history(start_height) {
@@ -115,6 +116,14 @@ impl Worker {
                 // Prepared rows belong to the pre-reset position: the rebuild
                 // re-derives from the frontier, so they cannot be carried.
                 *pending = None;
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    self.runtime.fail_compact_filters(
+                        &DerivedIndexWorkerError::HistoryUnavailable(HistoryUnavailable::Pruned {
+                            below,
+                        }),
+                    );
+                    return Ok(ReconcileAction::Progressed);
+                }
                 return self.rebuild_from_pruned(capabilities, below, target);
             }
             Err(error) => {
@@ -197,7 +206,7 @@ impl Worker {
     /// `Continue` to keep processing.
     #[expect(
         clippy::too_many_lines,
-        reason = "one admission path owns lease and batch state"
+        reason = "one admission path owns lease, capability failure and batch state"
     )]
     pub(super) fn prepare_and_admit_chunk(
         &self,
@@ -239,25 +248,31 @@ impl Worker {
         let sub_chunk = &identities[..loaded];
 
         let needs_spent_scripts = capabilities.contains(IndexCapability::ScriptHistory)
-            || capabilities.contains(IndexCapability::ScriptLive);
+            || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters);
         let anchors = if needs_spent_scripts {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
                     Ok(anchor) => anchors.push(anchor),
                     Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. })
-                        if !capabilities.contains(IndexCapability::ScriptHistory) =>
+                        if capabilities.contains(IndexCapability::ScriptHistory) =>
                     {
+                        tracing::error!(error = %error, "ScriptHistory requires retained spent-script undo");
+                        return Err(error);
+                    }
+                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
+                        if capabilities.contains(IndexCapability::CompactFilters) {
+                            *pending = None;
+                            self.runtime.fail_compact_filters(&error);
+                            return Ok(ChunkAction::Progressed);
+                        }
                         *pending = None;
                         self.writer
                             .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                             .map_err(DerivedIndexWorkerError::Index)?;
                         tracing::warn!(error = %error, "rebuilding ScriptLive after pruned undo");
                         return Ok(ChunkAction::Stalled);
-                    }
-                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
-                        tracing::error!(error = %error, "ScriptHistory requires retained spent-script undo");
-                        return Err(error);
                     }
                     Err(error) => return Err(error),
                 }

@@ -46,6 +46,7 @@ impl<S: KvStore> Indexer<S> {
             tx_lookup: self.capability_watermark(IndexCapability::TxLookup)?,
             script_history: self.capability_watermark(IndexCapability::ScriptHistory)?,
             script_live: self.capability_watermark(IndexCapability::ScriptLive)?,
+            compact_filters: self.capability_watermark(IndexCapability::CompactFilters)?,
         })
     }
 

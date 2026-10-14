@@ -26,9 +26,6 @@ use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::time::Instant;
 
-#[cfg(test)]
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
-
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 ///
 /// RPC selects this default when no request override is supplied. Embedded
@@ -283,7 +280,7 @@ pub struct ContextHandles {
     pub chain: ChainHandles,
     /// Mempool capability: the mutation gateway in front of the pool.
     pub mempool: MempoolHandles,
-    /// Index capability: transaction and script index query adapters.
+    /// Index capability: transaction, script and compact-filter query adapters.
     pub indexes: IndexHandles,
     /// Network capability: peer registry, reachability, and connection control.
     pub network: NetworkHandles,
@@ -448,6 +445,8 @@ pub struct IndexHandles {
     pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     /// Generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
+    /// Optional snapshot-gated BIP158 basic-filter index.
+    pub compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
     /// Complete transaction lookup used by Esplora output projections. It may
     /// exist without [`Self::derived_index`] because it does not advertise
     /// the Core `--txindex` contract.
@@ -1764,7 +1763,10 @@ mod tests {
             record.header_hex(),
             consensus_bytes(&block.header).to_lower_hex_string()
         );
-        assert_eq!(record.header_hex().len(), SERIALIZED_BLOCK_HEADER_LEN * 2);
+        assert_eq!(
+            record.header_hex().len(),
+            bitcoin_rs_primitives::Header::LEN * 2
+        );
     }
 
     /// The tree's header must reach a caller even when the log has the block.
@@ -2110,6 +2112,7 @@ mod tests {
                 derived_index: None,
                 esplora_tx_index: None,
                 script_index: None,
+                compact_filters: None,
                 derived_index_status: Some(Arc::clone(&status)),
             },
             network: NetworkHandles::default(),

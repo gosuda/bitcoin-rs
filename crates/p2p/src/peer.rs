@@ -138,6 +138,8 @@ pub struct Peer<S> {
     pub compact_blocks: CompactBlockNegotiation,
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
+    /// One BIP157 request waiting for asynchronous index publication.
+    pub(crate) pending_filter_request: Option<(Message, std::time::Instant)>,
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
@@ -172,6 +174,7 @@ impl<S> Peer<S> {
             capabilities: PeerCapabilities::default(),
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
+            pending_filter_request: None,
             net_trace: None,
             recv: negotiated.recv,
             send: Some(negotiated.send),

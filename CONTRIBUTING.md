@@ -264,6 +264,36 @@ owns script-engine selection and its promotion criteria.
 Keep implementation guidance with its owner rather than introducing another
 architecture or validation specification in this guide.
 
+## Proposing and implementing BIPs
+
+External BIP authors and implementers are welcome to propose, prototype, and
+implement BIP-based capabilities in `bitcoin-rs`. The
+[BIP adoption policy](docs/policies/bip-adoption.md) governs evaluation and
+lifecycle decisions; contributors can follow this lightweight path:
+
+1. **Propose:** Open an ordinary GitHub issue (or join an existing discussion)
+   with a link to the BIP or pinned draft revision, the intended node-facing
+   use case, and an initial validation or interoperability idea. Non-consensus
+   BIPs are explicitly welcome **before Bitcoin Core merges or ships them**; a
+   Core merge is not a prerequisite for proposing or exploring an idea here.
+2. **Experiment:** Small, reversible, opt-in (default-off) implementation PRs
+   are welcome. State which existing crate and state owner the implementation
+   extends, and provide the first bounded proof (such as reference vectors,
+   codecs, or a regtest prototype). Full production interoperability evidence
+   is not required just to explore or merge an isolated experiment.
+3. **Validate and promote:** Merging an experimental implementation is distinct
+   from declaring production or `Shipped` compatibility. Promotion requires the
+   policy's stronger external-consumer evidence, sync safety, and measured
+   resource costs. Review is grounded in consensus invariance, synchronization
+   safety, clean ownership, and bounded overhead, not whether Core accepted the
+   idea first.
+
+This workflow is intentionally lightweight: there is no separate BIP registry,
+governance committee, scorecard, mandatory proposal template, or custom CI gate.
+See [`docs/policies/bip-adoption.md`](docs/policies/bip-adoption.md) for detailed
+lifecycle criteria and [docs/bip-support.md](docs/bip-support.md) for the
+current coverage map.
+
 ## Commit and PR conventions
 
 - Commit style: capitalized imperative subject line under 72 characters (for example, `Own Bitcoin protocol primitives natively`).

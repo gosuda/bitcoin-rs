@@ -10,6 +10,29 @@ use compact_str::CompactString;
 
 use crate::ScriptHash;
 
+/// Optional BIP157/158 queries shared by RPC and P2P adapters.
+pub trait CompactFilterQuery: Send + Sync {
+    /// Reads an active-chain block's basic filter. Unknown/stale hashes return None.
+    fn block_filter(
+        &self,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<crate::BasicFilter>, TxQueryError>;
+    /// Visits a bounded range from one immutable snapshot, retaining at most
+    /// one serialized filter at a time. `step` is 1 or checkpoint interval 1000.
+    /// Returns the previous header, or None for invalid/unknown ranges and a
+    /// visitor that stopped. A concurrent tip change can return Retry after
+    /// delivery; any delivered records still belong to the requested stop chain.
+    fn for_each_filter(
+        &self,
+        start: u32,
+        stop: bitcoin_rs_primitives::Hash256,
+        step: u32,
+        emit: &mut dyn FnMut(bitcoin_rs_primitives::Hash256, crate::BasicFilter) -> bool,
+    ) -> Result<Option<[u8; 32]>, TxQueryError>;
+    /// Actual durable progress; readiness is never inferred from configuration.
+    fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError>;
+}
+
 /// Actual progress reported by the node-owned transaction index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DerivedIndexInfo {

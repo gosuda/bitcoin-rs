@@ -31,6 +31,8 @@ pub struct IndexRowCounts {
     pub headers: usize,
     /// Live-output mutations applied to [`ColumnFamily::ScriptLive`].
     pub live: usize,
+    /// Basic-filter rows written to the optional index metadata namespace.
+    pub filters: usize,
 }
 
 /// One index row together with the transaction byte range that produced it.
@@ -75,6 +77,7 @@ pub(super) struct PendingRows {
     /// families above, this one mixes puts and deletes, and a later block's
     /// delete of an earlier block's insert must stay later.
     pub(super) live_ops: Vec<LiveOp>,
+    pub(super) filter_rows: Vec<([u8; 32], super::filters::BasicFilter)>,
 }
 
 /// Counts distinct row keys in a sorted `PositionedRow` slice.
@@ -142,6 +145,7 @@ impl PendingRows {
             spending: distinct_row_count(&self.spending_rows),
             headers: self.header_rows.len(),
             live: self.live_ops.len(),
+            filters: self.filter_rows.len(),
         }
     }
     pub(super) fn append(&mut self, other: Self) {
@@ -150,11 +154,17 @@ impl PendingRows {
         self.spending_rows.extend(other.spending_rows);
         self.header_rows.extend(other.header_rows);
         self.live_ops.extend(other.live_ops);
+        self.filter_rows.extend(other.filter_rows);
     }
 
     pub(super) fn total(&self) -> usize {
         let counts = self.counts();
-        counts.txids + counts.funding + counts.spending + counts.headers + counts.live
+        counts.txids
+            + counts.funding
+            + counts.spending
+            + counts.headers
+            + counts.live
+            + counts.filters
     }
 
     pub(super) fn encoded_bytes(&self) -> Result<usize, IndexError> {
@@ -186,9 +196,18 @@ impl PendingRows {
         let history_bytes = funding_positions
             .checked_mul(32 + 32 + crate::types::TX_POSITION_SIZE + 1)
             .ok_or(IndexError::MutationSizeOverflow)?;
+        let filter_bytes = self
+            .filter_rows
+            .iter()
+            .try_fold(0_usize, |total, (_, row)| {
+                total
+                    .checked_add(34 + 64 + row.filter.len())
+                    .ok_or(IndexError::MutationSizeOverflow)
+            })?;
         prefix_bytes
             .checked_add(position_bytes)
             .and_then(|s| s.checked_add(history_bytes))
+            .and_then(|s| s.checked_add(filter_bytes))
             .and_then(|s| s.checked_add(header_bytes))
             .and_then(|s| s.checked_add(live_bytes))
             .ok_or(IndexError::MutationSizeOverflow)
@@ -254,6 +273,13 @@ pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for row in &rows.header_rows {
         batch.put(ColumnFamily::BlockHeaders, row, &[]);
     }
+    for (hash, filter) in &rows.filter_rows {
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            &super::filters::key(hash),
+            &filter.encode(),
+        );
+    }
     apply_live_ops(batch, &rows.live_ops, false);
 }
 
@@ -277,6 +303,9 @@ pub(super) fn delete_rows(
         batch.delete(ColumnFamily::Funding, group[0].row.as_bytes());
     }
     // Rollback reverses the authoritative live transition, preserving op order.
+    for (hash, _) in &rows.filter_rows {
+        batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
+    }
     apply_live_ops(batch, &rows.live_ops, true);
     if delete_shared_identity {
         for row in &rows.header_rows {

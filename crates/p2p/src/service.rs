@@ -855,8 +855,8 @@ impl P2pService {
         Arc::clone(&self.peer_table)
     }
 
-    /// The service flags this node advertises in every `version` (Core
-    /// `init.cpp:2022-2026`): what RPC reports as `localservices`.
+    /// Base service flags. Handshakes and RPC add `COMPACT_FILTERS` only
+    /// while the optional filter index is healthy and caught up.
     #[must_use]
     pub fn local_services(&self) -> bitcoin::p2p::ServiceFlags {
         self.config.local_services

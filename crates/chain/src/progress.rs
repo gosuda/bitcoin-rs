@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, i64_to_f64, u64_to_f64};
 
+use crate::TipSnapshot;
 use crate::ibd::InitialBlockDownload;
 use crate::node::ChainWork;
-use crate::tip::TipSnapshot;
 use crate::view::{BlockTreeReader, TipReader};
 
 /// Chain synchronization facts at one applied publication.

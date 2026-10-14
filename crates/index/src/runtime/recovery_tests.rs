@@ -75,15 +75,42 @@ impl BlockBodyStore for MapBodyStore {
 }
 
 fn coinbase_undo(bodies: &BodyMap) -> InMemoryUndoStore {
-    struct NoInputs;
-    impl bitcoin_rs_utxo::contract::SpentOutputLookup for NoInputs {
+    struct FixtureCoins {
+        coins: hashbrown::HashMap<(bitcoin_rs_primitives::Txid, u32), bitcoin_rs_utxo::UtxoCoin>,
+    }
+    impl bitcoin_rs_utxo::contract::SpentOutputLookup for FixtureCoins {
         fn entry(
             &self,
-            _outpoint: &bitcoin_rs_primitives::OutPoint,
+            outpoint: &bitcoin_rs_primitives::OutPoint,
         ) -> Option<&bitcoin_rs_utxo::UtxoCoin> {
-            None
+            self.coins.get(&(outpoint.txid, outpoint.vout))
         }
     }
+
+    // Every non-genesis fixture block spends its parent coinbase output, so the
+    // spent-coin source resolves against the outputs the fixtures create.
+    let mut coins = hashbrown::HashMap::new();
+    for ((height, _), body) in bodies {
+        let block: bitcoin_rs_primitives::Block =
+            bitcoin_rs_primitives::deserialize(body).expect("fixture body");
+        for tx in &block.txs {
+            let txid = tx.txid();
+            let coinbase = tx.is_coinbase();
+            for (vout, txout) in tx.outputs.iter().enumerate() {
+                let vout = u32::try_from(vout).expect("fixture vout fits u32");
+                coins.insert(
+                    (txid, vout),
+                    bitcoin_rs_utxo::UtxoCoin {
+                        outpoint: bitcoin_rs_primitives::OutPoint { txid, vout },
+                        txout: txout.clone(),
+                        coinbase,
+                        height: *height,
+                    },
+                );
+            }
+        }
+    }
+    let lookup = FixtureCoins { coins };
 
     let store = InMemoryUndoStore::default();
     for ((height, hash), body) in bodies {
@@ -94,8 +121,6 @@ fn coinbase_undo(bodies: &BodyMap) -> InMemoryUndoStore {
             .iter()
             .map(bitcoin_rs_primitives::Tx::txid)
             .collect::<Vec<_>>();
-        // These fixtures contain only coinbases: the normal UTXO owner emits
-        // no restores, plus the created-output inverse outside genesis.
         let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
             &block,
             *height,
@@ -103,11 +128,11 @@ fn coinbase_undo(bodies: &BodyMap) -> InMemoryUndoStore {
             None,
             1,
             0,
-            &NoInputs,
+            &lookup,
             None,
             crate::MAX_LIVE_SCRIPT_SIZE,
         )
-        .expect("coinbase-only changes");
+        .expect("fixture changes");
         bitcoin_rs_utxo::contract::persist_block_undo(
             &store,
             *height,
@@ -134,7 +159,7 @@ fn coinbase_tx(height: u32, extra: i64) -> Transaction {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::new(),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     }
 }
@@ -157,6 +182,14 @@ fn mine_block(prev_hash: Hash256, height: u32, extra: i64) -> (Block, Hash256) {
         },
         txdata: vec![coinbase_tx(height, extra)],
     };
+    if height > 0 {
+        let mut spend = coinbase_tx(height, extra);
+        spend.input[0].previous_output = bitcoin::OutPoint {
+            txid: coinbase_tx(height - 1, if height == 1 { 0 } else { extra }).compute_txid(),
+            vout: 0,
+        };
+        block.txdata.push(spend);
+    }
     block.header.merkle_root = block
         .compute_merkle_root()
         .unwrap_or_else(TxMerkleNode::all_zeros);
@@ -230,6 +263,42 @@ struct Harness {
     /// The pruning authority this worker reads through.
     retention: Arc<RetentionRegistry>,
     worker: Worker,
+}
+
+#[test]
+fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
+    let fixture = ForkFixture::new(2);
+    for pruned in [false, true] {
+        let harness = Harness::with_enabled(
+            &fixture,
+            u32::MAX,
+            IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
+        );
+        // Filter preparation needs spent-script undo for every block; remove
+        // the a-branch records so the capability reports unavailable.
+        for (i, entry) in fixture.a.iter().enumerate() {
+            let height = u32::try_from(i).expect("fixture height fits u32") + 1;
+            fixture
+                .bodies
+                .undo
+                .remove_archived(height, fixture.tip(*entry).hash);
+        }
+        harness.set_tip(&fixture.tip(fixture.a[1]));
+        if pruned {
+            harness.retention.reserve(1).commit(1);
+        }
+        harness.settle(&mut None);
+        harness.assert_at(&fixture.tip(fixture.a[1]));
+        assert!(harness.runtime.compact_filter_failure.read().is_some());
+        assert!(!harness.runtime.should_stop());
+        assert!(harness.watermarks().compact_filters.is_none());
+        assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
+        // A later reorg still rolls back and catches up both body-only indexes.
+        harness.set_tip(&fixture.tip(fixture.b[1]));
+        harness.settle(&mut None);
+        harness.assert_at(&fixture.tip(fixture.b[1]));
+        assert!(harness.watermarks().compact_filters.is_none());
+    }
 }
 
 impl Harness {
@@ -321,10 +390,12 @@ impl Harness {
         });
         let watermarks = self.watermarks();
         assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
-        assert_eq!(
-            watermarks.script_history, expected,
-            "script_history watermark"
-        );
+        if self.worker.enabled.contains(IndexCapability::ScriptHistory) {
+            assert_eq!(
+                watermarks.script_history, expected,
+                "script_history watermark"
+            );
+        }
         assert_eq!(self.runtime.phase(), ReconcilePhase::FORWARD);
     }
 
@@ -340,6 +411,57 @@ impl Harness {
                 (cap.clone(), *ih, *th, thb.clone(), ihb.clone(), *d)
             })
     }
+}
+
+#[test]
+fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings() {
+    struct SpentScript;
+    impl crate::SpentCoinScripts for SpentScript {
+        fn script_bytes(&self, _: &[u8; 32], _: u32) -> Option<&[u8]> {
+            Some(&[0x51])
+        }
+    }
+    let f = ForkFixture::new(2);
+    let h = Harness::with_enabled(
+        &f,
+        u32::MAX,
+        IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
+    );
+    let a2 = f.tip(f.a[1]);
+    // Publish valid filter rows from the fixture's known spent script. The
+    // history store has bodies but no undo when the worker later rolls back.
+    f.bodies.undo.remove_archived(2, a2.hash);
+    let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
+    let mut batch = PreparedBatch::new(DEFAULT_BATCH_LIMITS);
+    for identity in identities {
+        let body = f.bodies.bodies.lock()[&(identity.height, identity.hash)].clone();
+        let prepared = h
+            .writer
+            .prepare_block_with_spent_scripts(
+                h.worker.enabled,
+                identity.height,
+                identity.hash,
+                &body,
+                &SpentScript,
+            )
+            .expect("prepare");
+        assert!(batch.try_push(prepared).is_ok());
+    }
+    let fence = h.writer.fenced_watermarks().expect("fence").0;
+    h.writer
+        .commit_forward_with_cursor(fence, batch, crate::ConsumerCursorUpdate::Keep)
+        .expect("initial filter publication");
+    let original = h.watermarks().compact_filters;
+    h.set_tip(&f.tip(f.b[1]));
+    h.settle(&mut None);
+    h.assert_at(&f.tip(f.b[1]));
+    assert_eq!(
+        h.watermarks().compact_filters,
+        original,
+        "preserve failed capability data"
+    );
+    assert!(h.runtime.compact_filter_failure.read().is_some());
+    assert!(!h.runtime.should_stop());
 }
 
 /// `RCV-04`: a watermark above the applied tip is an operator-visible

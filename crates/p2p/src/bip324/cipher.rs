@@ -6,7 +6,7 @@ use chacha20::cipher::{KeyIvInit as _, StreamCipher as _, StreamCipherSeek as _}
 use chacha20poly1305::{AeadInOut as _, ChaCha20Poly1305, KeyInit as _};
 
 /// Length fields or packets each cipher handles before it rekeys.
-pub(crate) const REKEY_INTERVAL: u32 = 224;
+const REKEY_INTERVAL: u32 = 224;
 
 /// Bytes in the encrypted length field.
 pub(crate) const LENGTH_FIELD_LEN: usize = 3;

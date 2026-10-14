@@ -44,6 +44,22 @@ pub struct InventoryServing {
 
 /// Read-only active-chain view used by server-side P2P responders.
 pub trait ChainQuery: Send + Sync {
+    /// Whether the optional filter index currently covers the applied chain.
+    fn compact_filters_ready(&self) -> bool {
+        false
+    }
+
+    /// Serves a bounded BIP157 request from persisted filters only. Returns
+    /// false only when publication or send headroom is pending and no response
+    /// has been sent. The caller retains the request until its existing deadline.
+    fn serve_compact_filters(
+        &self,
+        _request: &Message,
+        _headroom: &dyn Fn() -> bool,
+        _send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+    ) -> Result<bool, PeerError> {
+        Ok(true)
+    }
     /// Returns a bounded contiguous active-chain header response.
     fn headers_after(
         &self,
@@ -301,6 +317,22 @@ pub fn dispatch_inbound_full<S>(
             step(peer, message)?;
             send(headers_response(chain, request))?;
         }
+        Message::GetCFilters(_) | Message::GetCFHeaders(_) | Message::GetCFCheckpt(_) => {
+            step(peer, message)?;
+            if peer.pending_filter_request.is_some() {
+                return Err(PeerError::Io(std::io::Error::other(
+                    "compact filter request already pending",
+                )));
+            }
+            if let Some(chain) = chain
+                && !chain.serve_compact_filters(message, headroom, send)?
+            {
+                peer.pending_filter_request = Some((
+                    message.clone(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                ));
+            }
+        }
         Message::GetBlocks(request) => {
             ensure_block_locator_within_bounds(
                 &request.locator_hashes,
@@ -549,12 +581,10 @@ mod tests {
     use crate::peer::{Peer, PeerState};
     use crate::wire::{Message, PeerError};
 
-    fn block_payload_bytes(block: &Block) -> bytes::Bytes {
-        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block))
-    }
-
     fn block_payload(block: &Block) -> Message {
-        Message::BlockPayload(block_payload_bytes(block))
+        Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
+            block,
+        )))
     }
 
     #[derive(Default)]
@@ -585,6 +615,14 @@ mod tests {
     }
 
     impl ChainQuery for FakeChain {
+        fn serve_compact_filters(
+            &self,
+            _: &Message,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<bool, PeerError> {
+            Ok(false)
+        }
         fn headers_after(
             &self,
             _locator_hashes: &[BlockHash],
@@ -615,7 +653,7 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(Message::BlockPayload(block_payload_bytes(found)))?;
+                serve(block_payload(found))?;
             }
             Ok(outcome)
         }
@@ -1059,7 +1097,7 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(Message::BlockPayload(block_payload_bytes(found)))?;
+                serve(block_payload(found))?;
             }
             Ok(outcome)
         }
@@ -1898,6 +1936,39 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.state = PeerState::Ready;
         peer
+    }
+
+    #[test]
+    fn deferred_filter_request_keeps_ping_responsive_and_bounds_pending_work()
+    -> Result<(), PeerError> {
+        let mut peer = ready_peer();
+        let chain = FakeChain::default();
+        let request = Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
+            filter_type: 0,
+            start_height: 0,
+            stop_hash: bitcoin::BlockHash::all_zeros(),
+        });
+        let dispatch = |peer: &mut Peer<Cursor<Vec<u8>>>| {
+            dispatch_inbound_full(
+                peer,
+                &request,
+                Some(&chain),
+                None,
+                &|| true,
+                &|| true,
+                &mut |_| panic!("index not published"),
+                &mut |_| {},
+                &mut |_| {},
+            )
+        };
+        dispatch(&mut peer)?;
+        assert!(peer.pending_filter_request.is_some());
+        assert_eq!(
+            dispatch_inbound(&mut peer, &Message::Ping(42))?,
+            vec![Message::Pong(42)]
+        );
+        assert!(matches!(dispatch(&mut peer), Err(PeerError::Io(_))));
+        Ok(())
     }
 
     fn test_header(prev_blockhash: BlockHash, nonce: u32) -> Header {

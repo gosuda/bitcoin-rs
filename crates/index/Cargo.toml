@@ -14,6 +14,7 @@ workspace = true
 [features]
 default = []
 test-seam = []
+silent-payments = ["dep:secp256k1"]
 rocksdb = [
     "bitcoin-rs-storage/rocksdb",
     "bitcoin-rs-utxo/rocksdb",
@@ -37,6 +38,9 @@ compact_str.workspace = true
 crossbeam-channel.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+bitcoin.workspace = true
+bitcoin_hashes.workspace = true
+secp256k1 = { workspace = true, optional = true }
 hashbrown.workspace = true
 zerocopy.workspace = true
 serde.workspace = true
@@ -51,7 +55,6 @@ proptest.workspace = true
 serde_json.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
-bitcoin.workspace = true
 
 [[bench]]
 name = "history_resolve"

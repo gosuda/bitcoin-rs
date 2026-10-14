@@ -10,12 +10,12 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::secp256k1::rand::SeedableRng as _;
 use bitcoin::secp256k1::rand::rngs::StdRng;
 
+use super::configure_peer_stream;
 use super::{
     ConnectionShared, bind_listener, run_outbound_handshake, serve,
     spawn_pinned_outbound_connection, test_shared,
 };
 use crate::bip324::Handshake;
-use crate::socket::configure_peer_stream;
 use crate::transport::{Negotiated, TransportProtocol, establish};
 use crate::{Message, Peer, PeerError, PeerLease, PeerRole, PeerTable};
 

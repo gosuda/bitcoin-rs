@@ -2,6 +2,7 @@ use super::format::generation_name;
 use super::fs::CheckpointRoot;
 use super::load::read_current;
 use super::*;
+use bitcoin_rs_primitives::encode::hex_encode;
 
 use cap_std::ambient_authority;
 use sha2::{Digest, Sha256};
@@ -553,6 +554,10 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(generation_name(7), "gen-00000000000000000007");
     let bytes = [0_u8, 1, 0xfe, 0xff];
     assert_eq!(decode_hex::<4>(&hex_encode(&bytes))?, bytes);
+    assert_eq!(hex_encode(&bytes), "0001feff");
+    for invalid in ["0001FEFF", "0001fe", "0001feffff", "0001fegf"] {
+        assert!(decode_hex::<4>(invalid).is_err(), "accepted {invalid}");
+    }
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;

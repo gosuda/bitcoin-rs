@@ -426,6 +426,18 @@ impl NodeState {
         })
     }
 
+    /// Returns the optional compact-filter query owner for RPC and P2P.
+    #[must_use]
+    pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {
+        if !self.config.indexes.blockfilterindex {
+            return None;
+        }
+        self.derived_index.adapter().map(|adapter| {
+            let query: Arc<dyn bitcoin_rs_index::CompactFilterQuery> = adapter.clone();
+            query
+        })
+    }
+
     /// Returns the node-owned complete generic script-index query adapter.
     #[must_use]
     pub fn script_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery>> {
@@ -476,6 +488,7 @@ fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCap
         .indexes
         .script_index
         .enabled_capabilities(config.indexes.txindex)
+        .with_compact_filters(config.indexes.blockfilterindex)
 }
 
 fn build_derived_index_open_spec(
@@ -488,7 +501,7 @@ fn build_derived_index_open_spec(
         return Ok(None);
     }
     if config.storage.prune_target_mb > 0 {
-        bail!("transaction and script indexing are not compatible with -prune");
+        bail!("transaction, script and compact-filter indexing are not compatible with -prune");
     }
     let canonical_data_root = config
         .data_dir

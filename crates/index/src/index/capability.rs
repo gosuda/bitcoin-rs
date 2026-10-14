@@ -10,6 +10,8 @@ pub(super) const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 
 pub(super) const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 
+pub(super) const COMPACT_FILTERS_WATERMARK_KEY: &[u8] = &[0x00, b'F'];
+
 pub(super) const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 
 /// `TxLookup` coverage floor: first height with derived rows.
@@ -28,7 +30,7 @@ pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u
     match capability {
         IndexCapability::TxLookup => Some(TX_LOOKUP_FLOOR_KEY),
         IndexCapability::ScriptHistory => Some(SCRIPT_HISTORY_FLOOR_KEY),
-        IndexCapability::ScriptLive => None,
+        IndexCapability::ScriptLive | IndexCapability::CompactFilters => None,
     }
 }
 
@@ -52,41 +54,51 @@ pub enum IndexCapability {
     /// filed under its script. Rebuildable from the authoritative UTXO
     /// set alone, unlike history.
     ScriptLive,
+    /// BIP158 basic filters and their BIP157 header chain.
+    CompactFilters,
 }
 
 impl IndexCapability {
     /// Every capability in mask-bit and report order.
     ///
-    /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`.
+    /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`, `CompactFilters`.
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
-    pub(crate) const ALL: [Self; 3] = [Self::TxLookup, Self::ScriptHistory, Self::ScriptLive];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::TxLookup,
+        Self::ScriptHistory,
+        Self::ScriptLive,
+        Self::CompactFilters,
+    ];
 
     /// POST: the single mask bit this capability owns, matching the persisted
-    /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100).
+    /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100, `CompactFilters` 0b1000).
     pub(super) const fn bit(self) -> u8 {
         match self {
             Self::TxLookup => 0b001,
             Self::ScriptHistory => 0b010,
             Self::ScriptLive => 0b100,
+            Self::CompactFilters => 0b1000,
         }
     }
 
-    /// POST: the position of this capability in [`Self::ALL`], 0 to 2.
+    /// POST: the position of this capability in [`Self::ALL`], 0 to 3.
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::TxLookup => 0,
             Self::ScriptHistory => 1,
             Self::ScriptLive => 2,
+            Self::CompactFilters => 3,
         }
     }
 
-    /// The persisted watermark key (`T`, `S`, or `L` under `0x00`).
+    /// The persisted watermark key (`T`, `S`, `L`, or `F` under `0x00`).
     pub(super) const fn watermark_key(self) -> &'static [u8] {
         match self {
             Self::TxLookup => TX_LOOKUP_WATERMARK_KEY,
             Self::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
             Self::ScriptLive => SCRIPT_LIVE_WATERMARK_KEY,
+            Self::CompactFilters => COMPACT_FILTERS_WATERMARK_KEY,
         }
     }
 
@@ -98,15 +110,17 @@ impl IndexCapability {
             Self::TxLookup => &[ColumnFamily::TxConfirmed],
             Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
             Self::ScriptLive => &[ColumnFamily::ScriptLive],
+            Self::CompactFilters => &[], // Own prefix in UtxoMeta; reset preserves its siblings.
         }
     }
 
-    /// POST: the display name (`tx_lookup`, `script_history`, `script_live`).
+    /// POST: the display name (`tx_lookup`, `script_history`, `script_live`, `compact_filters`).
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::TxLookup => "tx_lookup",
             Self::ScriptHistory => "script_history",
             Self::ScriptLive => "script_live",
+            Self::CompactFilters => "compact_filters",
         }
     }
 
@@ -116,6 +130,7 @@ impl IndexCapability {
             Self::TxLookup => "txindex is disabled",
             Self::ScriptHistory => "script history is disabled",
             Self::ScriptLive => "script live is disabled",
+            Self::CompactFilters => "blockfilterindex is disabled",
         }
     }
 }
@@ -145,8 +160,22 @@ impl IndexCapabilities {
     /// Node `--txindex` plus `--scriptindex=utxo`.
     pub const TX_LOOKUP_SCRIPT_LIVE: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
-    /// Every index capability, including the compact live view.
-    pub const ALL: Self = Self(0b111);
+    /// Every index capability, including optional compact block filters.
+    pub const ALL: Self = Self(0b1111);
+    /// Transaction lookup plus the full script index.
+    pub const TX_AND_SCRIPTS: Self = Self(0b111);
+    /// BIP158 basic filter index only.
+    pub const COMPACT_FILTERS: Self = Self(0b1000);
+
+    /// Adds the optional compact-filter capability without changing script mode.
+    #[must_use]
+    pub const fn with_compact_filters(self, enabled: bool) -> Self {
+        if enabled {
+            self.insert(IndexCapability::CompactFilters)
+        } else {
+            self
+        }
+    }
     /// Every capability derivable from a block body alone.
     ///
     /// Anchorless paths use this, because `ScriptLive` cannot be prepared
@@ -208,10 +237,10 @@ impl IndexCapabilities {
 
     /// POST: the set the mask encodes, or
     /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
-    /// bit 2 is set.
+    /// bit 3 is set.
     pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
         // An older marker without bit 2 has no live rows to reset.
-        if mask == 0 || mask & !0b111 != 0 {
+        if mask == 0 || mask & !0b1111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
         Ok(Self(mask))
@@ -230,6 +259,7 @@ pub struct IndexWatermarks {
     pub tx_lookup: Option<IndexWatermark>,
     pub script_history: Option<IndexWatermark>,
     pub script_live: Option<IndexWatermark>,
+    pub compact_filters: Option<IndexWatermark>,
 }
 
 impl IndexWatermarks {
@@ -239,6 +269,7 @@ impl IndexWatermarks {
             IndexCapability::TxLookup => self.tx_lookup,
             IndexCapability::ScriptHistory => self.script_history,
             IndexCapability::ScriptLive => self.script_live,
+            IndexCapability::CompactFilters => self.compact_filters,
         }
     }
 
@@ -252,6 +283,7 @@ impl IndexWatermarks {
             IndexCapability::TxLookup => self.tx_lookup = cursor,
             IndexCapability::ScriptHistory => self.script_history = cursor,
             IndexCapability::ScriptLive => self.script_live = cursor,
+            IndexCapability::CompactFilters => self.compact_filters = cursor,
         }
     }
 }
@@ -412,6 +444,15 @@ mod tests {
                 "script_live",
                 "script live is disabled",
             ),
+            (
+                IndexCapability::CompactFilters,
+                0b1000,
+                3,
+                &[0, b'F'][..],
+                &[][..],
+                "compact_filters",
+                "blockfilterindex is disabled",
+            ),
         ] {
             assert_eq!(capability.bit(), bit);
             assert_eq!(capability.index(), index);
@@ -430,6 +471,7 @@ mod tests {
                 IndexCapability::TxLookup,
                 IndexCapability::ScriptHistory,
                 IndexCapability::ScriptLive,
+                IndexCapability::CompactFilters,
             ]
         );
         for (position, capability) in IndexCapability::ALL.into_iter().enumerate() {
@@ -439,7 +481,7 @@ mod tests {
     }
 
     /// The reset marker round-trips byte-identically and refuses an empty
-    /// mask and any bit above bit 2.
+    /// mask and any bit above bit 3.
     #[test]
     fn reset_marker_mask_round_trips_and_refuses_invalid_masks() {
         for selection in [
@@ -461,7 +503,7 @@ mod tests {
             IndexCapabilities::from_mask(0),
             Err(IndexError::InvalidResetMarker)
         ));
-        for mask in [0b1000_u8, 0b0001_0000, 0b1001, 0b1111] {
+        for mask in [0b10000_u8, 0b0010_0000, 0b10001, 0b11111] {
             assert!(
                 IndexCapabilities::from_mask(mask).is_err(),
                 "mask {mask:#b} must be refused"

@@ -4,7 +4,12 @@
 /// Native block type and block-level hashing helpers.
 pub mod block;
 /// Chain-level policy constants shared across tiers.
-pub mod chain_constants;
+pub mod chain_constants {
+    /// Minimum number of blocks kept below the active tip for Core-compatible
+    /// reorg safety.
+    pub const CORE_REORG_SAFETY_MARGIN: u32 = 288;
+}
+
 /// Native consensus encoding and decoding for protocol types.
 pub mod encode;
 /// Fixed-width 256-bit hash type.

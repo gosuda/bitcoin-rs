@@ -145,6 +145,7 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
         spending_rows: positioned_rows(),
         header_rows: vec![[1; crate::types::HEADER_ROW_SIZE]],
         live_ops: Vec::new(),
+        filter_rows: Vec::new(),
     };
     rows.sort();
     assert_eq!(
@@ -154,7 +155,8 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
             funding: 2,
             spending: 2,
             headers: 1,
-            live: 0
+            live: 0,
+            filters: 0,
         }
     );
     let mut puts = BufferedWriteBatch::default();

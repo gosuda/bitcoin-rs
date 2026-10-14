@@ -84,7 +84,7 @@ const LOCATOR_MAX_ENTRIES: usize = 32;
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
 
-/// Time after which an unanswered `getheaders` request may be retried.
+/// Time after which an unanswered frontier `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the node asks whether its own tip has gone stale: Core's
@@ -244,9 +244,9 @@ fn defer_owned_body_fetch(scheduler: &mut SchedulerState, source: PeerSource, ha
 struct SchedulerState {
     window: DownloadWindow,
     stager: BlockStager,
-    /// The one outstanding header request, owned by the exact connection it
-    /// was sent to. Same-address replacement never inherits it.
-    header_request: Option<PendingHeaderRequest>,
+    /// Selects the exact lifecycle entry whose request paces frontier
+    /// discovery; request data lives only in `headers_sync`.
+    header_request_owner: Option<PeerSource>,
     /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
     /// `getdata` was issued for a tip hash whose header has not attached yet.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
@@ -254,32 +254,34 @@ struct SchedulerState {
     /// it can bring us to the tip. Keyed by exact connection identity, so a
     /// replacement at the same address is judged on its own record.
     chain_sync: hashbrown::HashMap<PeerSource, peers::ChainSyncState>,
-    /// The download-twice header sync of every connection whose chain this
-    /// node has not yet seen reach the network's minimum work. Keyed by
-    /// exact connection identity, so a same-address replacement starts its
-    /// own sync and never inherits its predecessor's commitments.
-    headers_sync: hashbrown::HashMap<PeerSource, headers_presync::HeadersSyncState>,
+    /// The sole header lifecycle owner for each exact connection: its wire
+    /// request and download-twice validation cursor share one entry.
+    headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
     /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
 }
 
 impl SchedulerState {
+    fn header_request(&self) -> Option<HeaderRequest> {
+        self.header_request_owner
+            .and_then(|source| self.headers_sync.get(&source)?.request)
+    }
+
     /// Releases every scheduling fact owned by a connection not in `live`.
     ///
     /// PRE: `live` is the peer table's live-session snapshot.
-    /// POST: the window, the header request, the header presync states, and
-    ///   the deferred body fetches hold only facts owned by a connection in
-    ///   `live`.
+    /// POST: the window, header lifecycles, and deferred body fetches hold
+    ///   only facts owned by a connection in `live`.
     /// INVARIANT: ownership is compared by connection identity, never by
     ///   address alone.
     fn release_unowned(&mut self, live: &[PeerSource]) {
         let owns = |source: &PeerSource| live.contains(source);
         self.window.retain_owned_by(owns);
         if self
-            .header_request
-            .is_some_and(|request| !owns(&request.source))
+            .header_request_owner
+            .is_some_and(|source| !owns(&source))
         {
-            self.header_request = None;
+            self.header_request_owner = None;
         }
         self.owned_body_fetches.retain(|(source, _)| owns(source));
         self.chain_sync.retain(|source, _| owns(source));
@@ -308,13 +310,44 @@ impl SchedulerState {
     }
 }
 
+#[derive(Default)]
+struct PeerHeadersSync {
+    request: Option<HeaderRequest>,
+    presync: Option<headers_presync::HeadersSyncState>,
+}
+
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PendingHeaderRequest {
+pub(super) struct HeaderRequest {
     /// The exact connection the request was sent to.
     source: PeerSource,
+    kind: HeaderRequestKind,
     locator_tip_hash: Hash256,
     target_height: u32,
     requested_at: Instant,
+    state: HeaderRequestState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HeaderRequestKind {
+    Frontier,
+    ChainSyncProbe,
+}
+
+impl HeaderRequest {
+    fn timeout(self) -> Duration {
+        match (self.kind, self.state) {
+            (HeaderRequestKind::ChainSyncProbe, HeaderRequestState::AwaitingResponse) => {
+                peers::HEADERS_RESPONSE_TIME
+            }
+            _ => HEADER_REQUEST_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HeaderRequestState {
+    AwaitingResponse,
+    Answered,
 }
 
 /// Whether `send_getheaders` reached the wire this tick.
@@ -322,8 +355,7 @@ pub(super) struct PendingHeaderRequest {
 pub(super) enum GetheadersOutcome {
     /// The request was sent and registered.
     Sent,
-    /// An identical request is already pending on that connection; nothing
-    /// was sent.
+    /// Existing request pacing or a live presync cursor owns this connection.
     Suppressed,
     /// Nothing was sent because the frontier body is already owned: the
     /// capability question the probe exists to answer is resolved, and no
@@ -387,7 +419,7 @@ impl BlockSync {
             scheduler: Mutex::new(SchedulerState {
                 window: DownloadWindow::new(budget),
                 stager: BlockStager::new(budget),
-                header_request: None,
+                header_request_owner: None,
                 owned_body_fetches: Vec::new(),
                 chain_sync: hashbrown::HashMap::new(),
                 headers_sync: hashbrown::HashMap::new(),
@@ -408,7 +440,7 @@ impl BlockSync {
         *self.scheduler.lock() = SchedulerState {
             window: DownloadWindow::new(budget),
             stager: BlockStager::new(budget),
-            header_request: None,
+            header_request_owner: None,
             owned_body_fetches: Vec::new(),
             chain_sync: hashbrown::HashMap::new(),
             headers_sync: hashbrown::HashMap::new(),
@@ -478,6 +510,7 @@ impl BlockSync {
     /// reconciliation: observe, recover what is unowned, then schedule or
     /// name why progress is impossible.
     pub fn tick(&self) {
+        self.retire_timed_out_header_syncs(Instant::now());
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
@@ -707,7 +740,7 @@ impl BlockSync {
                 BodyState::Unowned
             }
         });
-        let header_request = scheduler.header_request;
+        let header_request = scheduler.header_request();
         SyncFrontier {
             chain,
             body_state,

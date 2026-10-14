@@ -17,6 +17,8 @@ pub enum IndexError {
     InvalidHeaderLength { len: usize },
     #[error("transaction byte range does not fit u32 at block offset {offset}")]
     UnaddressablePosition { offset: u64 },
+    #[error("compact filter or parent filter commitment is unavailable or corrupt")]
+    InvalidCompactFilter,
     #[error("invalid TxIndex watermark encoding")]
     InvalidWatermark,
     #[error("invalid TxIndex prefix row length {len}")]
@@ -44,10 +46,13 @@ pub enum IndexError {
         expected: Option<IndexWatermark>,
         actual: Option<IndexWatermark>,
     },
-    /// `ScriptHistory` or `ScriptLive` was requested without a spent-coin source.
-    /// An external input's script is absent from the block body and must be
-    /// supplied for history occurrences and live-output deletes.
-    #[error("ScriptHistory and ScriptLive require a spent-coin script source")]
+    /// `ScriptHistory`, `ScriptLive`, or `CompactFilters` was requested without
+    /// a spent-coin source. An external input's script is absent from the block
+    /// body and must be supplied for history occurrences, live-output deletes,
+    /// and filter construction.
+    #[error(
+        "ScriptHistory, ScriptLive and CompactFilters preparation requires a spent-coin script source"
+    )]
     MissingSpentScripts,
     /// The spent-coin source could not resolve an external input's script.
     /// Missing evidence must not omit a history spend or retain a spent live output.

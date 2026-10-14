@@ -3,9 +3,11 @@
 use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
+use super::HeaderRequest;
+use super::HeaderRequestKind;
+use super::HeaderRequestState;
 use super::LOCATOR_MAX_ENTRIES;
 use super::PROTOCOL_VERSION;
-use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
@@ -64,6 +66,9 @@ impl BlockSync {
             body_fetch_owned,
         }) = self.inbound_headers_rx.try_recv()
         {
+            if source.is_some_and(|source| !self.peer_table.is_current(source)) {
+                continue;
+            }
             let batch_len = headers.len();
             total_headers = total_headers.saturating_add(batch_len);
 
@@ -74,8 +79,13 @@ impl BlockSync {
             // bypassing the state leaves its cursor behind and the next
             // page breaks continuity against a stale position.
             let feeds_live_sync = wire_response
-                && source
-                    .is_some_and(|source| self.scheduler.lock().headers_sync.contains_key(&source));
+                && source.is_some_and(|source| {
+                    self.scheduler
+                        .lock()
+                        .headers_sync
+                        .get(&source)
+                        .is_some_and(|owned| owned.presync.is_some())
+                });
 
             // Already-known batches skip the transition lock. The listener
             // forwards every inbound body's embedded header here so
@@ -136,11 +146,9 @@ impl BlockSync {
                 HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
-                        if self.peer_table.disconnect_source(source) {
-                            // Every removal path releases a `getheaders`
-                            // gate the peer owned, or a same-address
-                            // reconnect inherits a dead deadline.
-                            self.clear_header_request_for(source);
+                        let disconnected = self.peer_table.disconnect_source(source);
+                        self.clear_headers_sync_for(source);
+                        if disconnected {
                             self.scheduler
                                 .lock()
                                 .window
@@ -241,9 +249,9 @@ impl BlockSync {
             return;
         }
         let mut credit_refresh_needed = false;
-        // `header_request` is a singleton: asking a second peer before the
-        // first answers would orphan the earlier request untracked, so
-        // unknown announcements queue back for a later drain instead.
+        // The frontier request has one pacing owner: asking a second peer
+        // before the first answers would orphan that owner's request from
+        // discovery, so unknown announcements queue back for a later drain.
         let mut deferred: Vec<(PeerSource, Hash256)> = Vec::new();
         for (source, hash) in pending {
             if !self.peer_table.is_current(source) {
@@ -260,7 +268,7 @@ impl BlockSync {
                 (tree.lookup(hash).is_some(), height)
             };
             if !known {
-                if self.scheduler.lock().header_request.is_some() {
+                if self.scheduler.lock().header_request().is_some() {
                     deferred.push((source, hash));
                 } else {
                     self.request_headers_from(Some(source));
@@ -370,40 +378,120 @@ impl BlockSync {
         }
     }
 
-    /// Consumes the pending `getheaders` when a nonempty wire `headers`
-    /// response arrives on the exact connection that owns it. An empty
-    /// response supplies no new capability: retain its deadline so idle
-    /// discovery is paced and rotates to another peer. The consumption is
-    /// identity-exact: only the connection the request was sent to can
-    /// answer it, so a same-address replacement's batch never frees the
-    /// predecessor's deadline. Headers forwarded out of a delivered body
-    /// (`wire_response = false`) are not a response: letting them clear the
-    /// pending slot would let every delivered block reset request pacing
-    /// and emit duplicate `getheaders`.
+    /// Updates the request lifecycle from a wire `headers` response on its
+    /// exact connection. An empty response preserves the original pacing
+    /// deadline but is no longer unanswered; a nonempty response removes
+    /// that source's request. Headers forwarded out of a delivered body
+    /// (`wire_response = false`) are not a response.
     fn consume_header_request(
         &self,
         source: Option<PeerSource>,
         wire_response: bool,
         batch_empty: bool,
     ) {
-        if let Some(source) = source.filter(|_| wire_response && !batch_empty) {
+        let Some(source) = source.filter(|_| wire_response) else {
+            return;
+        };
+        if !batch_empty {
             self.clear_header_request_for(source);
+            return;
+        }
+        let mut scheduler = self.scheduler.lock();
+        if let Some(owned) = scheduler.headers_sync.get_mut(&source) {
+            if let Some(request) = owned.request.as_mut() {
+                request.state = HeaderRequestState::Answered;
+            }
+            owned.presync = None;
+        }
+        let prune = scheduler
+            .headers_sync
+            .get(&source)
+            .is_some_and(|owned| owned.request.is_none() && owned.presync.is_none());
+        if prune {
+            scheduler.headers_sync.remove(&source);
+        }
+        if scheduler.header_request_owner == Some(source)
+            && scheduler
+                .headers_sync
+                .get(&source)
+                .is_none_or(|owned| owned.request.is_none())
+        {
+            scheduler.header_request_owner = None;
         }
     }
 
-    /// Releases a `getheaders` gate owned by `source`. Every disconnect
-    /// path — send failure, window or staged-header blame — clears the
-    /// owner so a same-address reconnect cannot inherit a stale deadline.
-    /// The match is identity-exact (P2P-02): a same-address replacement
-    /// never frees its predecessor's pending request.
+    /// Clears only the wire request, retaining a live presync cursor.
     pub(super) fn clear_header_request_for(&self, source: PeerSource) {
         let mut scheduler = self.scheduler.lock();
-        if scheduler
-            .header_request
-            .is_some_and(|request| request.source == source)
-        {
-            scheduler.header_request = None;
+        if let Some(owned) = scheduler.headers_sync.get_mut(&source) {
+            owned.request = None;
         }
+        if scheduler
+            .headers_sync
+            .get(&source)
+            .is_some_and(|owned| owned.presync.is_none())
+        {
+            scheduler.headers_sync.remove(&source);
+        }
+        if scheduler.header_request_owner == Some(source) {
+            scheduler.header_request_owner = None;
+        }
+    }
+
+    fn clear_headers_sync_for(&self, source: PeerSource) {
+        let mut scheduler = self.scheduler.lock();
+        scheduler.headers_sync.remove(&source);
+        if scheduler.header_request_owner == Some(source) {
+            scheduler.header_request_owner = None;
+        }
+    }
+
+    fn clear_presync_for(&self, source: PeerSource) -> Option<HeadersSyncState> {
+        let mut scheduler = self.scheduler.lock();
+        let state = scheduler
+            .headers_sync
+            .get_mut(&source)
+            .and_then(|owned| owned.presync.take());
+        if scheduler
+            .headers_sync
+            .get(&source)
+            .is_some_and(|owned| owned.request.is_none() && owned.presync.is_none())
+        {
+            scheduler.headers_sync.remove(&source);
+        }
+        state
+    }
+
+    /// A timed-out download-twice cursor cannot be retried on the same
+    /// connection: the wire has no request IDs to disambiguate late pages.
+    pub(super) fn retire_timed_out_header_syncs(&self, now: Instant) {
+        let below_floor = self.below_header_work_floor();
+        let expired: Vec<_> = {
+            let scheduler = self.scheduler.lock();
+            scheduler
+                .headers_sync
+                .iter()
+                .filter_map(|(source, owned)| {
+                    let request = owned.request?;
+                    (request.state == HeaderRequestState::AwaitingResponse
+                        && (below_floor || owned.presync.is_some())
+                        && now.saturating_duration_since(request.requested_at) >= request.timeout())
+                    .then_some(*source)
+                })
+                .collect()
+        };
+        for source in expired {
+            self.peer_table.disconnect_source(source);
+            self.clear_headers_sync_for(source);
+            tracing::debug!(peer_addr = %source.addr, "block sync: header sync request timed out");
+        }
+    }
+
+    fn below_header_work_floor(&self) -> bool {
+        let minimum_work = self.chain.minimum_chain_work();
+        self.chain
+            .chain_tip()
+            .is_none_or(|tip| tip.chainwork < minimum_work)
     }
 
     /// Records a body fetch the window does not own — the compact outcome
@@ -742,20 +830,28 @@ impl BlockSync {
         outcome
     }
 
-    /// Sends one `getheaders` for the chain-sync eviction probe, without the
-    /// frontier-ownership gate — a lagging peer owes an answer for its own
-    /// silence regardless of who owns the next body — and without claiming
-    /// the singleton `header_request` slot.
+    /// Sends one `getheaders` for the chain-sync eviction probe without
+    /// claiming the frontier request owner. A live presync cursor defers the
+    /// probe; the common request gate handles wire-request ownership.
     ///
     /// PRE: `source` names a live subject connection.
-    /// POST: return the wire outcome; `Suppressed` counts only when an
-    ///   identical request is already pending for this connection, and
-    ///   nothing else suppresses the send.
+    /// POST: return the wire outcome; only an unowned connection receives
+    ///   an eviction probe.
     pub(super) fn send_chain_sync_probe(
         &self,
         frontier: &SyncFrontier,
         source: PeerSource,
     ) -> GetheadersOutcome {
+        let has_presync = {
+            let scheduler = self.scheduler.lock();
+            scheduler
+                .headers_sync
+                .get(&source)
+                .is_some_and(|owned| owned.presync.is_some())
+        };
+        if has_presync {
+            return GetheadersOutcome::Suppressed;
+        }
         // Core anchors this probe at the best header's parent
         // (`net_processing.cpp` ConsiderEviction) so the answer can carry
         // the header tip the eviction benchmark is measured against. The
@@ -776,8 +872,13 @@ impl BlockSync {
         };
         let our_height = headers.height.saturating_sub(1);
         let target_height = i32::try_from(headers.height).unwrap_or(i32::MAX);
-        let outcome =
-            self.send_getheaders_tracked(source, our_height, target_height, locator, false);
+        let outcome = self.send_getheaders_tracked(
+            source,
+            our_height,
+            target_height,
+            locator,
+            HeaderRequestKind::ChainSyncProbe,
+        );
         if outcome == GetheadersOutcome::Sent {
             tracing::debug!(
                 peer_addr = %source.addr,
@@ -813,19 +914,24 @@ impl BlockSync {
         target_height: i32,
         locator: Vec<Hash256>,
     ) -> GetheadersOutcome {
-        self.send_getheaders_tracked(source, our_height, target_height, locator, true)
+        self.send_getheaders_tracked(
+            source,
+            our_height,
+            target_height,
+            locator,
+            HeaderRequestKind::Frontier,
+        )
     }
 
-    /// `track` registers the request in the singleton `header_request` slot;
-    /// a probe that must not displace the frontier's pending request sends
-    /// untracked — its answer arrives as ordinary inbound headers.
+    /// Every request is registered under its exact connection. Its kind
+    /// selects the response timeout and whether it claims the frontier owner.
     fn send_getheaders_tracked(
         &self,
         source: crate::PeerSource,
         our_height: u32,
         target_height: i32,
         locator: Vec<Hash256>,
-        track: bool,
+        kind: HeaderRequestKind,
     ) -> GetheadersOutcome {
         let Some(locator_tip_hash) = locator.first().copied() else {
             return GetheadersOutcome::Failed;
@@ -856,21 +962,34 @@ impl BlockSync {
         if self
             .peer_table
             .send_then(source, msg, || {
-                if track {
-                    let mut scheduler = self.scheduler.lock();
+                let mut scheduler = self.scheduler.lock();
+                scheduler.headers_sync.entry(source).or_default().request = Some(HeaderRequest {
+                    source,
+                    kind,
+                    locator_tip_hash,
+                    target_height,
+                    requested_at: now,
+                    state: HeaderRequestState::AwaitingResponse,
+                });
+                if kind == HeaderRequestKind::Frontier {
                     // A continuation from a different peer must not replace
-                    // the singleton request its current owner still owes.
-                    if scheduler
-                        .header_request
-                        .is_none_or(|pending| pending.source == source)
-                    {
-                        scheduler.header_request = Some(PendingHeaderRequest {
-                            source,
-                            locator_tip_hash,
-                            target_height,
-                            requested_at: now,
-                        });
+                    // the frontier request its current owner still owes.
+                    let can_claim_owner = scheduler.header_request_owner.is_none_or(|owner| {
+                        owner == source
+                            || scheduler
+                                .headers_sync
+                                .get(&owner)
+                                .and_then(|owned| owned.request)
+                                .is_none_or(|request| {
+                                    now.saturating_duration_since(request.requested_at)
+                                        >= request.timeout()
+                                })
+                    });
+                    if can_claim_owner {
+                        scheduler.header_request_owner = Some(source);
                     }
+                } else if scheduler.header_request_owner == Some(source) {
+                    scheduler.header_request_owner = None;
                 }
             })
             .is_err()
@@ -882,12 +1001,10 @@ impl BlockSync {
             // The send failure means this connection is gone: evict it so the
             // scheduler cannot re-pick a dead peer every tick. The identity
             // check inside `disconnect_source` keeps a same-address
-            // replacement untouched, and only then is a pending request keyed
-            // to this connection dropped so a fast reconnect does not inherit
-            // a stale deadline gate.
-            if self.peer_table.disconnect_source(source) {
-                self.clear_header_request_for(source);
-            }
+            // replacement untouched, and the exact-source lifecycle is
+            // dropped so a fast reconnect does not inherit stale sync state.
+            self.peer_table.disconnect_source(source);
+            self.clear_headers_sync_for(source);
             return GetheadersOutcome::Failed;
         }
         tracing::debug!(
@@ -900,9 +1017,10 @@ impl BlockSync {
         GetheadersOutcome::Sent
     }
 
-    /// Whether an unexpired request with these exact parameters is already
-    /// pending on this exact connection. Identity is the full `PeerSource`:
-    /// a same-address replacement is a different request.
+    /// An unanswered request owns its exact connection while its ordinary
+    /// timeout is live, and indefinitely below the work floor or during a
+    /// download-twice sync. An answered request only paces an identical
+    /// locator and target until its original deadline.
     fn has_pending_getheaders(
         &self,
         source: PeerSource,
@@ -910,14 +1028,30 @@ impl BlockSync {
         target_height: u32,
         now: Instant,
     ) -> bool {
+        let below_floor = self.below_header_work_floor();
         let scheduler = self.scheduler.lock();
-        let Some(pending) = scheduler.header_request else {
+        let Some(owned) = scheduler.headers_sync.get(&source) else {
             return false;
         };
-        pending.source == source
-            && pending.locator_tip_hash == locator_tip_hash
-            && pending.target_height == target_height
-            && now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT
+        let Some(request) = owned.request else {
+            return false;
+        };
+        let unexpired = now.saturating_duration_since(request.requested_at) < request.timeout();
+        match request.state {
+            HeaderRequestState::AwaitingResponse
+                if below_floor || owned.presync.is_some() || unexpired =>
+            {
+                true
+            }
+            HeaderRequestState::Answered
+                if request.locator_tip_hash == locator_tip_hash
+                    && request.target_height == target_height
+                    && unexpired =>
+            {
+                true
+            }
+            HeaderRequestState::AwaitingResponse | HeaderRequestState::Answered => false,
+        }
     }
 
     /// Routes one inbound batch to direct admission or to the delivering
@@ -939,14 +1073,16 @@ impl BlockSync {
     ///   admitted directly — an empty batch, source-less delivery, unknown
     ///   fork, or fork already at the network minimum — or when the
     ///   committed phase released headers; and `None` when the sync state
-    ///   retained the batch, in which case this call already retired the
-    ///   answered request, sent the state-cursor continuation, or ran the
-    ///   fault path.
+    ///   retained the batch, in which case the drain already consumed the
+    ///   wire request and this call sent the state-cursor continuation or ran
+    ///   the fault path.
+    /// A stale wire batch also returns `None` before sync state or admission
+    /// is touched.
     /// INVARIANT: a body-carried header is deferred below the work floor
     ///   only after standalone `PoW` and contextual validation pass; wire
     ///   batches reach admission below the floor only as
     ///   [`super::headers_presync::HeaderSyncResult::ready_headers`], and
-    ///   only a wire `headers` message mutates `headers_sync`.
+    ///   only a wire `headers` message mutates the nested presync state.
     pub(super) fn route_headers_batch(
         &self,
         headers: &[Header],
@@ -954,14 +1090,15 @@ impl BlockSync {
         wire_response: bool,
         batch_len: usize,
     ) -> Option<HeaderAdmission> {
+        if wire_response && source.is_some_and(|source| !self.peer_table.is_current(source)) {
+            return None;
+        }
         if headers.is_empty() {
             // An empty answer ends a live download-twice sync — the peer
             // has no more headers for this cursor — rather than leaving
             // the state to pace a stale request.
-            if wire_response {
-                if let Some(source) = source {
-                    self.scheduler.lock().headers_sync.remove(&source);
-                }
+            if wire_response && let Some(source) = source {
+                self.clear_presync_for(source);
             }
             return Some(self.chain.admit_headers(headers));
         }
@@ -990,10 +1127,16 @@ impl BlockSync {
             // Page validation runs without the scheduler lock: hashing a
             // full page under `scheduler` would stall body-fetch ownership
             // and every other scheduler read for its duration, so a live
-            // state leaves the map for the check and is committed back only
-            // while its connection is still live — an ownership sweep that
-            // raced in just drops the parked state.
-            let parked = self.scheduler.lock().headers_sync.remove(&source);
+            // state leaves the entry for the check and is committed back
+            // while its connection is still live. The request remains in
+            // the entry throughout this unlocked validation.
+            let parked = {
+                let mut scheduler = self.scheduler.lock();
+                scheduler
+                    .headers_sync
+                    .get_mut(&source)
+                    .and_then(|owned| owned.presync.take())
+            };
             let mut state = if let Some(state) = parked {
                 state
             } else {
@@ -1008,14 +1151,20 @@ impl BlockSync {
             };
             let outcome = Self::advance_presync_state(&mut state, headers, batch_len);
             if self.peer_table.is_current(source) {
-                self.scheduler.lock().headers_sync.insert(source, state);
+                self.scheduler
+                    .lock()
+                    .headers_sync
+                    .entry(source)
+                    .or_default()
+                    .presync = Some(state);
             }
             outcome
         };
         if outcome.finished {
-            self.scheduler.lock().headers_sync.remove(&source);
+            self.clear_presync_for(source);
         }
         if let Some(error) = outcome.failure {
+            self.clear_presync_for(source);
             self.settle_presync_fault(source, error);
             return None;
         }
@@ -1031,21 +1180,10 @@ impl BlockSync {
             self.peer_table
                 .note_headers_progress(source, outcome.height);
         }
-        // The batch answered the connection's outstanding request, so
-        // that request retires here, before the continuation: Core
-        // clears the request stamp on every processed headers message
-        // and then sends the sync's own locator whenever the sync wants
-        // more (`net_processing.cpp:2932-2943`). Retiring first lets a
-        // phase transition reach the wire even when its locator repeats
-        // the request this batch answered — the transition re-anchors at
-        // the fork — and the fresh registration restarts expiry from this
-        // send, so the connection that did respond is never blamed for
-        // silence. The continuation also leaves on a releasing batch: the
-        // REDOWNLOAD cursor sits up to `redownload_buffer_size` headers
-        // deeper than the release point, and a page requested from the
-        // release point would fail the state's continuity check and
-        // restart the whole sync.
-        self.consume_header_request(Some(source), wire_response, false);
+        // The inbound drain consumed the wire request before routing here.
+        // Send the state-cursor continuation from that released request;
+        // REDOWNLOAD may sit deeper than the release point, so reusing its
+        // locator would fail continuity and restart the sync.
         if outcome.request_more {
             self.send_presync_getheaders(source, outcome.locator, outcome.height);
         }
@@ -1059,7 +1197,7 @@ impl BlockSync {
                 // the sync instead; the paced ancestry re-request restarts
                 // it once admission reopens, the same retry the direct path
                 // gets.
-                let dropped = self.scheduler.lock().headers_sync.remove(&source);
+                let dropped = self.clear_presync_for(source);
                 if let Some(mut state) = dropped {
                     state.finalize();
                 }
@@ -1251,8 +1389,9 @@ impl BlockSync {
             );
             return;
         }
-        if self.peer_table.disconnect_source(source) {
-            self.clear_header_request_for(source);
+        let disconnected = self.peer_table.disconnect_source(source);
+        self.clear_headers_sync_for(source);
+        if disconnected {
             self.scheduler
                 .lock()
                 .window

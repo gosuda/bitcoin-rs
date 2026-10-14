@@ -244,7 +244,10 @@ impl<S: KvStore> IndexWriter<S> {
         watermark: IndexWatermark,
         floor: u32,
     ) -> Result<(), IndexError> {
-        if capabilities.is_empty() || capabilities.contains(IndexCapability::ScriptLive) {
+        if capabilities.is_empty()
+            || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters)
+        {
             return Err(IndexError::AnchorUnsupportedSelection);
         }
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
@@ -332,10 +335,26 @@ impl<S: KvStore> IndexWriter<S> {
                 .ok_or(IndexError::NonContiguousPrepared { watermark: current })?,
         };
         let mut expected_parent = current.map(|w| w.hash);
+        let mut previous_filter_header = if capabilities.contains(IndexCapability::CompactFilters) {
+            ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
+            match current {
+                None => [0; 32],
+                Some(w) => {
+                    let parent =
+                        super::filters::read(self.indexer.store.snapshot()?.as_ref(), &w.hash)?;
+                    if parent.is_none() {
+                        ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
+                    }
+                    parent.ok_or(IndexError::InvalidCompactFilter)?.header
+                }
+            }
+        } else {
+            [0; 32]
+        };
         let mut merged = PendingRows::default();
         let mut last = None;
         let block_count = batch.len();
-        for (block_index, block) in batch.into_blocks().into_iter().enumerate() {
+        for (block_index, mut block) in batch.into_blocks().into_iter().enumerate() {
             if block.height != expected_height {
                 return Err(IndexError::NonContiguousPrepared { watermark: current });
             }
@@ -343,6 +362,10 @@ impl<S: KvStore> IndexWriter<S> {
                 if block.parent_hash != parent {
                     return Err(IndexError::NonContiguousPrepared { watermark: current });
                 }
+            }
+            for (_, filter) in &mut block.rows.filter_rows {
+                filter.chain(previous_filter_header);
+                previous_filter_header = filter.header;
             }
             merged.append(block.rows);
             if block_index + 1 < block_count {
@@ -398,6 +421,7 @@ impl<S: KvStore> IndexWriter<S> {
     ) -> Result<(), IndexError> {
         if capabilities.contains(IndexCapability::ScriptHistory)
             || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters)
         {
             return Err(IndexError::MissingSpentScripts);
         }
@@ -412,7 +436,8 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Atomically rolls back one block with the exact scripts of its spent
-    /// coins, required when `ScriptHistory` or `ScriptLive` is selected.
+    /// coins, required when `ScriptHistory`, `ScriptLive`, or `CompactFilters`
+    /// is selected.
     ///
     /// The commit point is the successful return from the durable conditional
     /// write, so recovery sees either the prior state or the complete rollback.

@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -125,12 +125,22 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         proxy_randomize_credentials: false,
     })
     .collect::<Vec<_>>();
+    let mut local_services =
+        ctx.network.local_services & !bitcoin::p2p::ServiceFlags::COMPACT_FILTERS.to_u64();
+    if ctx
+        .indexes
+        .compact_filters
+        .as_ref()
+        .is_some_and(|index| index.filter_index_info().is_ok_and(|info| info.synced))
+    {
+        local_services |= bitcoin::p2p::ServiceFlags::COMPACT_FILTERS.to_u64();
+    }
     typed_to_sonic(&v31::GetNetworkInfo {
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
         subversion: USER_AGENT.to_owned(),
         protocol_version: 70016,
-        local_services: format!("{:016x}", ctx.network.local_services),
-        local_services_names: bitcoin_rs_p2p::service_flag_names(ctx.network.local_services)
+        local_services: format!("{local_services:016x}"),
+        local_services_names: bitcoin_rs_p2p::service_flag_names(local_services)
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -310,7 +320,7 @@ pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Val
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let banned = ctx.network.p2p.banned();
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_time_secs();
     let entries = banned
         .iter()
         .map(|entry| {
@@ -489,7 +499,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let count = optional_u64(params, 0, 1)?;
 
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_time_secs();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 

@@ -40,7 +40,7 @@ use bitcoin_rs_rpc::{
     },
 };
 
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, is_coinbase_tx};
+use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
@@ -1635,6 +1635,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
         indexes: IndexHandles {
             derived_index: None,
             script_index: None,
+            compact_filters: None,
             esplora_tx_index: None,
             derived_index_status: None,
         },
@@ -1732,7 +1733,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
         mined_block
             .txs
             .iter()
-            .filter(|tx| !is_coinbase_tx(tx))
+            .filter(|tx| !tx.is_coinbase())
             .map(|tx| Arc::new(tx.clone())),
     );
     assert_eq!(committed.len(), 1, "one admitted candidate: the spend");

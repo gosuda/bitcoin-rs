@@ -16,7 +16,8 @@ pub struct DerivedIndexCapability {
 }
 
 impl DerivedIndexCapability {
-    /// Builds the capability projection over the worker publication cells.
+    /// Builds transaction/script status over the shared worker publication cells.
+    /// Compact-filter readiness is exposed separately through its query adapter.
     #[must_use]
     pub fn new(
         lifecycle: Option<Arc<ArcSwap<DerivedIndexLifecycle>>>,
@@ -26,7 +27,7 @@ impl DerivedIndexCapability {
         Self {
             lifecycle,
             runtime,
-            enabled,
+            enabled: enabled.without(crate::IndexCapability::CompactFilters),
         }
     }
 
@@ -50,7 +51,10 @@ impl DerivedIndexCapability {
             }
             DerivedIndexLifecycle::Serving(engine) => engine,
         };
-        let phase = runtime.phase();
+        let phase = runtime.phase().with_leg(
+            IndexCapabilities::COMPACT_FILTERS,
+            super::ReconcileLeg::Forward,
+        );
         if let Some((from_height, to_height)) = phase.rolling_back() {
             return CapabilityState::RollingBack {
                 from_height,

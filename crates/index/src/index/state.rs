@@ -1,10 +1,10 @@
 //! Coherent write fences and cooperative, versioned capability-reset recovery.
 
 use super::{
-    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
-    capability::IndexWatermarks, capability::SCRIPT_HISTORY_WATERMARK_KEY,
-    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::TX_LOOKUP_WATERMARK_KEY,
-    capability::WATERMARK_LEN, error::IndexError,
+    capability::COMPACT_FILTERS_WATERMARK_KEY, capability::IndexCapabilities,
+    capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
+    capability::SCRIPT_HISTORY_WATERMARK_KEY, capability::SCRIPT_LIVE_WATERMARK_KEY,
+    capability::TX_LOOKUP_WATERMARK_KEY, capability::WATERMARK_LEN, error::IndexError,
 };
 use bitcoin_rs_storage::{
     BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit, WriteCondition,
@@ -186,6 +186,7 @@ pub(super) fn capture_write_fence<S: KvStore>(
     let observed_script_history =
         snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY)?;
     let observed_script_live = snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?;
+    let observed_filters = snapshot.get(ColumnFamily::UtxoMeta, COMPACT_FILTERS_WATERMARK_KEY)?;
     drop(snapshot);
 
     let state = match observed_reset.as_deref() {
@@ -222,6 +223,10 @@ pub(super) fn capture_write_fence<S: KvStore>(
                 .map(IndexWatermark::from_bytes)
                 .transpose()?,
             script_history: observed_script_history
+                .as_deref()
+                .map(IndexWatermark::from_bytes)
+                .transpose()?,
+            compact_filters: observed_filters
                 .as_deref()
                 .map(IndexWatermark::from_bytes)
                 .transpose()?,
@@ -398,7 +403,7 @@ fn watermark_condition<'a>(
     }
 }
 
-/// Applies one ordinary batch under the coherent fence. Five exact conditions
+/// Applies one ordinary batch under the coherent fence. Six exact conditions
 /// fence the batch: reset state, ordinary revision, and all watermark rows.
 /// The commit also inserts the next revision. A lost race with an unchanged
 /// reset returns [`IndexError::StaleIndexState`]. A moved reset cooperatively
@@ -432,12 +437,14 @@ pub(super) fn commit_ordinary<S: KvStore>(
         .watermarks
         .script_live
         .map(|watermark| watermark.to_bytes());
+    let compact_filters = fence.watermarks.compact_filters.map(|w| w.to_bytes());
     let conditions = [
         reset_condition(&fence.state),
         revision_condition(fence.revision, &revision_bytes),
         watermark_condition(tx_lookup.as_ref(), TX_LOOKUP_WATERMARK_KEY),
         watermark_condition(script_history.as_ref(), SCRIPT_HISTORY_WATERMARK_KEY),
         watermark_condition(script_live.as_ref(), SCRIPT_LIVE_WATERMARK_KEY),
+        watermark_condition(compact_filters.as_ref(), COMPACT_FILTERS_WATERMARK_KEY),
     ];
     if store.write_durable_if(&conditions, batch)? {
         return Ok(());
@@ -591,10 +598,10 @@ pub(super) fn resume_capability_reset<S: KvStore>(
         requested_mask = 0;
 
         let capabilities = IndexCapabilities::from_mask(work.mask)?;
-        let mut column_families: Vec<ColumnFamily> = capabilities
+        let mut scans: Vec<(ColumnFamily, &[u8])> = capabilities
             .iter()
             .flat_map(IndexCapability::column_families)
-            .copied()
+            .map(|&cf| (cf, &[][..]))
             .collect();
         let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
             false,
@@ -608,7 +615,7 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             },
         )?;
         if !unselected_cursor_remains {
-            column_families.push(ColumnFamily::BlockHeaders);
+            scans.push((ColumnFamily::BlockHeaders, &[]));
         }
 
         let revision_bytes = work.revision.unwrap_or(0).to_le_bytes();
@@ -617,9 +624,12 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             revision_condition(work.revision, &revision_bytes),
         ];
         let mut claim_changed = false;
-        'families: for cf in column_families {
+        if capabilities.contains(IndexCapability::CompactFilters) {
+            scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX));
+        }
+        'families: for (cf, prefix) in scans {
             loop {
-                let scan = store.scan_prefix_bounded(cf, &[], RESET_SCAN_LIMIT)?;
+                let scan = store.scan_prefix_bounded(cf, prefix, RESET_SCAN_LIMIT)?;
                 if scan.rows.is_empty() {
                     if scan.complete {
                         break;

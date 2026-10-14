@@ -29,7 +29,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
     assert!(
         sync.scheduler
             .lock()
-            .header_request
+            .header_request()
             .is_some_and(|request| request.source.addr == invalid_peer),
         "a pending getheaders must name the invalid peer before its batch arrives"
     );
@@ -50,7 +50,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
     sync.tick();
 
     assert!(
-        sync.scheduler.lock().header_request.is_none(),
+        sync.scheduler.lock().header_request().is_none(),
         "an attributed invalid-header fault must release the pending header request"
     );
     assert!(

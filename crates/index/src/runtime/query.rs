@@ -13,6 +13,7 @@ use super::{
     deserialize, record_at_height,
 };
 
+mod filters;
 mod scripts;
 mod transactions;
 
@@ -231,7 +232,7 @@ impl CapabilityFloors {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup = floor,
             IndexCapability::ScriptHistory => self.script_history = floor,
-            IndexCapability::ScriptLive => {}
+            IndexCapability::ScriptLive | IndexCapability::CompactFilters => {}
         }
     }
 }
@@ -326,6 +327,11 @@ impl DerivedIndexQueryEngine {
     {
         self.query_health()?;
         self.require_enabled(required)?;
+        if required.contains(IndexCapability::CompactFilters)
+            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(reason));
+        }
 
         // Live answers compose the index snapshot, the authoritative UTXO set,
         // and the applied tip. Apply mutates UTXO before publishing that tip,
@@ -387,6 +393,11 @@ impl DerivedIndexQueryEngine {
         let result = f(snapshot.as_ref(), &tip_before, &mut budget, floors);
 
         self.query_health()?;
+        if required.contains(IndexCapability::CompactFilters)
+            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(reason));
+        }
         let tip_after = self.applied_tip.load_full();
         let revision_after = self.runtime.revision();
         if revision_before != revision_after
@@ -417,7 +428,7 @@ impl DerivedIndexQueryEngine {
         let snapshot = reader
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-        let mut marks = [None; 3];
+        let mut marks = [None; 4];
         for capability in IndexCapability::ALL {
             if !required.contains(capability) {
                 continue;

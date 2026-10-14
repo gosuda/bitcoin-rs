@@ -15,7 +15,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
 | Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
-| Transport | Legacy v1 envelope only; BIP324 v2 is not implemented (§7) |
+| Transport | Legacy v1 by default; experimental BIP324 v2 is opt-in via `--v2transport` (§7) |
 
 ### 2.1 Version-Bump Rules
 
@@ -27,8 +27,9 @@ Re-pinning to a newer Core version requires all of:
 
 ## 3. Transport and Envelope
 
-- Bitcoin P2P **v1 envelope only** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload.
-- Payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB`. Core caps messages at 4 MiB; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference.
+- Default Bitcoin P2P **v1 envelope** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload.
+- Experimental BIP324 v2 is present behind `--v2transport` (off by default), with key exchange, packet framing (capped at `MAX_PAYLOAD_LEN = 4,000,000` bytes, Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH`, `crates/p2p/src/bip324/reader.rs`) and v1 fallback (`crates/p2p/src/transport.rs`, `bip324.rs`). Reference vectors and in-tree negotiation tests are implementation evidence, not recorded bidirectional Core interoperability (§7).
+- V1 payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB` (`crates/p2p/src/wire.rs`). Core caps v1 messages at 4,000,000 bytes; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference.
 - Network magic and default ports come from `bitcoin_rs_primitives::Network` and are asserted equal to Core's constants per network (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444).
 - Fork networks sharing a chain may override the message-start bytes with `--p2p-magic` (a bitcoin-rs extension; requires `--network mainnet` semantics and explicit `--connect` peers). Not a Core option; recorded as extension, not parity.
 
@@ -42,7 +43,7 @@ The `version` message pins:
 | Field | Value | Core 31.1 comparison |
 | :--- | :--- | :--- |
 | `version` | `70016` | matches Core's latest protocol version |
-| `services` | `NETWORK \| WITNESS`, or `NETWORK_LIMITED \| WITNESS` when `storage.prune_target_mb > 0` | Core derives the same set from the prune setting (`init.cpp:2022-2026`): a pruned node never advertises `NODE_NETWORK`. No `COMPACT_FILTERS`/`BLOOM`: those services do not exist here |
+| `services` | `NETWORK \| WITNESS`, or `NETWORK_LIMITED \| WITNESS` when `storage.prune_target_mb > 0`; adds `COMPACT_FILTERS` only when the optional filter index is ready | Core derives the base set from the prune setting (`init.cpp:2022-2026`): a pruned node never advertises `NODE_NETWORK`. `--blockfilterindex` defaults off and requires unpruned history. `BLOOM` remains unsupported. |
 | `relay` | `true` on a full-relay connection, `false` on a block-relay-only dial | matches Core's per-connection preference (`PushNodeVersion`, `net_processing.cpp:1651-1689`) |
 | `user_agent` | `/bitcoin-rs:<version>/` | distinct subver string; Core records it in `getpeerinfo.subver` |
 | `timestamp` | `0` | deviation: we do not send a real clock; Core 31 does not misbehave-score time offsets (live interop evidence), but this remains a recorded deviation |
@@ -83,7 +84,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
 | `getblocktxn` | served | BIP152. A stored, non-invalid block within 10 of the applied tip is answered with `blocktxn`, including a block that became stale after its compact announcement. As in Core, this shallow path requires body availability but does not apply the inventory stale-age filter. A deeper request uses full witness-bearing `block` inventory policy, including the stale validation and age restrictions below; depth is checked before past-the-end indexes. Unknown or unavailable blocks stay unanswered. The mutually supported compact serving profile determines transaction witness encoding. On the `blocktxn` path an index past the body is a protocol disconnect; empty or non-increasing indexes are rejected at the inbound boundary regardless of depth. The headroom gate runs before any body load. |
 | `merkleblock` / `filterload` / `filteradd` / `filterclear` | ignored | BIP37. We do not advertise `NODE_BLOOM`, so a default Core peer never sends them; if one does, they are ignored. |
-| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | BIP157/158 compact-filter P2P is unsupported. We do not advertise `NODE_COMPACT_FILTERS` and do not serve compact filters. |
+| `getcfilters` / `getcfheaders` / `getcfcheckpt` | served when enabled and ready | BIP157 basic type 0 only; active-chain stop, at most 1,000 filters / 2,000 hashes; checkpoint headers at positive multiples of 1,000. Filter payloads stream under send headroom from one index snapshot. Unknown, unsupported, unavailable and oversized requests receive no answer. |
+| `cfilter` / `cfheaders` / `cfcheckpt` | ignored | The node serves external consumers; it does not synchronize its validated chain through compact filters. |
 | `reject` | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
 | `alert` | Decoded as opaque bytes, ignored. The command is dead in Core. |
 
@@ -144,10 +146,11 @@ transport I/O/timeouts, and local encoding failures never discourage an IP.
 | Condition | bitcoin-rs action for an ordinary automatic nonlocal peer | Core 31.1 reference |
 | :--- | :--- | :--- |
 | Unknown command after readiness | ignore | ignore |
+| Decoded compact-filter requests with a non-basic type, unknown/unapplied stop, inverted range or more than 1,000 filters / 2,000 hashes | ignore and keep the connection open, without discouragement | `PrepareBlockFilterRequest` disconnects without discouragement; this is a deliberate connection-policy deviation, tested by the compact-filter wire probe |
 | Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
 | Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
 | Checksum failure | disconnect and temporarily avoid the IP | Core v1 rejects the message and resets its decoder; this remains a stricter bitcoin-rs policy |
-| Invalid command bytes, wrong magic, or length above 32 MiB | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection is separate from `Misbehaving`; Core's message-size cap is 4 MiB |
+| Invalid command bytes, wrong magic, or length above 32 MiB | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection is separate from `Misbehaving`; Core's message-size cap is 4,000,000 bytes |
 | `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000 | disconnect and temporarily avoid the IP | the relevant Core handlers mark for discouragement |
 | Locator above 101 or `notfound` above 50,000 | disconnect and temporarily avoid the IP | Core directly disconnects oversized locators; oversized `notfound` is ignored by request handling, without generic punishment |
 | `getblocktxn` indexes beyond the body on the `blocktxn` serving path | disconnect and temporarily avoid the IP | Core marks these body-relative bounds violations for discouragement (`net_processing.cpp:2600-2608`), separately from differential decoding |
@@ -201,7 +204,7 @@ issued through `GetRequestsToSend` in `SendMessages` (`net_processing.cpp:6206`)
 TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 `net_processing.cpp:319` under the `INVENTORY_BROADCAST_*` delays at `:163-166`):
 
-1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
+1. **BIP324 v2 transport**: experimental, default-off implementation. V1 remains the default; Core 31 accepts v1 peers. Promotion requires a recorded live bidirectional Core 31.1 run proving v2 in both directions; the external-evidence inventory does not yet claim that qualification (issue #1503).
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: one P2P-owned `AddressBook` retains canonical
@@ -413,7 +416,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    with the original confirmation time, without replacing newer demonstrated
    anchors. Dispatched attempts never return merely because connection fails.
    A stale queue item cannot dispatch after its reservation was returned.
-5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
+5. **Service bits**: the base set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. `NODE_BLOOM` remains unsupported. `NODE_COMPACT_FILTERS` is advertised on new handshakes only while the explicitly enabled filter index is healthy and caught up. Pruning and filter indexing cannot be enabled together. Existing connections retain their negotiated flags, but each filter query checks current readiness. See [the indexing contract](../contracts/indexing.md) and [the pinned Core/Kyoto runner](../../tools/compact-filter-interop/README.md).
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic discouragement** (§6) uses bounded exact-IP expiry rather than Core's rolling Bloom filter. The explicit strict-parser, transport and permission differences are listed in §6; there is no additive score.
 8. **Chain-sync timeout scope**: a full-relay outbound connection that stops bringing a better chain is timed out as Core does (`ConsiderEviction`, `net_processing.cpp:5498-5550`), with one `getheaders` probe at 20 minutes (`CHAIN_SYNC_TIMEOUT`, definition `net_processing.cpp:109`) and the first four outbound connections to reach the tip protected (`MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT`, definition `net_processing.cpp:107`). Protection and the timeout both key on a tip the peer actually handed us, never on the height its handshake claimed: Core reads `pindexBestKnownBlock` there, not `nStartingHeight` (use-site `net_processing.cpp:3203-3210`). An operator-pinned connection is exempt in both, as it is in Core: `IsOutboundOrBlockRelayConn()` excludes `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Block-relay-only connections are exempt here; Core times out both outbound classes. A connection dialed for blocks alone is therefore never replaced by this timer.
