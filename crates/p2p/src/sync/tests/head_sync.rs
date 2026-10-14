@@ -124,6 +124,155 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
 }
 
 #[test]
+fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let SyncHarness {
+        sync,
+        peers,
+        applied_tip,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        ..
+    } = SyncHarness::new(tree);
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    sync.tick();
+    let original_tip = applied_tip.load_full().ok_or("missing applied tip")?.hash;
+
+    let peer = test_addr(9781, 0)?;
+    let _old_rx = connect_peer(&peers, synthetic_peer(peer, 2));
+    let old_source = current_source(&peers, peer);
+    let block = regtest_fixture::mined_block_with_prev_hash(
+        blocks[0].block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .or_fail("regtest fixture block");
+    let hash = Hash256::from(block.block_hash());
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![block.header],
+        source: Some(old_source),
+        wire_response: false,
+        body_fetch_owned: false,
+    })?;
+    let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+    inbound.source = Some(old_source);
+    inbound_blocks_tx.send(inbound)?;
+
+    assert!(peers.disconnect_source(old_source));
+    let _replacement_rx = connect_peer(&peers, synthetic_peer(peer, 2));
+    let replacement = current_source(&peers, peer);
+    assert_ne!(replacement, old_source);
+    sync.drain_inbound_headers();
+    sync.drain_inbound_blocks();
+
+    assert!(sync.chain.block_tree().lookup(hash).is_none());
+    assert!(!sync.scheduler.lock().stager.contains(&hash));
+    assert_eq!(
+        applied_tip.load_full().ok_or("missing applied tip")?.hash,
+        original_tip,
+        "a retired delivery must not enter through its body-carried header",
+    );
+
+    let mut current_inbound = crate::InboundBlock::from_decoded(block);
+    current_inbound.source = Some(replacement);
+    inbound_blocks_tx.send(current_inbound)?;
+    sync.tick();
+    assert_eq!(
+        applied_tip.load_full().ok_or("missing applied tip")?.hash,
+        hash,
+        "the same body from a current connection remains admissible",
+    );
+    Ok(())
+}
+
+#[test]
+fn staged_body_retries_after_source_replacement_without_replacement_credit() -> TestResult {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let SyncHarness {
+        sync,
+        peers,
+        applied_tip,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        ..
+    } = SyncHarness::new(tree);
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    sync.tick();
+    assert_eq!(
+        applied_tip.load_full().ok_or("missing applied tip")?.hash,
+        Hash256::from(blocks[0].block_hash()),
+    );
+
+    let peer = test_addr(9780, 0)?;
+    let old_rx = connect_peer(&peers, synthetic_peer(peer, 3));
+    let old_source = current_source(&peers, peer);
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        blocks[0].block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .or_fail("regtest fixture block");
+    let block3 = regtest_fixture::mined_block_with_prev_hash(
+        block2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )
+    .or_fail("regtest fixture block");
+    let block3_hash = Hash256::from(block3.block_hash());
+
+    let mut orphan_body = crate::InboundBlock::from_decoded(block3);
+    orphan_body.source = Some(old_source);
+    inbound_blocks_tx.send(orphan_body)?;
+    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks();
+    next_getheaders(&old_rx)?;
+    {
+        let scheduler = sync.scheduler.lock();
+        assert!(scheduler.stager.contains(&block3_hash));
+        assert_eq!(
+            scheduler.stager.staged_source(&block3_hash),
+            Some(old_source),
+            "the staged body must retain its delivering connection",
+        );
+    }
+
+    assert!(peers.disconnect_source(old_source));
+    let _replacement_rx = connect_peer(&peers, synthetic_peer(peer, 3));
+    let replacement_source = current_source(&peers, peer);
+    assert_ne!(replacement_source, old_source);
+
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![block2.header],
+        source: Some(replacement_source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    sync.drain_inbound_headers();
+    let mut parent_body = crate::InboundBlock::from_decoded(block2);
+    parent_body.source = Some(replacement_source);
+    inbound_blocks_tx.send(parent_body)?;
+    sync.tick();
+    sync.tick();
+
+    assert_eq!(
+        applied_tip.load_full().ok_or("missing applied tip")?.hash,
+        block3_hash,
+        "the retained body must apply after its parent header arrives",
+    );
+    assert!(!sync.scheduler.lock().stager.contains(&block3_hash));
+    let replacement_session = peers
+        .sessions()
+        .into_iter()
+        .find(|session| session.addr == peer)
+        .ok_or("replacement peer session missing")?;
+    assert!(
+        !replacement_session.demonstrated_tips.contains(&block3_hash),
+        "a predecessor's staged body must not credit its replacement",
+    );
+    Ok(())
+}
+
+#[test]
 fn headers_batch_missing_parent_requests_ancestry() -> TestResult {
     // An announce of a tip whose parent is unknown cannot attach. The
     // announcer demonstrably has the gap, so sync asks it for the ancestry
