@@ -237,6 +237,17 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
   rejection drops the staged body (`stager.discard`, never re-queued;
   its download-window record is only released when the delivery drains), disconnects the source, and marks
   it unresponsive — the same outcome a rejected `headers` batch produces.
+  A staged body's recorded source is retained for work-floor validation and
+  header retry after that source disconnects, but exact-source checks prevent
+  the retry from crediting or faulting a same-address replacement
+  (`staged_body_retries_after_source_replacement_without_replacement_credit`).
+  The inbound body drain drops deliveries whose source is already retired
+  when checked at dequeue, before historical or foreground routing
+  (`queued_body_from_replaced_source_cannot_enter_staging`).
+  This check does not hold peer-table authority through body validation or
+  staging: a body accepted while its source is current may finish staging
+  after concurrent retirement. Credit and fault attribution still require
+  the exact source to be current.
 - A `cmpctblock` outcome that fetches the body itself (`RequestMissing`'s
   `getblocktxn`, `Fallback`'s `getdata`) is marked
   (`InboundHeaders::body_fetch_owned`): once the tip admits, the window
@@ -263,9 +274,10 @@ Proof: `crates/p2p/src/sync/tests/head_sync.rs` covers body-carried header
 admission and apply, gap-fill requests for staged bodies ahead of their
 header chain, announcer-directed `getheaders` on unattached batches,
 non-response forwards preserving pending-request state, staged-retry
-credit, shared-ancestor capability, bounded fork evidence, credit for
-already-known tips, the compact-owned pending mark, and the retained
-mark resolving once its tip header attaches.
+credit, `staged_body_retries_after_source_replacement_without_replacement_credit`,
+shared-ancestor capability, bounded fork evidence, credit for already-known
+tips, the compact-owned pending mark, and the retained mark resolving once its
+tip header attaches.
 `crates/p2p/src/sync/tests/limited_peers.rs` pins the block-body service clause
 on both paths: the `statically_fanout_eligible` rows for the
 initial-block-download exclusion, the 287/288-block retained-window boundary,
@@ -489,9 +501,13 @@ prefilter exemption.
   unanswered timeout below the work floor or during PRESYNC/REDOWNLOAD
   retires the connection and its sync state before queued headers are
   processed, even when it is the last usable peer. Recovery starts on another
-  connection. Deliveries from retired or replaced connections are ignored,
-  never admitted or attributed to the replacement. The wire has no request
-  identifier with which to reconcile overlapping responses.
+  connection. Wire deliveries whose source is retired or replaced at the
+  ingress identity check are ignored, never admitted or attributed to the
+  replacement. Foreground bodies accepted while their source is current may
+  finish staging and retry their embedded header after retirement through the
+  body-carried path, retaining their source for work-floor validation while
+  exact-source credit and fault checks exclude the replacement. The wire has
+  no request identifier with which to reconcile overlapping responses.
 - The serving side is the mirror rule: below the network's assumed work the
   node answers `getheaders` with the empty response
   (`ActiveChainQuery::headers_after`, `net_processing.cpp:3010-3018`), so a
@@ -506,14 +522,20 @@ Proof: `crates/p2p/src/sync/tests/headers_presync.rs` tests
 presync lifecycle end to end — first-pass commitment collection, the
 work-floor crossing that restarts the sync at the fork point, commitment
 divergence on a substituted redownload header, salted-commitment spends, the
-benign lost-continuity break, and the disconnects every other failure costs
-the connection. `crates/p2p/src/sync/tests/chain_sync.rs` test
+benign lost-continuity break, and the disconnects every other failure costs the
+connection. `crates/p2p/src/sync/tests/chain_sync.rs` test
 `frontier_and_eviction_probes_do_not_overwrite_live_requests` covers
 above-floor request ownership; `chain_sync_probe_holds_request_for_its_response_window`
 and `expired_chain_sync_probe_does_not_suppress_frontier_request` prove its
 unanswered two-minute gate; `empty_chain_sync_probe_keeps_original_five_second_pacing`
 and `replacing_expired_frontier_with_chain_sync_probe_releases_owner` cover
 answered pacing and selector ownership.
+`crates/p2p/src/sync/tests/head_sync.rs` test
+`staged_body_retries_after_source_replacement_without_replacement_credit`
+proves staged-body recovery without replacement credit after disconnect.
+`queued_body_from_replaced_source_cannot_enter_staging` in the same suite
+proves deliveries already stale at dequeue cannot enter staging through the
+inbound body drain.
 `crates/p2p/benches/headers_presync.rs` measures the hashing bound the first
 pass pays per page.
 
