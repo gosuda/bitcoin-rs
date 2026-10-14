@@ -10,6 +10,7 @@ use crate::{
     tree::BlockTree,
 };
 
+/// Maximum live future drift from the caller's network-adjusted clock.
 const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
 /// Selects which contextual header checks apply to a batch of headers.
@@ -54,6 +55,10 @@ pub enum HeaderAdmission {
 /// appended, so the returned ids stay 1:1 with the input headers.
 ///
 /// `now_secs` sets the live future-drift bound; historical replay ignores it.
+///
+/// An empty tree admits only `network`'s genesis, the one header exempt from
+/// contextual checks. Like Core, a `bad-prevblk` parent refusal precedes
+/// contextual validation.
 pub fn accept_headers(
     tree: &mut BlockTree,
     headers: &[BlockHeader],
@@ -326,6 +331,10 @@ fn expected_non_retarget_bits(
     }
 }
 
+/// A retarget may move the target by at most the clamped timespan ratio:
+/// four times up, four times down, never past the proof-of-work limit, and
+/// the bound is compared after the compact round-trip, exactly as Core
+/// rounds it.
 fn expected_retarget_bits(
     network: Network,
     tree: &BlockTree,

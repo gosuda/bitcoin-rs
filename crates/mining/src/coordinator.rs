@@ -339,6 +339,10 @@ impl MiningService {
     /// [`MiningControlError::InvalidRequest`] for a malformed long-poll id;
     /// [`MiningControlError::Unavailable`] while no tip is applied, on
     /// shutdown, or when the generation raced during assembly.
+    ///
+    /// Assembly may retry after a tip move; the deployment snapshot is
+    /// always read against the candidate it describes, never paired with a
+    /// stale pre-assembly view.
     pub fn get_block_template(
         &self,
         long_poll_id: Option<&str>,
@@ -474,6 +478,10 @@ impl MiningService {
     }
 
     /// Cache lookup or single-flight assembly for one generation key.
+    ///
+    /// The live key is re-read under the lifecycle lock after assembly
+    /// completes: a candidate finished against a moved generation is a
+    /// race, not a publishable result.
     fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
         let template_id = key.template_id();
         let mut state = self.state.lock();
@@ -670,6 +678,10 @@ impl Drop for InFlightAssemblyGuard<'_> {
 ///
 /// Rule advertisement follows the candidate's own deployment facts and
 /// producer capabilities, never caller-requested names.
+/// Projects an assembled candidate into the API-11 `getblocktemplate`
+/// shape: capabilities advertise what this node produces, never
+/// client-requested rule names, and `version_bits_required` stays Core v31's
+/// hardcoded `vbrequired = 0`.
 fn template_from_candidate(
     network: Network,
     candidate: Arc<Candidate>,
@@ -863,6 +875,7 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 /// Signet challenge and flag for `network`, or `None` off signet.
 #[must_use]
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
+    /// Core's default 1-of-2 signet challenge.
     const DEFAULT_SIGNET_CHALLENGE: [u8; 71] = [
         0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3,
         0xd4, 0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d,

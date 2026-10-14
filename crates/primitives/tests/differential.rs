@@ -59,6 +59,10 @@ fn corpus_root() -> PathBuf {
 /// Returns `None` only when the selected directory does not exist (the
 /// corpus lives in another repository and may not be checked out);
 /// `Some` — possibly empty — when it does.
+///
+/// QAC-05's corpus contract: validate the corpus's own verifier wiring and
+/// reuse the published seed corpus, or skip; a corpus with no seeds would
+/// run vacuously.
 fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let dir = corpus_root().join(target);
     let entries = match std::fs::read_dir(&dir) {
@@ -79,6 +83,9 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     Some(seeds)
 }
 
+/// `rust-bitcoin`'s `wtxid` is computed from the reference crate, not from
+/// native code, and is checked against the golden wtxid — a wtxid mismatch
+/// indicates a parser disagreement, not just an encoder regression.
 fn assert_tx_roundtrip(serialized: &[u8], expected_wtxid: &str, context: &str) {
     let native = deserialize::<NativeTx>(serialized)
         .unwrap_or_else(|error| panic!("{context}: native decode failed: {error}"));
@@ -278,6 +285,9 @@ fn error_kind(error: &DecodeError) -> String {
     }
 }
 
+/// Each seed is parsed once and its verdict recorded; a different
+/// constructor against the same corpus asserts verdict-set equality, and
+/// code separators in the corpus are deliberately skipped.
 #[test]
 fn corpus_seeds_decode_with_typed_verdicts() {
     for target in ["tx_validate", "block_validate"] {

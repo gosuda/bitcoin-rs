@@ -343,6 +343,9 @@ fn check_weight_boundary(extra: u8) -> TestResult<Value> {
     )
 }
 
+/// A measure-then-assert loop: stage the entry, the parent, and each
+/// chained descendant under the live gateway, then compare memory, CPU,
+/// and file descriptors before and after each stage.
 #[test]
 fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
     let mut measurements = Vec::new();

@@ -32,6 +32,10 @@ const VECTOR_COMMITMENT: [u8; 32] = [
     0xb6, 0x4f, 0x69, 0x21, 0x65, 0xec, 0x29, 0x41, 0xf2, 0x3e, 0xac, 0xb0, 0x64, 0x76, 0xec, 0xe6,
 ];
 
+/// Three-way pin: assembled commitment equals a checked-in BIP141 vector,
+/// and a `rust-bitcoin` oracle walks the transaction set independently —
+/// neither share computes the root for the other, nor the leaves nor the
+/// reserved value.
 #[test]
 fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<(), Box<dyn Error>> {
     let parent = witnessed_tx(1, 50_000, None);

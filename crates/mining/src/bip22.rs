@@ -55,6 +55,9 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
 }
 
 /// Core `GetRejectReason` strings for header/chain failures (API-19).
+///
+/// `bad-version` prints the rejected version's unsigned bit pattern
+/// (`0x{:08x}`), matching Core's `bad-version(0x%08x)`.
 pub fn chain_reject_reason(error: &ChainError) -> CompactString {
     CompactString::from(match error {
         ChainError::InvalidPow { .. } => "high-hash",

@@ -25,6 +25,10 @@ struct RawCase {
 }
 
 /// An exact sigop budget accepts the raw entry; one unit less refuses the block.
+/// POL-05/API-28 share the mining snapshot's sigop plumbing: forged
+/// entries feed candidate values, sighash/reserved prevouts get a
+/// reconsidered evaluation, and asserts compare against the live `bitcoin`
+/// sigop oracle.
 #[test]
 fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
     let pool = Mempool::new(MempoolLimits::default());

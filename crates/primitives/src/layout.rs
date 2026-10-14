@@ -328,6 +328,10 @@ impl<'a> ParsedTransaction<'a> {
 
     /// Parses one transaction starting at `*cursor` inside `image` and
     /// advances `*cursor` past it; spans are absolute offsets into `image`.
+    ///
+    /// After a zero input count the next byte is a flag: `0x00` is Core's
+    /// legacy empty-input/empty-output form, `0x01` is the BIP144 segwit
+    /// marker, and any other value is [`DecodeError::InvalidSegwitFlag`].
     fn parse_at(image: &'a [u8], cursor: &mut u64) -> Result<Self, DecodeError> {
         let mut cur = ImageCursor {
             image,
@@ -508,6 +512,10 @@ impl<'a> ParsedTransaction<'a> {
 
     /// The input and output byte range of a `SegWit` transaction's base
     /// serialization, between the marker/flag and the witness section.
+    ///
+    /// Every span is image-relative, not transaction-relative: the
+    /// transaction's own origin is subtracted before indexing the borrowed
+    /// slice.
     fn segwit_base_body(&self) -> &'a [u8] {
         let body_end = self.outputs.last().map_or_else(
             || self.output_count_span.end(),

@@ -54,6 +54,11 @@ pub struct AssumeUtxoData {
     pub chain_tx_count: u64,
 }
 
+/// `nMinimumChainWork` copied from `src/kernel/chainparams.cpp` in the
+/// Bitcoin Core tree this workspace links against (the `libbitcoinkernel-sys`
+/// vendored client, 31.99). These constants are Core's per-release tuning,
+/// not consensus rules, and are re-copied whenever the pinned Core revision
+/// moves — the [`MAINNET_ASSUME_VALID_HEIGHT`] anchor moving is the tell.
 const MAINNET_MINIMUM_CHAIN_WORK: [u8; 32] =
     decode_compiled_hex("0000000000000000000000000000000000000001128750f82f4c366153a3a030");
 
@@ -437,6 +442,10 @@ impl Network {
     ///
     /// See [`ChainTxData`]. Regtest carries Core's deliberately non-zero rate
     /// against a zero baseline, which is what makes progress testable there.
+    ///
+    /// Values are copied from the same pinned Core `chainparams.cpp` as
+    /// [`MAINNET_MINIMUM_CHAIN_WORK`] (chain-tx data generated 2026-02-25)
+    /// and move with it.
     #[must_use]
     pub const fn chain_tx_data(self) -> ChainTxData {
         match self {
@@ -476,6 +485,9 @@ impl Network {
     ///
     /// Compare as byte arrays: for a fixed width, big-endian lexicographic order
     /// is numeric order.
+    ///
+    /// Regtest returns zero: Core leaves `nMinimumChainWork` unset there so a
+    /// one-block regtest chain still counts as synced.
     #[must_use]
     pub const fn minimum_chain_work(self) -> [u8; 32] {
         match self {
@@ -653,6 +665,10 @@ const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
     Hash256::from_le_bytes(&out)
 }
 
+/// Mainnet assume-UTXO anchors copied from Core's
+/// `src/kernel/chainparams.cpp`: heights `840_000`–`935_000` from v31.1
+/// (`9be056a8a72b624dae9623b2f7bded92c2a21c91`), height `965_000` from
+/// v32.0rc1 (`d0231bb01d83178224bf7b198ba04f78cc2c89ef`).
 const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
     AssumeUtxoData {
         height: 840_000,

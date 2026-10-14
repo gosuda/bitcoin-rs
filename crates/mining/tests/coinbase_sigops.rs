@@ -26,6 +26,9 @@ fn sigop_limited(segwit_active: bool, max_sigops: u64) -> CandidateContext {
     }
 }
 
+/// A coinbase pays Core's legacy sigop cost: `<sigops>/<satoshi> + 1`
+/// semantics apply, and a multisig output counts by `OP_CHECKMULTISIG`,
+/// not by key count.
 #[test]
 fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
     let snapshot = snapshot(1, vec![]);

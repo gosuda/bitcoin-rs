@@ -69,6 +69,8 @@ fn small_heights_use_bip34_opcodes_and_two_byte_script_sig() -> Result<(), Box<d
     Ok(())
 }
 
+/// The leaves list is clipped to template order (`body.ordered`) when
+/// computing the oracle root, matching `witness_merkle_root`.
 #[test]
 fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<(), Box<dyn Error>> {
     let parent = witnessed_tx(1, 50_000, None);
@@ -195,6 +197,10 @@ impl bitcoin_rs_mempool::AdmissionChain for ReorgCoins {
 
 /// The reserved reorg batch must store resolved BIP141 cost all the way
 /// through the real gateway and mining snapshot; template selection consumes it.
+///
+/// Unexecuted redeem and witness-program branches still count toward the
+/// sigop budget: `OP_IF`-gated spending code is costed whether or not the
+/// branch runs.
 #[test]
 fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
     use bitcoin::hashes::{hash160, sha256};

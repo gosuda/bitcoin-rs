@@ -5,6 +5,11 @@ use bitcoin_rs_consensus::locktime_cutoff;
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
+///
+/// Consensus owns the BIP9/finality rules and the tree owns the
+/// historical/MTP and next-work lookups; this resolves them into the one
+/// record a candidate builder needs. Proposal validation is the apply path
+/// ([`bitcoin_rs_chain`]'s block connection), not a second header checker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MiningChainContext {
     pub(crate) previous_block_hash: Hash256,
@@ -26,6 +31,12 @@ impl MiningChainContext {
     /// `candidate_time` is the timestamp the candidate would carry; it feeds
     /// the minimum-difficulty branch of [`header_sync::next_work_required`],
     /// exactly as the candidate's header time would during validation.
+    ///
+    /// `min_time` floors at the chain-owned
+    /// [`header_sync::minimum_candidate_time`] — the same boundary
+    /// predicate admission enforces, applied on every network as Core's
+    /// `GetMinimumTime` policy — so a locally built template cannot start
+    /// under the floor it would be rejected at.
     ///
     /// # Errors
     ///

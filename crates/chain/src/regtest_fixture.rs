@@ -174,6 +174,9 @@ pub fn mined_regtest_header(
 /// regtest bits, merkle root bound to the transaction list, nonce ground from
 /// zero. No boolean selector parameters; variant selection is by named
 /// function.
+///
+/// `version: 4` because regtest's BIP34 activation height is 500: a fixture
+/// chain longer than that must clear the shared contextual version gate.
 fn build_block(
     prev_blockhash: BlockHash,
     time: u32,

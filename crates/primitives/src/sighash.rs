@@ -168,6 +168,11 @@ impl EcdsaType {
 /// the prevout set changes. Aggregate hashes initialize once and can be shared across
 /// parallel input checks. Script code, input index, hash type, annex and code-separator
 /// position remain arguments of each digest.
+///
+/// The three algorithms are bug-for-bug compatible with Bitcoin Core's
+/// `interpreter.cpp` (`SignatureHash` for legacy, `SignatureHashWitnessV0`
+/// for BIP143, `SignatureHashSchnorr` for BIP341/342); Core's `sighash.json`
+/// vectors and independent v27.0 digests pin that in `tests/`.
 pub struct SighashCache<'t> {
     tx: &'t Tx,
     segwit_prevouts: OnceLock<Hash256>,
@@ -301,6 +306,11 @@ impl<'t> SighashCache<'t> {
     /// checker, not the digest engine. Raw zero is valid here, unlike the typed
     /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
     /// script-code suffix verbatim.
+    ///
+    /// When `SIGHASH_SINGLE` has no matching output, `hashOutputs` is the
+    /// BIP143 zero hash and the complete preimage is still hashed — a
+    /// signature over that digest can verify; this is not the legacy
+    /// SINGLE early-return bug.
     pub fn segwit_v0_signature_hash_raw(
         &self,
         input_index: usize,
@@ -694,6 +704,9 @@ mod tests {
         }
     }
 
+    /// The expected digest is an independent compatibility pin generated
+    /// with Bitcoin Core v27.0's `SignatureHashWitnessV0`, checked in so
+    /// this test does not compare two native implementations.
     #[test]
     fn bip143_sighash_pins_single() {
         let tx = synthetic_tx(2);
@@ -711,6 +724,9 @@ mod tests {
         );
     }
 
+    /// The expected digests are independent compatibility pins generated
+    /// with Bitcoin Core v27.0's `SignatureHashSchnorr` / Tapscript sighash
+    /// implementation.
     #[test]
     fn bip341_key_path_and_bip342_script_path_pins() {
         let tx = synthetic_tx(2);

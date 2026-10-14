@@ -8,6 +8,9 @@ use crate::MiningControlError;
 
 /// Core `GetNetworkHashPS` for `getnetworkhashps` (API-06). Owns lookup and
 /// height validation.
+///
+/// Any height the snapshot cannot resolve — below `-1`, above the tip, or
+/// absent from the tip's ancestry — is Core's invalid-parameter error.
 pub fn network_hash_ps(
     tree: &BlockTree,
     tip: Option<&TipSnapshot>,

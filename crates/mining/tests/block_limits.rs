@@ -21,6 +21,9 @@ type Assemble =
 const ASSEMBLERS: [Assemble; 2] = [assemble_candidate, assemble_ordered_candidate];
 
 /// Checks the 80-byte header and one-byte count against an independently parsed block.
+/// Exact fits assemble; one byte over is `CapacityExhausted`. POL-05's
+/// contract is a block-boundary against serialized bytes, so the shared
+/// count varint size rides with the body.
 #[test]
 fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult {
     let snapshot = snapshot(0, false)?;
@@ -49,6 +52,9 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
 }
 
 /// Both assemblers accept exact limits and account for the 252-to-253 count growth.
+/// Same package accepted at both sides of the 252-253 `CompactSize`
+/// boundary: the second accepts the same weight with one fewer body slot
+/// after the count varint grows by two bytes.
 #[test]
 fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult {
     for segwit_active in [false, true] {

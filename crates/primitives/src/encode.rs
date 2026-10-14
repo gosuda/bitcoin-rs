@@ -15,7 +15,9 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Byte sink used by consensus encoding. Writes cannot fail.
+/// Byte sink used by consensus encoding. Writes cannot fail — no
+/// `io::Write`, no encode-time `Result`; only decoding yields a typed
+/// [`DecodeError`].
 pub trait Sink {
     /// Appends `bytes` to the sink.
     fn write_all(&mut self, bytes: &[u8]);
@@ -276,6 +278,9 @@ fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
 
 /// Serializes a transaction; `with_witness` controls the BIP144 marker/flag and witness
 /// sections (emitted only when some input carries witness data).
+/// Serializes a transaction; BIP144 marker/flag and the witness section are
+/// emitted only when `with_witness`, so an all-empty witness section never
+/// produces an encoding a parser rejects as superfluous.
 pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
     sink.write_all(&tx.version.to_le_bytes());
     let has_witness = with_witness && tx.has_witness();

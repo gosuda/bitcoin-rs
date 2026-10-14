@@ -1,5 +1,8 @@
 use bitcoin_rs_primitives::{Network, consensus_bytes};
 
+/// The Blockstream-published genesis hash (display-order) is the external
+/// oracle; also asserts the compiled genesis bytes re-encode identically
+/// and every output is the consensus subsidy.
 #[test]
 fn native_genesis_matches_published_hash_and_compiled_bytes() {
     let times = b"The Times 03/Jan/2009 Chancellor on brink of second bailout for banks";

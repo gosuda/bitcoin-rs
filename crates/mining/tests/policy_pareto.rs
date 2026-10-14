@@ -35,6 +35,8 @@ fn selected(candidate: &Candidate) -> Vec<Txid> {
     candidate.transactions.iter().map(|tx| tx.txid).collect()
 }
 
+/// Order is authoritative for independent entries, so the same five cases
+/// also prove modified-fee ranking, not just fee ranking.
 #[test]
 fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dyn Error>> {
     let mut mempool = zero_fee_pool();
@@ -166,6 +168,8 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+/// BIP68 `Sequence` locks hold only while CSV is active: an unconfirmed
+/// lock skips the whole chunk.
 #[test]
 fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
 -> Result<(), Box<dyn Error>> {
@@ -191,6 +195,8 @@ fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
     Ok(())
 }
 
+/// POL-05's chunk limit is against the live remainder per iteration, not
+/// the original budget.
 #[test]
 fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
     let reservation = assemble_candidate(&context(), &snapshot(4, vec![]), PAYOUT)?;
@@ -243,6 +249,8 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Derives exact limits from an assembled empty candidate rather than
+/// hardcoding a value the builder's arithmetic could drift away from.
 #[test]
 fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<(), Box<dyn Error>> {
     let payout = vec![0xac];
@@ -323,6 +331,9 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Forged snapshots exercise the graph-shape error contract end-to-end:
+/// cycles that cannot exist in a real pool still fail with typed owner
+/// errors, not panics.
 #[test]
 fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
     let missing = snapshot(

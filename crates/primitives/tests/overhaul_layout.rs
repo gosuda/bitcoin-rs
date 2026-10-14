@@ -21,6 +21,10 @@ fn read_fixture(height: u32) -> Vec<u8> {
 /// Golden blocks: every transaction span slices to exactly the transaction's
 /// consumed region, per-transaction regions account for the whole block, and
 /// the materialized form re-encodes byte-identically.
+/// Every golden block: every parsed span hashes back to its fixture bytes,
+/// each transaction consumes its declared count, and the parsed witness
+/// view equals the reference block's — layout consensus is structural,
+/// not the `Hash` impl's.
 #[test]
 fn golden_blocks_validate_all_spans_and_consumed_counts() {
     for height in HEIGHTS {

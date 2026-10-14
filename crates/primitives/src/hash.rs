@@ -90,6 +90,10 @@ impl Hash256 {
     }
 
     /// Returns the first eight bytes of the little-endian representation.
+    ///
+    /// An internal convenience for the chain tree's hash-table key and a
+    /// benchmark sharder — not a durable consensus or serialization
+    /// contract, so it is deliberately unpinned.
     #[must_use]
     pub fn prefix8(self) -> [u8; 8] {
         let mut prefix = [0_u8; 8];
@@ -99,6 +103,10 @@ impl Hash256 {
 }
 
 impl fmt::Display for Hash256 {
+    /// Emits the byte-reversed (big-endian) order that is the Bitcoin
+    /// display convention. The `from_utf8` stays checked rather than
+    /// `unchecked`: every byte came from the ASCII table, and a
+    /// presentation-only path carries no `unsafe`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut encoded = [0_u8; 64];
 

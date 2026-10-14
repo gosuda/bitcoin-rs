@@ -201,6 +201,8 @@ pub fn assemble_ordered_candidate(
     finish_candidate(context, snapshot, payout, &body, reservation)
 }
 
+/// Weight/size/sigop cost of the fixed block header and coinbase, reserved
+/// before body selection begins.
 #[derive(Clone, Copy)]
 pub(crate) struct FixedReservation {
     pub(crate) weight: u64,
@@ -222,6 +224,7 @@ pub(crate) struct SelectedBody {
     pub(crate) ordered: Vec<usize>,
     pub(crate) fees: u64,
 
+    /// Body weight, including the exact `CompactSize` transaction count.
     pub(crate) weight: u64,
 }
 
@@ -270,6 +273,8 @@ fn fixed_reservation(
 
 /// Includes every requested transaction or refuses the whole ordered candidate.
 /// Transaction-count bytes belong to the body; the header and coinbase are fixed.
+/// As in Core's `generateblock`, explicitly ordered transactions claim no
+/// fees: `SelectedBody::fees` stays zero.
 fn exact_order(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
@@ -326,6 +331,11 @@ fn exact_order(
 }
 
 /// Builds commitments and adds the fixed reservation to the selected body totals.
+///
+/// The reservation is exact, not approximate: fees change only the
+/// fixed-width coinbase amount and the witness commitment replaces a
+/// fixed-width hash, so the final coinbase carries the same weight,
+/// serialized size, and sigop cost as the reserved one.
 fn finish_candidate(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,

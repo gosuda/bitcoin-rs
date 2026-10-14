@@ -114,6 +114,11 @@ fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
     })
 }
 
+/// BIP34 requires the minimal `CScriptNum` encoding, so heights `1..=16`
+/// encode as `OP_1..=OP_16` via [`push_int`] rather than a data push — the
+/// form consensus `check_bip34` accepts. Consensus also rejects a coinbase
+/// scriptSig shorter than two bytes (`bad-cb-length`), so a single-opcode
+/// prefix gets a trailing `OP_0`, matching Core's `CreateNewBlock`.
 fn coinbase_script_sig(height: u32) -> Vec<u8> {
     let mut script = push_int(i64::from(height));
 

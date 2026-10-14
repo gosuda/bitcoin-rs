@@ -310,6 +310,12 @@ impl BlockTree {
     /// sampling the height index. Side-chain, malformed, and disconnected tips
     /// walk back through parents with exponential backoff. Stops at the genesis
     /// (no parent) or after `max_entries` hashes.
+    ///
+    /// The indexed walk checks each sample's local adjacency in O(1): the
+    /// parent must be the entry at `h - 1` (absent at `h == 0`), and the
+    /// `h + 1` entry, when present, must name the node as parent. A
+    /// same-height fork swap fails the seam and falls back to the
+    /// parent walk.
     #[must_use]
     pub fn block_locator(&self, tip_id: NodeId, max_entries: usize) -> Vec<Hash256> {
         let mut locator = Vec::with_capacity(max_entries.min(32));
@@ -639,6 +645,11 @@ impl BlockTree {
     /// callers use them to purge bounded body and download state after releasing their
     /// chain-transition witness. Equal-work valid tips retain insertion order, matching
     /// normal tip publication.
+    ///
+    /// The displaced previous tip is demoted to `Stale` only when it is not
+    /// itself inside the invalid subtree. BIP9 memoized states go with the
+    /// subtree: a permanently invalid block can never anchor a
+    /// deployment-state lookup again.
     pub fn invalidate_subtree(&mut self, root: NodeId) -> Result<Vec<Hash256>, ChainError> {
         let (invalid, best) = self.invalidation_plan(root)?;
 
@@ -773,6 +784,10 @@ impl BlockTree {
         Ok(())
     }
 
+    /// Rebuilds the index into a temporary vector and installs it only
+    /// after every walked node resolves and its height matches its slot;
+    /// any anomaly clears the index to tainted rather than mutating the
+    /// live index mid-validation.
     fn refresh_active_height_index(&mut self, tip_id: NodeId) {
         let Ok(tip) = self.node(tip_id) else {
             self.active_by_height.clear_tainted();
@@ -1279,6 +1294,9 @@ mod tests {
         Ok(())
     }
 
+    /// The schedule Core's `GetLocator` produces at tip height 40
+    /// (`src/chain.cpp`): unit steps back from the tip, doubling only after
+    /// more than ten entries.
     const CORE_LOCATOR_HEIGHTS_40: [u32; 16] = [
         40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 27, 23, 15, 0,
     ];

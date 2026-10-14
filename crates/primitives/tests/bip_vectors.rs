@@ -119,6 +119,10 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
 /// BIP341 wallet test vectors: every keyPathSpending input-spending case pins
 /// the signature message for one SIGHASH mode; the cache must reproduce it
 /// from the unsigned transaction and the spent outputs alone.
+///
+/// The vectors are implementation-submission cases: key-path and script-path
+/// covers the documented annex and extension flags, and the script-path
+/// digest commits to the merkle root that fixes the executed script.
 #[test]
 fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
     let vectors = load_json("bip341-wallet-test-vectors.json")?;

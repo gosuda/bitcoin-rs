@@ -4,6 +4,9 @@ mod pow_oracle;
 use bitcoin_rs_primitives::{BlockHash, Network};
 use pow_oracle::pow_is_met;
 
+/// The byte-order of the hash word is load-bearing: a hash encoding `2^255`
+/// little-endian must still exceed the regtest target when the `bitcoin`
+/// oracle is the judge.
 #[test]
 fn oracle_accepts_genesis_and_rejects_a_far_hash() {
     let genesis = Network::Regtest.genesis_block();

@@ -13,6 +13,9 @@ struct DeploymentView<'a> {
     tree: &'a BlockTree,
     tip_id: NodeId,
 
+    /// Captured only when `tip_id` sits off the header chain, for reporting
+    /// queries; validation keeps the tree's direct view and this stays
+    /// `None`. The temporary ids are not a state cache.
     ancestry: Option<Vec<NodeId>>,
 }
 
@@ -88,6 +91,10 @@ impl DeploymentContext for DeploymentView<'_> {
 }
 
 /// CSV/Segwit contextual state for the block that would extend `previous_tip_id`.
+///
+/// Consensus owns the BIP9 state machine and deployment parameters; this
+/// module supplies the tree walk, the BIP9 cache, and this snapshot an apply
+/// or mining caller needs at a connect height.
 #[must_use]
 pub fn softfork_state(
     tree: &BlockTree,
@@ -232,6 +239,10 @@ pub enum DeploymentQueryError {
 /// `None` identifies genesis before the first applied publication. Fixed-height
 /// Taproot and native CSV/Segwit BIP9 remain native facts, not Core's newer
 /// deployment model. This read never changes validation rules.
+///
+/// The `since` binary search relies on BIP9 state monotonicity: a deployment
+/// never returns to an earlier state, so the first period in the current
+/// state can be found by bisecting rather than walking every period.
 pub fn deployment_statuses(
     tree: &BlockTree,
     network: Network,
@@ -504,6 +515,10 @@ mod tests {
         Ok(())
     }
 
+    /// Seeds a chain in which the BIP34 activation header enters the index
+    /// under its authenticated `expected_hash`: mutating the node afterward
+    /// would leave the child's `prev_blockhash` and the `by_hash` key
+    /// pointing at a discarded hash.
     fn seed_known_bip34_activation_chain(
         tree: &mut BlockTree,
         network: Network,

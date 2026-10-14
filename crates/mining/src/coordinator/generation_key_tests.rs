@@ -18,6 +18,8 @@ fn long_poll_round_trips_template_id() {
     assert_eq!(TemplateId::new(&tip, 7).as_str(), id.as_str());
 }
 
+/// `é` is two bytes, so the 64-char prefix lands mid-codepoint: the slice
+/// boundary must be non-ASCII, not just non-UTF8-safe.
 #[test]
 fn long_poll_rejects_non_ascii_split_boundary_without_panicking() {
     let malformed = format!("{}é", "0".repeat(63));

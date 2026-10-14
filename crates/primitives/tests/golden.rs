@@ -64,6 +64,9 @@ const HEIGHTS: &[(u32, &str)] = &[
     ),
 ];
 
+/// Parses each golden mainnet block, asserts every transaction wtxid and
+/// txid round-trips to the Blockstream-published values, and re-encodes
+/// each block to bytes identical to its fixture.
 #[test]
 fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn std::error::Error>> {
     for (height, expected_hash) in HEIGHTS {

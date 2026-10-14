@@ -53,6 +53,12 @@ macro_rules! identifier_newtype {
 
 identifier_newtype!(
     /// The double-SHA256 of a transaction's non-witness serialization.
+    ///
+    /// Every identifier newtype is `#[repr(transparent)]` over [`Hash256`] and
+    /// deliberately implements no `Deref`: mixing a `Txid`, `Wtxid`, or
+    /// `BlockHash` is a compile error rather than a silent coercion. Storage
+    /// seams that need the raw 32-byte consensus encoding call
+    /// [`Self::as_bytes`].
     Txid
 );
 
