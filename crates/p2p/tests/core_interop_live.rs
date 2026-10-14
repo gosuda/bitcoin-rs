@@ -1,17 +1,3 @@
-//! Live Bitcoin Core differential verifier — the env-gated cut lane.
-//!
-//! NOT part of the default suite: requires a real `bitcoind` driven by
-//! `scripts/run-p2p-core-interop.sh`, which starts Bitcoin Core (regtest),
-//! brings up a bitcoin-rs node, syncs them over the P2P v1 transport, diffs
-//! observable chain-identity RPCs, and writes an evidence JSON.
-//!
-//! Run via:
-//! ```text
-//! scripts/run-p2p-core-interop.sh --bitcoind-command "$(scripts/install-bitcoind.sh)"
-//! ```
-//! or directly with `--ignored --nocapture` after setting
-//! `P2P_CORE_INTEROP_EVIDENCE=<path to evidence json>`.
-
 #![cfg(unix)]
 
 use std::path::PathBuf;

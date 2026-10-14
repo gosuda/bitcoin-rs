@@ -29,7 +29,6 @@ impl ShutdownHandler {
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
-                // First signal flips the flag; later ones only re-wake.
                 request_shutdown();
                 if shutdown_tx.try_send(()).is_err() {
                     break;

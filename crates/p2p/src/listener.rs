@@ -364,23 +364,7 @@ impl ConnectionShared {
         serialized: bytes::Bytes,
     ) {
         let source = lease.source(peer_addr);
-        // Every body carries its own header; route it through the headers
-        // sink too so tips learned only by body delivery (`inv` getdata,
-        // compact reconstruction, or an unsolicited push) reach header
-        // admission. Without a tree node the body can never become the
-        // apply frontier's expected block, and no announced-tip credit
-        // reaches the delivering peer. The headers drain runs before the
-        // blocks drain each tick, so the body lands already expected. The
-        // forward is not a `headers` response: it must not consume an
-        // outstanding `getheaders` request's pending state.
-        //
-        // The body goes on its channel before the header goes on its own on
-        // purpose: a tip learned only by body delivery arrives untracked
-        // (the `inv` getdata is never marked pending), so if the header
-        // reached the tree while the body still sat outside `received`, the
-        // same tick would schedule a duplicate fetch for it. Queueing the
-        // body first means the tick that admits the header always marks the
-        // body received first.
+
         let header = block.header;
         let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
         let requested = self
@@ -388,9 +372,6 @@ impl ConnectionShared {
             .as_ref()
             .is_some_and(|sync| sync.owns_body_fetch(source, hash));
         let Some(credit) = lease.admit_block_forward(source, hash, requested) else {
-            // The connection is over its unsolicited bound: drop the header
-            // too, or a flood of refused bodies still grows the header queue
-            // without limit.
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
             return;
         };
@@ -616,12 +597,7 @@ fn accept_connections(
                     tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: network inactive");
                     continue;
                 }
-                // Reserve the inbound slot atomically with the capacity
-                // test before any thread exists: a separate count followed
-                // by an unconstrained spawn races concurrent accepts.
-                // Registration stays identity-checked, so the reservation
-                // itself is the handshaking-peer accounting Core's connman
-                // performs (`net.cpp:1838-1845`, eviction cut to refusal).
+
                 let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
                 let lease = crate::PeerLease::new_inbound(outbound_tx)
                     .with_no_ban(shared.banned.is_noban(peer_addr.ip()));
@@ -748,8 +724,7 @@ fn run_outbound_connection(
             ));
         }
     }
-    // Core starts BIP324 on every manual connection, and on an automatic one
-    // only when the address advertises `NODE_P2P_V2`.
+
     let try_v2 = shared.v2_transport
         && (manual
             || shared
@@ -759,9 +734,6 @@ fn run_outbound_connection(
     match dial(addr, shared, role, manual, count_failure, try_v2)? {
         Dialed::Done => Ok(()),
         Dialed::V1Retry => {
-            // The peer closed a v2 attempt without sending a byte, as a v1-only
-            // node does: retry once over v1, as Core does. The unanswered
-            // attempt is not evidence against the peer.
             tracing::debug!(
                 peer_addr = %addr,
                 "p2p v2 handshake unanswered; retrying with v1 transport protocol"
@@ -795,8 +767,6 @@ fn dial(
 ) -> Result<Dialed, crate::wire::PeerError> {
     let connection = TcpStream::connect_timeout(&addr, Duration::from_secs(10));
     if let Some(book) = &shared.address_book {
-        // Like Core ConnectNode, record actual TCP attempts on success/failure,
-        // after local admission guards. Spawn failures/cancellation are not peer evidence.
         book.attempted(addr, count_failure && !manual, crate::addrman::now());
     }
     let stream = connection.map_err(crate::wire::PeerError::Io)?;
@@ -807,14 +777,10 @@ fn dial(
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
     }
 
-    // Wrapped before registration and the handshake, so failed socket
-    // posture cannot leave a dead peer in live-connection accounting.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
     let stream = crate::CountingStream::from_connected(stream, counters)
         .map_err(crate::wire::PeerError::Io)?;
 
-    // Register the connection before the handshake so live-connection
-    // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
     let lease = match (role, manual) {
         (crate::peer_info::PeerRole::FullRelay, false) => crate::PeerLease::new(outbound_tx),
@@ -843,8 +809,6 @@ fn dial(
         return Ok(Dialed::Done);
     }
 
-    // One deadline covers the transport and the version handshake, as
-    // Core's single `-peertimeout` does.
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut stream = stream;
     let negotiated = if try_v2 {
@@ -901,9 +865,6 @@ fn dial(
         addr,
         shared,
     ) {
-        // `remove_current` cancels as a side effect, so revocation must be
-        // read before it: a pre-cancelled lease means an external shutdown,
-        // while a live lease means this handshake failed on its own.
         let revoked = lease.is_cancelled();
         if !revoked {
             shared.note_misbehavior(addr, &lease, &error);
@@ -988,8 +949,6 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
             && matches!(accepted, crate::Message::Version(_))
             && let Some(version) = peer.remote_version.as_ref()
         {
-            // Record received services even when the ordinary service gate rejects
-            // this VERSION. Metadata does not imply handshake success or Good.
             let _ = shared.peer_table.with_current(lease.source(addr), || {
                 if !shared.is_session_cancelled()
                     && shared.activity.is_active()
@@ -999,8 +958,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
                 }
             });
         }
-        // Feelers establish address liveness from an accepted native VERSION.
-        // They neither require ordinary services nor wait for VERACK/ready work.
+
         if shared.feeler && peer.remote_version.is_some() {
             return Ok(());
         }
@@ -1079,8 +1037,6 @@ fn spawn_handshake_thread(
         });
 
     if let Err(error) = spawn_result {
-        // The accept loop reserved this lease for the thread; with no
-        // thread running, the reservation must release its capacity.
         peer_table.remove_current(peer_addr, &reservation);
         reservation.cancel();
         tracing::warn!(
@@ -1120,8 +1076,7 @@ fn run_handshake(
         shared.peer_table.remove_current(peer_addr, &lease);
         return Err(error);
     }
-    // The accept loop reserved this lease: every exit from here on must
-    // release it, or a failed setup would consume an admission slot forever.
+
     if let Err(error) = configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io) {
         shared.peer_table.remove_current(peer_addr, &lease);
         lease.cancel();
@@ -1149,18 +1104,12 @@ fn run_handshake(
     };
     let counters = std::sync::Arc::clone(stream.counters());
 
-    // The accept loop already reserved this lease in the table — live
-    // connection accounting covers handshaking peers exactly like Core's
-    // connman — so the inbound path never registers an unrestricted
-    // connection here.
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(peer_addr, &lease);
         lease.cancel();
         return Ok(());
     }
 
-    // One deadline covers the transport and the version handshake, as
-    // Core's single `-peertimeout` does.
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut stream = stream;
     let negotiated = match negotiate_inbound(&mut stream, shared, &lease, handshake_deadline) {
@@ -1193,9 +1142,6 @@ fn run_handshake(
         &lease,
         handshake_deadline,
     ) {
-        // `remove_current` cancels as a side effect, so revocation must be
-        // read before it: a pre-cancelled lease means an external shutdown,
-        // while a live lease means this handshake failed on its own.
         let revoked = lease.is_cancelled();
         if !revoked {
             shared.note_misbehavior(peer_addr, &lease, &error);
@@ -1246,9 +1192,6 @@ fn run_connected_session(
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
     mut info: crate::PeerInfo,
 ) -> Result<(), crate::wire::PeerError> {
-    // BIP339 announcement preference is the peer's received wtxidrelay,
-    // independently of our own advertisement. Publish it atomically with the
-    // completed handshake so relay never chooses a type during negotiation.
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
     info.send_headers = peer.capabilities.send_headers;
     let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
@@ -1590,8 +1533,6 @@ mod keepalive_tests {
 /// announced transaction and enqueues no transaction body. INVARIANT: block
 /// processing and peer punishment are unchanged. Opening the gate needs no
 /// reconnect, and unrelated messages never read it.
-// The transaction-relay gate adds one documented parameter and one lazy
-// closure to an already-large dispatch loop.
 #[expect(clippy::too_many_lines)]
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
@@ -1635,11 +1576,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match keepalive.next_action(Instant::now()) {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
-                // A probe queued behind a saturated outbound queue would
-                // cancel the lease for our own queue state, not for the
-                // peer's silence; skip it while the queue has no production
-                // headroom and let the timeout rule judge the connection on
-                // its next due probe.
                 if budget.has_block_production_headroom() {
                     let nonce = generate_nonce(peer_addr);
                     lease.send(crate::Message::Ping(nonce)).map_err(|_| {
@@ -1659,8 +1595,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 
         compact_reconstruction.prune(Instant::now());
 
-        // Retry publication on the existing socket poll, keeping ping, inbound
-        // traffic and lease cancellation responsive while the index catches up.
         if let Some((request, deadline)) = peer.pending_filter_request.take()
             && let Some(chain) = shared.chain_query.as_deref()
         {
@@ -1702,8 +1636,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
-                // Publish announced identities before dispatch can consult the
-                // gateway or invoke callbacks while the relay worker runs.
+
                 if let crate::Message::Inv(items) = &message {
                     shared
                         .peer_table
@@ -1840,10 +1773,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             .remote_preference()
                             .is_some_and(|preference| preference.version == send_cmpct.version) =>
                     {
-                        // Only a version we advertise negotiates BIP152 relay.
-                        // The high-bandwidth push preference is a separate
-                        // per-peer choice and must not gate compact-fetch
-                        // eligibility.
                         shared
                             .peer_table
                             .note_compact_relay(lease.source(peer_addr));
@@ -1930,9 +1859,6 @@ fn process_compact_wire_message(
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
 ) {
-    // Reconstruction scans the whole mempool, so a compact block must first
-    // earn it with its header; anything else is only a header announcement.
-    // Without a chain view nothing qualifies.
     if let crate::Message::CmpctBlock(cmpct) = message
         && let Some(header) = crate::compact_blocks::native_header(&cmpct.compact_block.header)
         && !shared.block_sync.as_ref().is_some_and(|sync| {
@@ -1957,9 +1883,7 @@ fn process_compact_wire_message(
         compact_hints,
         Instant::now(),
     );
-    // A compact announcement is itself a tip announcement: when the outcome
-    // emits no body (`Complete` already forwards its header via `send_block`),
-    // this forward is the only path the embedded header takes to admission.
+
     let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
         && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
     {
@@ -1967,20 +1891,13 @@ fn process_compact_wire_message(
     } else {
         None
     };
-    // When the outcome itself fetches the body (`RequestMissing` issues
-    // a `getblocktxn`, `Fallback` a full-block `getdata`), the window
-    // must record that in-flight fetch instead of scheduling a
-    // duplicate request for the freshly admitted tip.
+
     let body_fetch_owned = matches!(
         outcome,
         crate::compact_blocks::Outcome::RequestMissing(_)
             | crate::compact_blocks::Outcome::Fallback(_)
     );
-    // Ownership — the header's `body_fetch_owned` flag and the scheduler
-    // mark alike — is recorded only once the follow-up request actually
-    // left on the connection: a failed send enqueues nothing, and marking
-    // either path anyway would suppress recovery of that block from
-    // another peer.
+
     let fetch_issued = handle_compact_outcome(outcome, lease, peer_addr, shared);
     if let Some(header) = announced_header {
         let fetch_owned = body_fetch_owned && fetch_issued;
@@ -2597,7 +2514,6 @@ mod resilient_accept_tests {
 
         std::thread::sleep(Duration::from_millis(300));
 
-        // The listener must still be alive — connect a real client to prove it.
         let _client = TcpStream::connect(addr).expect("listener should still accept");
 
         shutdown.store(true, Ordering::Relaxed);
@@ -2638,10 +2554,7 @@ mod inbound_admission_tests {
         let _first = TcpStream::connect(addr)?;
         let mut second = TcpStream::connect(addr)?;
         let second_addr = second.local_addr()?;
-        // The refusal closes the socket as part of the same accept step that
-        // admitted the first, so the EOF is the synchronization point. The
-        // read bound only guards a hang: an admitted socket would sit in the
-        // handshake read for the full `HANDSHAKE_TIMEOUT` (60 s) first.
+
         second.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut byte = [0u8; 1];
         let read = second.read(&mut byte)?;
@@ -2715,7 +2628,6 @@ mod writer_setup_cleanup_tests {
         let lease_probe = lease.clone();
         shared.peer_table.register(peer_addr, lease.clone());
 
-        // Lease must be registered before the failure.
         assert!(
             shared.peer_table.is_connected(peer_addr),
             "lease must be registered before writer setup"
@@ -2764,9 +2676,6 @@ mod writer_shutdown_tests {
 
     const FAILSAFE: Duration = Duration::from_secs(5);
 
-    // CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (a
-    // handshake failure on a live lease surfaces its protocol error; only an
-    // externally revoked lease is muted as a shutdown).
     #[test]
     fn inbound_handshake_failure_on_live_lease_returns_err() {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
@@ -2777,9 +2686,6 @@ mod writer_shutdown_tests {
         );
         let (mut client, server, peer_addr) = loopback_pair();
 
-        // A validly framed message with a foreign magic fails the handshake
-        // while the lease is fully live: nothing external revoked it. The
-        // revocation mask (remove_current cancels) must not swallow this.
         let mut frame = Vec::new();
         frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33]);
         frame.extend_from_slice(b"version\0\0\0\0\0");
@@ -2879,9 +2785,6 @@ mod writer_shutdown_tests {
 
     #[test]
     fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Error>> {
-        // Every inbound body carries its own header; `send_block` must also
-        // emit it through the headers sink so body-only announcements
-        // (`inv`-served, compact reconstruction, pushes) reach admission.
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -3063,9 +2966,6 @@ mod writer_shutdown_tests {
 
     #[test]
     fn sendcmpct_raises_published_compact_relay_preference() {
-        // A post-verack sendcmpct announces BIP152 relay, with or without the
-        // high-bandwidth push preference: an inbound peer is never selected
-        // for push, and fetch eligibility must not depend on it.
         assert!(sendcmpct_scenario(true, 2, 18_448));
         assert!(sendcmpct_scenario(false, 2, 18_449));
         assert!(!sendcmpct_scenario(false, 1, 18_450));
@@ -3294,8 +3194,6 @@ mod writer_shutdown_tests {
             let _ = done_tx.send(());
         });
 
-        // The queue is idle and a foreign lease clone keeps every sender
-        // alive; only the close signal can wake the writer.
         lease.cancel();
         done_rx
             .recv_timeout(FAILSAFE)
@@ -3349,9 +3247,6 @@ mod writer_shutdown_tests {
             let _ = done_tx.send(());
         });
 
-        // Five pings are queued as one control burst. Two full frames (64 B)
-        // succeed; the third header exceeds the remaining budget and the
-        // burst fails as a unit, so nothing is released.
         blocked_rx
             .recv_timeout(FAILSAFE)
             .expect("writer must exhaust its byte budget");
@@ -3500,8 +3395,7 @@ mod writer_shutdown_tests {
                     ),
                     Magic::BITCOIN,
                 );
-                // Receiving wtxidrelay chooses outbound inventory; our own
-                // advertisement alone must not switch the remote preference.
+
                 if peer_requested_wtxid {
                     peer.wtxid_relay.mark_peer_supported();
                 }
@@ -3510,9 +3404,6 @@ mod writer_shutdown_tests {
                 let _ = done_tx.send(result);
             });
 
-            // The external clone keeps the queue's senders alive for the whole
-            // call; only the teardown close signal lets the writer exit, so the
-            // session must still return under the failsafe.
             let result = done_rx
                 .recv_timeout(FAILSAFE)
                 .expect("session must return while an external lease clone is alive");
@@ -3613,8 +3504,7 @@ mod writer_shutdown_tests {
             use bitcoin::secp256k1::rand::SeedableRng as _;
             self.calls.fetch_add(1, Ordering::Relaxed);
             let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::seed_from_u64(1484);
-            // Force the worker interleaving at the real dispatch callback,
-            // before dispatch returns, without a timing race or test hook.
+
             self.table
                 .poll_transaction_relay(&self.gateway, self.due, false, &mut rng);
             self.lease.cancel();
@@ -3752,9 +3642,6 @@ mod writer_shutdown_tests {
         );
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
 
-        // The first Pong response takes the one-frame budget, so the second
-        // cannot be admitted and the saturation policy cancels the lease and
-        // ends the loop.
         let result = run_message_loop(&mut peer, addr, &lease, &shared, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
@@ -3936,9 +3823,6 @@ mod block_forward_tests {
     /// dropped for that bound.
     #[test]
     fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::error::Error>> {
-        // Real sync wiring: peer A announces block 2 and the window asks A for
-        // its body, so A's requested delivery must outlive A's exhausted
-        // unsolicited credits.
         let (mut tree, blocks) = mined_chain(1, 0)?;
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
@@ -4078,7 +3962,6 @@ mod block_forward_tests {
         use bitcoin::p2p::message_compact_blocks::CmpctBlock;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Genesis plus two blocks, all applied: the applied tip is block 2.
         let (mut tree, blocks) = mined_chain(2, 0)?;
         let chain_tip = tree.tip_handle();
         let applied_tip = Arc::new(ArcSwapOption::new(chain_tip.load_full()));
@@ -4141,19 +4024,17 @@ mod block_forward_tests {
             )
         };
 
-        // No proof of work: the right parent, but a target the hash misses.
         let mut no_work = next(3)?;
         no_work.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
         deliver(&no_work)?;
-        // Unknown parent.
+
         let orphan = regtest_fixture::mined_block_with_prev_hash(
             no_work.header.compute_hash(),
             4,
             vec![regtest_fixture::coinbase(4)],
         )?;
         deliver(&orphan)?;
-        // A replayed applied block: known parent, but no more work than the
-        // applied tip.
+
         let replayed = blocks.first().ok_or("chain has block 1")?;
         deliver(replayed)?;
         assert_eq!(scans(), 0, "no rejected header reaches the mempool");
@@ -4164,26 +4045,22 @@ mod block_forward_tests {
             assert!(!announced.body_fetch_owned);
         }
 
-        // Another connection owning its body fetch does not count for this one.
         sync.record_owned_body_fetch(other_source, Hash256::from(replayed.block_hash()));
         deliver(replayed)?;
         assert_eq!(scans(), 0, "ownership is by exact connection");
         assert!(blocks_rx.is_empty());
         assert_eq!(headers_rx.try_recv()?.headers.len(), 1);
 
-        // The replayed block once this connection owns its body fetch.
         sync.record_owned_body_fetch(source, Hash256::from(replayed.block_hash()));
         deliver(replayed)?;
         assert_eq!(scans(), 1);
         assert_eq!(blocks_rx.len(), 1);
 
-        // A new block extending the applied tip needs no request.
         let extending = next(3)?;
         deliver(&extending)?;
         assert_eq!(scans(), 2);
         assert_eq!(blocks_rx.len(), 2);
 
-        // Repeating it never rescans the mempool.
         deliver(&extending)?;
         assert_eq!(scans(), 2);
         assert_eq!(blocks_rx.len(), 2);
@@ -4391,7 +4268,7 @@ mod feeler_tests {
                 if revoked == 0 {
                     sent.expect("VERSION only");
                 }
-                // No VERACK is sent; a feeler closes after native VERSION acceptance.
+
                 while let Ok((message, _)) = peer.read_message() {
                     assert!(
                         !matches!(message, crate::Message::GetAddr | crate::Message::Verack),
@@ -4535,7 +4412,7 @@ mod feeler_tests {
     fn manual_dial_bypasses_known_incomplete_stored_services() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
-        drop(listener); // Local refused TCP distinguishes an attempted dial from service rejection.
+        drop(listener);
         let mut shared = test_shared(
             Arc::new(crate::PeerTable::new()),
             crossbeam_channel::unbounded().0,
@@ -4767,8 +4644,7 @@ mod discouragement_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         for inbound in [false, true] {
             let shared = shared();
-            // Exercise real socket framing and teardown with a nonlocal
-            // connection identity. The test never dials this public address.
+
             let address: SocketAddr = "8.8.8.8:8333".parse()?;
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let mut sender = TcpStream::connect(listener.local_addr()?)?;
@@ -4800,7 +4676,7 @@ mod discouragement_tests {
             info.inbound = inbound;
             let mut malformed = Vec::new();
             crate::wire::write_message(&mut malformed, Magic::BITCOIN, &Message::Ping(7))?;
-            malformed[20] ^= 1; // A fully delivered frame with a bad checksum.
+            malformed[20] ^= 1;
             io::Write::write_all(&mut sender, &malformed)?;
             io::Write::write_all(&mut sender, &malformed)?;
             let Err(error) = run_connected_session(&mut peer, address, &shared, lease, rx, info)
@@ -4869,8 +4745,7 @@ mod discouragement_tests {
             )?;
             crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
             let mut peer = Peer::new(std::io::Cursor::new(bytes), Magic::REGTEST);
-            // A cursor-backed outbound reader avoids interleaving test writes
-            // with unread input; the steps are the production handshake owner.
+
             let (accepted, _) = crate::handshake::next_handshake_step(
                 &mut peer,
                 &lease,

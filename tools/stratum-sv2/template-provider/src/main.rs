@@ -1,13 +1,3 @@
-//! bitcoin-rs SV2 Template Distribution bridge.
-//!
-//! Translates bitcoin-rs's authoritative mining surface (`getblocktemplate`
-//! long-poll + `submitblock`) into the Stratum V2 Template Distribution
-//! protocol, so an external SRI pool mines against bitcoin-rs without
-//! bitcoin-rs gaining any Stratum dependency. Example for issue #1289.
-//!
-//! Everything is configured through the environment; see `config_from_env`
-//! for the full escape-hatch list.
-
 mod rpc;
 mod server;
 mod template;
@@ -19,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use stratum_apps::key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
-// Direct dep pinned at 0.28: the secp256k1 the noise layer's key types wrap.
-// (`stratum_core::bitcoin::secp256k1` is 0.29 — a different crate version.)
+
 use secp256k1::SecretKey;
 use tokio::sync::watch;
 use tracing::{error, info};
@@ -80,7 +69,7 @@ fn config_from_env() -> Result<Config, String> {
         listen,
         rpc_url: env_or("BITCOINRS_RPC_URL", "http://127.0.0.1:18443"),
         rpc_user: env_or("BITCOINRS_RPC_USER", "bitcoin-rs"),
-        // No default: the node refuses the legacy public password.
+
         rpc_pass: std::env::var("BITCOINRS_RPC_PASS")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -142,9 +131,7 @@ impl Hub {
                 issued.pop_first();
             }
         }
-        // `send` silently drops the value while the channel has zero
-        // receivers (e.g. every publish before the first pool connects);
-        // `send_replace` stores it unconditionally and still notifies.
+
         self.latest.send_replace(Some(state));
     }
 }
@@ -222,8 +209,7 @@ async fn template_loop(rpc: Arc<RpcClient>, hub: Hub) -> Result<(), String> {
                     }
                     Err(e) => {
                         error!(error = %e, "failed to convert getblocktemplate response");
-                        // Re-poll without a long-poll id; the sleep keeps a
-                        // persistent bad response from spinning the loop.
+
                         long_poll_id = None;
                         tokio::time::sleep(RETRY_DELAY).await;
                     }

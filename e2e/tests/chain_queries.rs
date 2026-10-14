@@ -1,6 +1,3 @@
-//! Chain-state query E2E: block/height lookups, chain tips, UTXO set
-//! statistics, proofs, and index/introspection surfaces.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -33,7 +30,6 @@ fn height_and_hash_queries() -> Result<()> {
         "height 0 is genesis"
     );
 
-    // Core answers out-of-range heights with -8 RPC_INVALID_PARAMETER.
     for height in [99_i64, -1] {
         let beyond = node.rpc_raw(&json!({
             "jsonrpc": "2.0", "id": 1, "method": "getblockhash", "params": [height]
@@ -81,7 +77,7 @@ fn block_views_agree() -> Result<()> {
     );
 
     let header = node.rpc("getblockheader", &json!([hash]))?;
-    // The header view must agree field-for-field with the verbose block.
+
     for field in ["hash", "height", "time", "mediantime", "bits", "nonce"] {
         assert_eq!(
             header.field(field)?,
@@ -131,8 +127,7 @@ fn txoutset_info_counts_utxos() -> Result<()> {
 
     let info = node.rpc("gettxoutsetinfo", &json!([]))?;
     assert_eq!(info.u64_field("height")?, 7);
-    // The unspendable genesis coinbase is excluded, as is each block's
-    // provably-unspendable OP_RETURN witness-commitment output.
+
     assert_eq!(info.u64_field("transactions")?, 7);
     assert_eq!(info.u64_field("txouts")?, 7);
     let total = info
@@ -212,7 +207,7 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
         Some(true),
         "scan must succeed: {scan}"
     );
-    // Only address-matched outputs count; the OP_RETURN commitment does not.
+
     assert_eq!(scan.u64_field("txouts")?, 5);
     let unspents = scan
         .get("unspents")
@@ -232,10 +227,9 @@ fn node_introspection_and_util_queries() -> Result<()> {
     let _ = mine_bare_blocks(&mut node, 3)?;
 
     assert_eq!(node.rpc("verifychain", &json!([]))?, json!(true));
-    // No indexes configured: the manifest reports an empty object.
+
     assert_eq!(node.rpc("getindexinfo", &json!([]))?, json!({}));
 
-    // Pruning is disabled, so the request is refused rather than honoured.
     let prune = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "pruneblockchain", "params": [1000]
     }))?;
@@ -247,7 +241,7 @@ fn node_introspection_and_util_queries() -> Result<()> {
     assert_eq!(bogus.get("isvalid"), Some(&json!(false)));
 
     let desc = node.rpc("getdescriptorinfo", &json!(["raw(51)"]))?;
-    // The descriptor echo carries the `#checksum` suffix, like Core.
+
     assert!(
         desc.str_field("descriptor")?.starts_with("raw(51)#"),
         "descriptor: {desc}"
@@ -281,7 +275,7 @@ fn immature_coinbase_spend_rejected() -> Result<()> {
     let reply = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "sendrawtransaction", "params": [hex]
     }))?;
-    // Core's mempool rejection code for a policy/consensus failure.
+
     assert_eq!(
         reply["error"]["code"],
         json!(-26),

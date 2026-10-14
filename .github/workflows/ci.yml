@@ -33,6 +33,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: ./scripts/ci-pr.sh comments
 
   deny:
     runs-on: ubuntu-latest

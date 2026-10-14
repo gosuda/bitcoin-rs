@@ -1,10 +1,3 @@
-//! Derived-index query contract: typed errors, progress info, and the
-//! object-safe read traits the RPC surface and node composition consume.
-//!
-//! These are index-owned contracts — answers are complete only at a durable
-//! watermark equal to the applied tip. `bitcoin_rs_rpc::context` re-exports
-//! them under its historical paths.
-
 use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
 use compact_str::CompactString;
 

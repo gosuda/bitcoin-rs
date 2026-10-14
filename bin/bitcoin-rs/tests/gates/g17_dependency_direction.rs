@@ -1,5 +1,3 @@
-//! ARCH-01..ARCH-04: check the live Cargo graph against the architecture contract.
-
 #[path = "../support/dependency_graph.rs"]
 mod dependency_graph;
 
@@ -193,7 +191,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         &["E0599"],
         "persist_undo",
     )?;
-    // A private field may also be removed: both outcomes seal the capability.
+
     for (receiver, member) in [
         ("tip: &TipReader", "tip.inner"),
         ("tree: &BlockTreeReader", "tree.inner"),
@@ -223,8 +221,6 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "tip_handle",
     )?;
 
-    // Refer to associated methods without supplying arguments: this rejects
-    // availability regardless of signature, and deleted APIs remain valid.
     for method in [
         "chain_tip",
         "applied_tip",
@@ -232,18 +228,10 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "applied_tip_handle",
         "block_tree",
         "block_tree_handle",
-        // Tree reads go through `BlockTreeReader`; a facade read guard would
-        // be a second route to the same lock.
         "read_block_tree",
         "transition_barrier",
-        // Retained-history authority lives in storage/pruning; chainstate
-        // keeps acquisition roles and must not broker the registry.
         "retention_handle",
-        // The transition domain is minted by composition and split into roles;
-        // chainstate holds one role and must not republish a fence.
         "read_fence",
-        // The authoritative UTXO set stays with its mutation owner; consumers
-        // take `UtxoReader`, which carries no `utxo::contract` path.
         "utxo",
         "utxo_handle",
         "apply_block",
@@ -257,9 +245,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
             method,
         )?;
     }
-    // `UtxoReader::fixture_set` is the only route from a read capability back
-    // to the set `utxo::contract` mutates. It is compiled out of production
-    // builds, so a production consumer must not be able to name it.
+
     consumer.deny(
         &format!(
             "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"

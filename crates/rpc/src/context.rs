@@ -380,14 +380,11 @@ impl AdmissionChain for ChainAdmissionView {
         let locktime_cutoff = tip_node
             .and_then(|node| tree.median_time_past_at(node))
             .unwrap_or(0);
-        // CSV activation at the next block gates BIP68 relative locks,
-        // matching the block-connect and mining evaluation contexts.
+
         let csv_active = tip_node.is_some_and(|node| {
             softfork_state(&tree, self.network, Some(node), height + 1).csv_active
         });
-        // Confirmed coin metadata for BIP68 and coinbase maturity. Height `h`
-        // uses the MTP of the block before `h`, the same derivation the
-        // block-connect path applies. MTP lookups are cached per height.
+
         let mut mtp_cache: HashMap<u32, u32> = HashMap::new();
         let mut prevout_meta: HashMap<OutPoint, PrevoutMeta> = HashMap::new();
         let mut prevouts = Vec::new();
@@ -415,9 +412,7 @@ impl AdmissionChain for ChainAdmissionView {
             );
             prevouts.push((input.previous_output, coin.txout));
         }
-        // Live confirmed coins are positive chain evidence. The RPC lookup
-        // cache may contain unconfirmed bodies and cannot supply this fact.
-        // No live outputs means unknown, not proof that the tx is unconfirmed.
+
         let confirmed = self
             .utxo
             .has_live_outputs_for_txid(&Hash256::from(tx.txid()));
@@ -914,9 +909,7 @@ impl ChainHandles {
             hash: BlockHash::from(hash),
             height: node.height,
             body_size: 0,
-            // The one place a header is produced. Every constructor leaves the
-            // field empty, so the tree node reached here is the single source of
-            // truth for what a block's header is.
+
             header: consensus_bytes(&node.header).try_into().ok().map(Box::new),
             tx_count: 0,
             time: node.header.time,
@@ -931,21 +924,8 @@ impl ChainHandles {
     /// matching durable body metadata.
     #[must_use]
     pub(crate) fn record_for_hash(&self, hash: Hash256) -> Option<BlockRecord> {
-        // Tree authority resolves identity first; the exact `(height, hash)`
-        // record may then enrich its payload fields.
         if let Some(mut record) = self.header_record(hash) {
-            // The tree already gave us the height, so this is a binary search
-            // over a height-ordered log rather than a walk of every record on
-            // the chain. `getblock` and `getblockheader` both land here.
             if let Some(cached) = record_at_height_hash(&self.blocks.read(), record.height, hash) {
-                // The cached record supplies the payload facts — size and
-                // transaction count — and the tree supplies the header, because
-                // the log does not store one. Returning the cached record as it
-                // stands would answer with no header at all.
-                //
-                // Costs no extra lock: `header_record` has already taken and
-                // released the tree guard, and the header it produced outlives
-                // it.
                 let mut cached = cached.clone();
                 cached.header = record.header.take();
                 return Some(cached);
@@ -1257,8 +1237,6 @@ mod tests {
             })
         };
 
-        // Before the first publication every projection answers with its
-        // documented empty default.
         let empty = ctx.chain.applied_view();
         assert_eq!(empty.tip(), None);
         assert_eq!(empty.height(), 0);
@@ -1272,7 +1250,7 @@ mod tests {
         let b = tip(20, 0xbb, 9, ChainTxCount::established(200));
         ctx.chain.applied_tip.store(Some(Arc::clone(&a)));
         let view = ctx.chain.applied_view();
-        // The publisher advances while the response is still being built.
+
         ctx.chain.applied_tip.store(Some(b));
 
         assert_eq!(view.height(), 10, "height must stay at the capture");
@@ -1288,11 +1266,8 @@ mod tests {
         );
         assert_eq!(view.chain_tx_count(), Some(100), "count must stay");
 
-        // A fresh capture sees the newer publication.
         assert_eq!(ctx.chain.applied_view().height(), 20);
 
-        // A present tip whose count is unknown stays unknown: it is never
-        // guessed as zero, which would differ from it by an entire chain.
         ctx.chain
             .applied_tip
             .store(Some(tip(30, 0xcc, 11, ChainTxCount::UNKNOWN)));
@@ -1359,8 +1334,7 @@ mod tests {
             .enumerate()
             .map(|(index, height)| {
                 let mut hash = [0_u8; 32];
-                // Distinct per record, not per height: the duplicates have to be
-                // distinguishable by hash or the walk has nothing to walk.
+
                 hash[0] = u8::try_from(index).unwrap_or(0);
                 let mut record =
                     BlockRecord::synthetic(height, BlockHash::from(Hash256::from_le_bytes(&hash)));
@@ -1547,18 +1521,14 @@ mod tests {
             },
             ..ContextHandles::default()
         });
-        // Identity is not observable: the two roles are distinct types with no
-        // comparison. Exclusion is, and exclusion is what the wiring has to
-        // guarantee — a guard taken from the context must block the caller's
-        // own role, which fails if the context was wired to another domain.
+
         let held = ctx.chain.chain_transition.lock();
         assert!(
             chain_transition.try_lock().is_none(),
             "the caller's role must exclude the same transitions the context does"
         );
         drop(held);
-        // The count travels inside the applied tip: one publication replaces
-        // tip and count together, through the cell the caller shares.
+
         let snapshot = |count| {
             Arc::new(TipSnapshot {
                 tip_id: bitcoin_rs_chain::NodeId::new(0),
@@ -1636,7 +1606,6 @@ mod tests {
         ctx.chain.applied_tip.store(Some(tip(3, 0xaa, 7, 42)));
         let captured = ctx.chain.applied_view();
 
-        // The publisher advances while the response is still being built.
         ctx.chain.applied_tip.store(Some(tip(9, 0xbb, 9, 84)));
 
         let progress = ctx.chain.sync_progress_at(&captured);
@@ -1657,7 +1626,6 @@ mod tests {
             "the captured count must stay paired with the captured tip"
         );
 
-        // A fresh capture follows the publisher; header height is sampled apart.
         assert_eq!(ctx.chain.sync_progress().blocks, 9);
     }
 
@@ -1863,8 +1831,6 @@ mod tests {
             tree.node(id).expect("inserted node").hash
         };
 
-        // Nothing was pushed into `blocks`, so the record can only come from the
-        // tree.
         let record = ctx
             .chain
             .record_for_hash(hash)
@@ -1923,8 +1889,7 @@ mod tests {
             ctx.chain
                 .applied_tip
                 .store(Some(Arc::new((*applied_tip).clone())));
-            // Stale cache entry at the SAME height as the tree child but with a
-            // different hash. The active-tree identity must win over this cache.
+
             let stale_hash = Hash256::from_le_bytes(&[0xa5_u8; 32]);
             ctx.chain
                 .add_block(BlockRecord::synthetic(1, BlockHash::from(stale_hash)));
@@ -2122,9 +2087,6 @@ mod tests {
             ..ContextHandles::default()
         });
 
-        // With the regtest work floor at zero and the tip recent, only the
-        // tree lookup can make `is_active` answer false; a latch holding any
-        // other tree finds no node and keeps reporting true.
         let now = 1_800_000_000_u64;
         let tip = insert_recent_tip(&ctx, now);
         ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -2237,10 +2199,6 @@ mod admission_chain_tests {
             &Hash256::default(),
         )?;
 
-        // Stable whole-chain readers hold this mutex without changing the
-        // generation. Admission must succeed through its real RPC path while
-        // such a reader is active, rather than spending its retry budget on
-        // contention that says nothing about stale chain facts.
         let accepted = ctx.chain.with_stable_chainstate(|| {
             crate::handlers::tx::sendrawtransaction(&ctx, &json!([raw]))
         })?;
@@ -2332,8 +2290,6 @@ mod admission_chain_tests {
             []
         );
 
-        // A borrowed capability observes current handles even in isolated
-        // contexts that replace test state after construction.
         ctx.chain.utxo =
             bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         let mut changes = BlockChanges::default();
@@ -2393,8 +2349,6 @@ mod admission_chain_tests {
             0,
         ));
 
-        // Accepted: the handler commits the funded transaction through the
-        // gateway.
         let rpc_ctx = Arc::new(Context::new());
         bitcoin_rs_utxo::contract::commit_block_changes(
             &rpc_ctx.chain.utxo.fixture_set(),
@@ -2405,7 +2359,6 @@ mod admission_chain_tests {
         assert_eq!(accepted.as_str(), Some(spend.txid().to_string()).as_deref());
         assert!(rpc_ctx.mempool.gateway.read().contains_txid(&spend.txid()));
 
-        // Refused: an unknown prevout is refused and not inserted.
         let orphan = spending(OutPoint::new(
             Txid::from(Hash256::from_le_bytes(&[22; 32])),
             0,
@@ -2416,8 +2369,6 @@ mod admission_chain_tests {
         assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
         assert!(!rpc_ctx.mempool.gateway.read().contains_txid(&orphan.txid()));
 
-        // Preview: testmempoolaccept answers for the funded transaction
-        // without inserting it.
         let preview_ctx = Arc::new(Context::new());
         bitcoin_rs_utxo::contract::commit_block_changes(
             &preview_ctx.chain.utxo.fixture_set(),

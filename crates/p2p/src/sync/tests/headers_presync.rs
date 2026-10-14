@@ -1,5 +1,3 @@
-//! Header-presync admission gating over the real headers drain.
-
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -444,10 +442,6 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
 
 #[test]
 fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
-    // A chain one page plus a tail long, with the floor on its last
-    // header: the first page's own claimed work stays below the floor, so
-    // it collects under presync; the tail page carries the cumulative work
-    // over it and the crossing commits the sync to its second pass.
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(threshold)?;
@@ -518,9 +512,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
 
 #[test]
 fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
-    // A page plus 500 headers whose floor crosses on the last of them:
-    // the whole chain is committed at once and the replay restarts at the
-    // fork point.
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);
     let (_genesis, sync, inbound_headers_tx, peers) = presync_fixture(threshold)?;
@@ -656,7 +647,6 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
     let (addr_b, _lease_b, rx_b) = connect(&peers, 9722, 100_000);
     let source_b = current_source(&peers, addr_b);
 
-    // The first request can expire before it has created a PRESYNC state.
     sync.tick();
     let _ = next_locator(&rx_a).ok_or("the initial request was not sent")?;
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source_a)?;
@@ -676,7 +666,6 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
         "a delayed response after initial timeout must not be admitted",
     );
 
-    // Expire a live PRESYNC continuation while its next page is queued.
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source_b)?;
     sync.tick();
     let _ = next_locator(&rx_b).ok_or("the presync continuation was not sent")?;
@@ -700,8 +689,6 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
         "a delayed presync page must not be admitted after timeout",
     );
 
-    // Bring the recovery source through PRESYNC and into REDOWNLOAD, then
-    // expire that cursor with a replay page already waiting in the queue.
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source_c)?;
     sync.tick();
     let _ = next_locator(&rx_c).ok_or("the recovery presync continuation was not sent")?;
@@ -738,8 +725,6 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
         "the work floor must still block admission before replay",
     );
 
-    // The replacement follows the established two-pass path and only the
-    // redownload pass may admit the chain.
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source_d)?;
     sync.tick();
     let _ = next_locator(&rx_d).ok_or("the final presync continuation was not sent")?;
@@ -831,8 +816,6 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
     let replacement_request =
         pending_request(&sync, replacement).ok_or("replacement request was not registered")?;
 
-    // This whole batch would cross the work floor and admit directly if the
-    // predecessor were still current. It must leave the live replacement alone.
     deliver_headers(&inbound_headers_tx, chain, old_source)?;
     sync.tick();
     assert_no_getheaders(&replacement_rx);
@@ -857,10 +840,6 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
 
 #[test]
 fn redownload_release_continues_from_the_state_cursor() -> TestResult {
-    // Five pages: the work floor crosses on the chain's last header, and
-    // the replay overflows the regtest buffer on its fourth page — three
-    // pages before the chain runs out, so the release is a buffer
-    // overflow, not the completion.
     let chain = chain_on(&genesis_header(), 0, 5 * PAGE);
     let threshold = ChainWork::from(WORK_PER_HEADER * u64::try_from(5 * PAGE).unwrap_or(u64::MAX));
     assert_eq!(

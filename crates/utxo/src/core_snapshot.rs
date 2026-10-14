@@ -1,10 +1,3 @@
-//! Bitcoin Core portable snapshot v2 input.
-//!
-//! The header is untrusted metadata. Full loading resolves a compiled network
-//! anchor, checks the commitment of staged existing records, and only then
-//! installs them into the existing UTXO set.
-//! Native bitcoin-rs v4 checkpoint serialization is a separate format.
-
 use std::io::{self, Read};
 
 use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, varint};
@@ -20,7 +13,7 @@ const MAGIC: [u8; 5] = *b"utxo\xff";
 const VERSION: u16 = 2;
 const HEADER_BYTES: u64 = 51;
 const MAX_SCRIPT_BYTES: u64 = 10_000;
-// Core ReadCompactSize's default range check.
+
 const MAX_COMPACT_SIZE: u64 = 0x0200_0000;
 
 /// Parsed header fields; parsing these fields does not authenticate the file.
@@ -253,8 +246,7 @@ pub fn read_and_verify(
             actual: hash_serialized,
         });
     }
-    // The only inputs reaching the identity-hashed UTXO table now belong to
-    // the compiled state. Forged colliding txids never reach insertion.
+
     let set = UtxoSet::new();
     for record in records {
         set.insert_snapshot_record(record);
@@ -314,8 +306,6 @@ impl<'a, R: Read> Decoder<'a, R> {
                     });
                 }
                 Ok(n) => {
-                    // Read returns at most the remaining slice length; its
-                    // full end position was checked against max_bytes above.
                     self.consumed += u64::try_from(n).unwrap_or(0);
                     bytes = &mut bytes[n..];
                 }
@@ -369,8 +359,7 @@ impl<'a, R: Read> Decoder<'a, R> {
 
     fn core_varint(&mut self, maximum: u64) -> Result<u64, SnapshotError> {
         let mut value = 0_u64;
-        // A u64 needs at most ten bytes. Core's continuation adds one after
-        // each seven-bit group; this is deliberately NOT record LEB128.
+
         for _ in 0..10 {
             let byte = self.array::<1>()?[0];
             value = value
@@ -425,7 +414,6 @@ impl<'a, R: Read> Decoder<'a, R> {
                 script.push(0x87);
             }
             2 | 3 => {
-                // Core preserves even non-curve compressed pubkey bytes here.
                 script.extend_from_slice(&[0x21, u8::try_from(code).unwrap_or(0)]);
                 script.extend_from_slice(&self.array::<32>()?);
                 script.push(0xac);
@@ -460,9 +448,7 @@ impl<'a, R: Read> Decoder<'a, R> {
             count,
             u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         )?;
-        // Temporary transaction staging holds the existing record payloads,
-        // without a hash table or a second coin representation. The vector
-        // grows only after a complete bounded group has arrived.
+
         let mut records = Vec::new();
         let mut commitment = SerializedUtxoHasher::new();
         let mut remaining = count;
@@ -514,8 +500,7 @@ impl<'a, R: Read> Decoder<'a, R> {
                     height,
                 ));
             }
-            // Core's disk-key order is not a numeric-vout contract. Sorting
-            // also detects duplicates without hashing untrusted indices.
+
             outputs.sort_unstable_by_key(|output| output.vout);
             for pair in outputs.windows(2) {
                 if pair[0].vout == pair[1].vout {

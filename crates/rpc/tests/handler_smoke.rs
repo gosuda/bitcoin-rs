@@ -1,6 +1,3 @@
-//! Smoke tests for every required Task 16 RPC handler.
-// A mis-sequenced fixture is a test failure; panicking reports it at the call
-// site, so expect() is deliberate throughout.
 #![allow(clippy::expect_used)]
 extern crate alloc;
 
@@ -53,7 +50,6 @@ fn required_handlers_report_the_fixture_chain_mempool_and_network_facts()
         assert_contains(method, method, &actual, &expected);
     }
 
-    // uptime counts wall-clock seconds, so only its type is fixed here.
     let uptime = handler.dispatch("uptime", &json!([]))?;
     assert!(uptime.as_u64().is_some(), "uptime must be a second count");
     Ok(())
@@ -166,7 +162,7 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
     let tip = fixture.block_hash.to_string();
     let txid = fixture.txid.to_string();
     let raw_tx = consensus_bytes(&fixture.tx).to_lower_hex_string();
-    // The block hex starts with the 80-byte header getblockheader serializes.
+
     let header_hex = &fixture.block_hex[..160];
 
     vec![
@@ -251,7 +247,6 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
 fn network_and_wallet_expectations(
     fixture: &Fixture,
 ) -> Result<Vec<Expectation>, Box<dyn std::error::Error>> {
-    // A valid base64 PSBT for finalizepsbt / combinepsbt.
     let psbt = build_valid_base64_psbt(&fixture.tx)?;
 
     Ok(vec![
@@ -275,7 +270,6 @@ fn network_and_wallet_expectations(
             json!({"complete": false, "psbt": psbt, "hex": null}),
         ),
         ("combinepsbt", json!([[psbt]]), json!(psbt)),
-        // No block verifier is wired, so the chain cannot be declared verified.
         ("verifychain", json!([]), json!(false)),
         ("getmininginfo", json!([]), json!({"chain": "regtest"})),
         (
@@ -437,7 +431,7 @@ fn invalidateblock_maps_unknown_block_to_core_not_found() {
             &json!(["0000000000000000000000000000000000000000000000000000000000000000"]),
         )
         .expect_err("unknown block should map to an error");
-    // Core reports an unknown block as RPC_INVALID_ADDRESS_OR_KEY (-5).
+
     assert_eq!(err.code(), RpcError::CORE_NOT_FOUND);
 }
 
@@ -506,7 +500,7 @@ fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std:
         .get("muhash")
         .and_then(JsonValueTrait::as_str)
         .ok_or("muhash missing")?;
-    // Core's muhash over the empty UTXO set (identity accumulator digest).
+
     assert_eq!(
         muhash,
         "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8"
@@ -649,15 +643,14 @@ fn getblockstats_errors_without_indexer() {
             &json!(["0000000000000000000000000000000000000000000000000000000000000000"]),
         )
         .expect_err("getblockstats should error without an indexer");
-    // Core reports an unknown block as RPC_INVALID_ADDRESS_OR_KEY (-5).
+
     assert_eq!(err.code(), RpcError::CORE_NOT_FOUND);
 }
 
 #[test]
 fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut values = HashMap::new();
-    // The indexed prevout values equal the outputs they fund, so every fee
-    // in the fixture block is zero and every percentile bucket reads zero.
+
     values.insert(outpoint(21), 10_000);
     values.insert(outpoint(22), 20_000);
     let (ctx, _low_tx, _high_tx) = fee_stats_context(Some(values));
@@ -680,7 +673,7 @@ fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error:
         .iter()
         .map(|v| v.as_u64().unwrap_or(0))
         .collect();
-    // Core reports five percentiles: the 10th, 25th, 50th, 75th, and 90th.
+
     assert_eq!(values, vec![0, 0, 0, 0, 0]);
     Ok(())
 }
@@ -1064,9 +1057,6 @@ fn outpoint(label: u8) -> OutPoint {
 }
 
 fn build_valid_base64_psbt(tx: &Tx) -> Result<String, Box<dyn std::error::Error>> {
-    // PSBT construction uses the bitcoin crate's Psbt type as a sanctioned
-    // seam — there is no native PSBT implementation. Convert the native tx
-    // to bitcoin::Transaction by re-serializing and deserializing.
     let bytes = consensus_bytes(tx);
     let btc_tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&bytes)?;
     let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(btc_tx)?;

@@ -1,5 +1,3 @@
-//! Native script parsing, classification, and building helpers.
-
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
 
@@ -539,7 +537,6 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
 /// division by 1000 at the end only).
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
-    // Scripts over the consensus execution limit are unspendable, as in Core.
     if script.len() > 10_000 {
         return 0;
     }
@@ -676,7 +673,7 @@ mod tests {
         assert!(is_push_only(&ok));
         assert!(is_push_only(&[opcode::OP_RESERVED]));
         assert!(!is_push_only(&[opcode::OP_DUP]));
-        assert!(!is_push_only(&[0x51, 0x20, 0x00])); // truncated 32-byte push
+        assert!(!is_push_only(&[0x51, 0x20, 0x00]));
         assert!(!is_push_only(&[0x51, 0xff]));
     }
 
@@ -748,7 +745,6 @@ mod tests {
         .concat();
         assert_eq!(multisig_key_count(&two_of_two), Some(2));
 
-        // A key push that is not a serialized pubkey fails the match.
         let bad_key: Vec<u8> = [
             vec![opcode::OP_PUSHNUM_1],
             push_data(&[0_u8; 4]),
@@ -758,7 +754,6 @@ mod tests {
         assert!(is_multisig(&bad_key));
         assert_eq!(multisig_key_count(&bad_key), None);
 
-        // Counts may be minimal script-number pushes, reaching past OP_16.
         let mut seventeen_of_seventeen = vec![0x01, 0x11];
         for _ in 0..17 {
             seventeen_of_seventeen.extend(push_data(&keys));
@@ -766,7 +761,6 @@ mod tests {
         seventeen_of_seventeen.extend([0x01, 0x11, opcode::OP_CHECKMULTISIG]);
         assert_eq!(multisig_key_count(&seventeen_of_seventeen), Some(17));
 
-        // Twenty-one keys exceeds `MAX_PUBKEYS_PER_MULTISIG`.
         let mut twenty_one = vec![opcode::OP_PUSHNUM_1];
         for _ in 0..21 {
             twenty_one.extend(push_data(&keys));
@@ -774,8 +768,6 @@ mod tests {
         twenty_one.extend([0x01, 0x15, opcode::OP_CHECKMULTISIG]);
         assert_eq!(multisig_key_count(&twenty_one), None);
 
-        // Non-minimal count encodings fail: PUSHDATA1 for one byte, and a
-        // redundant sign byte in the value.
         let padded_push: Vec<u8> = [
             vec![opcode::OP_PUSHDATA1, 0x01, 0x01],
             push_data(&keys),
@@ -794,13 +786,12 @@ mod tests {
 
     #[test]
     fn dust_threshold_matches_core_arithmetic() {
-        // P2PKH: witness false → 32+4+1+107+4+8 + 1 varint + 25 = 182; 3000 * 182 / 1000 = 546.
         let p2pkh: Vec<u8> = [vec![0x76, 0xa9, 0x14], vec![7; 20], vec![0x88, 0xac]].concat();
         assert_eq!(minimal_non_dust(&p2pkh, 3_000), 546);
-        // P2WPKH: witness true → 32+4+1+26+4+8 + 1 + 22 = 98; 3000 * 98 / 1000 = 294.
+
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
         assert_eq!(minimal_non_dust(&p2wpkh, 3_000), 294);
-        // OP_RETURN: always zero.
+
         assert_eq!(minimal_non_dust(&[opcode::OP_RETURN], 3_000), 0);
     }
 
@@ -819,27 +810,21 @@ mod tests {
 
     #[test]
     fn has_valid_ops_enforces_core_legacy_boundary() {
-        // Valid legacy opcodes up to OP_NOP10 (0xb9) are accepted.
         assert!(has_valid_ops(&[opcode::OP_NOP10]));
         assert!(has_valid_ops(&[opcode::OP_DUP, opcode::OP_NOP10]));
 
-        // OP_CHECKSIGADD (0xba) is rejected under legacy HasValidOps.
         assert!(!has_valid_ops(&[opcode::OP_CHECKSIGADD]));
         assert!(!has_valid_ops(&[0xba]));
 
-        // Opcodes above the boundary (0xbb, 0xff) are rejected.
         assert!(!has_valid_ops(&[0xbb]));
         assert!(!has_valid_ops(&[0xff]));
 
-        // Malformed pushes are rejected.
         assert!(!has_valid_ops(&[opcode::OP_PUSHDATA1]));
         assert!(!has_valid_ops(&[0x02, 0x01]));
 
-        // 520-byte pushes are accepted (MAX_SCRIPT_ELEMENT_SIZE).
         let max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE];
         assert!(has_valid_ops(&push_data(&max_element)));
 
-        // Pushes exceeding 520 bytes are rejected.
         let over_max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE + 1];
         assert!(!has_valid_ops(&push_data(&over_max_element)));
     }

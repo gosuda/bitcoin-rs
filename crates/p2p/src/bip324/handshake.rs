@@ -1,11 +1,3 @@
-//! The BIP324 handshake as a resumable state machine over a blocking stream.
-//!
-//! The driver alternates two calls: [`Handshake::take_outbound`] for bytes
-//! to send, and [`Handshake::advance`] to read. `advance` reads only the bytes
-//! the handshake needs: never past the peer's version packet, so the first
-//! application packet stays in the stream for the established reader. A poll
-//! timeout returns with all progress kept.
-
 use std::io::Read;
 
 use bitcoin::p2p::Magic;
@@ -219,7 +211,7 @@ impl Handshake {
                     if room == 0 {
                         return Err(TransportError::TerminatorNotFound);
                     }
-                    // Never read past the earliest point the terminator could end.
+
                     let window =
                         (GARBAGE_TERMINATOR_LEN - partial_match(scanned, terminator)).min(room);
                     read_up_to(reader, scanned, window)?;
@@ -242,7 +234,6 @@ impl Handshake {
                 };
             }
             State::ReadVersion { recv, .. } => {
-                // The version packet's contents are reserved; receivers ignore them.
                 recv.read_contents(reader)?;
                 let State::ReadVersion {
                     send,

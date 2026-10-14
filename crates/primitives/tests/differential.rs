@@ -1,17 +1,3 @@
-//! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
-//! `sighash.json` vectors, and fuzz-corpus self-consistency.
-//!
-//! Fuzz-corpus gates read `BITCOIN_RS_FUZZ_CORPUS/<target>` first (the
-//! `corpus/` directory of a gosuda/bitcoin-rs-fuzz-corpus checkout, the
-//! canonical seed home) and fall back to a local `fuzz/corpus/<target>/`
-//! overlay; they loud-skip (with a stderr note) only when neither exists. A
-//! present-but-empty corpus fails. When the corpus root carries
-//! `verdicts.json`, every seed is checked against its pinned verdict
-//! (accepted seeds re-encode byte-identically; rejected seeds keep their
-//! typed `DecodeError` kind) so a decoder change cannot silently flip a
-//! verdict — `QAC-05`, docs/contracts/qa-corpus.md. Without the file the
-//! gate degrades to checking that each seed yields a well-formed verdict.
-
 #![expect(
     clippy::expect_used,
     reason = "test fixtures: a malformed vector or missing fixture file is an authoring bug, not a runtime path"
@@ -102,10 +88,7 @@ fn assert_tx_roundtrip(serialized: &[u8], expected_wtxid: &str, context: &str) {
         32,
         "{context}: txid width"
     );
-    // Golden wtxid derived independently of this codec (BIP141: double
-    // SHA-256 of the full serialization; equal to the txid without witness
-    // data). The tests/testdata/<height>.wtxids.txt goldens were derived
-    // once offline and are checked in.
+
     let expected = Wtxid::from_str(expected_wtxid)
         .unwrap_or_else(|error| panic!("{context}: golden wtxid hex: {error}"));
     assert_eq!(native.wtxid(), expected, "{context}: golden wtxid");
@@ -163,8 +146,6 @@ fn fixture_blocks_roundtrip_byte_identically() {
 /// alone and says so.
 fn enforce_corpus_verdicts(target: &str) {
     let Some(seeds) = corpus_seeds(target) else {
-        // Test-binary runner output (allowed exception: not a library path):
-        // an absent corpus must skip loudly, not pass silently.
         eprintln!(
             "SKIP {target}: no corpus directory \
              (set BITCOIN_RS_FUZZ_CORPUS to a bitcoin-rs-fuzz-corpus checkout)"
@@ -193,7 +174,6 @@ fn enforce_corpus_verdicts(target: &str) {
 
     let manifest_path = corpus_root().join("verdicts.json");
     if std::env::var_os("CORPUS_VERDICTS_WRITE").is_some() {
-        // Read-modify-write so per-target invocations merge into one file.
         let mut root = std::fs::read_to_string(&manifest_path)
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -298,9 +278,6 @@ fn error_kind(error: &DecodeError) -> String {
     }
 }
 
-// Both corpus gates enforce the QAC-05 round-trip contract
-// (docs/contracts/qa-corpus.md): every seed decodes to a typed verdict and
-// accepted seeds re-encode byte-identically.
 #[test]
 fn corpus_seeds_decode_with_typed_verdicts() {
     for target in ["tx_validate", "block_validate"] {
@@ -412,10 +389,6 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
             .legacy_signature_hash(input_index, &script, flag)
             .unwrap_or_else(|error| panic!("vector {expected}: native sighash failed: {error}"));
 
-        // Core's sighash.json contains OP_CODESEPARATOR vectors whose expected hash
-        // assumes the interpreter-level codesep strip; this crate hashes the script
-        // as-is (the interpreter strips codeseps before signing), so those entries
-        // are skipped here.
         if script.contains(&0xab) {
             skipped_codeseparator = skipped_codeseparator.saturating_add(1);
             continue;

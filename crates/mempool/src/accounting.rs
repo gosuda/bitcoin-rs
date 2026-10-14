@@ -1,9 +1,3 @@
-//! Prevout-aware accounting shared by admission and acceptance previews.
-//!
-//! These are accounting facts, not a second validation engine. The gateway
-//! still verifies scripts and commits policy decisions; a preview may provide
-//! incomplete prevouts and must retain its explicit missing-input fact.
-
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;

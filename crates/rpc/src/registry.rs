@@ -1,10 +1,3 @@
-//! Unified RPC registry: one row owns compat metadata plus dispatch arm.
-//!
-//! [`REGISTRY`] is the single source of truth for every external surface.
-//! Each row declares the compat metadata (the [`Entry`] projection) and
-//! binds the dispatch arm (`handler`) in one literal. `dispatch` routes
-//! through this table; manifest views project from the same rows.
-
 use alloc::sync::Arc;
 
 use sonic_rs::Value;
@@ -143,7 +136,7 @@ macro_rules! declare_rows {
 }
 
 declare_rows! {
-    // -- JSON-RPC: shipped methods (registration order) --------------
+
     "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);
     "getchaintips", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintips);
@@ -208,10 +201,8 @@ declare_rows! {
     "getnetworkhashps", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units.", "0.4.0", Some(mining::getprioritisedtransactions);
 
-    // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
-    // -- JSON-RPC: additional Core blockchain/control surfaces ------
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
     "getblockfilter", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md.", "0.14.0", Some(chain::getblockfilter);
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
@@ -232,7 +223,6 @@ declare_rows! {
     "logging", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Log-category controls not exposed over RPC.", "n/a", None;
     "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;
 
-    // -- JSON-RPC: Core surface not exposed (mining/network/util/signer)
     "getaddrmaninfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Addrman table stats not exposed.", "n/a", None;
     "abortprivatebroadcast", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
     "analyzepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
@@ -253,7 +243,6 @@ declare_rows! {
     "signmessagewithprivkey", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Signing requires key material this process never holds.", "n/a", None;
     "verifymessage", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Message-signature verification not implemented.", "n/a", None;
 
-    // -- JSON-RPC: Core wallet surface, excluded by the no-wallet policy
     "abandontransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "abortrescan", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "backupwallet", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
@@ -310,7 +299,6 @@ declare_rows! {
     "walletpassphrasechange", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "walletprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
 
-    // -- REST (Core StartREST registration order) --------------------
     "/rest/tx/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/notxdetails/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Full transaction projection omits undo fees and prevouts; the shared undo read capability is used by spenttxouts and getblock verbosity 2/3.", "0.4.0", None;
@@ -325,7 +313,6 @@ declare_rows! {
     "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Serves retained certified undo in Core bin/hex/json formats. Older uncertified stale rows remain unavailable; transient retained-body absence and resource budgets return retry responses. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", None;
     "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;
 
-    // -- ZMQ topics --------------------------------------------------
     "hashblock", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashblock endpoint.", "0.4.0", None;
     "hashtx", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashtx endpoint.", "0.4.0", None;
     "rawblock", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawblock endpoint.", "0.4.0", None;

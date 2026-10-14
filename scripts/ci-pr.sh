@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|deep|all}" >&2
+  echo "usage: $0 {fmt|comments|clippy|test-crates|test-binary|test-workspace|test|deny|deep|all}" >&2
   exit 2
 }
 
@@ -140,6 +140,15 @@ case "$1" in
     cargo fmt --all -- --check
     ;;
 
+  comments)
+    python3 scripts/check_comments.py .
+    ;;
+
+  style)
+    "$0" fmt
+    "$0" comments
+    ;;
+
   clippy)
     clippy_profiles
     ;;
@@ -175,6 +184,7 @@ case "$1" in
 
   deep)
     collect_failures=true
+    profile "comments" python3 scripts/check_comments.py .
     clippy_profiles
     test_crates_profiles
     test_binary_profiles

@@ -1,13 +1,3 @@
-//! Authoritative BIP sighash vectors: the pinned expectations in
-//! `tests/vectors/` decide, not this crate's own re-derivations.
-//!
-//! - BIP143 "Alternative Signing Procedure" examples (P2WPKH and P2SH-P2WSH
-//!   6-of-6 multisig) pin the segwit-v0 digest for every base SIGHASH mode.
-//! - BIP341 wallet test vectors pin the key-path signature message for every
-//!   base SIGHASH mode plus `SIGHASH_DEFAULT`.
-//!
-//! Provenance and the script-path coverage story live in
-//! `tests/vectors/PROVENANCE.md`.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use std::path::PathBuf;
@@ -79,8 +69,7 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
         let tx_bytes = hex_decode(example["unsigned_tx"].as_str().expect("tx hex"));
         let tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("{example}: native decode failed: {error}"));
-        // The cache API takes the raw script bytes and writes the compactSize
-        // prefix itself; the checked-in vectors store scriptCode raw.
+
         let script_code = hex_decode(example["script_code"].as_str().expect("script code"));
         let value_sats = example["value_sats"].as_u64().expect("value sats");
         let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
@@ -95,7 +84,6 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
                 Sighash::from_consensus_u8(u8::try_from(hash_type).expect("hash type fits u8"))
                     .unwrap_or_else(|error| panic!("bip143: hash type {hash_type:#x}: {error}"));
 
-            // Typed cache path.
             let cached = cache
                 .segwit_v0_signature_hash(
                     input_index,
@@ -110,8 +98,6 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
                 "bip143 {example} hash type {hash_type:#x}"
             );
 
-            // Raw path (BIP143 appends the full 32-bit flag word): the base
-            // types serialize identically to their raw encoding.
             let raw = cache
                 .segwit_v0_signature_hash_raw(
                     input_index,

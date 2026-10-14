@@ -1,14 +1,3 @@
-//! Transaction signature checker: ECDSA, Schnorr, locktime, and sequence verification.
-//!
-//! Implements the signature-checking layer the script evaluator calls. Every digest
-//! is routed through the existing [`SighashCache`] engine; ECDSA through `secp256k1`,
-//! Schnorr through `secp256k1`'s Schnorr API. Encoding enforcement (strict DER, low-S,
-//! hashtype validity, pubkey encoding, `NULLFAIL`) is driven by [`VerifyFlags`].
-//!
-//! Behavioral authority: `.references/bitcoin/src/script/interpreter.cpp`
-//! (`CheckSignatureEncoding`, `CheckPubKeyEncoding`, `IsLowDERSignature`,
-//! `CheckLockTime`, `CheckSequence`).
-
 use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, Tx, TxOut};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
@@ -105,8 +94,6 @@ impl<'a> TxSignatureChecker<'a> {
         sigversion: SigVersion,
         flags: VerifyFlags,
     ) -> Result<bool, ScriptError> {
-        // Core checks both encodings before signature verification. An empty
-        // signature is permitted, but does not waive public-key encoding rules.
         check_signature_encoding(sig, flags)?;
         check_pubkey_encoding(pubkey, flags, sigversion)?;
 
@@ -114,8 +101,6 @@ impl<'a> TxSignatureChecker<'a> {
             return Ok(false);
         }
 
-        // Parse the pubkey; an invalid pubkey is a clean false (not an error)
-        // matching Core's `CPubKey::IsValid()` returning false.
         let Ok(secp_pubkey) = PublicKey::from_slice(pubkey) else {
             return Ok(false);
         };
@@ -124,21 +109,11 @@ impl<'a> TxSignatureChecker<'a> {
             return Ok(false);
         };
 
-        // Parse the DER portion using lax DER parsing (Core's
-        // `ecdsa_signature_parse_der_lax`), then normalize to low-S before
-        // verification (Core's `secp256k1_ecdsa_signature_normalize`). Strict
-        // DER enforcement is handled separately by `check_signature_encoding`
-        // under the DERSIG flag; the verification path itself always uses lax
-        // parsing so pre-BIP66 signatures still verify. Invalid DER is a
-        // clean false.
         let Ok(mut ecdsa_sig) = EcdsaSig::from_der_lax(der_sig) else {
             return Ok(false);
         };
         ecdsa_sig.normalize_s();
 
-        // Core's CTransactionSignatureSerializer::SerializeScriptCode removes
-        // OP_CODESEPARATOR (0xab) opcode bytes from the scriptCode before
-        // hashing. Segwit v0 uses BIP143 which does not have this step.
         let sighash = match sigversion {
             SigVersion::Base => {
                 let raw_hashtype = u32::from(*hashtype_byte);
@@ -147,20 +122,16 @@ impl<'a> TxSignatureChecker<'a> {
                     .legacy_signature_hash(self.input_index, &cleaned, raw_hashtype)
                     .map_err(|e| ScriptError::Verification(e.to_string()))?
             }
-            SigVersion::WitnessV0 => {
-                // STRICTENC alone restricts ECDSA hashtypes. BIP143 must
-                // classify, but still commit to, the original signature byte.
-                self.cache
-                    .segwit_v0_signature_hash_raw(
-                        self.input_index,
-                        script_code,
-                        self.amount,
-                        u32::from(*hashtype_byte),
-                    )
-                    .map_err(|e| ScriptError::Verification(e.to_string()))?
-            }
+            SigVersion::WitnessV0 => self
+                .cache
+                .segwit_v0_signature_hash_raw(
+                    self.input_index,
+                    script_code,
+                    self.amount,
+                    u32::from(*hashtype_byte),
+                )
+                .map_err(|e| ScriptError::Verification(e.to_string()))?,
             SigVersion::Tapscript => {
-                // ECDSA is not used in tapscript; this is a caller error.
                 return Err(ScriptError::Verification(
                     "ECDSA signature check requested for tapscript".to_owned(),
                 ));
@@ -168,17 +139,10 @@ impl<'a> TxSignatureChecker<'a> {
         };
 
         let message = Message::from_digest(*sighash.as_byte_array());
-        // One process-wide context: constructing `verification_only()` per
-        // signature rebuilds secp256k1's verification tables on every CHECKSIG.
+
         let verified = secp256k1::SECP256K1
             .verify_ecdsa(&message, &ecdsa_sig, &secp_pubkey)
             .is_ok();
-
-        // NULLFAIL is enforced by the callers (eval_checksig for CHECKSIG,
-        // check_multisig cleanup for CHECKMULTISIG), matching Core where
-        // CheckECDSASignature returns false without inspecting NULLFAIL.
-        // A sig that fails against one pubkey may succeed against another in
-        // multisig; an internal NULLFAIL check would fire prematurely.
 
         Ok(verified)
     }
@@ -200,7 +164,6 @@ impl<'a> TxSignatureChecker<'a> {
         leaf_hash: Option<&Hash256>,
         codesep_pos: u32,
     ) -> Result<bool, ScriptError> {
-        // Empty signature: a clean false in tapscript (invalid but not an error).
         if sig.is_empty() {
             return Ok(false);
         }
@@ -214,7 +177,7 @@ impl<'a> TxSignatureChecker<'a> {
         let (schnorr_sig_bytes, hashtype_byte) = if sig.len() == 65 {
             (&sig[..64], sig[64])
         } else {
-            (sig, 0x00) // SIGHASH_DEFAULT (64-byte sig)
+            (sig, 0x00)
         };
 
         if sig.len() == 65 && hashtype_byte == 0x00 {
@@ -244,7 +207,6 @@ impl<'a> TxSignatureChecker<'a> {
                 }
             })?;
 
-        // Compute the BIP341/BIP342 sighash.
         let leaf_codesep = leaf_hash.map(|lh| (*lh, codesep_pos));
         let sighash = self
             .cache
@@ -312,9 +274,6 @@ impl<'a> TxSignatureChecker<'a> {
         };
         let tx_sequence = i64::from(input.sequence.to_consensus());
 
-        // Transaction version must be >= 2 for BIP68 rules. Core stores
-        // version as uint32_t, so 0xffffffff is a large positive number, not
-        // -1; compare as unsigned (bit-preserving) to match.
         #[expect(
             clippy::as_conversions,
             clippy::cast_sign_loss,
@@ -347,10 +306,6 @@ impl<'a> TxSignatureChecker<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encoding checks (mirrors Core's CheckSignatureEncoding / CheckPubKeyEncoding)
-// ---------------------------------------------------------------------------
-
 /// Checks signature encoding per Core's `CheckSignatureEncoding`.
 ///
 /// Empty signatures are allowed (clean false). Under `DERSIG`, `LOW_S`, or
@@ -360,8 +315,6 @@ impl<'a> TxSignatureChecker<'a> {
 /// # Errors
 /// Returns the typed DER, high-S, or undefined-hashtype failure selected by `flags`.
 pub fn check_signature_encoding(sig: &[u8], flags: VerifyFlags) -> Result<(), ScriptError> {
-    // Empty signature is always allowed (not strictly DER, but valid for
-    // CHECK(MULTI)SIG dummy / null-fail purposes).
     if sig.is_empty() {
         return Ok(());
     }
@@ -403,7 +356,6 @@ fn check_pubkey_encoding(
         });
     }
 
-    // Only compressed keys are accepted in segwit v0.
     if flags.contains(VerifyFlags::WITNESS_PUBKEYTYPE)
         && sigversion == SigVersion::WitnessV0
         && !is_compressed_pubkey(pubkey)
@@ -473,9 +425,6 @@ fn is_valid_der_encoding(sig: &[u8]) -> bool {
 /// Core's `IsLowDERSignature`: checks that the S value is at most half the
 /// group order.
 fn is_low_der_signature(sig: &[u8]) -> bool {
-    // secp256k1's group order / 2 in big-endian:
-    // n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-    // n/2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
     const HALF_ORDER: [u8; 32] = [
         0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         0xff, 0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b,
@@ -805,8 +754,6 @@ mod tests {
 
     #[test]
     fn sighash_json_corpus_legacy_path() {
-        // The tracked corpus, not the untracked `.references` checkout of Core:
-        // this test must grade against the same rows on every machine.
         let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../consensus/tests/vectors/sighash.json");
         let json_str = std::fs::read_to_string(&corpus).unwrap_or_else(|error| {
@@ -851,13 +798,8 @@ mod tests {
             let tx = deserialize::<Tx>(&tx_bytes)
                 .unwrap_or_else(|e| panic!("tx decode at row {tested}: {e}"));
 
-            // Core's SignatureHash removes OP_CODESEPARATOR (0xab) from
-            // script_code before hashing; our legacy_signature_hash expects
-            // the pre-processed script. Match Core's SerializeScriptCode.
             let script_code = remove_all(&hex_decode(script_hex), &[OP_CODESEPARATOR]).0;
 
-            // The hashtype in sighash.json is a signed 32-bit integer;
-            // Core casts `int nHashType` to `uint32_t` (bit-preserving).
             #[expect(
                 clippy::as_conversions,
                 clippy::cast_possible_truncation,

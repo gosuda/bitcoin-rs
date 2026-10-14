@@ -1,8 +1,3 @@
-//! Curated acceptance comparisons against a pinned live Bitcoin Core.
-//!
-//! Only public RPCs and independently produced Core funding/candidate blocks
-//! are used. The suite owns no consensus implementation or production hooks.
-
 use std::fs;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
@@ -167,7 +162,7 @@ fn compare_case(
         };
         let reference = core.rpc(input.method(), &params)?;
         evidence["reference_reply"] = reference.clone();
-        // Persist the first observation even if the second process dies.
+
         fs::write(&evidence_path, serde_json::to_vec_pretty(&evidence)?)?;
         let candidate = node.rpc(input.method(), &params)?;
         evidence["candidate_reply"] = candidate.clone();
@@ -208,8 +203,6 @@ fn compare_case(
 }
 
 fn core_candidate(core: &mut ProcessNode, transactions: &[String]) -> Result<Block> {
-    // submit=false returns independently assembled, solved bytes without
-    // making the reference's eventual submitblock response a duplicate.
     let reply = core.rpc(
         "generateblock",
         &json!([funding_address()?.to_string(), transactions, false]),
@@ -230,9 +223,6 @@ fn update_merkle_and_pow(block: &mut Block) -> Result<()> {
 }
 
 fn common_active_chain(core: &mut ProcessNode, node: &mut ProcessNode) -> Result<CommonFunds> {
-    // Core 31.1 activates regtest CSV/BIP34 at height 1, whereas the candidate
-    // uses 432/500. Funding only to coinbase maturity does not establish the
-    // same active rules. Cross both thresholds before comparing these cases.
     let mut funds = mine_common_chain(core, node, 100)?;
     for _ in 0..4 {
         let batch = mine_common_chain(core, node, 100)?;
@@ -350,8 +340,7 @@ fn curated_live_acceptance() -> Result<()> {
     ] {
         compare_case(&mut core, &mut node, name, Input::Block(&block), false)?;
     }
-    // A positive control after all rejections also proves the shared parent
-    // is still usable and the mature coin has not been consumed by previews.
+
     let spend_block = core_candidate(&mut core, &[serialize_hex(&valid)])?;
     compare_case(
         &mut core,

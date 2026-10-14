@@ -1,4 +1,3 @@
-//! The ordered durable commit between chain mutation and publication.
 use super::error::ApplyError;
 use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
@@ -68,8 +67,6 @@ pub(super) fn commit_connect_head(
         .load()
         .map_err(ApplyError::DurableHeadCommit)?;
     if let Some(head) = prior.as_ref() {
-        // Recovery replays to the head at boot, so a connect must always
-        // extend the head exactly.
         if head.tip != facts.prev_hash {
             return Err(ApplyError::DurableHeadLineage {
                 head: head.tip,
@@ -230,12 +227,7 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
             "a disconnect marker exists with no durable head to reconcile it against",
         ));
     };
-    // Gap replay is valid only when the restored tip already lies on the
-    // certified head chain. Height alone cannot answer that: a checkpointed
-    // tip can sit below the head on a branch a reorg already left. The head
-    // tip itself may be absent from the restored tree, so the tip is measured
-    // against the deepest head-chain point the tree resolves. Anything else
-    // must first rewind to the fork through the stored undo rows.
+
     let restored = handles.applied_tip.load_full();
     let mode = match restored.as_deref() {
         None => "cold-replay",
@@ -258,9 +250,7 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         mode,
         "automatic disconnect recovery replayed the certified head chain"
     );
-    // Publication is the durability fence: the recovery checkpoint retires
-    // the marker only after the repaired state, the journal compaction, and
-    // the resume all land. A failure retains it.
+
     if let Err(error) = handles.publish_recovery_checkpoint() {
         return Err(ApplyError::RecoveryPublication(Box::new(error)));
     }
@@ -441,9 +431,7 @@ fn rewind_one_step(
             "a rewound block body does not hash to the applied tip",
         ));
     }
-    // A header-matching body can still carry altered transactions; the
-    // txid-level merkle check the ordinary disconnect path runs applies
-    // here for the same reason.
+
     let txids: Vec<bitcoin_rs_primitives::Txid> = block
         .txs
         .iter()
@@ -461,9 +449,7 @@ fn rewind_one_step(
     })?;
     let tx_count_delta = tx_count_delta_for(&block);
     let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
-    // Recovery owns the surviving marker — the ordinary path's arming
-    // guard would refuse every step under it, and overwriting it would
-    // erase the evidence being reconciled.
+
     rollback_block_recovery(
         handles.utxo.as_ref(),
         handles.coin_stats.as_ref(),
@@ -544,8 +530,7 @@ fn replay_committed_gap(
     restored: Option<&TipSnapshot>,
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
-    // The first height the replay must re-apply: the restored tip's child,
-    // or genesis when nothing was restored.
+
     let base_height = match restored {
         Some(tip) => {
             if head.height <= tip.height {
@@ -557,8 +542,7 @@ fn replay_committed_gap(
         }
         None => 0,
     };
-    // Width bounds the descriptor allocation only; the body-identity and
-    // ancestry checks below decide recoverability.
+
     let gap_width = usize::try_from(head.height - base_height + 1)
         .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
 
@@ -580,7 +564,6 @@ fn replay_committed_gap(
         Ok((block, bytes))
     };
 
-    // Walk the head chain down to the base, keeping only hash descriptors.
     let mut chain = Vec::with_capacity(gap_width);
     let mut cursor = (head.height, head.tip);
     loop {
@@ -700,16 +683,14 @@ fn replay_gap_chain(
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     let mut transition = Some(handles.begin_transition()?);
-    // A length always fits u64; the metrics counter counts in u64.
+
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
     let replayed = (|| {
         let mut commit_id = 0_u64;
         for (height, hash) in chain {
             let (block, bytes) = load_body(height, hash)?;
             let bytes = bytes::Bytes::from(bytes);
-            // The head receipt certifies the body and undo inputs. Rebuild the
-            // proof for the retry because the first call consumes it even
-            // when journal admission refuses before mutation.
+
             let outcome = match apply_replayed_gap_block(
                 handles, head, restored, &block, &bytes, height, hash,
             ) {
@@ -734,9 +715,7 @@ fn replay_gap_chain(
             tracing::debug!(height, hash = %hash.to_string_be(), "replayed committed gap block");
         }
         let published = handles.applied_tip.load_full();
-        // A head stored before counts were tracked records the unknown
-        // marker (wire 0): replay may reconstruct a real count, so the count
-        // is part of the landing check only when the head actually knows it.
+
         let (head_tip, head_height, head_count, head_commit) =
             (head.tip, head.height, head.chain_tx_count, head.commit_id);
         let landed = published.as_ref().is_some_and(|tip| {

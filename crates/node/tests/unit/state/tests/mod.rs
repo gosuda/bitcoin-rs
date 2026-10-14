@@ -76,8 +76,7 @@ fn dir_listing(data_dir: &std::path::Path) -> String {
 fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
     const CHILD_DIR_ENV: &str = "BITCOIN_RS_TEST_EPOCH_CHILD_DIR";
     const CHILDREN: usize = 8;
-    // Subprocess mode: this same test binary was re-exec'd by the parent
-    // below. Park on the start barrier, then allocate one epoch.
+
     if let Ok(data_dir) = std::env::var(CHILD_DIR_ENV) {
         let data_dir = std::path::PathBuf::from(data_dir);
         let dir = cap_std::fs::Dir::open_ambient_dir(&data_dir, cap_std::ambient_authority())?;
@@ -102,7 +101,6 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
 
-    // Harness test names are crate-relative; `module_path!()` is not.
     let test_name = concat!(
         module_path!(),
         "::process_epoch_allocation_is_unique_across_processes"
@@ -124,8 +122,6 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
         );
     }
 
-    // Every child must be alive and parked before any allocates, so all
-    // eight genuinely contend for the same lock file on one data dir.
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
     loop {
         let ready = std::fs::read_dir(&data_dir)?

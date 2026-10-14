@@ -1,6 +1,3 @@
-//! Snapshot-gated compact-filter queries. No chain-transition lock is needed:
-//! these answers depend only on immutable block identities and index rows.
-
 use super::{
     DerivedIndexInfo, DerivedIndexQueryEngine, Hash256, IndexCapabilities, TxIndexSnapshot,
     TxQueryError,
@@ -43,8 +40,7 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
                     return Ok((step == 1000 && start == 1000).then_some([0; 32]));
                 }
                 let count = (end - start) / step + 1;
-                // BIP157 headers have at most 2000 hashes; checkpoints fit the
-                // 4 MB protocol envelope. Bound work before allocating/walking.
+
                 if (step == 1 && count > 2000) || count > 100_000 {
                     return Ok(None);
                 }

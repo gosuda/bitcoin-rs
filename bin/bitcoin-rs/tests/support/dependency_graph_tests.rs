@@ -1,5 +1,3 @@
-//! Synthetic Cargo metadata coverage for production feature isolation.
-
 use super::WorkspaceGraph;
 use serde_json::{Value, json};
 

@@ -1,24 +1,3 @@
-//! BIP152 compact-block conformance over the real P2P wire.
-//!
-//! One bitcoin-rs process, one raw loopback peer speaking the production
-//! codec and the production inbound dispatch path — no mock dispatcher, so
-//! what these tests observe is what a real peer sees: which message answers
-//! a `getdata`, which request follows a failed reconstruction, and whether a
-//! malformed request ends the connection.
-//!
-//! Three behaviours are pinned here and cannot be pinned in the crate unit
-//! tests, which stop at the protocol object boundary:
-//!
-//! * serving depth — a compact `getdata` and a `getblocktxn` are answered
-//!   with a `cmpctblock`/`blocktxn` only near the active tip, and with the
-//!   whole witness-bearing `block` beyond the bound;
-//! * the coinbase prefill a served compact block carries;
-//! * the receive side — a `cmpctblock` whose body does not hash to its own
-//!   header is never applied, and recovery is one full-block `getdata` on
-//!   the same connection.
-//!
-//! The pinned Core 31.1 authority for each is cited at the test.
-
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::collections::BTreeMap;
@@ -98,7 +77,7 @@ impl CompactPeer {
             | Inventory::Block(hash) => *hash,
             _ => return Ok(false),
         };
-        // The wire takes an owned body; the map keeps serving further requests.
+
         let Some(body) = self.blocks.get(&hash).cloned() else {
             self.wire
                 .send(NetworkMessage::NotFound(vec![*item]), deadline)?;
@@ -496,8 +475,6 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     let hash = real.block_hash();
     peer.offer_chain(std::slice::from_ref(&real));
 
-    // The same header, announced with a coinbase body that is not the one the
-    // header commits to.
     let mut wrong = real.txdata[0].clone();
     wrong.output[0].value = Amount::from_sat(1);
     let announced = CmpctBlock {
@@ -563,8 +540,7 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
     let (mut node, mut peer, common) = synced_peer_with_len("stale-race", 100)?;
     let parent = common.last().expect("common tip");
     let mut stale = segwit_coinbase_block(parent, 101, 0xD1);
-    // Include a non-coinbase transaction, forcing an actual missing short-ID
-    // slot after the compact response's sole coinbase prefill.
+
     stale.txdata[0].input[0].witness.clear();
     stale.txdata[0].output.truncate(1);
     let funding = &common[0].txdata[0];
@@ -600,7 +576,6 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
     assert_eq!(compact.compact_block.prefilled_txs.len(), 1);
     assert_eq!(compact.compact_block.prefilled_txs[0].idx, 0);
 
-    // The peer holds the prefill while a different, longer branch wins.
     let branch = build_chain(parent, 2, 0xE1, 101);
     peer.headers = common.iter().map(|b| b.header).collect();
     peer.offer_chain(&branch);

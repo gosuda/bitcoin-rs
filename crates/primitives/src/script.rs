@@ -1,5 +1,3 @@
-//! Native script and witness byte stacks.
-
 use core::ops::{Deref, DerefMut};
 
 /// A Bitcoin script (`scriptSig` or `scriptPubKey`) as owned consensus bytes.

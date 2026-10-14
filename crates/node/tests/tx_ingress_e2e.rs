@@ -1,26 +1,3 @@
-//! ING-R9 e2e: peer transaction admission and source-excluding relay over a
-//! real loopback socket pair.
-//!
-//! Each test binds real TCP listeners on 127.0.0.1 and drives the production
-//! wire path end to end: a dialer peer frames `version`/`verack`/`inv`/`tx`
-//! with `bitcoin_rs_p2p::wire`, the node side runs the real inbound handshake
-//! and `dispatch_inbound_full` with the real [`MempoolGateway`] as the
-//! `TxInventory` filter, the decoded transaction enters the real bounded
-//! channel drained by [`spawn_tx_ingress_consumer`], admission commits through
-//! the node's one shared `MempoolGateway`, and the real P2P relay worker
-//! announces through `PeerRelaySink` over
-//! `NodeState::peer_table`. The assertions read framed messages back off
-//! the sockets: the bystander peer receives the `inv`, the source peer does
-//! not.
-//!
-//! The production listener now forwards `Message::Tx` into the ingress
-//! channel and dispatches through `TxInventory`. This harness still drives
-//! its own loopback sockets so the assertions stay deterministic; it uses
-//! the same consumer, admission, and relay worker `start_node` spawns.
-//!
-//! Skip gate: when loopback TCP is unavailable (sandboxed environment) the
-//! tests return early with a `tracing::warn!` rather than failing.
-
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -65,10 +42,6 @@ const RELAY_ABSENCE_WINDOW: Duration = Duration::from_secs(31);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(35);
 /// Slice between deadline checks in the frame collectors.
 const COLLECT_SLICE: Duration = Duration::from_millis(200);
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
 
 /// Parent outpoint funding the spending transactions.
 fn parent_txid(marker: u8) -> Txid {
@@ -217,10 +190,6 @@ fn loopback_skip() -> Option<String> {
         Err(error) => Some(format!("loopback TCP unavailable: {error}")),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Loopback peer: real socket pair around a real lease
-// ---------------------------------------------------------------------------
 
 /// Node-side wiring shared by every loopback peer of one test.
 #[derive(Clone)]
@@ -401,13 +370,9 @@ fn serve_connection(
                     &message,
                     None,
                     Some(gateway.as_ref()),
-                    // The harness has no chain; its tests cover post-IBD
-                    // relay behavior, so the gate defaults open.
                     &|| true,
                     &|| true,
                     &mut send,
-                    // The harness has no block sync: block inventory is
-                    // announced to nothing here.
                     &mut |_| {},
                     &mut |items| {
                         wiring
@@ -580,10 +545,6 @@ fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> anyhow::Result
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
 /// Full path under test: funded node state, the production ingress and P2P
 /// relay workers, and a source + bystander
 /// loopback peer pair with completed handshakes.
@@ -655,8 +616,7 @@ impl Harness {
             relay_queue: relay.clone(),
             _dir: dir,
         };
-        // Register each handle as soon as its spawn succeeds so later setup
-        // failure still closes the peers and joins every earlier worker.
+
         harness.relay = Some(spawn_tx_relay_worker(
             PeerRelaySink::new(harness.state.peer_table()),
             relay_rx,
@@ -714,10 +674,6 @@ impl Drop for Harness {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[test]
 fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Result<()> {
     let (state, _dir) = open_node()?;
@@ -725,7 +681,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Re
     let gateway = state.mempool_gateway();
     let (relay, _relay_rx) = TxRelayQueue::new(1);
     let pending = spending_tx(parent_txid(0xEE), 40_000);
-    // The filler request is never admitted, so it carries no real epoch.
+
     assert!(relay.announce(pending.txid(), pending.wtxid(), None, u64::MAX));
     let mining = Arc::new(RecordingMining::default());
     let mining_control: Arc<dyn MiningControl> = Arc::<RecordingMining>::clone(&mining);
@@ -835,8 +791,6 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
     let tx = spending_tx(parent_txid(0xAA), 40_000);
     let txid = tx.txid();
 
-    // The source announces; the node's dispatch + gateway inventory filter does not
-    // know the tx and requests its body over the same socket.
     write_frame(&harness.source.dialer, harness.magic, &tx_inv(&txid))?;
     wait_for_tx_getdata(
         &harness.source.dialer,
@@ -845,13 +799,10 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
         OBSERVE_TIMEOUT,
     )?;
 
-    // The body arrives framed on the wire; the real consumer admits it
-    // through the shared gateway.
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))
         .map_err(|_| anyhow!("admitted tx never reached the shared mempool gateway"))?;
 
-    // Relay announces to the bystander…
     wait_for_tx_inv(
         &harness.bystander.dialer,
         harness.magic,
@@ -859,8 +810,6 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
         OBSERVE_TIMEOUT,
     )?;
 
-    // …and excludes the source: drain its socket for a full window and assert
-    // no announcement for the delivered tx ever appears on it.
     let source_frames = collect_frames(
         &harness.source.dialer,
         harness.magic,
@@ -871,8 +820,6 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
         "source peer must never receive the inv for its own transaction"
     );
 
-    // The accepted-only mining wake fired exactly through the accepted
-    // mutation, and the admission inventory now reports the mempool hold.
     assert!(
         harness.mining.publish_count() >= 1,
         "accepted tx must wake the mining control"
@@ -897,11 +844,9 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
     }
     let harness = Harness::build(0xCC)?;
 
-    // Zero fee: 0 sat/kvB against the pool's 1_000 sat/kvB floor.
     let tx = spending_tx(parent_txid(0xCC), 50_000);
     let txid = tx.txid();
 
-    // The unknown tx is requested…
     write_frame(&harness.source.dialer, harness.magic, &tx_inv(&txid))?;
     wait_for_tx_getdata(
         &harness.source.dialer,
@@ -910,7 +855,6 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
         OBSERVE_TIMEOUT,
     )?;
 
-    // …the body is delivered and rejected…
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || {
         harness.gateway.is_rejected(Hash256::from(txid))
@@ -921,7 +865,6 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
         "a below-min-relay tx must not enter the mempool"
     );
 
-    // …never relayed to the bystander…
     let bystander_frames = collect_frames(
         &harness.bystander.dialer,
         harness.magic,
@@ -937,7 +880,6 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
         "a rejected tx must not wake the mining control"
     );
 
-    // …and its next announcement is suppressed by the real dispatch filter.
     write_frame(&harness.source.dialer, harness.magic, &tx_inv(&txid))?;
     let source_frames = collect_frames(
         &harness.source.dialer,
@@ -1037,8 +979,7 @@ fn orphan_parent_reuses_the_completed_childs_announcement_slot() -> anyhow::Resu
         return Ok(());
     }
     let harness = Harness::build(0xC1)?;
-    // A wtxid-relay connection keeps filler txid candidates delayed while
-    // the ready child's admission releases its request slot.
+
     let _witness_peer = harness.connect_peer("witness-delay", true)?;
     let parent = parent_txid(0xC2);
     let child = spending_tx(parent, 40_000);

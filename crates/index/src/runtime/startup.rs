@@ -1,5 +1,3 @@
-//! Supervised index backend opening, failure publication, and worker handoff.
-
 use super::DerivedIndexLifecycle;
 use super::DerivedIndexOpenSpec;
 use super::DerivedIndexQueryEngine;
@@ -159,7 +157,7 @@ fn finish_worker(
         tracing::error!(%error, "txindex worker open or run failed");
         fail_worker(runtime, lifecycle, generation, &error.to_string());
     }
-    // Release is generation-checked and never removes a poisoned claim.
+
     registry.release(namespace_key, generation.id());
 }
 
@@ -229,10 +227,7 @@ pub(super) fn open_and_run(
             shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop()
         })?;
 
-    // Check shutdown and generation immediately after backend open returns.
     if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
-        // Drop all store values (open.writer, open.reader) and exit without
-        // publication or reconciliation.
         return Ok(());
     }
 
@@ -250,14 +245,12 @@ pub(super) fn open_and_run(
         },
     ));
 
-    // Publish the complete engine atomically; readiness is proven per query.
     publish_lifecycle(
         lifecycle,
         generation,
         DerivedIndexLifecycle::Serving(query_engine),
     );
 
-    // Check shutdown immediately after publication.
     if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
         return Ok(());
     }
@@ -299,7 +292,6 @@ pub(super) fn open_derived_index_with_timeout(
     open_timeout: Duration,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
-    // No open thread exists yet: cancellation here can release the namespace.
     if should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
     }
@@ -399,7 +391,6 @@ pub(super) fn wait_for_open_result(
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     let deadline = Instant::now() + timeout;
     loop {
-        // Shutdown wins even when its observation coincides with the deadline.
         if should_stop() {
             return Err(DerivedIndexWorkerError::OpenStopped);
         }
@@ -499,15 +490,12 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let checks = AtomicUsize::new(0);
             let result = wait_for_open_result(&open_rx, Duration::from_secs(30), || {
-                // Stop on the second check, after one pending receive. No scheduler
-                // race or storage-engine sleep is needed to put the wait in flight.
                 checks.fetch_add(1, Ordering::Relaxed) > 0
             });
             let _ = done_tx.send(result);
         });
         let result = done_rx.recv_timeout(Duration::from_secs(2));
-        // Unblock even the old, uncapped receive before asserting, so a regression
-        // fails promptly rather than leaking a 30-second test thread.
+
         drop(open_tx);
         assert!(worker.join().is_ok());
         assert!(matches!(

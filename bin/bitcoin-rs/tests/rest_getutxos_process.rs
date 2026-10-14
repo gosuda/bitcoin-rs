@@ -1,7 +1,3 @@
-//! API-03: canonical POST bytes agree with pinned Core GET, including coins.
-//! Core 31.1's POST parser prepends a string length and shifts the fields;
-//! that independently observed mismatch is intentionally retained as a gap.
-
 #![expect(
     clippy::expect_used,
     reason = "reference failures identify the exact wire contract"
@@ -35,8 +31,6 @@ fn start(kind: Kind) -> ProcessNode {
 }
 
 fn request_body(check: bool, points: &[OutPoint]) -> Vec<u8> {
-    // Write the intended protocol directly, independently of the candidate's
-    // request parser. This vector is deliberately small enough for one byte.
     let mut body = vec![
         u8::from(check),
         u8::try_from(points.len()).expect("bounded count"),

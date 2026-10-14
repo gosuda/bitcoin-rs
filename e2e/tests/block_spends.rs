@@ -1,5 +1,3 @@
-//! Retained undo across public RPC/REST, compared with pinned unmodified Core.
-
 use std::io::Cursor;
 use std::time::Duration;
 
@@ -61,8 +59,7 @@ fn compare_raw_lookup_sources(
     let indexed = compare_raw_transaction(core, node, txid, None)?;
     assert!(indexed.get("in_active_chain").is_none());
     assert_eq!(indexed["version"], u32::MAX);
-    // Standard version 2 can enter both mempools without a policy override.
-    // The high-bit version above is covered through actual block admission.
+
     let (outpoint, prevout) = funds.confirmed_output(2)?;
     let mempool = signed_spend(outpoint, &prevout, 1000, Sequence::MAX)?;
     let mempool_id = mempool.compute_txid().to_string();
@@ -154,7 +151,7 @@ fn compare_formats(core: &mut ProcessNode, node: &mut ProcessNode, hash: &str) -
         node.http_get(&format!("{path}.hex"))?.body,
         core.http_get(&format!("{path}.hex"))?.body
     );
-    // Independently decode ordinary Bitcoin TxOuts, not the native undo codec.
+
     let rows = native_json.json()?;
     let rows = rows
         .as_array()
@@ -264,8 +261,7 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
     assert!(stale.get("nextblockhash").is_none());
     submit_common(&mut core, &mut node, &[])?;
     let replacement = submit_common(&mut core, &mut node, &[])?;
-    // Exact declared deviation: a later receipt no longer certifies the old
-    // branch. Its stored rows must not be promoted to trusted history.
+
     let native = node.rpc("getblock", &json!([block, 3]))?;
     let reference = core.rpc("getblock", &json!([block, 3]))?;
     assert_eq!(native["confirmations"], reference["confirmations"]);
@@ -292,8 +288,6 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
 
 #[test]
 fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()> {
-    // Core's ordinary debug option rotates 64 KiB block files and permits
-    // pruning after height 100; the binary itself is the pinned release.
     let mut core = ProcessNode::spawn_with(
         Kind::Core,
         &SpawnOptions {
@@ -312,7 +306,7 @@ fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()>
     let old = core.rpc("getblockhash", &json!([1]))?;
     let genesis = core.rpc("getblockhash", &json!([0]))?;
     let tip = core.rpc("getbestblockhash", &json!([]))?;
-    // A clean checkpoint establishes the native pruner's recovery floor.
+
     let datadir = node.stop_keep_datadir()?;
     let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &opts, datadir)?;
     for process in [&mut core, &mut node] {

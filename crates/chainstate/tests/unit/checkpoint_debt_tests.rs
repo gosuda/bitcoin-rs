@@ -1,6 +1,3 @@
-//! An in-flight disconnect refuses checkpoint publication without touching
-//! the published state.
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;

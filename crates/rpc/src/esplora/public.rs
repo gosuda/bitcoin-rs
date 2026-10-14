@@ -1,11 +1,6 @@
-//! Wallet-facing electrs/Esplora routes.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
-// WHY rust-bitcoin: `/tx/:id/merkleblock-proof` returns the serialized
-// rust-bitcoin `MerkleBlock`; no native merkle-proof builder exists in-tree
-// (sanctioned compat seam).
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
@@ -166,10 +161,7 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
                 Err(error) => admission_error(error),
             }
         }
-        // `/txs/package` is in this namespace so it cannot fall through to
-        // JSON-RPC. API.md makes package relay conditional on a
-        // package-admission backend; 404 is preferable to sequential
-        // sendrawtransaction calls pretending to be atomic.
+
         _ => not_found(),
     }
 }
@@ -218,7 +210,6 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
         |(record, bytes, txid)| {
-            // MerkleBlock construction requires bitcoin::Block (sanctioned seam).
             let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
             else {
                 return internal_error("stored block body is corrupt");
@@ -405,8 +396,7 @@ fn block_status(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
-    // Membership and the next-best lookup select from one captured applied
-    // publication, so a reorg between them cannot mix two branches.
+
     let view = ctx.chain.applied_view();
     let in_best_chain =
         ctx.chain.active_hash_in_view(&view, record.height) == Some(Hash256::from(record.hash));
@@ -451,8 +441,6 @@ pub(super) fn block_transaction_values<'a>(
     record: &bitcoin_rs_index::block_log::BlockRecord,
     transactions: impl IntoIterator<Item = &'a Tx>,
 ) -> Result<Vec<TransactionValue>, Response> {
-    // A record fetched by hash can be from a losing branch. Do not reuse the
-    // active block at the same height for its transactions' confirmation data.
     let block_status = (ctx.chain.active_hash_at_height(record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
@@ -498,8 +486,6 @@ fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
     })
 }
 fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
-    // One publication decides the default start and every height lookup, so the
-    // array cannot straddle two applied branches.
     let view = ctx.chain.applied_view();
     let start = start_height.unwrap_or_else(|| view.height());
     if ctx.chain.block_by_height_in_view(&view, start).is_none() {
@@ -549,9 +535,7 @@ fn mempool_recent(ctx: &Context) -> Response {
     const RECENT: usize = 10;
     let latest = {
         let pool = ctx.mempool.gateway.read();
-        // Bounded top-ten selection: candidates borrow the scanned entry, so
-        // only the ten survivors pay an `Arc` clone — an eviction ordering
-        // never clones a transaction it evicts (SEL-01).
+
         let mut latest: Vec<(u64, Txid, u64, u32, &Arc<Tx>)> = Vec::with_capacity(RECENT);
         for entry in pool.iter_entries() {
             let rank = (entry.time, entry.txid);
@@ -588,14 +572,6 @@ fn mempool_recent(ctx: &Context) -> Response {
     )
 }
 fn fee_estimates(handler: &Handler) -> Response {
-    // CONTRACT: docs/contracts/external-api.md#API-26 — one horizon, honest
-    // refusal. A target without enough admitted-and-confirmed history has no
-    // answer: the entry is omitted from the map rather than fabricated as a
-    // 1 sat/vB floor, so a wallet can tell "no data" from "cheap". The
-    // dispatched `estimatesmartfee` feerate is the RPC surface's own
-    // `sat_to_btc` projection of the estimator's sat/kvB rate (see the
-    // util.rs handler); this endpoint is a consumer of that value, so the
-    // unit projection cannot drift between the two surfaces.
     let mut values = serde_json::Map::new();
     for target in (1_u32..=25).chain([144, 504, 1008]) {
         if let Some(fee) = handler
@@ -644,7 +620,7 @@ pub(super) fn history(
     include_mempool: bool,
 ) -> Response {
     let projection = Projection::new(ctx);
-    // Sentinel "" selects mempool transactions only. Avoid confirmed resolution.
+
     if last == Some("") {
         let mempool = match projection.mempool_activity_for(h) {
             Ok(mempool) => mempool,
@@ -680,8 +656,7 @@ pub(super) fn history(
         Ok(records) => records,
         Err(response) => return response,
     };
-    // API-09: only an exact known lowercase txid advances the page. Unknown
-    // or noncanonical cursors restart, including links made stale by a reorg.
+
     let start = last.and_then(|x| {
         records
             .iter()

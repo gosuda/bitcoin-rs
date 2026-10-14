@@ -117,7 +117,7 @@ fn assert_matches_core(
 #[test]
 fn estimate_network_hashps_matches_core_getnetworkhashps() {
     let mut tree = BlockTree::new();
-    // Non-monotonic times: height 2 goes backwards so min/max ≠ first/last.
+
     let times = [1_000_000_u32, 1_000_600, 1_000_300, 1_001_200, 1_001_800];
     let mut prev = BlockHash::default();
     let mut tip_id = None;
@@ -158,7 +158,7 @@ fn estimate_network_hashps_matches_core_getnetworkhashps() {
 }
 
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-06
+
 fn network_hash_ps_rejects_a_height_the_tip_cannot_resolve() {
     let mut tree = BlockTree::new();
     let genesis = append(&mut tree, BlockHash::default(), 1_000_000);

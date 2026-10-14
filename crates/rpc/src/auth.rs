@@ -77,7 +77,6 @@ impl Auth {
 /// Compares byte strings without early exit.
 #[must_use]
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    // SPEC: constant-time eq to avoid auth-timing leaks.
     let len = left.len().max(right.len());
     let mut diff = left.len() ^ right.len();
     let mut index = 0;

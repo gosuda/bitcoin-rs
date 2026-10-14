@@ -1,9 +1,3 @@
-//! Process-input configuration for the `bitcoin-rs` binary.
-//!
-//! Owns the command-line, TOML, environment, and Bitcoin Core `bitcoin.conf`
-//! adapters together with their precedence. `node` only receives the resolved
-//! configuration and never opens these process-input sources.
-
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

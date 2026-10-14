@@ -1,9 +1,3 @@
-//! Fixed compatibility coverage for the supported v4 snapshot format.
-//!
-//! The fixture was written by an earlier build and is checked only in the load
-//! direction; current writers are not required to preserve internal byte order.
-// A golden-vector test that cannot read its own fixture has failed; panicking
-// names the step that broke.
 #![allow(clippy::expect_used)]
 
 use std::io::Cursor;

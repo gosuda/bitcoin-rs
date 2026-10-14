@@ -57,7 +57,7 @@ impl Drop for RestoreCheckpointRoot {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn disabled_zmq_still_seals_the_observer_slot() {
     let pool = Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
         bitcoin_rs_mempool::MempoolLimits::default(),
@@ -76,7 +76,7 @@ fn disabled_zmq_still_seals_the_observer_slot() {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-success"));
@@ -100,7 +100,7 @@ fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<(
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = isolated_config(&temp.path().join("node-checkpoint-failure"));
@@ -150,7 +150,7 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow:
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-join-failure"));
@@ -181,7 +181,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-slow-bootstrap"));
@@ -239,7 +239,7 @@ fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> anyhow::
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let daemon_config = isolated_config(&temp.path().join("daemon"));
@@ -267,7 +267,7 @@ fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
     shutdown::take_shutdown_stages_reached();
     let joins = Arc::new(AtomicUsize::new(0));
@@ -285,7 +285,7 @@ fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("startup-rollback"));
@@ -317,16 +317,13 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
 }
 
 #[test]
-// CONTRACT: docs/contracts/embedding.md EMB-01 — on explicit embedded
-// shutdown the derived-index worker is stopped and joined before the clean
-// checkpoint publishes and before chainstate closes.
+
 fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = isolated_config(&temp.path().join("node-index-join"));
     config.indexes.txindex = true;
     let node = start_node(config, RuntimeInputs::default(), true)?;
-    // Wait until the worker's store is open (the lifecycle leaves Opening),
-    // so shutdown exercises the live-worker join, not an open race.
+
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while matches!(
         node.state.derived_index_status().capability().state,
@@ -338,9 +335,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Res
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    // `worker_joined` flips only after the worker's join returns — a join
-    // abandoned at the deadline never sets it — so the checkpoint-side
-    // observation proves the join ran, not just that shutdown was requested.
+
     let joined = node.state.index_worker_joined();
     let worker_joined_before_checkpoint = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&worker_joined_before_checkpoint);
@@ -359,7 +354,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Res
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
     wake_tx.send(())?;
@@ -371,8 +366,7 @@ fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
         let _ = done_tx.send(result);
     });
     let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));
-    // Release a formerly blocking send even when the assertion will fail;
-    // the regression must not leave a detached blocked thread behind.
+
     let _ = wake_rx.try_recv();
     worker
         .join()

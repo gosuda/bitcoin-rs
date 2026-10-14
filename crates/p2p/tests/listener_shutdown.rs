@@ -1,4 +1,3 @@
-//! P2P listener shutdown integration coverage.
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
 use bitcoin_rs_p2p::{ListenerExtras, NetworkActivity, PeerTable};

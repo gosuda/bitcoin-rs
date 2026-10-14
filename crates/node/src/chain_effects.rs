@@ -1,9 +1,3 @@
-//! Derived consumers of committed chain transitions.
-//!
-//! Ownership and ordering rules are defined by `ARCH-07` in
-//! [`docs/contracts/architecture.md`](../../docs/contracts/architecture.md). Apply
-//! does not import these consumer types.
-
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
@@ -424,8 +418,6 @@ pub(crate) fn bootstrap_genesis(
     }
     let genesis = handles.network().genesis_block();
     match followers.apply_connect(handles, &genesis) {
-        // The header-tip cell is the chainstate's to publish — including on
-        // a committed-but-unsettled connect, which owns its outcome.
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
         Err(error) => {
             if let ConnectMutationError::CommittedButSettlementFailed { outcome, .. } = &error {
@@ -748,8 +740,7 @@ mod tests {
         assert_eq!(gateway.orphan_count(), 2);
         assert!(!gateway.has_observer());
         let fence = gateway.begin_chain_change()?;
-        // Existing parent work and the snapshot-wide wake must share one ready
-        // identity. The other parent becomes available only through the snapshot.
+
         gateway.chain_changed(&[missing.inputs[0].previous_output.txid]);
         *chain.prevouts.write() = vec![(
             available.inputs[0].previous_output,
@@ -760,8 +751,7 @@ mod tests {
         )];
         followers.on_snapshot();
         followers.on_snapshot();
-        // The queued claim must select a still-live announcer after the
-        // original connection leaves, without losing the resident body.
+
         gateway.maintain_orphans(1, [replacement, missing_source]);
         assert_eq!(gateway.retry_orphans(&chain, 1), []);
         assert!(gateway.read().is_empty());

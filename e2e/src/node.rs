@@ -1,5 +1,3 @@
-//! Process custody for `bitcoin-rs` and pinned Bitcoin Core nodes.
-
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
@@ -311,7 +309,7 @@ fn launch_command(
         (Kind::BitcoinRs, None) => Command::new(bitcoin_rs_binary()?),
         (Kind::Core, _) => Command::new(verified_core_binary()?),
     };
-    // Host configuration must not leak into the isolated regtest profile.
+
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("BITCOIN_RS_") {
             command.env_remove(key);
@@ -375,10 +373,6 @@ fn launch_command(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     {
-        // Give the child its own console process group so
-        // GenerateConsoleCtrlEvent can deliver a graceful stop to it
-        // specifically; group 0 delivery would hit every test process
-        // sharing this console.
         use std::os::windows::process::CommandExt as _;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
     }
@@ -396,7 +390,6 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 98")
         || stderr.contains("Unable to bind")
         || stderr.contains("Failed to bind")
-        // Windows: WSAEADDRINUSE and WSAEACCES (excluded/blocked port).
         || stderr.contains("Only one usage of each socket address")
         || stderr.contains("os error 10048")
         || stderr.contains("An attempt was made to access a socket")
@@ -818,12 +811,12 @@ impl ProcessNode {
     /// harness has none (a service or a windowless parent) delivery fails
     /// and there is no graceful stop to wait for, so the failure escalates
     /// to a forced terminate immediately rather than stalling the stop
-    /// timeout.
+    /// timeout. `GenerateConsoleCtrlEvent` accepts any process group id; a
+    /// stale pid makes the call a no-op.
+    #[allow(clippy::undocumented_unsafe_blocks)]
     #[cfg(windows)]
     fn send_sigterm(&mut self) {
         use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
-        // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
-        // group id; a stale pid simply makes the call a no-op.
         let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid()) };
         if delivered == 0 {
             eprintln!(
@@ -880,8 +873,7 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
         };
         let mut tail: VecDeque<u8> = VecDeque::new();
         let limit = usize::try_from(MAX_OUTPUT).unwrap_or(usize::MAX);
-        // File bytes already dropped from `tail`; once they reach `limit` the
-        // file (stale head + live tail) is compacted back to the tail.
+
         let mut stale = 0_usize;
         let mut buffer = [0_u8; 8192];
         loop {
@@ -896,8 +888,6 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
                         stale += excess;
                     }
                     if stale >= limit && publish_tail(&path, tail.make_contiguous()).is_ok() {
-                        // The rename orphaned `file` onto the old inode — reopen
-                        // the published path to keep appending to it.
                         if let Ok(fresh) = OpenOptions::new().append(true).open(&path) {
                             file = fresh;
                         }
@@ -907,7 +897,7 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
                 }
             }
         }
-        // Rest state: file is exactly the retained tail, honoring MAX_OUTPUT.
+
         if stale > 0 {
             let _ = publish_tail(&path, tail.make_contiguous());
         }
@@ -942,8 +932,6 @@ mod tests {
             .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
             .filter(|entry| {
-                // A marker distinct from the flag the sibling test binary uses,
-                // so concurrent harness binaries never collide on this count.
                 fs::read_to_string(entry.path().join("launch.json"))
                     .is_ok_and(|text| text.contains("--process-harness-invalid-option-retry-audit"))
             })

@@ -1,10 +1,3 @@
-//! Process-level chain transition regressions against pinned Bitcoin Core.
-//!
-//! The two candidate nodes begin with identical Core-mined blocks. One
-//! connects a losing branch before receiving Core's winning branch; the
-//! other receives only the winning branch. Their public chainstate and
-//! mempool observations must converge.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -356,8 +349,6 @@ fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
     );
     assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
 
-    // Core mines only the specified conflicting transaction. Its independent
-    // spend stays out of the winning branch and remains eligible for mempool.
     let mut rival = vec![mine_core_block(&mut core, &[tx_hex(&new_tx)])?];
     rival.push(mine_core_block(&mut core, &[])?);
     rival.push(mine_core_block(&mut core, &[])?);
@@ -438,9 +429,6 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
         Some(rival[0].header.merkle_root)
     );
 
-    // Run the exact overclaim body through the pinned independent validator
-    // from genesis. This distinguishes the intended consensus failure from
-    // an accidentally malformed header or Merkle commitment.
     let mut oracle = ProcessNode::spawn(Kind::Core)?;
     assert_eq!(
         oracle.rpc("submitblock", &json!([serialize_hex(&rival[0])]))?,
@@ -459,9 +447,6 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
     assert_eq!(sorted_mempool(&mut node)?, Vec::<String>::new());
     assert_eq!(node.rpc("getblockhash", &json!([1]))?, json!(old_tip));
 
-    // Invalid-branch recovery reconnects the old branch through durable
-    // commits. Kill immediately after the public state has returned to that
-    // branch, then check the same tip and coins before allowing new work.
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);

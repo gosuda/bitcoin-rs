@@ -1,17 +1,3 @@
-//! Canonical sync-frontier reconciliation.
-//!
-//! The reconciler answers one question per tick: is the canonical
-//! next-required body owned by a live connection, staged, or applying — and
-//! when it is none of those, what concrete work unblocks it or what
-//! explicit reason makes progress impossible. All observation funnels
-//! through [`BlockSync::observe_frontier`] and every recovery decision
-//! through [`SyncFrontier::plan`], so exactly one place evaluates the
-//! frontier invariant; there is no second model of "is sync stuck".
-//!
-//! All work ownership is stamped with the requesting connection's
-//! [`PeerSource`]: a cancelled or same-address-replaced connection never
-//! inherits its predecessor's assignments, convictions, or deadlines.
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -273,8 +259,6 @@ impl SyncFrontier {
 
         plan.schedule_bodies = true;
         let body_state = match self.body_state {
-            // A pending whose owner fell out of the usable set is unowned
-            // work; reconcile released it, and it must be re-requested.
             Some(BodyState::InFlight(owner))
                 if !self.usable_peers.iter().any(|peer| peer.source == owner) =>
             {

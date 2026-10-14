@@ -89,7 +89,6 @@ fn consistent(policy: &TxPolicy) {
     assert!(in_flight.values().all(|count| *count <= MAX_PEER_IN_FLIGHT));
 }
 
-// Read-only snapshots prove all rejection paths preserve metadata as well as counts.
 fn snapshot(policy: &TxPolicy) -> String {
     format!("{policy:?}")
 }
@@ -118,8 +117,7 @@ fn combined_caps_use_one_local_victim_and_never_spend_an_unrelated_slot_on_refus
         for n in 0..8u16 {
             let peer = source(n + 1);
             peers.push(peer);
-            // The owner is the numeric worst victim, but initially the only ready
-            // source. Omitting the owner filter must not turn admission into refusal.
+
             let ready = if n == 0 { now } else { now + SOURCE_DELAY };
             let priority = if n == 0 { u64::MAX } else { u64::from(n) };
             let mut entry = candidate(peer, 1, ready, protected, priority);

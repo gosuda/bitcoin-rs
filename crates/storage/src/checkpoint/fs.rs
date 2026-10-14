@@ -1,4 +1,3 @@
-//! Capability-scoped checkpoint directory and file operations.
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -10,9 +9,6 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
-// This serialized marker is the single source of truth for the current
-// persistent format epoch. Increment it for a schema-breaking storage change;
-// no converter or compatibility reader accompanies the bump.
 
 /// Opens a directory with ambient authority for initial datadir access.
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
@@ -241,8 +237,6 @@ pub fn read_file(dir: &Dir, name: &str, limit: u64) -> io::Result<Vec<u8>> {
 ))]
 /// Flushes a directory entry to durable storage where the platform supports it.
 pub fn sync_dir(dir: &Dir) -> io::Result<()> {
-    // cap-std directory capabilities use O_PATH on Linux; reopen "." read-only
-    // so fsync has an I/O-capable descriptor without leaving this capability.
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -293,7 +287,7 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             dir.remove_file(file_name)?;
         }
     }
-    // Windows refuses RemoveDirectory while a handle on the target is open.
+
     drop(dir);
     root.remove_dir(name)
 }

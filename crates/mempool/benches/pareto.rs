@@ -1,11 +1,3 @@
-//! Production-path mempool priority-index benchmark.
-//!
-//! `mempool_insert_entry` is the end-to-end path an attacker actually drives:
-//! `Mempool::insert_entry` accounts the entry through the derived-state
-//! owners and refreshes package metadata incrementally over the affected
-//! closure (`refresh_metadata`), so an acceptance pays for its
-//! neighborhood, not a full rebuild of the priority index. The full-rebuild
-//! pass, `recompute_all_metadata`, is test-only.
 #![allow(missing_docs)]
 #![allow(clippy::expect_used)]
 

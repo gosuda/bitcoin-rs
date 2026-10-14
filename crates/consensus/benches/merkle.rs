@@ -1,5 +1,3 @@
-//! Merkle root computation benchmarks for the AVX2-capable reducer.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 
 use std::hint::black_box;

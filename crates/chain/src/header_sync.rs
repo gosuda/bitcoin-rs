@@ -10,7 +10,6 @@ use crate::{
     tree::BlockTree,
 };
 
-// Maximum live future drift from the caller's network-adjusted clock.
 const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
 /// Selects which contextual header checks apply to a batch of headers.
@@ -73,15 +72,14 @@ pub fn accept_headers(
             continue;
         }
         validate_pow(header, hash, network)?;
-        // An empty tree only roots at the network's genesis hash.
+
         if tree.is_empty() {
             if hash != network.genesis_block_hash() {
                 return Err(ChainError::MissingParent {
                     prev_hash: Hash256::from(header.prev_blockhash),
                 });
             }
-            // The validated genesis root: the tree is empty, so the
-            // header has no parent and no contextual rule applies.
+
             let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
             accepted.push(id);
             continue;
@@ -92,7 +90,6 @@ pub fn accept_headers(
             None => return Err(ChainError::MissingParent { prev_hash }),
         };
         if tree.node(parent_id)?.status == NodeStatus::Invalid {
-            // Core's bad-prevblk gate precedes contextual validation.
             return Err(ChainError::InvalidParent { parent: parent_id });
         }
         validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
@@ -150,11 +147,6 @@ pub fn validate_contextual_header(
         });
     }
 
-    // BIP94 timewarp floor at a difficulty-adjustment boundary: the
-    // candidate may not fall more than `MAX_TIMEWARP` below its parent
-    // (`src/validation.cpp:4100-4110`). Consensus applies it only where the
-    // BIP94 deployment is active; the mining floor in
-    // [`minimum_candidate_time`] applies it on every network as policy.
     if network.enforce_bip94()
         && let Some(minimum) = minimum_candidate_time(parent.header.time, height, network)
         && header.time < minimum
@@ -166,9 +158,6 @@ pub fn validate_contextual_header(
         });
     }
 
-    // Future-drift ceiling. Historical replay skips only this check: a
-    // checkpoint or journal record must not become invalid solely because
-    // the host clock rolled backwards after publication.
     if mode == HeaderValidationMode::LiveAdmission {
         let max_allowed = now_secs.saturating_add(MAX_FUTURE_TIME_SECONDS);
         if header.time > max_allowed {
@@ -180,8 +169,6 @@ pub fn validate_contextual_header(
         }
     }
 
-    // Version floors for the buried deployments, in Core's order
-    // (`src/validation.cpp:4112-4126`).
     for (required, active) in [
         (2, network.is_bip34_active(height)),
         (3, network.is_bip66_active(height)),
@@ -258,8 +245,7 @@ pub fn validate_header_nbits(
     if actual == expected {
         return Ok(());
     }
-    // `height` only reports the mismatch; resolve it on the failure path
-    // since `next_work_required` already proved the parent resolves.
+
     let height = tree
         .node(parent_id)?
         .height
@@ -429,10 +415,7 @@ pub fn permitted_difficulty_transition(
     if interval == 0 || !height.is_multiple_of(interval) {
         return old_bits == new_bits;
     }
-    // A retarget may move the target by at most the clamped timespan ratio:
-    // four times up, four times down, never past the proof-of-work limit,
-    // and the bound is compared after the compact round-trip, exactly as
-    // Core rounds it.
+
     let pow_limit = network.max_target();
     let old_target = pow::compact_to_target(old_bits);
     let observed = pow::compact_to_target(new_bits);
@@ -615,8 +598,6 @@ mod contextual_header_tests {
 
         let mut filled = 0_u32;
         for (activation, stale, required) in [(500_u32, 1_i32, 2_i32), (1251, 2, 3), (1351, 3, 4)] {
-            // Fill up to the activation height with headers that already meet
-            // the floor, so only the candidate's version is under test.
             for height in filled + 1..activation {
                 extend_regtest(&mut tree, &mut prev, height, required, base_time);
             }
@@ -684,8 +665,7 @@ mod contextual_header_tests {
             tip_time = header.time;
         }
         let parent_id = tree.lookup(prev.0).ok_or("fixture tip present")?;
-        // Height 2016 is a difficulty-adjustment boundary on Testnet4, so the
-        // candidate must carry the retargeted bits.
+
         let bits = next_work_required(&tree, parent_id, tip_time, network)?;
         let now = tip_time + MAX_FUTURE_TIME_SECONDS;
         let candidate = |time: u32| BlockHeader {
@@ -697,7 +677,6 @@ mod contextual_header_tests {
             nonce: 0,
         };
 
-        // More than `MAX_TIMEWARP` below the parent: rejected.
         assert_eq!(
             validate_contextual_header(
                 &tree,
@@ -713,7 +692,7 @@ mod contextual_header_tests {
                 minimum: tip_time - 600,
             })
         );
-        // Exactly `MAX_TIMEWARP` below the parent: still valid.
+
         validate_contextual_header(
             &tree,
             parent_id,
@@ -805,7 +784,6 @@ mod contextual_header_tests {
         (tree, tip)
     }
 
-    // MTP binds in both modes; replay must ignore the caller's future ceiling.
     #[test]
     fn timestamp_bounds_hold_per_validation_mode() -> Result<(), Box<dyn std::error::Error>> {
         let (tree, tip) = chain_with_median_five();

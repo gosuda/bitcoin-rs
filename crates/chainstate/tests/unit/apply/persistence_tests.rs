@@ -111,9 +111,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
             &cancellation,
         ))
     });
-    // Existing private Condvar observation proves the predicate checked the
-    // starting tip and parked before the failed transition. There is no RPC
-    // deadline that could let this waiter complete before apply_block runs.
+
     let registration_deadline = Instant::now() + Duration::from_secs(2);
     while handles.tip_notification.changed.notify_all() == 0 {
         assert!(Instant::now() < registration_deadline, "waiter must park");
@@ -270,7 +268,6 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn 
     let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
     assert!(utxo.get(&first_outpoint).is_some());
 
-    // The stored head no longer certifies the applied tip.
     handles.durable_head = Arc::new(InMemoryDurableHeadStore::new());
 
     let outcome = handles.begin_transition()?.disconnect(&first);

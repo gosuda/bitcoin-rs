@@ -1,6 +1,3 @@
-//! Stale-tip policy: the one extra full-relay dial a stalled tip buys, and
-//! the conditions that refuse it.
-
 use std::io;
 use std::net::TcpListener;
 use std::sync::atomic::AtomicBool;

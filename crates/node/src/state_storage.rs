@@ -1,5 +1,3 @@
-//! Chainstate storage, pruning, and recovery-evidence composition.
-
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
@@ -53,11 +51,9 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
             &store,
         )));
-        // Load the commit point before block-file recovery can change bytes.
-        // A clean checkpoint does not make a damaged committed frame an orphan.
+
         let committed = durable_head.load()?.and_then(|head| head.body_extent);
-        // The frontier is read once, before any lease can be granted, so no
-        // capability hands out history a previous process already deleted.
+
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
         ));
@@ -259,12 +255,6 @@ impl BlockBodySource for StoredBlockBodySource {
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
-        // `None` is overloaded here: it means both "this store cannot slice"
-        // and "the read failed". Callers must treat either as a reason to fall
-        // back to the whole body, so the return type stays — but this is the
-        // hot path for every ScriptIndex history call now, and an I/O error that
-        // silently degrades into a full block scan is exactly the failure that
-        // would otherwise show up only as unexplained latency.
         match self
             .store
             .load_block_body_range(height, hash.0, offset, len)
@@ -359,7 +349,6 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             |_pruned_below| Ok(()),
         )
         .map_err(|err| match err {
-            // The reorg-margin/overflow refusals are operator-facing RPC text; pass them through verbatim.
             PruneError::Storage(StorageError::InvalidOperation(message)) => {
                 PruneServiceError::failed(message)
             }

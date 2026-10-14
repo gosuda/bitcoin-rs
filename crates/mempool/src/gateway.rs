@@ -1,17 +1,3 @@
-//! The single mutation gateway in front of the mempool.
-//!
-//! Every production mempool mutation routes through [`MempoolGateway`]: it
-//! owns the pool's write lock, commits the mutation, and then enqueues the
-//! ordered [`MutationEnvelope`] for the optional [`MempoolObserver`] — always
-//! in commit order, by construction. Publication is eventual: a nested or
-//! concurrent mutation call may return before its callback runs, and the
-//! elected drainer completes every queued callback exactly once, in
-//! sequence order, with no gateway lock held. After this, no production
-//! code outside the gateway takes the mempool write lock — lookups go
-//! through the [`MempoolGateway::read`] passthrough. The composition root
-//! constructs one gateway per pool and passes clones of that handle to every
-//! mutation route, so they share one publish queue and one observer slot.
-
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -86,10 +72,6 @@ pub enum ChainChangeError {
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
 }
-
-// ---------------------------------------------------------------------------
-// Atomic admission — one generation-revalidated gateway operation.
-// ---------------------------------------------------------------------------
 
 /// Resolved context and exact state tokens for one admission attempt.
 pub struct AdmissionRequest {
@@ -239,9 +221,7 @@ impl PreparedAdmission {
             self.reject(AdmitError::Consensus, default_scope);
             return;
         };
-        // Core package prechecks must reject value/finality errors before
-        // any row is reported script-valid. Reuse the consensus owner over
-        // copied outputs; this phase executes no scripts and holds no lock.
+
         if bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
             &request.tx,
             &PrevoutMap(&self.prevouts),
@@ -308,8 +288,7 @@ impl PreparedAdmission {
             );
             return;
         }
-        // Core v31.1 BroadcastTransaction and testmempoolaccept apply the
-        // caller's maximum only after a successful admission verdict.
+
         if crate::standardness::exceeds_max_feerate(
             self.fact.base_fee.unwrap_or(0),
             self.fact.vsize,
@@ -701,8 +680,6 @@ impl MempoolGateway {
     /// or mutation. Exact duplicates retain their idempotent submission result.
     /// Committed changes use the existing ordered publication seam, including
     /// the capacity evictions verified before insertion.
-    // The public atomic API consumes its prepared request; the private path
-    // borrows it so the shared retry owner can recover the Arc after a mismatch.
     #[expect(clippy::needless_pass_by_value)]
     /// Test seam: the pre-claimed single-shot door; production submissions
     /// run through `submit_transaction`'s bounded claimed path.
@@ -713,8 +690,6 @@ impl MempoolGateway {
 
     /// A private resident-body claim joins generation/sequence validation.
     /// Evicted or refreshed retry bodies may not mutate pool or lifecycle.
-    // Keep token checks, mutation, lifecycle finalization and FIFO publication
-    // in one auditable write-lock interval instead of splitting the commit.
     pub(crate) fn admit_transaction_claimed(
         &self,
         request: &AdmissionRequest,
@@ -766,8 +741,6 @@ impl MempoolGateway {
                 }
                 let default_reject_scope = rejection_scope(&request.tx);
 
-                // The writer consumes the already verified graph plan. It checks
-                // the stamp again but never reruns the solver or script verifier.
                 let ReplacementStage::Verified(plan) = prepared.replacement else {
                     return Err(AdmitError::MempoolChanged);
                 };
@@ -847,16 +820,7 @@ impl MempoolGateway {
                 context.sigop_cost,
             ));
         }
-        // Core re-admits a disconnected transaction with `bypassLimits = true`
-        // on `AcceptToMemoryPool` (validation.cpp), which skips the
-        // `GetMinFee()` floor and the mempool size limit while ancestor
-        // topology, TRUC, and ephemeral-spend checks still run. `Deferred` is
-        // that bypass: the fee floor is skipped here and the per-acceptance
-        // size trim downstream, with one size trim at settlement instead.
-        // It derives from the chain-change fence, not the caller-declared
-        // origin: `AdmissionOrigin::Reorg` is public metadata, so only a
-        // submission that actually runs under `AdmissionFence::ChainChange`
-        // may defer — anything else enforces in full.
+
         let enforcement = match (request.origin, fence) {
             (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
                 LimitEnforcement::Deferred
@@ -872,9 +836,7 @@ impl MempoolGateway {
                 policy.incremental_relay_fee_sat_per_kvb,
             ))
         };
-        // BIP68 is evaluated at the next block. A resolved input that is not
-        // present in the confirmed metadata is an unconfirmed (mempool/package)
-        // parent and is encoded as the next block.
+
         let next_height = request.height.saturating_add(1);
         let resolved_prevouts: HashSet<OutPoint> =
             request.prevouts.iter().map(|(op, _)| *op).collect();
@@ -919,8 +881,6 @@ impl MempoolGateway {
             }
         }
         if mode == AdmissionMode::PackageTest {
-            // Core PackageTestAccept forbids replacement before fee/script
-            // checks; an already resident tx retains its duplicate result.
             if !pool.contains_txid(&request.tx.txid())
                 && !pool.conflicts_for(&request.tx).is_empty()
             {
@@ -941,11 +901,7 @@ impl MempoolGateway {
             }
         } else if prepared.rejection.is_none() {
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            // Core's `bypassLimits` re-acceptance still runs
-            // `SingleTRUCChecks` (validation.cpp): the pool the disconnect
-            // changed decides the topology now, so the TRUC conflict walk —
-            // which also returns the direct conflicts the BIP125 fee rules
-            // need — applies under Deferred exactly as under Full.
+
             let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
             let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
                 let entry = MempoolEntry::new(
@@ -1588,12 +1544,12 @@ mod tests {
 
     fn standard_tx(label: u8) -> Tx {
         let mut script = Vec::with_capacity(25);
-        script.push(0x76); // OP_DUP
-        script.push(0xa9); // OP_HASH160
-        script.push(0x14); // push 20 bytes
+        script.push(0x76);
+        script.push(0xa9);
+        script.push(0x14);
         script.extend_from_slice(&[label; 20]);
-        script.push(0x88); // OP_EQUALVERIFY
-        script.push(0xac); // OP_CHECKSIG
+        script.push(0x88);
+        script.push(0xac);
         Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -1619,7 +1575,7 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: prev,
                 script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME, // RBF signal
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -2038,9 +1994,6 @@ mod tests {
                 let _ = done_tx.send(result);
             });
 
-            // The concurrent mutation must enqueue and return while the first
-            // callback is still gated: its thread hands back the committed
-            // result with the next sequence even though nothing has published.
             let queued_result = done_rx
                 .recv_timeout(core::time::Duration::from_secs(10))
                 .expect("the concurrent mutation must return while the callback is gated");
@@ -2049,7 +2002,6 @@ mod tests {
                 "the enqueued batch keeps its committed sequence"
             );
 
-            // Nothing may publish while the gate is closed.
             assert_eq!(
                 observer.stream.lock().len(),
                 1,
@@ -2693,13 +2645,12 @@ mod tests {
         let gateway = gateway_with(Some(dyn_observer(&observer)));
 
         let mut original = standard_tx(44);
-        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME; // RBF signal (< 0xFFFF_FFFE)
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let original_txid = original.txid();
         let mut replacement = standard_tx(45);
         replacement.inputs[0].previous_output = original.inputs[0].previous_output;
-        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // RBF signal
-        // Higher fee to pass BIP125 (original output is 10 000, replacement
-        // output is 5 000, so fee = 5 000 > original fee = 0).
+        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
+
         replacement.outputs[0].value = Amount::from_sat(5_000);
         let replacement_txid = replacement.txid();
 
@@ -2713,7 +2664,7 @@ mod tests {
         let request = AdmissionRequest {
             tx: Arc::new(replacement.clone()),
             context: PackageTxContext {
-                fee: 5_000, // 10 000 - 5 000
+                fee: 5_000,
                 vsize: 100,
                 sigop_cost: 0,
                 missing_inputs: false,
@@ -3227,10 +3178,10 @@ mod tests {
     /// that gives a script failure a witness-strippable variant.
     fn p2sh_prevout() -> TxOut {
         let mut script = Vec::with_capacity(23);
-        script.push(0xa9); // OP_HASH160
-        script.push(0x14); // push 20 bytes
+        script.push(0xa9);
+        script.push(0x14);
         script.extend_from_slice(&[0x2a; 20]);
-        script.push(0x87); // OP_EQUAL
+        script.push(0x87);
         TxOut {
             value: Amount::from_sat(11_000),
             script_pubkey: script.into(),

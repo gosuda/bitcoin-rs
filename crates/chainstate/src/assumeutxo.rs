@@ -1,10 +1,3 @@
-//! Explicit `AssumeUTXO` chainstate role management and background historical validation.
-//!
-//! [`AssumeUtxoManager`] coordinates an active state rooted at a pinned snapshot
-//! and an isolated historical state validating through [`crate::ChainTransition::connect`].
-//! Role restrictions are defined by [`ChainstateRole`]; commitment/count checks,
-//! finalization, and durable fail-closed behavior by [`AssumeUtxoManager::step_historical`].
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -385,8 +378,6 @@ impl AssumeUtxoManager {
         if let Some(data_dir) = manager.data_dir.as_deref()
             && let Err(error) = crate::assumeutxo_snapshot::cleanup_reservations(data_dir, network)
         {
-            // Cleanup is not an activation authority. Failure retains extra
-            // files for a later retry and never resets the accepted head.
             tracing::warn!(%error, "snapshot reservation cleanup deferred");
         }
         match manager.status()? {
@@ -535,8 +526,6 @@ impl AssumeUtxoManager {
         self.activate_pinned_snapshot(set, base_hash, pinned)
     }
 
-    // Only network-pinned metadata reaches this boundary in production. Tests
-    // use a small consensus-valid chain to exercise lifecycle transitions.
     fn activate_pinned_snapshot(
         &self,
         set: UtxoSet,
@@ -561,9 +550,6 @@ impl AssumeUtxoManager {
             });
         }
 
-        // Core's AssumeutxoHash is HASH_SERIALIZED, not MuHash. Derive it
-        // from the owned imported coins; neither a caller nor a trailer can
-        // assert the commitment on behalf of the verifier.
         let (commitment, stats) = set.with_stable_view(|view| {
             Ok::<_, bitcoin_rs_utxo::UtxoError>((
                 view.hash_serialized_3_at_height(pinned.height)?,
@@ -594,8 +580,6 @@ impl AssumeUtxoManager {
         }
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
-                // Recheck under transition exclusion: disconnect/recovery may
-                // arm the sticky marker while the import is being verified.
                 if self
                     .data_dir
                     .as_deref()
@@ -623,7 +607,6 @@ impl AssumeUtxoManager {
                 Ok(())
             })?;
 
-        // 3. Create isolated historical chainstate with detached events
         let historical = self.active_chainstate.create_historical_counterpart(
             pinned.height,
             pinned.block_hash,
@@ -660,8 +643,6 @@ impl AssumeUtxoManager {
             .clone()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
 
-        // Refuse out-of-order input before creating durable validation intent.
-        // Such a caller error must not poison the next startup.
         let expected_prev = historical
             .applied_tip_snapshot()
             .map_or_else(Hash256::default, |tip| tip.hash);
@@ -912,8 +893,7 @@ impl AssumeUtxoManager {
                     Some(historical),
                 ) => {
                     let applied = historical.applied_tip_snapshot();
-                    // The historical tip is read against the same admitted header
-                    // tree and best-header publication as the foreground role.
+
                     let progress = reader.progress_at(applied.as_deref(), self.network, now);
                     (
                         Some(HistoricalChainstateSummary {
@@ -969,7 +949,6 @@ impl AssumeUtxoManager {
     }
 
     fn fail_historical(&self, historical: &Chainstate) -> Result<(), AssumeUtxoError> {
-        // Close admission even when the diagnostic record cannot be written.
         self.active_chainstate.fail_closed_for_recovery();
         historical.fail_closed_for_recovery();
         if let AssumeUtxoDiskStatus::Validating {
@@ -1012,8 +991,7 @@ impl AssumeUtxoManager {
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.height + 1);
         let hash = block.block_hash().0;
-        // A committed archive receipt already owns these bytes. Replay still
-        // runs consensus, but must not regress progress or rewrite the receipt.
+
         if height < *base_height
             && height <= *historical_height
             && self.next_historical_block()? == Some((height, hash))
@@ -1144,8 +1122,6 @@ impl AssumeUtxoManager {
         mut status: AssumeUtxoDiskStatus,
         historical_block: Option<(&Block, &Chainstate)>,
     ) -> Result<(), AssumeUtxoError> {
-        // The manager is the only bridge from historical validation to durable
-        // history. This batch preserves the active tip and coin authority.
         let active = &self.active_chainstate;
         let _transition = active.chain_transition.lock();
         let prior = active
@@ -1318,8 +1294,7 @@ impl AssumeUtxoManager {
             height: tip.height,
             hash: tip.hash,
         });
-        // The base identity is deliberately kept in the lifecycle record;
-        // this checkpoint only accelerates historical recovery.
+
         Ok(())
     }
 }

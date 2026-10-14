@@ -1,5 +1,3 @@
-//! Index reconciliation state machine and supplied chain-position decisions.
-
 use super::CursorCommit;
 use super::DerivedIndexWorkerError;
 use super::PendingForward;
@@ -59,8 +57,6 @@ impl Worker {
             match action {
                 ReconcileAction::Progressed => continue,
                 ReconcileAction::CaughtUp => {
-                    // A wake can be coalesced or consumed while this pass runs.
-                    // The revision is authoritative: never sleep after it moved.
                     if self.runtime.revision() != revision_before {
                         continue;
                     }
@@ -84,11 +80,6 @@ impl Worker {
                         BatchWait::Woken => continue,
                         BatchWait::Deadline => {
                             if !self.commit_pending(&mut pending)? {
-                                // `commit_pending` already took the pending
-                                // forward; `Ok(false)` means a retryable
-                                // reset rejection, not a permanent failure.
-                                // Exit only on shutdown; otherwise let the
-                                // quiet wait throttle the retry.
                                 if self.runtime.should_stop() {
                                     break;
                                 }
@@ -100,8 +91,6 @@ impl Worker {
                     }
                 }
                 ReconcileAction::Stalled => {
-                    // Missing bodies and stopped writes retry only after one
-                    // revision lull; forward progress never waits.
                     quiet_armed = true;
                 }
             }
@@ -122,11 +111,7 @@ impl Worker {
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
         }
-        // A forward leg commits one capability set at a time, so its
-        // completion is only `CaughtUp` when no enabled capability needs
-        // another transition against the current tip; otherwise the pass
-        // merely progressed and the remaining legs (and their published
-        // phase) carry over.
+
         let (target, _, watermarks) = self.capture_target_watermarks()?;
         if self
             .rollback_selection(watermarks, target.as_deref())
@@ -152,9 +137,6 @@ impl Worker {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
         let leftover = self.enabled.leftover(watermarks);
         if !leftover.is_empty() {
-            // `full` → `utxo` (and dropping internal TxLookup when explicit
-            // `txindex` is off) must reset only the families that are no
-            // longer configured. Live stays queryable through that demotion.
             self.writer
                 .reset_capabilities(leftover)
                 .map_err(DerivedIndexWorkerError::Index)?;
@@ -171,8 +153,6 @@ impl Worker {
         while let Some((capabilities, watermark)) =
             self.rollback_selection(watermarks, target.as_deref())
         {
-            // Report once per pass: an 834k-block stale branch would otherwise
-            // report once per rolled-back block.
             if let Some(target) = target.as_deref()
                 && !reported_ahead
                 && watermark.height > target.height
@@ -221,10 +201,7 @@ impl Worker {
                         self.runtime.fail_compact_filters(&error);
                         continue;
                     }
-                    // Undo is the ScriptLive spend-script authority. TxLookup
-                    // and ScriptHistory roll back from the block body alone,
-                    // so a pruned undo must not force those families through
-                    // a full rebuild.
+
                     tracing::warn!(
                         error = %error,
                         "index cursor cannot restore ScriptLive without undo; rebuilding ScriptLive"
@@ -243,13 +220,7 @@ impl Worker {
                         self.runtime.fail_compact_filters(&error);
                         continue;
                     }
-                    // Every answer here is provisional: an outstanding
-                    // reservation can abort and release the range, the owner
-                    // granted the history and the row is not there yet, or
-                    // the node is shutting down. Waiting is the whole
-                    // reaction: a rebuild cannot recover what may already
-                    // exist, and rebuilding on a transient gap would discard
-                    // rows the consumer had already derived.
+
                     tracing::debug!(
                         error = %error,
                         "index rollback waits on a provisional history answer"
@@ -293,9 +264,7 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        // Live has no watermark after restoration, an interrupted seed, or a
-        // same-pass `reset_for_rebuild`. Seed from one stable UTXO view
-        // before `forward_selection` would replay it from genesis (`IDX-07`).
+
         if self.enabled.contains(IndexCapability::ScriptLive) && watermarks.script_live.is_none() {
             self.seed_live_from_utxo()?;
             return Ok(ReconcileAction::Progressed);
@@ -316,14 +285,12 @@ impl Worker {
         let Some(state) = pending.as_ref() else {
             return Err(DerivedIndexWorkerError::PendingDurableChanged);
         };
-        // Any fence change invalidates the retained rows. Discard them and
-        // re-derive from the new reset, revision, and watermark state.
+
         if fence != state.fence {
             *pending = None;
             return Ok(ReconcileAction::Stalled);
         }
-        // A different watermark under the same fence is an incoherent writer
-        // response, not a concurrent commit. Treat it as corruption.
+
         if selected_watermark(watermarks, state.capabilities)
             != SelectedWatermark::Valid(state.durable)
         {

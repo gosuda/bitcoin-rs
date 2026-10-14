@@ -1,5 +1,3 @@
-//! Capability rollback, selective rebuilding, live seeding, and recovery evidence.
-
 use super::DerivedIndexWorkerError;
 use super::UndoScripts;
 use super::Worker;
@@ -29,11 +27,7 @@ impl Worker {
         let Some(chain_transition) = self.chain_transition.as_ref() else {
             return Err(DerivedIndexWorkerError::MissingChainTransition);
         };
-        // Hold chain-transition until the stable UTXO view is acquired so
-        // `target` names the exact state we traverse. Release the transition
-        // before persistence; the view guard keeps the scan consistent while
-        // rows stream in bounded batches. Lock order matches apply:
-        // chain_transition, then stable-view read.
+
         let (target, view) = {
             let _transition = chain_transition.lock();
             let current = self.applied_tip.load_full();
@@ -47,9 +41,6 @@ impl Worker {
             (target, utxo.lock_stable_view())
         };
 
-        // `seed_script_live_stream` owns leftover-row reset: an interrupted
-        // seed is rows without a watermark, and the stream clears that
-        // family before any new locator is committed.
         let written = self
             .writer
             .seed_script_live_stream(
@@ -129,9 +120,7 @@ impl Worker {
         watermark: IndexWatermark,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
-        // One grant covers every persistence read this rollback needs: a
-        // prune pass may not delete the undo row in the gap between the
-        // body load and the live-anchor lookup.
+
         let lease = match self.history.request_history(watermark.height) {
             Ok(lease) => lease,
             Err(error @ HistoryUnavailable::Pruned { .. }) => {
@@ -217,8 +206,7 @@ impl Worker {
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
-        // The grant pins this height, so an absent body under it is transient
-        // absence, which the boundary types as `Missing`.
+
         let body = store.load_block_body(height, hash)?;
         body.ok_or(DerivedIndexWorkerError::HistoryUnavailable(
             HistoryUnavailable::Missing,

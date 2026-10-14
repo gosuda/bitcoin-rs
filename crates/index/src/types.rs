@@ -266,9 +266,6 @@ pub struct ScriptLiveRow {
 impl ScriptLiveRow {
     /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
-        // Consensus transaction output counts cannot reach 2^24 under the
-        // serialized-block size cap, so this drops no identity bits; enforce
-        // in all builds, not just debug.
         assert!(outpoint.vout <= U24_MAX, "vout does not fit in u24");
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
@@ -465,16 +462,14 @@ mod tests {
     #[test]
     fn script_live_row_roundtrips_outpoint() {
         let scripthash = ScriptHash::from_byte_array([7_u8; 32]);
-        // Nonuniform so a reversed-endian writer cannot satisfy the stored-byte
-        // assertion; a palindrome such as `[9; 32]` would.
+
         let txid_le = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
             0x1d, 0x1e, 0x1f, 0x20,
         ];
         let txid = Txid::from(Hash256::from_le_bytes(&txid_le));
-        // Nonuniform u24 value: format 5 stores `vout` in 3 bytes, so the
-        // fixture must fit `U24_MAX` (consensus vouts always do).
+
         let outpoint = OutPoint::new(txid, 0x000a_0b0c);
         let row = ScriptLiveRow::new(scripthash, &outpoint);
 

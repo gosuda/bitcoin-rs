@@ -1,12 +1,3 @@
-//! Big-endian key-order vs numeric-height-order contract tests.
-//!
-//! The 4-byte height suffix in `HashPrefixRow` is big-endian (format 5), so
-//! lexicographic key-byte order matches numeric height order within one
-//! 8-byte prefix. Height 1 (`00 00 00 01`) sorts before height 256
-//! (`00 00 01 00`) in byte order.
-//!
-//! These tests pin two contracts:
-//!
 #[path = "support/common.rs"]
 mod common;
 
@@ -130,9 +121,6 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     put_funding_row(&store, scripthash, 256)?;
     let indexer = Indexer::new(store);
 
-    // Direct keys at heights 1 and 256: both produce a funding row with the
-    // same 8-byte prefix; only the height suffix differs. `commit_block`
-    // cannot write a gapped height, so these tests own the keys themselves.
     let block_at_1 = Block {
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(1, 0), script.clone())],
@@ -142,22 +130,15 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
         txs: vec![tx_with_script(spent_outpoint(2, 0), script)],
     };
 
-    // --- Part A: iter_funding_rows returns BE byte order, hence numeric ---
-
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Height 1 is [0x00, 0x00, 0x00, 0x01]; height 256 is
-    // [0x00, 0x00, 0x01, 0x00]. BE byte order puts 1 before 256.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![1, 256],
         "BE byte order matches numeric height order"
     );
 
-    // --- Part B: resolve_script_history sorts by numeric height ---
-
-    // Compute the txids before moving the blocks into the source map.
     let txid_at_1 = block_at_1.txs[0].txid();
     let txid_at_256 = block_at_256.txs[0].txid();
     let source = MultiHeightSource {
@@ -167,15 +148,13 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     let entries = indexer.resolve_script_history(scripthash, &source)?;
 
     assert_eq!(entries.len(), 2, "two confirmed entries");
-    // Entries must be in numeric height order: 1 before 256, matching the
-    // underlying KV iteration order.
+
     assert_eq!(
         entries.iter().map(|e| e.height).collect::<Vec<_>>(),
         vec![1, 256],
         "resolve_script_history must sort by numeric height, matching BE iteration order"
     );
 
-    // The first entry's txid must come from the height-1 block.
     assert_eq!(entries[0].txid, txid_at_1);
     assert_eq!(entries[1].txid, txid_at_256);
     Ok(())
@@ -227,7 +206,6 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
 
-    // Whole-block channel: scanned by the oracle and by the fallback.
     let scan_block_at_1 = Block {
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(3, 0), script.clone())],
@@ -236,7 +214,7 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(4, 0), script.clone())],
     };
-    // Sliced-read channel: different transactions funding the same script.
+
     let byte_block_at_1 = Block {
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(8, 0), script.clone())],
@@ -246,10 +224,6 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
         txs: vec![tx_with_script(spent_outpoint(9, 0), script)],
     };
 
-    // Rows carry each byte block's single transaction position — offset
-    // past the 80-byte header and the compact-size count — so
-    // `resolve_script_history` takes its sliced-read path rather than the
-    // scan fallback.
     for (height, block) in [(1_u32, &byte_block_at_1), (256, &byte_block_at_256)] {
         let offset = 80_usize + varint::encode(u64::try_from(block.txs.len())?).len();
         let position = TxPosition::new(
@@ -287,9 +261,7 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
         vec![1, 256],
         "the scan oracle sorts by numeric height"
     );
-    // The sliced read must surface the byte-served transactions; equal
-    // txids between `fast` and `scan` mean the resolver silently fell back
-    // to the whole-block channel.
+
     assert_eq!(
         fast.iter().map(|e| e.txid).collect::<Vec<_>>(),
         vec![positioned_txid_at_1, positioned_txid_at_256],
@@ -316,7 +288,6 @@ fn spending_rows_also_use_numeric_height_order() -> Result<(), Box<dyn std::erro
     let rows = indexer.iter_spending_rows(&outpoint)?;
     assert_eq!(rows.len(), 2, "two spending rows at two heights");
 
-    // BE byte order: 1 before 256.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![1, 256]

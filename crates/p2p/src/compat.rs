@@ -1,10 +1,3 @@
-//! Bitcoin Core P2P compatibility inventory.
-//!
-//! This module owns the decoded command set and the pinned Core reference.
-//! The decoder in [`crate::wire`] types exactly the names in [`COMMANDS`].
-//! Handshake fields, the reject-or-ignore matrix, and the deviation ledger
-//! live in `docs/policies/p2p-compatibility.md`.
-
 /// Bitcoin Core release every P2P compatibility claim is made against.
 pub const PINNED_CORE_VERSION: &str = "31.1";
 

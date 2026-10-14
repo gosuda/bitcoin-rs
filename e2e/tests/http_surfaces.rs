@@ -1,6 +1,3 @@
-//! HTTP-surface E2E: RPC auth and protocol errors, batch semantics,
-//! REST toggle, the unauthenticated Esplora surface, and ZMQ gating.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -24,8 +21,7 @@ fn rpc_requires_auth() -> Result<()> {
     assert_eq!(unauth.status, 401, "missing auth must be 401");
 
     let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getblockcount\",\"params\":[]}";
-    // A wrong password is likewise a 401; the server must not hand a
-    // 403/500 or accept it.
+
     let bad = node.http_auth("POST", "/", body, Some(("parity", "wrong")))?;
     assert_eq!(bad.status, 401, "wrong password must be 401");
 
@@ -46,20 +42,16 @@ fn rpc_protocol_error_codes() -> Result<()> {
     }))?;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
-    // Wallet methods are not exposed by this wallet-free node.
     let unimplemented = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "getwalletinfo", "params": []
     }))?;
     assert_eq!(unimplemented["error"]["code"], json!(-32601));
 
-    // API-34: waitforblock is implemented; missing its required hash returns
-    // Core's usage error rather than method-not-found (and does not wait).
     let missing_hash = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 4, "method": "waitforblock", "params": []
     }))?;
     assert_eq!(missing_hash["error"]["code"], json!(-1));
 
-    // A JSON parse failure maps to HTTP 500 plus a -32700 body, as in Core.
     let malformed = node.http("POST", "/", b"{not json", true)?;
     assert_eq!(malformed.status, 500);
     let parsed = malformed.json()?;
@@ -212,17 +204,12 @@ fn esplora_tx_broadcast_and_projection() -> Result<()> {
         )?;
 
         if !txindex {
-            // Without txindex the full projection cannot resolve the spend's
-            // confirmed prevout, so the capability contract answers 503
-            // rather than an empty success.
             let fetched = node.http_get(&format!("/api/tx/{txid}"))?;
             assert_eq!(fetched.status, 503, "no txindex -> 503");
             node.stop()?;
             continue;
         }
 
-        // With txindex, 503 also means "index changed during query; retry"
-        // while the index crosses a snapshot boundary.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let fetched = loop {
             let response = node.http_get(&format!("/api/tx/{txid}"))?;

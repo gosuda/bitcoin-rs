@@ -1,5 +1,3 @@
-//! Filesystem, format, and atomic publication primitives for chainstate checkpoints.
-
 mod format;
 pub mod fs;
 mod load;

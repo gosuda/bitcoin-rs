@@ -1,5 +1,3 @@
-//! Inbound payloads received from peers.
-
 use bitcoin_rs_primitives::{Block, Header, Tx, consensus_bytes};
 
 /// A block received from a peer with its wire payload preserved.

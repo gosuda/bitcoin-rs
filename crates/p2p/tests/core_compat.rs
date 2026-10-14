@@ -1,5 +1,3 @@
-//! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
-
 use std::error::Error;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -188,8 +186,7 @@ impl ChainQuery for FakeChain {
                 .bodies
                 .get(&native)
                 .is_some_and(|block| block.block_hash() == native);
-            // This fixture supplies only validated, recent bodies. Production
-            // stale eligibility is exercised by ActiveChainQuery tests.
+
             if known {
                 if !headroom() {
                     outcome.halted = true;

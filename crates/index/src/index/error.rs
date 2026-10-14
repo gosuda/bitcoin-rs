@@ -1,5 +1,3 @@
-//! Typed failures shared by index reads, preparation, and durable writes.
-
 use super::capability::IndexWatermark;
 use bitcoin_rs_storage::StorageError;
 use thiserror::Error;

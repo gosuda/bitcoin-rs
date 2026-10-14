@@ -1,15 +1,3 @@
-//! Bitcoin Core `net:*` tracepoint payload mapping.
-//!
-//! [`inbound_message`] fires per checksum-valid wire message in the connection read
-//! loop and during the handshake; [`outbound_message`] fires per write
-//! attempt by the connection writer and during the handshake. Argument
-//! positions and types follow Bitcoin Core's published ABI — see
-//! `docs/tracing.md` and `bitcoin_rs_consensus`'s `probes.d` table. Every
-//! emitter no-ops unless the connection carries a [`NetTrace`], which only
-//! the live inbound-accept and outbound-dial roots attach, and payload
-//! preparation runs only while a consumer (bpftrace, BCC, DTrace) holds
-//! the probe's semaphore, so an untraced or unattached run pays nothing.
-
 use std::net::SocketAddr;
 
 use crate::peer_info::PeerRole;
@@ -94,8 +82,6 @@ fn message_args(
         trace.connection_type.to_owned(),
         command.to_owned(),
         payload_len_u64(payload.len()),
-        // A zero-length payload has no addressable bytes; hand the tracer a
-        // null pointer rather than a dangling non-null one.
         if payload.is_empty() {
             std::ptr::null()
         } else {

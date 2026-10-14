@@ -1,6 +1,3 @@
-//! Differential integration tests for the coinstats listener and the snapshot
-//! trailer: every commit-path shape must leave the listener holding exactly the
-//! stats a serial reference computes, and the trailer must be that `MuHash`.
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -81,8 +78,6 @@ fn run(plan: &Plan) -> TestResult {
     let mut first = BlockChanges::with_capacity(capacity, 0);
     let mut seeded = Vec::with_capacity(capacity);
     for index in 0..plan.entries {
-        // Four outputs per (shard, txid) pair, so each shard's commit carries
-        // same-transaction runs rather than one isolated output each.
         let shard = u8::try_from(index % u32::from(plan.shards))?;
         let slot = index / u32::from(plan.shards);
         let outpoint = OutPoint::new(

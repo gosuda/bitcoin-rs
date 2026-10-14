@@ -1,5 +1,3 @@
-//! Journal initialization and recovery of its exact durable append frontier.
-
 use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;

@@ -1,16 +1,3 @@
-//! Versioned on-disk encoding for [`UndoBatch`].
-//!
-//! An undo record is what lets the node disconnect a block during a chain
-//! reorganization. Two properties matter more than compactness:
-//!
-//! 1. **Versioned.** The first byte is a format version, so a record written by
-//!    an older binary is rejected rather than misread.
-//! 2. **Bound to its block.** The record carries the hash of the block it
-//!    undoes, and [`decode`] refuses a record whose hash does not match the
-//!    block being disconnected. Keying by height alone would let a stale record
-//!    from an abandoned branch be replayed against a different block at the
-//!    same height, which silently corrupts the UTXO set.
-
 use std::collections::HashSet;
 
 use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
@@ -92,7 +79,6 @@ pub(crate) fn decode_bounded(
     max_restores: usize,
     max_removes: usize,
 ) -> Result<UndoBatch, UndoCodecError> {
-    // A restore is at least an outpoint, a minimal TxOut, a flag, and a height.
     const MIN_RESTORE_BYTES: usize = 36 + 9 + 1 + 4;
     const MIN_REMOVE_BYTES: usize = 36;
 
@@ -144,8 +130,7 @@ pub(crate) fn decode_bounded(
         });
     }
     let mut removes = Vec::with_capacity(bounded_capacity(remove_count));
-    // `seen` deliberately carries over: a block cannot both restore and remove
-    // the same outpoint, so an appearance in both halves is corruption too.
+
     for _ in 0..remove_count {
         let outpoint = cursor.take_outpoint()?;
         reject_duplicate(&mut seen, outpoint)?;

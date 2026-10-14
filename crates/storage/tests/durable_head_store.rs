@@ -1,10 +1,3 @@
-//! Backend-level durable-head store laws, on a real `KvStore`.
-//!
-//! These exercise the receipt semantics the apply path leans on: `Ok(())`
-//! from a commit means a reopened store sees the new head, an injected
-//! durability fault never leaves a torn state, and the fence refuses a stale
-//! expectation without applying the batch.
-
 #![cfg(feature = "fjall")]
 
 use std::sync::Arc;

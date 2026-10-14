@@ -1,24 +1,3 @@
-//! Outbound block announcement owner: headers-first, high-bandwidth compact block,
-//! and `inv` fallback.
-//!
-//! # Architecture
-//!
-//! [`BlockAnnounceQueue`] is the non-blocking producer: a one-slot wake channel
-//! that coalesces notifications under backpressure. Chainstate remains the
-//! authoritative owner of the committed tip.
-//!
-//! [`BlockAnnouncer`] is the P2P-owned decision engine:
-//! - Tracks peer known-header/block state.
-//! - Tracks peer `sendheaders` preference (BIP130).
-//! - Maintains a bounded set of up to 3 peers promoted to BIP152 high-bandwidth mode.
-//! - Selects the best announcement mechanism for each peer:
-//!   1. BIP152 high-bandwidth compact block (`cmpctblock`) if selected, previous block is known, and not blocksonly.
-//!   2. BIP130 `headers` sequence (up to 8 headers) if `sendheaders` was negotiated and anchored to active chain.
-//!   3. Compatibility fallback `inv` (`MSG_BLOCK`) announcing the current active tip.
-//! - Discards stale announcements across reorgs.
-//! - Coalesces wakeups under queue saturation and rereads the committed tip from chainstate.
-//! - Disconnect cleanly removes peer announcement state.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -203,8 +182,7 @@ impl BlockAnnouncer {
         state
             .high_bandwidth_requested_peers
             .retain(|candidate| *candidate != source);
-        // Keep the table's `bip152_hb_to` snapshot consistent for the window
-        // where the entry outlives the worker's set membership.
+
         self.peers.note_high_bandwidth_selected(source, false);
     }
 
@@ -216,14 +194,6 @@ impl BlockAnnouncer {
         eligible: &[(PeerSource, u64)],
         sent: &mut Vec<(SocketAddr, Message)>,
     ) {
-        // BIP152 asks for high-bandwidth slots to go to peers that recently
-        // delivered blocks quickly. Filling strictly in session order
-        // freezes the initial fill on whoever connected first — measured
-        // live on testnet4, where a fresh v2/`hb=true` peer never won a
-        // slot from the earliest-connected Core relayers — so prefer proven
-        // deliverers here. Ties (all-zero sequences on quiet networks) keep
-        // session order because the sort is stable; the rotation pass in
-        // the caller still owns later upgrades.
         let mut fill_order = eligible.to_vec();
         fill_order.sort_by_key(|&(_, sequence)| std::cmp::Reverse(sequence));
         for &(source, _) in &fill_order {
@@ -394,8 +364,6 @@ impl BlockAnnouncer {
                 continue;
             }
 
-            // Option A: High-Bandwidth BIP152 Compact Block
-            // Peer must have explicitly requested high-bandwidth compact blocks from us.
             if peer_state.compact_high_bandwidth == Some(true)
                 && peer_state.compact_version == Some(COMPACT_BLOCK_VERSION)
                 && !self.config.blocksonly
@@ -425,17 +393,6 @@ impl BlockAnnouncer {
                 }
             }
 
-            // Option B: Headers-First Announcement (BIP130)
-            //
-            // Anchoring requires a demonstrated position: a tip this
-            // connection delivered and the node accepted (`demonstrated_tips`
-            // from a headers-download round, or its last announced block). A
-            // sendheaders peer that only listens for announcements has no
-            // anchor, so it stays on the `inv` fallback — measured live on
-            // testnet4 and pinned by
-            // `test_sendheaders_peer_without_demonstrated_tip_gets_inv`.
-            // Core additionally anchors on the peer's own announcements;
-            // closing that gap is a sync-credit change, not a planner one.
             let send_headers = session.info.as_ref().is_some_and(|i| i.send_headers);
             if send_headers {
                 if let Some((known_hash, known_height)) = known_position
@@ -470,7 +427,6 @@ impl BlockAnnouncer {
                 }
             }
 
-            // Option C: `inv` Compatibility Fallback
             let reason = Self::inv_fallback_reason(send_headers, known_position, tip.height);
             let block_inv =
                 Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
@@ -503,9 +459,7 @@ impl BlockAnnouncer {
         let tip_hash = Hash256::from(tip.hash);
         {
             let mut state = self.state.lock();
-            // Claim the observation only on the processing path. Planning is
-            // side-effect free, while this claim prevents concurrent workers
-            // from sending the same committed tip twice.
+
             if state.last_processed_tip == Some(tip_hash) {
                 return Vec::new();
             }
@@ -872,11 +826,6 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // Four eligible compact peers connected in order; a4 delivered three
-        // blocks and a1 one, the middle two none. BIP152 wants the slots on
-        // the proven deliverers, deepest sequence first. All peers are set
-        // up before any compact preference is recorded so the explicit
-        // reconcile below is the only one that sees eligible peers.
         let addrs = [
             test_addr(1201),
             test_addr(1202),
@@ -902,7 +851,6 @@ mod tests {
             vec![addrs[3], addrs[0], addrs[1]]
         );
 
-        // The selection is written through to the snapshot rpc reads.
         for (addr, expected) in addrs.iter().zip([true, true, false, true]) {
             let state = table
                 .announcement_state(source(&table, *addr))
@@ -916,9 +864,6 @@ mod tests {
 
     #[test]
     fn test_high_bandwidth_fill_keeps_session_order_without_evidence() {
-        // All sequences zero (quiet network): the stable sort keeps session
-        // order, so the fill behaves exactly like the old connection-order
-        // rule whenever no peer has delivered blocks yet.
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -951,11 +896,6 @@ mod tests {
 
     #[test]
     fn test_sendheaders_peer_without_demonstrated_tip_gets_inv() {
-        // Live-measured on testnet4: a sendheaders peer that never
-        // participates in a headers-download round has no demonstrated
-        // anchor, so the planner conservatively falls back to `inv` instead
-        // of BIP130 `headers`. See the Option B comment in
-        // `planned_announcements`.
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -966,7 +906,6 @@ mod tests {
 
         let addr = test_addr(1221);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
-        // No mark_known: the peer demonstrated nothing.
 
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
@@ -1072,7 +1011,6 @@ mod tests {
         assert_eq!(sent1.len(), 1);
         assert!(rx.try_recv().is_ok());
 
-        // Repeated tip event
         let sent2 = announcer.process_tip();
         assert!(sent2.is_empty(), "repeated tip event must be a no-op");
         assert!(rx.try_recv().is_err());
@@ -1124,7 +1062,6 @@ mod tests {
         let drained = announcer.drain_queue_and_process(&rx);
         assert_eq!(drained, 1);
 
-        // The wake carries no stale payload: the consumer rereads height 3.
         assert_eq!(announcer.peer_known_block(addr), Some(chain.hash_at(3)));
         let msg = peer_rx.try_recv().expect("peer received preserved tip");
         match msg {
@@ -1417,19 +1354,16 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // addr1: peer wants high-bandwidth compact blocks AND knows prev_hash
         let addr1 = test_addr(1031);
         let (_lease1, _rx1) = setup_peer(&table, &announcer, addr1, true);
         note_compact_preference(&table, addr1, true, 2);
         mark_known(&table, &announcer, addr1, chain.hash_at(1));
 
-        // addr2: peer wants high-bandwidth compact blocks, but does NOT know prev_hash
         let addr2 = test_addr(1032);
         let (_lease2, _rx2) = setup_peer(&table, &announcer, addr2, true);
         note_compact_preference(&table, addr2, true, 2);
         mark_known(&table, &announcer, addr2, chain.hash_at(0));
 
-        // addr3: peer sent sendcmpct(false), knows prev_hash -> must NOT receive CmpctBlock
         let addr3 = test_addr(1033);
         let (_lease3, _rx3) = setup_peer(&table, &announcer, addr3, true);
         note_compact_preference(&table, addr3, false, 2);
@@ -1576,7 +1510,6 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // Case A: distance = 5 <= MAX_BLOCKS_TO_ANNOUNCE (8) -> Headers
         let addr_a = test_addr(1051);
         let (_lease_a, rx_a) = setup_peer(&table, &announcer, addr_a, true);
         mark_known(&table, &announcer, addr_a, chain.hash_at(1));
@@ -1595,7 +1528,6 @@ mod tests {
         }
         assert!(rx_a.try_recv().is_ok());
 
-        // Case B: distance = 10 > MAX_BLOCKS_TO_ANNOUNCE (8) -> Inv fallback
         let chain = Arc::new(MockAnnounceChain::new(12));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(

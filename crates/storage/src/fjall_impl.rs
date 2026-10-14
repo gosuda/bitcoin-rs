@@ -16,7 +16,7 @@ pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 pub struct FjallStore {
     db: Database,
     keyspaces: Vec<Keyspace>,
-    // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
+
     write_lock: parking_lot::Mutex<()>,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
@@ -86,12 +86,8 @@ impl FjallStore {
 
         #[cfg(any(test, feature = "test-seam"))]
         {
-            // Apply boundary: the engine commit that lands the batch atomically.
             if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
                 if fault == crate::PersistFault::PartialApply {
-                    // A strict prefix is staged into the engine batch and the
-                    // boundary then faults: the never-committed batch leaves
-                    // no family with a partial view.
                     let mut fjall_batch = self.db.batch();
                     self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
                 }
@@ -100,8 +96,6 @@ impl FjallStore {
 
             if durability == Some(PersistMode::SyncAll) {
                 if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
-                    // The batch applies without the durability mode; completion
-                    // faults or is lost after that.
                     let mut fjall_batch = self.db.batch();
                     self.stage_ops(&mut fjall_batch, batch.ops)?;
                     fjall_batch.commit().map_err(StorageError::backend)?;

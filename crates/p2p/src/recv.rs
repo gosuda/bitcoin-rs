@@ -1,12 +1,3 @@
-//! Buffered reads that survive a peer socket's poll interval.
-//!
-//! Peer sockets poll with a short read timeout, so a frame or packet can
-//! stop arriving anywhere inside it. Every helper here leaves the bytes
-//! already consumed in place across `TimedOut`/`WouldBlock`, so the caller
-//! retries and the read resumes where it stopped instead of restarting
-//! mid-message. The v1 wire receiver and the BIP324 packet reader share
-//! this machinery; each maps the `io::Error` onto its own error type.
-
 use std::io::{self, Read};
 
 /// Largest single read into a message body. The retained buffer grows only

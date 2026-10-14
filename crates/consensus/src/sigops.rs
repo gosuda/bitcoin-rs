@@ -1,5 +1,3 @@
-//! Consensus transaction sigop-cost accounting.
-
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
@@ -11,7 +9,7 @@ use hashbrown::HashMap;
 pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> u32 {
     let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
-    // Core's coinbase cost never includes previous-output or witness sigops.
+
     if tx.is_coinbase() {
         return cost;
     }
@@ -114,7 +112,7 @@ mod tests {
         let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
         let p2wsh = [vec![0x00, 0x20], vec![2; 32]].concat();
         let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
-        // (prevout, scriptSig, witness, costs without/with WITNESS, including +4 output cost)
+
         let cases = [
             (p2sh.clone(), push_data(&multisig), Vec::new(), 12, 12),
             (p2wpkh.clone(), Vec::new(), Vec::new(), 4, 5),
@@ -178,8 +176,6 @@ mod tests {
             outputs: Vec::new(),
         };
 
-        // Two of three inputs resolved, out of order: one P2WSH bare multisig
-        // (2) plus one P2WPKH (1).
         let multisig_witness = Witness::from_stack(vec![vec![
             opcode::OP_PUSHNUM_1 + 1,
             opcode::OP_CHECKMULTISIG,

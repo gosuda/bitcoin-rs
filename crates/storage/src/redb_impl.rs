@@ -398,8 +398,6 @@ impl RedbTxIndexStore {
         match write_txn.open_table(TXINDEX_SCRIPT_LIVE) {
             Ok(table) => drop(table),
             Err(redb::TableError::TableTypeMismatch { .. }) => {
-                // The former 44-byte declaration could not accept index-owned
-                // 43-byte rows. Replace only an empty table, never operator data.
                 let old: FixedTable<44> = TableDefinition::new("txindex_v1_script_live");
                 let table = write_txn.open_table(old).map_err(StorageError::backend)?;
                 if !table.is_empty().map_err(StorageError::backend)? {

@@ -270,8 +270,7 @@ impl EncodedPreimageArena {
                 .min(PARALLEL_MUHASH_MAX_LANES)
                 .min(rayon::current_num_threads());
             let lane_len = self.ends.len().div_ceil(lane_count);
-            // Rayon collects scoped jobs before returning or propagating a panic,
-            // so no lane can retain arena slices after this flush.
+
             let partials: Vec<_> = (0..lane_count)
                 .into_par_iter()
                 .map(|lane| {
@@ -878,8 +877,6 @@ fn coin_hash_encoded_len(script_len: usize) -> usize {
 }
 
 #[cfg(test)]
-// A test pool that will not build has failed the test; panicking names the
-// reason. Matches the convention already used in `compress.rs`.
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use crate::{SnapshotCoin, SnapshotCoinObserver};

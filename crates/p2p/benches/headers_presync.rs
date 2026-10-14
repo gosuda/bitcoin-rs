@@ -1,12 +1,3 @@
-//! Criterion benches for the header download-twice state machine and the
-//! `getheaders` serving window.
-//!
-//! `presync_collect` and `redownload_replay` measure the two-pass machinery
-//! this change adds; the base tree has no equivalent path, so those two
-//! report absolute medians only. `serve_headers_page` measures the serving
-//! window that both trees answer: its head-versus-base medians are the
-//! no-regression evidence for the per-request gate on the changed hot path.
-
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -148,10 +139,6 @@ fn redownload_replay(c: &mut Criterion) {
     let start = anchor(&genesis);
     let params = regtest_params();
 
-    // The setup pass collects the whole chain and lands at the crossing on
-    // its last header; criterion times only the replay. REDOWNLOAD restarts
-    // at the anchor and the floor is the full chain's work, so the timed
-    // loop replays all 20k headers before the buffer drains.
     let collected = &chain[..];
     let mut group = c.benchmark_group("headers_presync");
     group.bench_function("redownload_replay_20k", |b| {

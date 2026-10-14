@@ -1,5 +1,3 @@
-//! Block rule checks over shared parse-once facts.
-
 use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
@@ -31,7 +29,6 @@ pub fn verify_flags(
 ) -> bitcoin_rs_script::VerifyFlags {
     use bitcoin_rs_script::VerifyFlags;
 
-    // P2SH (BIP16) is enforced except for Core's single grandfathered block.
     let mut flags = VerifyFlags::NONE;
     if !network.is_bip16_p2sh_exception(block_hash) {
         flags = flags.union(VerifyFlags::P2SH);
@@ -70,7 +67,7 @@ pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
     if facts.has_witness() {
         facts.or_insert_wtxids_from(&block.txs);
     }
-    // Conservative non-contextual mode: enforce checks from active softforks.
+
     let context = BlockRuleContext {
         segwit_active: true,
     };
@@ -179,7 +176,7 @@ fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.is_empty() {
         return None;
     }
-    // One pending node per level; u64::MAX leaves span 64 levels.
+
     let mut spine: [Option<Txid>; 64] = [None; 64];
     let mut mutated = false;
     for leaf in txids.iter().copied() {
@@ -195,7 +192,7 @@ fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
         }
         spine[height] = Some(current);
     }
-    // Duplicate-last self-pairs pad the spine without flagging mutation.
+
     let mut carry: Option<(Txid, usize)> = None;
     for (height, slot) in spine.iter().enumerate() {
         let Some(node) = *slot else { continue };
@@ -349,7 +346,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
-    // Reject malformed nonces before deriving witness IDs.
+
     if segwit_active && commitment.is_some() {
         let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
             return Err(ConsensusError::WitnessNonceSize);
@@ -602,7 +599,6 @@ mod tests {
                 vec![duplicated.clone(), duplicated.clone()],
                 Err(ConsensusError::MissingCoinbase),
             ),
-            // Adjacent duplicate txids make the Merkle tree ambiguous.
             (
                 vec![
                     coinbase_tx(),
@@ -612,8 +608,6 @@ mod tests {
                 ],
                 Err(ConsensusError::MerkleMutation),
             ),
-            // Non-adjacent duplicates are not a Merkle mutation; BIP30 owns
-            // that rejection at a later stage.
             (
                 vec![
                     coinbase_tx(),
@@ -779,7 +773,6 @@ mod tests {
             (vec![a, b, b], false),
             (vec![a, b, b, b], true),
             (one_to_six.clone(), false),
-            // Core's ambiguous pair: same root, only the tail copy mutated.
             ((1u8..=6).chain([5, 6]).map(txid).collect(), true),
             (vec![txid(0x2b); 3], true),
             (vec![txid(0x2b); 7], true),

@@ -1,11 +1,3 @@
-//! Script verification entry points over the native transaction type.
-//!
-//! The driver mirrors Core's `VerifyScript`/`VerifyWitnessProgram` flow: run
-//! scriptSig then scriptPubKey through the opcode evaluator, apply P2SH
-//! redeem-script evaluation, dispatch `SegWit` v0 spends through their witness
-//! programs, and hand taproot key-path and script-path spends to the local
-//! BIP341/BIP342 verifier.
-
 use std::borrow::Cow;
 use std::fmt;
 
@@ -351,7 +343,7 @@ impl Interpreter {
             Cow::Borrowed(tx)
         } else {
             let mut grafted = tx.clone();
-            // `grafted` is a clone of `tx`; input_idx was proven in-bounds.
+
             let grafted_input = &mut grafted.inputs[input_idx];
             grafted_input.script_sig = Script::from_bytes(script_sig.to_vec());
             grafted_input.witness = Witness::from_stack(witness.to_vec());
@@ -504,8 +496,7 @@ fn verify_script(
     if flags.contains(VerifyFlags::SIGPUSHONLY) && !is_push_only(script_sig) {
         return Err(invalid(ScriptErrCode::SigPushonly));
     }
-    // Witness data is only ever legitimate for a program this function
-    // reaches below; anything left unconsumed is malleation.
+
     let mut witness_used = false;
 
     let mut stack = Stack::new();
@@ -519,8 +510,7 @@ fn verify_script(
         &mut weight,
         None,
     )?;
-    // P2SH needs the scriptSig's own result, because scriptPubKey execution
-    // consumes the redeem script off the top.
+
     let redeem_stack = stack.clone();
     eval::eval_script(
         &mut stack,
@@ -539,11 +529,6 @@ fn verify_script(
                 return Err(invalid(ScriptErrCode::WitnessMalleated));
             }
             if version == 1 && program.len() == 32 {
-                // Bare Taproot follows the same scriptSig evaluation and
-                // witness-malleation checks as every native witness program.
-                // Wrapped v1 programs below retain their upgradeable meaning.
-                // Core recognizes native v1/32 before its activation check;
-                // DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM does not apply here.
                 if flags.contains(VerifyFlags::TAPROOT) {
                     verify_taproot(program, witness, flags, checker)?;
                 }
@@ -581,8 +566,6 @@ fn verify_script(
 
         if flags.contains(VerifyFlags::WITNESS) {
             if let Some((version, program)) = witness_program(&redeem) {
-                // The scriptSig may push exactly the redeem script and nothing
-                // else; any other shape lets a third party rewrite it.
                 if script_sig != crate::script::push_data(&redeem).as_slice() {
                     return Err(invalid(ScriptErrCode::WitnessMalleatedP2sh));
                 }
@@ -596,10 +579,6 @@ fn verify_script(
         return Err(invalid(ScriptErrCode::WitnessUnexpected));
     }
 
-    // Core's CLEANSTACK assertion is meaningful only when P2SH or WITNESS
-    // activates the corresponding stack-discipline path. Policy vectors may
-    // request CLEANSTACK alone; those legacy spends retain the normal
-    // final-top-item check.
     if flags.contains(VerifyFlags::CLEANSTACK)
         && (flags.contains(VerifyFlags::P2SH) || flags.contains(VerifyFlags::WITNESS))
     {
@@ -621,8 +600,6 @@ fn verify_witness_program(
     stack: &mut Stack,
 ) -> Result<(), ScriptError> {
     if version != 0 {
-        // Wrapped v1 and unknown versions stay spendable by consensus so
-        // future soft forks can define them; policy discourages relaying them.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableWitnessProgram));
         }
@@ -673,8 +650,6 @@ fn verify_witness_program(
         None,
     )?;
 
-    // Witness execution is its own stack discipline: exactly one true item,
-    // regardless of whether CLEANSTACK is set.
     if witness_stack.len() != 1 {
         return Err(invalid(ScriptErrCode::CleanStack));
     }
@@ -729,17 +704,13 @@ fn verify_taproot(
         return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
     }
 
-    // Work on an owned copy so we can pop the annex / control / script.
     let mut stack: Vec<Vec<u8>> = witness.to_vec();
 
-    // Strip annex: if the last element is non-empty and starts with 0x50.
-    // Core: "if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG)"
     let annex_bytes = strip_annex(&mut stack);
 
     if stack.len() == 1 {
         let signature = &stack[0];
-        // Tapscript uses an empty signature as false; a key-path witness
-        // must instead contain a 64/65-byte signature (BIP341).
+
         if signature.is_empty() {
             return Err(invalid(ScriptErrCode::SchnorrSigSize));
         }
@@ -777,7 +748,6 @@ fn verify_taproot_scriptpath(
     annex_bytes: Option<Vec<u8>>,
     flags: VerifyFlags,
 ) -> Result<(), ScriptError> {
-    // Core: "const valtype& control = SpanPopBack(stack); const valtype& script = SpanPopBack(stack);"
     let control = stack
         .pop()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
@@ -785,7 +755,6 @@ fn verify_taproot_scriptpath(
         .pop()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
 
-    // Core: control size validation.
     if control.len() < taproot::TAPROOT_CONTROL_BASE_SIZE
         || control.len() > taproot::TAPROOT_CONTROL_MAX_SIZE
         || !(control.len() - taproot::TAPROOT_CONTROL_BASE_SIZE)
@@ -794,34 +763,24 @@ fn verify_taproot_scriptpath(
         return Err(invalid(ScriptErrCode::TaprootWrongControlSize));
     }
 
-    // Core: execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, script)
     let leaf_version = control[0] & taproot::TAPROOT_LEAF_MASK;
     let tapleaf = bitcoin_rs_primitives::tapleaf_hash(leaf_version, &script);
 
-    // Core: VerifyTaprootCommitment(control, program, tapleaf_hash)
     if !taproot::verify_taproot_commitment(&control, program, &tapleaf) {
         return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
     }
 
-    // Core: if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT)
     if leaf_version != taproot::TAPROOT_LEAF_TAPSCRIPT {
-        // Unknown leaf version: success by consensus, discouraged by policy.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableTaprootVersion));
         }
         return Ok(());
     }
 
-    // Core's ExecuteWitnessScript checks OP_SUCCESS before initial stack
-    // limits, and success bypasses evaluation and the final stack checks.
     if eval::tapscript_op_success(&script, flags)? {
         return Ok(());
     }
 
-    // Build the witness stack for the evaluator: the remaining elements
-    // (after annex, control, and script were popped) are the input stack.
-    // Core: ExecuteWitnessScript checks stack.size() > MAX_STACK_SIZE
-    // for tapscript before running EvalScript.
     if stack.len() > eval::MAX_STACK_SIZE {
         return Err(invalid(ScriptErrCode::StackSize));
     }
@@ -835,11 +794,6 @@ fn verify_taproot_scriptpath(
             .map_err(|_| invalid(ScriptErrCode::StackSize))?;
     }
 
-    // Core: execdata.m_validation_weight_left =
-    //   GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET
-    // `witness.stack` is the *original* full witness (including annex,
-    // control, and script). The serialization is a CompactSize count
-    // prefix followed by each element as CompactSize(len) + bytes.
     let witness_serialized_size: usize =
         encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
             + witness
@@ -899,7 +853,6 @@ mod tests {
             Ok(true)
         );
 
-        // OP_0 leaves one empty element, which CastToBool reads as false.
         assert!(matches!(
             interpreter.execute_with_prevouts(
                 &[0x00],

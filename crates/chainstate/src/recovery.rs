@@ -1,5 +1,3 @@
-//! Checkpoint selection, journal replay, and fail-closed startup recovery.
-
 use crate::{ChainstateJournalConfig, JournalBootstrap};
 use anyhow::Context as _;
 use anyhow::{Result, bail};
@@ -190,9 +188,7 @@ pub fn prepare_initial_chainstate(
         network,
         genesis: network.genesis_block_hash(),
     };
-    // Check the full-revalidation marker BEFORE opening the checkpoint: the
-    // marker contract says incremental recovery must be ignored, so the
-    // checkpoint must not be part of the decision once the marker is present.
+
     if requires_full_revalidation(data_dir) {
         metrics::counter!(
             "node.chainstate_journal.fallback_total",

@@ -1,8 +1,3 @@
-//! Shared test support: a backend-free `KvStore` over `BTreeMap`.
-//!
-//! Deliberately not behind a storage feature. Correctness tests that gate a
-//! refactor must run on a plain `cargo test --workspace`; a test hidden behind
-//! `required-features` is a test that silently does not run.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -67,7 +62,7 @@ impl KvStore for MemoryStore {
         Ok(guard[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter must own cloned rows after the lock guard is dropped.
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -102,10 +97,7 @@ impl KvStore for MemoryStore {
                 "injected fenced write failure".into(),
             ));
         }
-        // Every condition observes pre-batch state; the batch is allowed to
-        // put or delete a condition key itself. The check and the apply run
-        // under one write lock, matching the backend's atomic conditional
-        // write.
+
         let mut guard = self.cfs.write();
         let matched = conditions.iter().all(|condition| {
             let (cf, key) = condition.location();
@@ -127,9 +119,7 @@ impl KvStore for MemoryStore {
         Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
     }
 
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
 }
 
 pub(crate) struct MemorySnapshot {
@@ -141,7 +131,7 @@ impl KvSnapshot for MemorySnapshot {
         Ok(self.cfs[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter owns cloned rows to match backend iterator ownership.
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -184,9 +174,6 @@ pub(crate) fn put_funding_row_positions(
     height: u32,
     positions: &[TxPosition],
 ) -> Result<(), StorageError> {
-    // An empty slice encodes an empty value — indistinguishable from
-    // `put_funding_row`'s scan-path marker, so the positioned read would
-    // silently not be exercised.
     assert!(
         !positions.is_empty(),
         "a funding row exists only because at least one transaction produced it"

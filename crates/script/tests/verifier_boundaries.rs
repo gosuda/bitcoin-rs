@@ -1,11 +1,3 @@
-//! BIP341 signature-message and interpreter input-boundary regressions.
-//!
-//! rust-bitcoin constructs and signs the transactions independently of the
-//! native interpreter. Every negative case first verifies its positive control;
-//! fixture construction failures panic rather than silently skipping coverage.
-//! These tests protect the restored verifier API without reintroducing the
-//! removed shared-cache entry point or changing validation defaults.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
@@ -107,7 +99,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
 
     let mut reordered_prevouts = prevouts.clone();
     reordered_prevouts.swap(0, 1);
-    // Keep the spent script fixed: only the ordered sighash inputs change.
+
     let input = &tx.inputs[0];
     assert!(
         Interpreter
@@ -122,7 +114,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
             )
             .is_err()
     );
-    // Exercise legacy evaluation so Taproot's own guard cannot mask the fallback.
+
     assert_eq!(
         Interpreter.execute_with_prevouts(
             &[0x51],

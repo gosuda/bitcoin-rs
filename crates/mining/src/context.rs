@@ -1,10 +1,3 @@
-//! Candidate chain context: version, work, and time.
-//!
-//! Consensus owns BIP9/finality rules. Chain owns historical/MTP lookups
-//! and next-work. This module resolves those facts into the one record a
-//! candidate builder needs. Proposal validation is the apply path
-//! (`Chainstate::validate_block`), not a second header checker here.
-
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
@@ -58,11 +51,7 @@ impl MiningChainContext {
                     id: previous_tip_id,
                 })?;
         let mut min_time = prev_median_time_past.saturating_add(1);
-        // The chain owns the boundary predicate and its floor: the template
-        // reads the same [`header_sync::minimum_candidate_time`] that
-        // admission enforces (Core's `GetMinimumTime`,
-        // `src/node/miner.cpp:42-49`), so a locally built template cannot
-        // start under the floor that admission would reject.
+
         if let Some(timewarp_floor) =
             header_sync::minimum_candidate_time(parent.header.time, height, network)
         {
@@ -198,9 +187,6 @@ mod tests {
     #[test]
     fn testnet4_bip94_min_time_uses_previous_time_floor() -> Result<(), Box<dyn std::error::Error>>
     {
-        // Heights 0..=2014 advance ten minutes each; height 2015 jumps far
-        // ahead, so its time minus the timewarp allowance exceeds the
-        // median time past of the last eleven blocks.
         let start = 1_600_000_000_u32;
         let jump = 100_000_u32;
         let mut tree = BlockTree::new();
@@ -214,8 +200,6 @@ mod tests {
         last.bits = CompactTarget::from_consensus(0x1d00_ffff);
         let tip = tree.insert_header(last, NodeStatus::HeaderValid)?;
 
-        // Height 2016 is a Testnet4 adjustment boundary: the floor is the
-        // previous block time minus 600 seconds.
         let boundary = MiningChainContext::resolve(&tree, Network::Testnet4, tip, last.time)?;
         assert_eq!(boundary.height, 2016);
         assert!(last.time - 600 > boundary.prev_median_time_past + 1);
@@ -225,7 +209,6 @@ mod tests {
             Some(boundary.min_time)
         );
 
-        // Height 2015 is not a boundary: the median-time-past floor stays.
         let inner = MiningChainContext::resolve(&tree, Network::Testnet4, before_tip, last.time)?;
         assert_eq!(inner.min_time, inner.prev_median_time_past + 1);
         assert_eq!(
@@ -237,9 +220,6 @@ mod tests {
             None
         );
 
-        // Regtest never enforces BIP94 as consensus, but 2016 is still a
-        // regtest retarget boundary and `GetMinimumTime` applies the floor
-        // on every network: the template's minimum follows it.
         let regtest = MiningChainContext::resolve(&tree, Network::Regtest, tip, last.time)?;
         assert_eq!(
             header_sync::minimum_candidate_time(last.time, regtest.height, Network::Regtest),

@@ -1,5 +1,3 @@
-//! Fenced row/cursor commits and retained forward-batch settlement.
-
 use super::CursorCommit;
 use super::DerivedIndexWorkerError;
 use super::PendingForward;
@@ -21,8 +19,6 @@ impl Worker {
     /// publisher briefly lags `applied_tip` inside one commit, so a disagreeing
     /// snapshot simply skips the write; the next caught-up pass retries.
     pub(super) fn persist_chain_cursor(&self) -> Result<CursorCommit, DerivedIndexWorkerError> {
-        // The shared advisory cursor cannot claim alignment of a failed filter
-        // capability. Its own watermark remains the restart authority.
         if self.runtime.compact_filter_failure.read().is_some() {
             return Ok(CursorCommit::Settled);
         }

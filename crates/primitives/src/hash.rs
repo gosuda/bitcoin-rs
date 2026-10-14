@@ -101,14 +101,13 @@ impl Hash256 {
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut encoded = [0_u8; 64];
-        // Display order is byte-reversed (the Bitcoin convention).
+
         let (pairs, _) = encoded.as_chunks_mut::<2>();
         for (byte, pair) in self.0.iter().rev().zip(pairs) {
             pair[0] = HEX[usize::from(byte >> 4)];
             pair[1] = HEX[usize::from(byte & 0x0f)];
         }
-        // Every byte comes from the ASCII table. Keep this conversion checked
-        // rather than adding unsafe code to a presentation-only path.
+
         let text = core::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
         f.write_str(text)
     }
@@ -159,9 +158,7 @@ mod tests {
             hash.to_string(),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
         );
-        // `prefix8()` is an internal convenience helper (used only by the
-        // chain tree's hash-table key and a benchmark sharder), not a durable
-        // consensus/serialization contract, so it is not pinned here.
+
         Ok(())
     }
 

@@ -1,9 +1,3 @@
-//! Bitcoin Core-compatible USDT probes declared in `probes.d`.
-//!
-//! Feature-off calls are empty; feature-on calls prepare arguments only when
-//! an attached consumer raises the semaphore. See `docs/tracing.md`.
-
-// Allow the lint set emitted by the usdt generator's casts and type-check items.
 #![allow(
     clippy::items_after_statements,
     clippy::as_conversions,
@@ -12,7 +6,7 @@
 )]
 
 mod generated {
-    // Keep generated providers private; the macro loads the package-root definitions.
+
     #[cfg(feature = "usdt")]
     usdt::dtrace_provider!("probes.d");
 }

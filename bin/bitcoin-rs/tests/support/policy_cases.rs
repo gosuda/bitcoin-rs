@@ -1,5 +1,3 @@
-//! Signed policy scenarios against two isolated public regtest processes.
-
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute, transaction,
@@ -21,9 +19,6 @@ struct Pair {
 
 impl Pair {
     fn new() -> Self {
-        // These are the repository's selected values, explicitly supplied to
-        // Core. They are not claims about Core 31.1's changed fee defaults.
-        // The two process launches are independent; start them concurrently.
         let (core, node) = std::thread::scope(|scope| {
             let core = scope.spawn(|| {
                 ProcessNode::spawn_with(
@@ -91,8 +86,7 @@ impl Pair {
     fn check(&mut self, tx: &Transaction, rejection: Option<&str>) {
         let raw = serialize_hex(tx);
         let txid = tx.compute_txid().to_string();
-        // The per-process observation sequences are independent; run the
-        // reference and candidate checks concurrently.
+
         let check_one = |process: &mut ProcessNode| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -167,7 +161,7 @@ impl Pair {
 
     fn preview(&mut self, txs: &[Transaction]) -> (Value, Value) {
         let raw: Vec<_> = txs.iter().map(serialize_hex).collect();
-        // The per-process preview observation is independent on each node.
+
         let preview_one = |process: &mut ProcessNode| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -258,8 +252,7 @@ fn replacement_graph_merges_splits_and_conflict_cluster_boundary() {
     pair.check(&sibling, None);
     let merge = transaction(&[output(&parent, 0), output(&other, 0)], 1, 10_000, 2);
     pair.check(&merge, None);
-    // Replacing the parent removes its descendants; the other parent survives
-    // in a separate component. Both sides of the affected diagram matter.
+
     let split = transaction(&[pair.coins[0].clone()], 1, 25_000, 2);
     pair.check(&split, None);
     let crossing = transaction(&[pair.coins[0].clone()], 120, 35_000, 2);
@@ -343,8 +336,7 @@ fn package_structure_and_fail_fast_verdicts() {
     assert_eq!(core[0]["allowed"], json!(true));
     assert_eq!(core[1]["allowed"], json!(false));
     assert_eq!(node[1]["allowed"], json!(false));
-    // Detailed consensus errors are intentionally generic in the candidate.
-    // Value failures are prechecks, so other rows remain unfinished.
+
     let overspend_coin = pair.coins[5].clone();
     let overspend = signed(
         std::slice::from_ref(&overspend_coin),
@@ -404,7 +396,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     let parent = transaction(&[pair.coins[0].clone()], 64, 10_000, 2);
     pair.check(&parent, None);
     for index in 0..63 {
-        // Different rates exercise many chunks in one maximal cluster.
         let fee = 1_000 + u64::try_from((index * 37) % 101).expect("bounded fee") * 50;
         let child = transaction(&[output(&parent, index)], 1, fee, 2);
         pair.check(&child, None);
@@ -412,8 +403,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     let overflow = transaction(&[output(&parent, 63)], 1, 10_000, 2);
     pair.check(&overflow, Some("too-large-cluster"));
 
-    // The replacement does not grow the full cluster. DER signature lengths
-    // vary by a byte, so find the exact signed incremental-fee boundaries.
     for shortfall in [1, 0] {
         let candidate = (1_100..1_400)
             .map(|fee| (fee, transaction(&[output(&parent, 0)], 1, fee, 2)))
@@ -456,7 +445,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     );
     pair.check(&replacement, None);
 
-    // Core PreChecks uses modified fees for the relay floor as well as RBF.
     let low_base_fee = transaction(&[pair.coins[3].clone()], 1, 1, 2);
     pair.check(&low_base_fee, Some("min relay fee not met"));
     for process in [&mut pair.core, &mut pair.node] {
@@ -472,8 +460,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     }
     pair.check(&low_base_fee, None);
 
-    // At more than 1,000 vbytes a floor(fee*1000/vsize) comparison can hide
-    // one excess satoshi. Core applies GetFee(vsize) to the caller's limit.
     let above_max = (1_800..2_000)
         .map(|fee| (fee, transaction(&[pair.coins[2].clone()], 50, fee, 2)))
         .find(|(fee, tx)| *fee == u64::try_from(tx.vsize()).expect("vsize") + 1)

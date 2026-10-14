@@ -1,6 +1,3 @@
-//! Block-download service eligibility: the initial-block-download rule and the
-//! retained-window rule for pruned peers.
-
 use std::sync::Arc;
 
 use bitcoin::p2p::ServiceFlags;

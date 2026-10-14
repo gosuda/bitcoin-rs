@@ -1,8 +1,3 @@
-//! Model/property coverage: the canonical frontier reconciler's invariant
-//! over `SyncFrontier::plan`, exercised directly against synthesized frontier
-//! states, plus the connection-identity pins that close the same-address-
-//! replacement race.
-
 use super::*;
 
 use super::super::frontier::{

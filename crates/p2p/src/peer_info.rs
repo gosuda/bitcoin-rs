@@ -1,5 +1,3 @@
-//! Public peer metadata published after a successful handshake.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -132,7 +130,7 @@ impl PeerInfo {
             conn_time,
             inbound: false,
             addr_bind,
-            // Freeze the offset at version receipt, not handshake completion.
+
             time_offset: version
                 .timestamp
                 .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
@@ -293,13 +291,13 @@ mod tests {
 
     #[test]
     fn services_names_match_bitcoin_core_service_flag_names() {
-        let all_known = (1_u64 << 0)  // NETWORK
-            | (1_u64 << 1)            // GETUTXO
-            | (1_u64 << 2)            // BLOOM
-            | (1_u64 << 3)            // WITNESS
-            | (1_u64 << 6)            // COMPACT_FILTERS
-            | (1_u64 << 10)           // NETWORK_LIMITED
-            | (1_u64 << 11); // P2P_V2
+        let all_known = (1_u64 << 0)
+            | (1_u64 << 1)
+            | (1_u64 << 2)
+            | (1_u64 << 3)
+            | (1_u64 << 6)
+            | (1_u64 << 10)
+            | (1_u64 << 11);
 
         assert_eq!(
             peer_info_with_services(all_known).services_names(),

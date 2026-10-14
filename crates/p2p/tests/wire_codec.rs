@@ -1,4 +1,3 @@
-//! Wire codec message round trips.
 use std::io::Cursor;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 

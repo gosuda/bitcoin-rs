@@ -1,5 +1,3 @@
-//! Daemon signal wrapper over the node-owned lifecycle.
-
 use std::io::IsTerminal as _;
 use std::time::Duration;
 

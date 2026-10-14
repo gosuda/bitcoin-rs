@@ -1,9 +1,3 @@
-//! Property tests for native taproot key-path execution over signed spends.
-//!
-//! The signing side deliberately uses rust-bitcoin's sighash + Schnorr APIs as
-//! an independent oracle: if the native interpreter's BIP341 digest diverged,
-//! these spends would stop verifying.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
@@ -72,11 +66,7 @@ proptest! {
             &fixture.tx,
             0,
         );
-        // With script-path now implemented, a two-element witness with a
-        // bogus extra element is rejected. When the extra starts with 0x50
-        // (ANNEX_TAG) it is stripped as an annex, leaving a key-path spend
-        // whose signature fails verification. Otherwise it is treated as a
-        // control block and rejected for wrong size or commitment mismatch.
+
         prop_assert!(
             matches!(
                 ok,

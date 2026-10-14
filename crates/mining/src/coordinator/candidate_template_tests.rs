@@ -1,5 +1,3 @@
-// CONTRACT: `docs/contracts/external-api.md#API-11` owns BIP22/BIP23
-// template capabilities, submitold, signet projection, and template rules.
 use super::CANDIDATE_CACHE_LIMIT;
 use super::CoordinatorState;
 use super::template_from_candidate;

@@ -1,5 +1,3 @@
-//! Per-connection identity and cancellation.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -481,8 +479,7 @@ impl PeerLease {
             return Some(BlockForwardCredit(None));
         }
         let counter = Arc::clone(&self.unsolicited_forwards);
-        // Increment-then-compare: a credit released on the sync thread
-        // concurrently can never let two admissions cross the bound.
+
         if counter.fetch_add(1, Ordering::AcqRel) >= MAX_UNSOLICITED_BLOCK_FORWARDS {
             counter.fetch_sub(1, Ordering::AcqRel);
             tracing::debug!(

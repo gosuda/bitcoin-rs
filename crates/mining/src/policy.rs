@@ -65,7 +65,6 @@ pub(crate) fn select_packages(
     let mut fees = 0_u64;
     let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
 
-    // Preserve the existing typed reference error before evaluating the graph.
     for (entry, row) in snapshot.entries.iter().enumerate() {
         for &ancestor in &row.ancestors {
             if !usize::try_from(ancestor).is_ok_and(|index| index < snapshot.entries.len()) {
@@ -79,7 +78,7 @@ pub(crate) fn select_packages(
         {
             break;
         }
-        // A skipped parent chunk makes dependent later chunks unavailable.
+
         if chunk.indices.iter().any(|&index| {
             snapshot.entries[index].ancestors.iter().any(|&ancestor| {
                 let ancestor = usize::try_from(ancestor).unwrap_or(usize::MAX);

@@ -1,9 +1,3 @@
-//! Fee curves over the mempool owner's graph projection.
-//!
-//! A maximum-weight closure chooses a dependency-closed set at a given fee
-//! rate. Parametric min-cuts find the highest-rate set without enumerating
-//! subsets. This module owns no transactions or mutable mempool state.
-
 use core::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -44,14 +38,13 @@ impl FeeWeight {
             .fee
             .checked_add(other.fee)
             .ok_or(FeeDiagramError::Arithmetic)?;
-        // Bound cross-products so rate sorting can multiply infallibly.
+
         fee.checked_mul(i128::from(i32::MAX))
             .ok_or(FeeDiagramError::Arithmetic)?;
         Ok(Self { fee, weight })
     }
 
     fn rate_cmp(self, other: Self) -> Ordering {
-        // validate/checked_add establish the product bound before sorting.
         (self.fee * i128::from(other.weight)).cmp(&(other.fee * i128::from(self.weight)))
     }
 }

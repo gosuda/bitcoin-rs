@@ -1,10 +1,3 @@
-//! Tests for the persisted transaction-position row values.
-//!
-//! A position is only useful if slicing the canonical block bytes at that range
-//! yields the transaction the row was written for. The row encoding is a
-//! persisted-index contract; ingest implementation parity
-//! is intentionally not tested here.
-// A malformed fixture is a test failure; panicking reports it at the call site.
 #![allow(clippy::expect_used)]
 
 #[path = "support/common.rs"]
@@ -51,9 +44,7 @@ fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
             },
             script_sig: Script::new(),
             sequence: Sequence::MAX,
-            // A segwit transaction serializes with a marker, a flag and a
-            // witness. If `total_size()` and the zero-copy measurement disagree
-            // anywhere, it is here.
+
             witness: if witness {
                 vec![vec![0xab; 71], vec![0xcd; 33]]
             } else {
@@ -114,8 +105,6 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .commit_block(0, &bytes)
         .expect("commit");
 
-    // Script 0x11 is funded by transaction 0 and again by transaction 1, which
-    // collapse into a single row: one key, two positions.
     let target = ScriptHash::from_script_bytes(&script(0x11));
 
     let rows = rows_with_values(&store, ColumnFamily::Funding);
@@ -177,7 +166,6 @@ fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
     for truncated in 1..value.len() {
         if truncated % TX_POSITION_SIZE == 0 {
-            // Whole positions are a well-formed shorter list.
             continue;
         }
         assert!(
@@ -200,6 +188,5 @@ proptest! {
         let decoded = TxPositionValue::decode(&encoded).expect("decodes");
         prop_assert_eq!(decoded, positions.as_slice());
     }
-
 
 }

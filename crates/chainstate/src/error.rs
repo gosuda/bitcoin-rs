@@ -1,5 +1,3 @@
-//! Typed authoritative chainstate mutation failures.
-
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {

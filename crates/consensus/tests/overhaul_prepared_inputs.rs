@@ -1,5 +1,3 @@
-//! Missing coins, duplicate inputs, and independently decoded transaction identities.
-
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin::hashes::Hash as _;

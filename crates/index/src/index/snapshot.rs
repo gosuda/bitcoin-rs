@@ -1,5 +1,3 @@
-//! Point-in-time, bounded, typed index scans.
-
 use super::{
     capability::IndexCapability, capability::IndexWatermark, error::IndexError, reader::Indexer,
     write::IndexWriter,

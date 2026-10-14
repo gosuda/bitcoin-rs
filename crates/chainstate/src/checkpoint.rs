@@ -1,5 +1,3 @@
-//! Checkpoint formats, loading, and publication.
-
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::encode::hex_encode;
@@ -59,18 +57,17 @@ pub(crate) mod publisher;
 
 fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
-        // Direct checkpoint I/O or domain I/O failed transiently.
         CheckpointError::Io(error)
         | CheckpointError::FullRevalidationMarker(error)
         | CheckpointError::Utxo(bitcoin_rs_utxo::UtxoError::Io(error))
         | CheckpointError::Storage(bitcoin_rs_storage::StorageError::Io(error)) => {
             classify_checkpoint_io(error)
         }
-        // Storage protocol validation failed and owns its classification.
+
         CheckpointError::Store(error) => {
             bitcoin_rs_storage::checkpoint::classify_checkpoint_error(error)
         }
-        // Domain decoding or consistency validation failed.
+
         error => corrupt_checkpoint(error.to_string()),
     }
 }
@@ -203,7 +200,7 @@ fn load_opened_checkpoint(
     }
     let restored_headers = match load_headers(&generation_dir, config, &manifest) {
         Ok(headers) => headers,
-        // Header codec reported a checkpoint version newer than this node.
+
         Err(CheckpointError::Header(headers::HeaderCheckpointError::UnsupportedVersion {
             actual,
         })) => {
@@ -211,7 +208,7 @@ fn load_opened_checkpoint(
                 "headers checkpoint version {actual} is not current"
             )));
         }
-        // Header loading failed for a non-version corruption or I/O reason.
+
         Err(error) => return Err(classify_checkpoint_error(error)),
     };
     if manifest.utxo.version != UTXO_VERSION {
@@ -234,7 +231,7 @@ fn load_opened_checkpoint(
     }
     match load_payloads(&generation_dir, &manifest, restored_headers) {
         Ok(restored) => Ok(CheckpointLoad::Complete(Box::new(restored))),
-        // Payload loading failed after authenticated metadata checks.
+
         Err(error) => Err(classify_checkpoint_error(error)),
     }
 }
@@ -305,8 +302,7 @@ fn load_payloads(
     let chain_tx_count = ChainTxCount::from_wire(manifest.applied_tip.chain_tx_count);
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
     validate_chain_tx_count(chain_tx_count, &coin_stats)?;
-    // Header reconstruction initializes counts to zero. Restore the exact
-    // cumulative count on the applied tip; ancestor counts remain unknown.
+
     let mut cursor = Some(headers.applied_tip_id);
     while let Some(node_id) = cursor {
         let parent = headers
@@ -347,8 +343,6 @@ fn validate_chain_tx_count(
     chain_tx_count: ChainTxCount,
     stats: &CoinStats,
 ) -> Result<(), CheckpointError> {
-    // An unknown restored count is not a second known total: only a known
-    // one has to agree with the coin statistics exported beside it.
     if chain_tx_count
         .get()
         .is_some_and(|count| count != stats.tx_count)
@@ -419,7 +413,7 @@ fn load_payloads_inner(
     let payload = coinstats_artifact_payload(&bytes).map_err(CheckpointError::Store)?;
     let coin_stats = CoinStats::from_bytes(payload)?;
     validate_coinstats_manifest(&coin_stats, &manifest.coinstats)?;
-    // Transaction count is chain metadata and cannot be derived from live coins.
+
     derived.tx_count = coin_stats.tx_count;
     if derived != coin_stats {
         return Err(CheckpointError::Store(StoreError::Invalid(
@@ -541,8 +535,7 @@ pub(crate) fn write_checkpoint_from_dir_at(
     let Some(applied_tip) = applied_tip else {
         return Ok(CheckpointWrite::SkippedNoAppliedTip);
     };
-    // The tip carries the count it was published with: a checkpoint can
-    // never name a total its applied tip disagrees with.
+
     let chain_tx_count = applied_tip.chain_tx_count;
     macro_rules! write_stage_artifact {
         ($stage:expr, $name:expr, $write_fp:ident, $sync_fp:ident, $write:expr) => {{

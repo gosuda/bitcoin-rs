@@ -1,5 +1,3 @@
-//! Cross-backend tests for bounded prefix scans.
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError};

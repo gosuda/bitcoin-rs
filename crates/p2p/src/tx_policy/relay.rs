@@ -1,4 +1,3 @@
-//! Fee-aware queued inventory, contained in the transaction policy owner.
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -78,8 +77,7 @@ fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
         return minimum;
     }
     let mut lower = 0.0;
-    // Core v31.1 initializes its quantizer from DEFAULT_MIN_RELAY_TX_FEE
-    // (100 sat/kvB), halved. This grid is independent of our configured floor.
+
     let mut upper = 50.0;
     while upper <= 10_000_000.0
         && upper < f64::from(u32::try_from(floor.min(10_000_001)).unwrap_or(10_000_001))
@@ -102,8 +100,6 @@ impl RelayPeer {
         clocks: &mut HashMap<InboundClockKey, Instant>,
         rng: &mut impl RngCore,
     ) -> Self {
-        // Joining an existing key adopts its clock, even if already due.
-        // Admission must not postpone a cycle that existing peers can send.
         let next_inv = match inbound {
             Some(key) => *clocks
                 .entry(key)
@@ -268,7 +264,7 @@ impl PeerTable {
                 return;
             }
         }
-        // Entropy is needed only for a new peer, and stays outside the policy lock.
+
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
         let mut policy = self.tx_policy.lock();
         let TxPolicy {
@@ -391,8 +387,7 @@ impl PeerTable {
                         if *shared <= now {
                             *shared = next_inv(now, true, rng);
                         }
-                        // Each due peer remains eligible this cycle, even if
-                        // an earlier sibling already advanced the shared clock.
+
                         *shared
                     }
                     None => next_inv(now, false, rng),
@@ -731,8 +726,7 @@ mod tests {
         let mut info = table
             .info_of(source.addr)
             .unwrap_or_else(|| panic!("clock fixture info"));
-        // A pre-BIP133 peer isolates inventory clock draws from fee-filter
-        // refreshes without substituting the scheduler under test.
+
         info.version = 70_012;
         table.publish_info(source.addr, &lease, info);
         connected
@@ -760,8 +754,6 @@ mod tests {
 
     #[test]
     fn inbound_clock_key_uses_network_class_and_canonical_bind_endpoint() {
-        // Core v31.1 net.cpp's inbound key uses GetNetClass, GetAddrBytes and
-        // GetPort. IPv4 mapped bind bytes are identical; scope/flow are absent.
         let key = |remote: &str, bind: &str| {
             InboundClockKey::new(
                 remote
@@ -803,7 +795,7 @@ mod tests {
         assert_eq!(due, clock(&table, b));
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         assert!(inventory(&a_rx).is_empty() && inventory(&b_rx).is_empty());
-        // Joining an already-due key must not postpone existing siblings.
+
         let (c, c_rx) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true);
         let draws = rng.draws;
         table.queue_transaction_relay(request, due, &mut rng);

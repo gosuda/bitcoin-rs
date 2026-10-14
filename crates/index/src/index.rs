@@ -1,5 +1,3 @@
-//! Confirmed transaction indexing with separate read, preparation, and durable-write owners.
-
 mod block;
 mod capability;
 mod error;

@@ -1,5 +1,3 @@
-//! Exact-identity block reads and transaction position verification.
-
 use super::{
     Block, BlockHash, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES,
     OutPoint, QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,

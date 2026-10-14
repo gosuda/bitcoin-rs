@@ -1,8 +1,3 @@
-//! Gateway-owned peer orphan lifecycle.
-//!
-//! Retention, witness identity, and retry invariants are owned by `MPL-04`
-//! in `docs/contracts/mempool-mutations.md`.
-
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
@@ -681,7 +676,7 @@ mod tests {
         assert!(pool.ready.is_empty());
         assert!(pool.ready_ids.is_empty());
     }
-    // MPL-04: aggregate orphan weight is bounded independently of count.
+
     #[test]
     fn aggregate_weight_evicts_fifo_even_when_count_quota_has_room() {
         let parent = tx(9, Txid::default()).txid();
@@ -718,7 +713,6 @@ mod tests {
         );
     }
 
-    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn maintenance_expires_old_bodies_and_cleans_every_index() {
         let parent = tx(9, Txid::default()).txid();
@@ -737,7 +731,6 @@ mod tests {
         assert_eq!(pool.total_weight(), current.weight());
     }
 
-    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn maintenance_uses_exact_connection_identity() {
         let parent = tx(9, Txid::default()).txid();
@@ -752,7 +745,6 @@ mod tests {
         assert!(pool.get(predecessor.wtxid()).is_none());
         assert!(pool.get(successor.wtxid()).is_some());
 
-        // MPL-04: retention expires at the DEFAULT_ORPHAN_TIMEOUT_SECS boundary.
         assert_eq!(pool.maintain(119 + DEFAULT_ORPHAN_TIMEOUT_SECS, &live), 1);
         assert_eq!(pool.len(), 0);
         assert_eq!(pool.total_weight(), 0);
@@ -787,7 +779,6 @@ mod tests {
         assert_eq!(state.orphans.len(), 1);
     }
 
-    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn witness_refresh_does_not_extend_expiry() {
         let parent = tx(9, Txid::default()).txid();
@@ -797,9 +788,7 @@ mod tests {
         pool.insert(Arc::clone(&first), source(2), 119);
 
         let live = HashSet::from([source(1), source(2)]);
-        // MPL-04: expiry stays anchored at the first arrival (time 0). The
-        // re-announcement must not buy another timeout window, so the body
-        // still expires exactly at the timeout boundary.
+
         assert_eq!(pool.maintain(120, &live), 1);
         assert!(pool.get(first.wtxid()).is_none());
     }

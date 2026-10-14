@@ -1,11 +1,3 @@
-//! One HTTP/1.1 transport for every harness request to a node listener: the
-//! keep-alive connection, the strict reply parser, the request wire builder,
-//! and the Basic-authorization encoder.
-//!
-//! A request that reached the peer's dispatch is never resent. Only a socket
-//! provably closed or broken before any request byte could have been
-//! processed is retried, and at most once per call.
-
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -82,9 +74,6 @@ impl Connection {
                     })
             }
             Err(ConnFail::Error(error)) => {
-                // A hard failure may leave an in-flight request on the
-                // socket: drop it so a later call cannot be pipelined or
-                // answered with the wrong response.
                 self.conn = None;
                 Err(error)
             }
@@ -128,8 +117,7 @@ impl Connection {
         conn.get_ref()
             .set_write_timeout(Some(remaining().map_err(ConnFail::Error)?))
             .map_err(|_| ConnFail::Stale)?;
-        // A failed write() transferred zero bytes, so resending is safe.
-        // Any partial send is not: the peer may hold a request prefix.
+
         let sent = conn.get_mut().write(wire).map_err(|_| ConnFail::Stale)?;
         if sent == 0 {
             return Err(ConnFail::Stale);
@@ -153,11 +141,6 @@ impl Connection {
                 }
             })?;
             if count == 0 {
-                // serve_connection writes a response before every close it
-                // initiates, so zero response bytes prove this request never
-                // reached dispatch: re-sending once is safe (a dead daemon
-                // fails the reconnect instead). Mid-headers EOF is
-                // ambiguous and is never retried.
                 return Err(if head.is_empty() {
                     ConnFail::Stale
                 } else {
@@ -177,18 +160,13 @@ impl Connection {
         let (status, headers, content_length, peer_close) =
             parse_reply_head(&head).map_err(ConnFail::Error)?;
         let content_length = match content_length {
-            // The head bound covers header bytes only; a corrupt peer could
-            // advertise an arbitrary length and drive an unbounded
-            // allocation, so bound it before the buffer exists.
             Some(length) if length > MAX_BODY => {
                 return Err(ConnFail::Error(Error::Protocol(
                     "RPC body length exceeds the response bound".into(),
                 )));
             }
             Some(length) => length,
-            // A 1xx, 204, or 304 reply carries no body and may omit
-            // Content-Length; any other framing-less reply is a protocol
-            // violation on a keep-alive connection.
+
             None if matches!(status, 100..=199 | 204 | 304) => 0,
             None => {
                 return Err(ConnFail::Error(Error::Protocol(
@@ -223,9 +201,7 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
     let wire = request_wire(addr, request, Some(("parity", "parity")))?;
     let remaining = || remaining_time(deadline, Instant::now(), "RPC deadline reached");
     let mut stream = TcpStream::connect_timeout(&addr, remaining()?.min(Duration::from_secs(2)))?;
-    // Nonblocking writes: a blocked send may ignore SO_SNDTIMEO on macOS
-    // (its timeout is documented as best-effort), so the deadline must
-    // interleave between calls rather than rely on the syscall bound.
+
     stream.set_nonblocking(true).map_err(Error::Io)?;
     let mut pending = wire.as_slice();
     while !pending.is_empty() {
@@ -244,8 +220,7 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
             Err(error) => return Err(Error::Io(error)),
         }
     }
-    // Reads stay nonblocking too: SO_RCVTIMEO is best-effort on macOS just
-    // like SO_SNDTIMEO, so the deadline must interleave between reads.
+
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {

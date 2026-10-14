@@ -1,5 +1,3 @@
-//! The sole concrete owner of durable index mutations.
-
 use super::{
     block::NoSpentScripts, block::SpentCoinScripts, capability::IndexCapabilities,
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
@@ -55,8 +53,7 @@ impl<S: KvStore> IndexWriter<S> {
                 }
             }
         }
-        // A plain open adopts any outstanding obligation (requested mask 0)
-        // without publishing a claim of its own.
+
         resume_capability_reset(indexer.store.as_ref(), generation, 0)?;
         Ok(Self {
             indexer,
@@ -125,10 +122,7 @@ impl<S: KvStore> IndexWriter<S> {
         if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
-        // An interrupted seed leaves rows without a ready watermark. Clear
-        // them before writing so this publication cannot mix leftover
-        // locators from a previous attempt. Recapture after the reset: the
-        // claim advances the fence, so a pre-reset capture cannot commit.
+
         self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
         let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         if fence.watermarks.script_live.is_some() {
@@ -496,9 +490,7 @@ impl<S: KvStore> IndexWriter<S> {
             });
         }
         let mut store_batch = self.indexer.store.new_batch();
-        // A disabled capability may still point above this block on the same
-        // disconnected prefix. Retain every ancestor identity it may need to
-        // reconcile when it is enabled again.
+
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
                 && fence

@@ -1,5 +1,3 @@
-//! Validated block connection and its ordered persistence/publication transaction.
-
 use super::SameBlockSpentSet;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
@@ -149,19 +147,6 @@ pub(super) fn apply_block_admitted<'b>(
         }
     }
 
-    // Contextual header rules, shared with header admission: the difficulty
-    // continuity, median-time-past, BIP94 timewarp, future-drift, and version
-    // floors all come from the one gate, so a block whose header never passed
-    // header sync cannot be connected and a direct `submitblock` cannot skip a
-    // rule by relying on header-sync history. The gate runs before the first
-    // mutation and before journal maintenance, so a contextually invalid block
-    // reports its own rejection instead of the backpressure its maintenance
-    // hit; the cost is that a block only the later self-PoW check rejects
-    // still pays that maintenance first. A crash-recovery replay skips the
-    // gate: its block already committed a durable head receipt, which
-    // certifies the header passed every rule at first connect, and the
-    // future-drift bound reads the wall clock, so re-running it after an
-    // operator clock rollback would refuse a block the store already holds.
     if !matches!(publication, PublishMode::Replay { .. }) {
         let contextual_header_started =
             tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
@@ -189,12 +174,6 @@ pub(super) fn apply_block_admitted<'b>(
         }
     }
 
-    // Self-consistency PoW: the block header's hash must satisfy its
-    // declared target. Contextual difficulty-adjustment validation
-    // (verifying the declared target matches the network's expected
-    // difficulty at this height) requires `BlockTree` state; it runs ahead of
-    // this check so its rejections also precede journal maintenance. This
-    // pass still runs before any structural check.
     let pow_self_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let pow_self_result =
         bitcoin_rs_chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
@@ -205,11 +184,10 @@ pub(super) fn apply_block_admitted<'b>(
         "apply_block: profile"
     );
     match pow_self_result {
-        // Declared target above the network limit is refused for proposals too.
         Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }) => {
             return Err(ApplyError::TargetAboveLimit);
         }
-        // Proposals carry an unsolved header, so only commits refuse an unmet target.
+
         Err(_) if intent == ApplyIntent::Commit => {
             return Err(ApplyError::ProofOfWork { hash: block_hash });
         }
@@ -266,9 +244,7 @@ pub(super) fn apply_block_admitted<'b>(
     } = prepared;
 
     let block_rules_started = quanta::Instant::now();
-    // Witness IDs are needed only for a witness-carrying block under active
-    // segwit; the view computes them once and the commitment check consumes
-    // the cache, so witness-free blocks never serialize-and-hash for wtxids.
+
     let needs_wtxids = softfork_state.segwit_active && tx_plan.has_witness;
     if needs_wtxids {
         view.witness_ids();
@@ -284,7 +260,7 @@ pub(super) fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
     block_rules_result?;
-    // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
+
     let bip30_bip34_started = quanta::Instant::now();
     let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
     let bip30_bip34_result =
@@ -295,7 +271,7 @@ pub(super) fn apply_block_admitted<'b>(
     bip30_bip34_result?;
 
     let script_verify_started = quanta::Instant::now();
-    // A matching proof certifies exactly this transaction-validation slot.
+
     let script_verify_result = if transactions_proven {
         Ok(())
     } else {
@@ -313,8 +289,7 @@ pub(super) fn apply_block_admitted<'b>(
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
-    // Emit the dispatch diagnostic before propagating a failed verification,
-    // including proposals. The aggregate duration remains a ledger hook.
+
     tracing::debug!(
         height,
         %block_hash,
@@ -389,10 +364,6 @@ pub(super) fn apply_block_admitted<'b>(
     let (changes, undo, value_totals) =
         utxo_changes_result.map_err(|e| map_block_change_error(&e))?;
 
-    // The last consensus gate, and the one that keeps a miner from creating
-    // money. Nothing above bounds what the coinbase pays itself: block rules
-    // check structure, and per-transaction verification exempts the coinbase
-    // because it has no inputs to weigh its outputs against.
     if height > 0 {
         let fees = value_totals
             .fees()
@@ -409,10 +380,6 @@ pub(super) fn apply_block_admitted<'b>(
         return Ok(ApplyFinish::Proposed);
     }
 
-    // Persist undo before the block body, the index, and the UTXO commit. All
-    // three are derived state for a block that is about to apply; if the undo
-    // record cannot be written the block must not apply at all, and leaving
-    // body bytes or index rows behind for it would be worse than not starting.
     let undo_persist_started = quanta::Instant::now();
     let undo_persist_result = bitcoin_rs_utxo::contract::persist_block_undo(
         handles.undo_store.as_ref(),
@@ -425,19 +392,9 @@ pub(super) fn apply_block_admitted<'b>(
         .record(undo_persist_started.elapsed().as_secs_f64());
     let undo_record = undo_persist_result?;
 
-    // Serialize the block lazily: only when a consumer actually needs the
-    // full bytes. During IBD with pruning+txindex disabled this avoids a
-    // full-block serialize on every apply.
     let block_bytes: bytes::Bytes = {
         let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
         if needs_body {
-            // The preserved P2P wire payload is byte-identical to the canonical
-            // block serialization: the decoder rejects every non-canonical
-            // encoding, so a decoded block always re-serializes to its wire
-            // bytes. The length guard keeps that invariant release-observable and
-            // self-heals to a fresh serialize if it ever fails to hold, so a
-            // future decoder change can never admit non-canonical bytes into the
-            // block body store.
             match provided_serialized {
                 Some(provided) if provided.len() == consensus_bytes(block).len() => {
                     #[cfg(debug_assertions)]
@@ -449,8 +406,6 @@ pub(super) fn apply_block_admitted<'b>(
                 _ => bytes::Bytes::from(consensus_bytes(block)),
             }
         } else {
-            // Nothing downstream reads `block_bytes` unless one of the consumers
-            // above needs the full body, so skip the serialize entirely.
             bytes::Bytes::new()
         }
     };
@@ -467,12 +422,6 @@ pub(super) fn apply_block_admitted<'b>(
         .record(block_body_persist_dur.as_secs_f64());
     block_body_persist_result?;
 
-    // Prove every fallible piece of block-tree bookkeeping before the first
-    // UTXO mutation. Header resolution (inserting the header when header-first
-    // sync has not seen it), the applied-height check, and the cumulative
-    // transaction-count derivation can all fail; proving them here keeps every
-    // rejection before the UTXO commit, so a failed block leaves no applied
-    // outputs behind, and it leaves the publication tail infallible.
     let block_tree_insert_started = quanta::Instant::now();
     let tip = applied_header_tip(handles, block_hash, block, height)?;
     let block_tree_insert_dur = block_tree_insert_started.elapsed();
@@ -486,20 +435,12 @@ pub(super) fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
-    // Core's connect-block interval ends with the block's UTXO application
-    // and bookkeeping (`UpdateCoins` per tx, undo write, `SetBestBlock`) at
-    // the end of `ConnectBlock`; the durable `view.Flush()` runs afterwards
-    // in `ConnectTip`. `commit_block` is the in-memory UTXO application, so
-    // the probe's duration argument is captured here.
+
     let block_connected_dur = total_started.elapsed();
-    // Capture before `finish_block` advances the listener's height: the
-    // journal delta of this block is exactly (height - parent_height).
+
     let coin_stats_height_delta =
         i64::from(height) - i64::from(handles.coin_stats.snapshot().height);
 
-    // Everything past the UTXO commit publishes values prepared above and
-    // cannot fail: the tip snapshot was resolved from the tree before the
-    // first write, so the publication tail is infallible.
     debug_assert!(
         handles.block_tree.read().node_by_hash(block_hash).is_some(),
         "block {} is entering the record log with no block-tree node; \
@@ -515,11 +456,7 @@ pub(super) fn apply_block_admitted<'b>(
     let total_dur = total_started.elapsed();
     metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
     metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
-    // Core fires `validation:block_connected` at the end of `ConnectBlock`,
-    // after the block is connected. Everything below this point is
-    // publication of an already-applied block, so this is the same commit
-    // point. A grouped publish still counts as connected here: the block's
-    // consensus state is applied to the chainstate before publication.
+
     emit_block_connected(
         block,
         &block_hash,
@@ -555,15 +492,6 @@ pub(super) fn apply_block_admitted<'b>(
     };
     let commit_id = match publication {
         PublishMode::Now => {
-            // RCV-02 steps 3–4: certify, then commit. `sync` makes the
-            // appended body bytes, the blocks directory, and every deferred
-            // index row durable; the durable-head batch then names them with
-            // one `write_durable_if` receipt — head, undo record, and
-            // locator row together. `Ok` is the receipt for the whole
-            // prefix (`INV-06`: the head never names bytes that are not
-            // already durable). An `Err` is not a rollback receipt: like a
-            // `UtxoCommit` refusal it leaves the caller to reconcile
-            // through recovery.
             let durable_sync_started = quanta::Instant::now();
             sync_appended_blocks(handles)?;
             let durable_sync_us = durable_sync_started.elapsed().as_micros();
@@ -578,8 +506,7 @@ pub(super) fn apply_block_admitted<'b>(
                     prev_hash,
                     tip: block_hash,
                     height,
-                    // The node's own cumulative total is what the batch
-                    // names, and publication may carry nothing else.
+
                     chain_tx_count_after: outcome.tip.chain_tx_count.to_wire(),
                     undo_extent: Some((height, block_hash)),
                 },
@@ -598,12 +525,7 @@ pub(super) fn apply_block_admitted<'b>(
             outcome.tip = receipt.certify(outcome.tip);
             receipt.commit_id
         }
-        // The gap block's durable batch committed before the crash: the
-        // stored head receipt covers its body, undo, and locator rows.
-        // Replay redoes only what publication owed — the journal tail and the
-        // coherent tip — and carries the receipt's commit id. Intermediate
-        // tips retain their reconstructed cumulative count; only the landing
-        // tip takes the durable head's certified count.
+
         PublishMode::Replay {
             receipt,
             certify_head,
@@ -615,9 +537,6 @@ pub(super) fn apply_block_admitted<'b>(
             commit_id
         }
         PublishMode::Grouped(group) => {
-            // The window buffers the durable work: facts ride in the group
-            // until its boundary, where one sync and one head batch commit
-            // the whole verified prefix and the prefix publishes in order.
             let journal_record = build_journal_record(
                 block,
                 height,
@@ -636,8 +555,7 @@ pub(super) fn apply_block_admitted<'b>(
             return Ok(ApplyFinish::Committed(Box::new(outcome)));
         }
     };
-    // The journal may lag the durable head, never lead it. Fresh commits and
-    // replayed receipts share publication; grouped commits publish later.
+
     emit_journal_record(
         handles,
         build_journal_record(
@@ -667,10 +585,6 @@ fn emit_block_connected(
     flags: bitcoin_rs_script::VerifyFlags,
     elapsed: std::time::Duration,
 ) {
-    // `block_hash` borrows the caller's already-computed hash local, which
-    // outlives this call: the probe argument must not point into a value the
-    // prepare closure owns, because the generated macro fires only after the
-    // closure has returned.
     bitcoin_rs_consensus::trace::block_connected(move || {
         let mut view = BlockLocalUtxoView::new(Arc::clone(resolved), &block.txs, height, 0);
         let mut inputs: u32 = 0;
@@ -791,13 +705,11 @@ fn check_bip68_sequence_locks(
                 sequence.to_consensus(),
             ) {
                 if entry.height == height {
-                    // A same-block prevout uses the MTP before the block being connected.
                     mtp
                 } else if let Some(cached) = prevout_mtp_by_height.get(&entry.height) {
                     *cached
                 } else {
                     let Some(previous_tip_id) = context.previous_tip_id else {
-                        // Time-based lock evaluated with no admitted tip to walk.
                         return Err(ApplyError::Consensus(
                             bitcoin_rs_consensus::ConsensusError::Bip {
                                 bip: "BIP68",
@@ -810,7 +722,6 @@ fn check_bip68_sequence_locks(
                     let Some(prevout_mtp) =
                         tree.median_time_past_before_height(previous_tip_id, entry.height)
                     else {
-                        // Prevout's ancestor is not on the previous tip's chain.
                         return Err(ApplyError::Consensus(
                             bitcoin_rs_consensus::ConsensusError::Bip {
                                 bip: "BIP68",
@@ -887,7 +798,6 @@ fn validate_contextual_block_header(
     prior: Option<&TipSnapshot>,
 ) -> Result<(), ApplyError> {
     if height == 0 {
-        // Genesis has no parent, so no contextual rule applies to it.
         return Ok(());
     }
     let Some(prior) = prior else {
@@ -943,9 +853,7 @@ pub(super) fn applied_header_tip(
     height: u32,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
     let mut tree = handles.block_tree.write();
-    // No header check here: the shared contextual gate
-    // (`validate_contextual_block_header`) ran at the top of this function, in
-    // the same pre-mutation phase, so a rejection there leaves nothing behind.
+
     let node_id = match tree.lookup(block_hash) {
         Some(node_id) => node_id,
         None => tree.insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?,

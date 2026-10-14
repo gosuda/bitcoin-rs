@@ -1,7 +1,3 @@
-//! Owner-local persistence for the fee estimator's confirmation history.
-//!
-//! CONTRACT: docs/policies/db-migration.md.
-
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -396,8 +392,6 @@ mod tests {
         let marker_path = temp_path.join("operator-data");
         std::fs::write(&marker_path, b"preserve me").expect("operator marker");
 
-        // Cleanup is best effort at shutdown; it must neither recursively
-        // delete a directory nor replace the RCV-09 rejected live file.
         save_pool(dir.path(), &seeded_pool());
         assert_eq!(std::fs::read(&path).expect("history survives"), rejected);
         assert_eq!(

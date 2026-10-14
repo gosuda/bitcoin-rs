@@ -1,11 +1,3 @@
-//! Synchronous Bitcoin Core-compatible JSON-RPC surface for `bitcoin-rs`.
-//!
-//! This node ships no wallet. RPCs that would fund, sign, or otherwise
-//! require private key material are not implemented and answer
-//! `method not found`. Descriptor utilities, `scantxoutset`, and PSBT
-//! combination/finalization remain for watch-only workflows driven by
-//! external signers without this process holding private key material.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;

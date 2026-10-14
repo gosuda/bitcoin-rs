@@ -1,5 +1,3 @@
-//! Consistent chain, transaction, and script-activity projections for Esplora.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
@@ -462,9 +460,7 @@ impl<'a> Projection<'a> {
             .unspent_outputs(script_hash)
             .map_err(query_error)?;
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
-        // The read guard protects pool facts only: which of a funder's outputs
-        // the pool already spends. Script hashing, statuses, and output
-        // strings are derived from those facts and run after the release.
+
         let funding = {
             let pool = self.ctx.mempool.gateway.read();
             confirmed
@@ -541,10 +537,7 @@ impl<'a> Projection<'a> {
         confirmed_unspent: &[ScriptIndexRecord],
     ) -> Result<Vec<Arc<Tx>>, Response> {
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
-        // The guard covers pool facts only. Funders are captured as `Arc`
-        // clones rather than txids alone: resolving a txid back to an entry
-        // afterwards costs a scan of the whole pool per selected
-        // transaction.
+
         let (sequence, funders) = {
             let pool = self.ctx.mempool.gateway.read();
             let sequence = pool.sequence_number();
@@ -556,9 +549,7 @@ impl<'a> Projection<'a> {
         };
         #[cfg(test)]
         crate::esplora::tests::gate_mempool_activity_for_tests();
-        // Match outputs after releasing the first guard. The second guard
-        // checks the captured sequence before reading spenders, so a concurrent
-        // membership change returns Retry instead of mixing pool views.
+
         let mut outputs = confirmed_unspent
             .iter()
             .map(|record| (record.txid, record.vout))
@@ -591,8 +582,7 @@ impl<'a> Projection<'a> {
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
-        // Keyed by txid so a transaction reached through both the funding index
-        // and the spend scan is selected once.
+
         let mut selected = std::collections::BTreeMap::new();
         for (txid, time, transaction) in &funders {
             selected.insert(*txid, (*time, Arc::clone(transaction)));
@@ -646,7 +636,7 @@ impl<'a> Projection<'a> {
 const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
     match shape {
         convert::ScriptShape::Empty => "empty",
-        // An unrecognized script and a future witness version share `unknown`.
+
         convert::ScriptShape::Nonstandard | convert::ScriptShape::WitnessUnknown => "unknown",
         convert::ScriptShape::Pubkey => "p2pk",
         convert::ScriptShape::PubkeyHash => "p2pkh",
@@ -735,7 +725,6 @@ mod tests {
 
     #[test]
     fn transaction_output_renders_address_through_the_shared_seam() {
-        // BIP 173 program `751e76e8…3bd6` on the fixture's mainnet.
         let mut script = vec![0x00, 0x14];
         script.extend([
             0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3,

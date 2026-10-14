@@ -1,6 +1,3 @@
-//! Public-process `sequence` stream across a branch switch. The subscriber
-//! lives in the RPC surface crate, which owns the optional libzmq dependency.
-
 #![cfg(feature = "zmq")]
 
 use std::time::{Duration, Instant};
@@ -76,10 +73,7 @@ fn spawn_sequence_subscriber() -> Result<(tempfile::TempDir, ProcessNode, zmq::C
         "ipc://{}",
         socket_dir.path().join("sequence.sock").display()
     );
-    // The serializer escapes the endpoint as a TOML string — quoting it
-    // verbatim breaks on backslashes, single quotes, and control
-    // characters in the path alike. `endpoint` keeps its real value for
-    // the subscriber and the assertions below.
+
     let toml_extra = format!(
         "[[notifications.zmq]]\nendpoint = {}\ntopics = [\"sequence\"]\nhwm = 1000\n",
         toml::Value::String(endpoint.clone())
@@ -121,7 +115,6 @@ fn wait_for_subscription_probe(
     node: &mut ProcessNode,
     subscriber: &zmq::Socket,
 ) -> Result<SequenceBlock> {
-    // A bounded observed C event proves readiness without a PUB/SUB sleep.
     for _ in 0..8 {
         let hash = mine_and_submit_core_block(core, node)?;
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -198,8 +191,6 @@ fn assert_sequence_stream(
 }
 
 fn assert_post_switch_recovery(core: &mut ProcessNode, mut node: ProcessNode) -> Result<()> {
-    // The last C is the externally observed commit boundary. Kill before a
-    // graceful stop can publish another checkpoint, then reopen the datadir.
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
@@ -236,8 +227,7 @@ fn sequence_reports_exact_disconnect_connect_order() -> Result<()> {
     let (_socket_dir, mut node, _context, subscriber) = spawn_sequence_subscriber()?;
     let ancestor = wait_for_subscription_probe(&mut core, &mut node, &subscriber)?;
     let old = mine_bare_blocks(&mut node, 2)?;
-    // The peers remain disconnected until Core has the strictly better
-    // branch, so neither can accidentally adopt the other's equal-work tip.
+
     let rival = mine_core_rival(&mut core)?;
     node.rpc("addnode", &json!([core.p2p_addr.to_string(), "onetry"]))?;
     let winning_height = core

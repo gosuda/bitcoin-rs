@@ -1,5 +1,3 @@
-//! Coherent chain-event publication and durable process epoch allocation.
-
 use anyhow::Context as _;
 use anyhow::{Result, bail};
 use bitcoin_rs_primitives::Hash256;
@@ -111,7 +109,6 @@ const PROCESS_EPOCH_LOCK_FILE: &str = ".process-epoch.lock";
 
 const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
 
-// A u64 in decimal is at most 20 digits; the trailing newline makes 21.
 const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
 
 /// Reads the persisted process epoch; `0` when the data dir has none yet.
@@ -147,14 +144,7 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
         .create(true)
         .follow(FollowSymlinks::No)
         .nonblock(true);
-    // Create-on-first-use races: when several processes open the absent lock
-    // at once, one creator's entry can disappear behind another's rename on
-    // this platform (reproduced with cap-std 4.0.3) and the loser's create
-    // reports NotFound. A loser's retry is itself still a create of the
-    // absent path until some creator's file lands, so a bounded settle loop
-    // (at most two extra attempts) waits out overlapping in-flight creates
-    // — 8-way startups cluster the losers — without weakening the
-    // `follow`/`nonblock` posture.
+
     let lock = {
         let mut retries = 0;
         loop {
@@ -211,8 +201,6 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     }
     allocation?;
 
-    // `lock` intentionally remains live until after the directory durability
-    // barrier above. Dropping it here releases the cross-process transaction.
     drop(lock);
     Ok(epoch)
 }

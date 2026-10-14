@@ -1,6 +1,3 @@
-//! Reference identities and validation used by the process and formal gates.
-//! The production RPC module owns the embedded manifest, not test orchestration.
-
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_rpc::manifest::MANIFEST_TOML;
 
@@ -320,8 +317,6 @@ fn check_custody_bindings(
     release: &ReleaseIdentity,
     kernel: &KernelIdentity,
 ) -> Result<(), ReferenceError> {
-    // v2 tuple layout: the product identity fields, then each pinned
-    // artifact (canonical first, `platforms` rows in manifest order).
     let artifact_fields = |artifact: &ReleaseArtifact| {
         format!(
             "{}\0{}\0{}\0{}",
@@ -529,8 +524,6 @@ fn parse_sha256(field: &'static str, text: &str) -> Result<[u8; 32], ReferenceEr
 }
 
 fn hex_digit(field: &'static str, character: Option<char>) -> Result<u8, ReferenceError> {
-    // Lowercase only: an uppercase digest is a different byte string from the
-    // one the release page publishes, and custody compares strings.
     character
         .filter(|digit| digit.is_ascii_digit() || ('a'..='f').contains(digit))
         .and_then(|digit| digit.to_digit(16))

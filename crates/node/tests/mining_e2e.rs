@@ -1,9 +1,3 @@
-//! Mining E2E: template → external-style assembly → submitblock → tip.
-//!
-//! The test drives the production RPC handlers (`getblocktemplate`,
-//! `submitblock`) exactly like an external miner: the block is assembled from
-//! rendered template JSON fields only, then enters ordinary validation.
-
 use anyhow::{Result, bail};
 
 use bitcoin_rs_mempool::{
@@ -53,13 +47,11 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // A spend of the height-1 seed coinbase matures exactly at height 101.
     let mempool_tx = seed_coinbase_spend();
     admit_to_mempool(&state, &mempool_tx)?;
 
     let handler = mining_handler(&state);
 
-    // --- getblocktemplate over the real RPC handler --------------------------
     let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     let prev_hex = required_str(&template, "previousblockhash")?;
     let height = required_u64(&template, "height")?;
@@ -89,7 +81,6 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         "the selected template tx must be the mempool tx"
     );
 
-    // --- rendered BIP22/BIP23 template fields -----------------------------
     assert_eq!(
         required_u64(&template, "coinbasevalue")?,
         REGTEST_SUBSIDY_SATS + MEMPOOL_TX_FEE_SATS,
@@ -214,10 +205,8 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         "rendered commitment must be SHA256D(witness merkle root || witness reserved value)"
     );
 
-    // --- external-miner-style assembly from JSON fields only -----------------
     let block = assemble_from_template(&template, template_txs)?;
 
-    // --- submitblock over the real RPC handler -------------------------------
     let hex = consensus_bytes(&block).to_lower_hex_string();
     let verdict = handler.dispatch("submitblock", &json!([hex]))?;
     assert!(
@@ -225,7 +214,6 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         "submitblock of the mined template must be accepted, got: {verdict}"
     );
 
-    // --- tip advanced, mempool drained, next template rebased ----------------
     let loaded_tip = state.chainstate().applied_tip_snapshot();
     let Some(tip) = loaded_tip.as_ref() else {
         bail!("applied tip must exist after an accepted submission");
@@ -366,8 +354,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::null(),
-                // BIP34 height push plus one pad byte: consensus requires a
-                // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
+
                 script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
@@ -461,8 +448,7 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // Must mirror the height-1 seed coinbase exactly (txid anchors
-            // the mempool spend).
+
             script_sig: Script::from_bytes([push_int(1), push_int(0)].concat()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -571,8 +557,7 @@ fn mine_regtest_block(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // BIP34 height push plus one pad byte: consensus requires a
-            // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
+
             script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -628,8 +613,6 @@ fn mining_handler(state: &NodeState) -> Handler {
             ..ChainHandles::default()
         },
         mempool: MempoolHandles {
-            // run()/lifecycle.rs wires `state.mempool_gateway()`: the gateway
-            // interned under the resolved `config.validation.engine`.
             gateway: state.mempool_gateway(),
         },
         indexes: IndexHandles::default(),
@@ -661,7 +644,7 @@ fn assemble_block(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // BIP34: the coinbase scriptSig begins with the serialized height.
+
             script_sig: Script::from_bytes(push_int(i64::from(height))),
             sequence: Sequence::MAX,
             witness: Witness::from_stack(vec![WITNESS_RESERVED.to_vec()]),
@@ -750,8 +733,6 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // Parent spends the matured height-1 coinbase; the child spends the
-    // parent. Both pay MEMPOOL_TX_FEE_SATS.
     let parent = seed_coinbase_spend();
     let parent_txid = parent.txid();
     let child = Tx {
@@ -836,8 +817,6 @@ fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Re
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // The node carries the gateway built for this pool, so publication runs
-    // through the same path production uses.
     let observer = Arc::new(RecordingMempoolObserver::default());
     let gateway = state.mempool_gateway();
     assert!(Arc::ptr_eq(gateway.pool(), &state.mempool()));
@@ -892,10 +871,6 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // The parent spends the matured seed coinbase but offers a 1-sat fee,
-    // far below the 1 000 sat/kvB relay floor. Reorg re-admission bypasses
-    // the floor, the way Core's `bypassLimits` skips `GetMinFee`: the family
-    // already paid for its place when it was mined.
     let parent = seed_coinbase_spend_with_fee(1);
     let parent_txid = parent.txid();
     let child = Tx {
@@ -944,7 +919,6 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // A consensus-valid spend that never passes through the mempool gateway.
     let tx = seed_coinbase_spend();
     assert!(!state.mempool().read().contains_txid(&tx.txid()));
 
@@ -991,7 +965,6 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
         "first block must be accepted, got: {verdict}"
     );
 
-    // A competing block built on the superseded template still points at old_tip.
     let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
     let stale_hex = consensus_bytes(&stale_block).to_lower_hex_string();
     let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;

@@ -1,10 +1,3 @@
-//! Shared dependency-graph parser and validator for `g17_dependency_direction`.
-//!
-//! The validator enforces the five-layer one-way dependency model, the
-//! storage-engine ownership boundary, the ZMQ surface ownership boundary,
-//! backend feature-forwarding rules, and production test-seam isolation in
-//! `docs/contracts/architecture.md`.
-
 #![expect(
     clippy::expect_used,
     reason = "malformed Cargo metadata is a test failure"
@@ -184,11 +177,7 @@ impl WorkspaceGraph {
                 if !dep_name.starts_with("bitcoin-rs") {
                     continue;
                 }
-                // Normal and build edges both count: a build dependency is
-                // still a dependency edge, and the RPC storage-independence
-                // rule admits no per-kind backdoor. Dev-dependencies stay
-                // excluded (the bench-only fixture exception the RPC manifest
-                // documents).
+
                 if matches!(
                     dependency["kind"].as_str().unwrap_or("normal"),
                     "normal" | "build"
@@ -244,7 +233,6 @@ impl WorkspaceGraph {
     pub(crate) fn validate(&self) -> Result<Validation, Vec<String>> {
         let mut violations = Vec::new();
 
-        // 1. Every normal bitcoin-rs edge points to the same or a lower layer.
         let mut checked_edges = 0_usize;
         for (name, edges) in &self.normal_deps {
             let layer = approved_layer(name);
@@ -260,9 +248,6 @@ impl WorkspaceGraph {
             }
         }
 
-        // 1b. Mempool must not depend on its transaction consumers. The real
-        //     edges point the other way; this keeps admission owning the pool
-        //     while consumers read or submit through the gateway.
         if let Some(mempool_edges) = self.normal_deps.get(MEMPOOL_CRATE) {
             for dep in mempool_edges {
                 if MEMPOOL_CONSUMER_CRATES.contains(&dep.as_str()) {
@@ -274,11 +259,8 @@ impl WorkspaceGraph {
             }
         }
 
-        // 1c. Workspace dependency diagrams must stay acyclic; a cycle would
-        //     make the one-way layer model vacuously satisfiable.
         let cycle_checked_crates = self.detect_cycles(&mut violations);
 
-        // 2. No crate outside storage names a storage-engine dependency.
         let mut checked_engine_edges = 0_usize;
         for (name, engines) in &self.engine_deps {
             if name != STORAGE_CRATE && !engines.is_empty() {
@@ -290,7 +272,6 @@ impl WorkspaceGraph {
             checked_engine_edges += engines.len();
         }
 
-        // 3. RPC names no storage backend at all.
         if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
             for dep in rpc_edges {
                 if dep == STORAGE_CRATE {
@@ -326,13 +307,8 @@ impl WorkspaceGraph {
         let mut checked_features = 0_usize;
         checked_features += self.validate_backend_forwarding(&mut violations);
 
-        // 5. The external ZMQ dependency is owned by the RPC surface crate.
-        //    Node may forward the surface feature but must not name the
-        //    external dependency directly.
         checked_features += self.validate_zmq_surface(&mut violations);
 
-        // 6. Fixture capabilities must never be selected by production edges
-        //    or forwarded by production/default features.
         checked_features += self.validate_test_seam_isolation(&mut violations);
 
         if violations.is_empty() {

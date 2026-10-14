@@ -1,33 +1,3 @@
-//! Commit-event delivery from the shard machinery to the coinstats listener.
-//!
-//! The notification interface is batch-only and order-independent, and it is
-//! machinery internal to this crate: the only listener the node attaches is
-//! [`CoinStatsListener`](crate::stats::CoinStatsListener), through
-//! [`UtxoSet::track_coin_stats`](crate::UtxoSet::track_coin_stats).
-//!
-//! A commit that touches exactly one shard delivers its same-transaction runs
-//! directly through [`CoinStatsListener::on_insert_coins`] and
-//! [`CoinStatsListener::on_remove_coins`]; a commit that touches two or more
-//! shards collects every shard's events and delivers them once after all
-//! shard attempts complete, through
-//! [`CoinStatsListener::on_committed_event_batches`]. The batch callback
-//! delivers every event for a mutation that landed, even when a shard fails,
-//! before that shard error is returned.
-//!
-//! [`CoinStatsListener::on_insert_coins`]: crate::stats::CoinStatsListener::on_insert_coins
-//! [`CoinStatsListener::on_remove_coins`]: crate::stats::CoinStatsListener::on_remove_coins
-//! [`CoinStatsListener::on_committed_event_batches`]: crate::stats::CoinStatsListener::on_committed_event_batches
-//!
-//! Multi-shard batch order and chunking are not semantic. Batches arrive in
-//! shard order and each groups one shard's same-transaction runs, but they may
-//! be chunked, merged, or split without changing the mutations they
-//! represent. A listener must derive the same final state from direct
-//! single-shard batches and collected multi-shard batches. The one ordering
-//! guarantee that always holds within a commit: the removal of an outpoint is
-//! delivered before the insertion that replaces it — overwrite removals
-//! arrive as one-element `RemoveBatch` events ahead of their replacement
-//! `InsertBatch`.
-
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use smallvec::SmallVec;
 

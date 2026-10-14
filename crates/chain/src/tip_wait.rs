@@ -1,5 +1,3 @@
-//! Read-only waits on the chain owner's durable applied-tip publication.
-
 use std::sync::Arc;
 use std::time::Instant;
 

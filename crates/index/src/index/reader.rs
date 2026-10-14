@@ -1,5 +1,3 @@
-//! Read-side store access and typed prefix-row decoding.
-
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
     capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError,

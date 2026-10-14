@@ -1,5 +1,3 @@
-//! Bounded real HTTP admission and cancellation for the shared scan owner.
-
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -83,8 +81,7 @@ fn scan_preserves_control_capacity_and_observes_server_shutdown() -> anyhow::Res
                         json!(true)
                     );
                 }
-                // The RPC transport deadline proves cancellation finishes while
-                // the authoritative transition is still excluded here.
+
                 let response = scan
                     .join()
                     .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;

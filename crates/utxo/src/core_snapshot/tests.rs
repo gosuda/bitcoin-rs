@@ -1,4 +1,3 @@
-//! Independent Core encodings and fail-closed resource contracts.
 #![allow(clippy::expect_used)]
 
 use std::io::{self, Cursor, Read};
@@ -22,7 +21,6 @@ fn hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
-// Used only to build corruption cases, never the independent positive fixtures.
 fn core_varint(mut value: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     loop {
@@ -63,7 +61,7 @@ fn group(txid: u8, indices: &[u64]) -> Vec<u8> {
     );
     for index in indices {
         bytes.extend_from_slice(varint::encode(*index).as_slice());
-        // Core Coin: height 1 + coinbase; compressed 50 BTC; raw OP_TRUE.
+
         bytes.extend_from_slice(&[3, 50, 7, 0x51]);
     }
     bytes
@@ -100,7 +98,7 @@ fn genuine_core_dump_matches_compiled_anchor_and_full_state() {
         loaded.hash_serialized.to_string(),
         "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a"
     );
-    // Core reports 8725 BTC for the 149*50 + 51*25 regtest subsidy outputs.
+
     let total = loaded.set.with_stable_view(|view| {
         let mut total = 0_u64;
         view.for_each_all(|outpoint, _| {
@@ -136,7 +134,6 @@ fn inspection_reads_only_fixed_header_without_claiming_trust() {
 
 #[test]
 fn core_varint_reference_boundaries_are_not_record_leb128() {
-    // Core serialize.h's subtract-one MSB encoding, including its width transitions.
     for (bytes, expected) in [
         (vec![0], 0),
         (vec![0x7f], 127),
@@ -162,7 +159,6 @@ fn core_varint_reference_boundaries_are_not_record_leb128() {
 
 #[test]
 fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
-    // Core compressor.cpp / compress_tests.cpp: six special script encodings.
     let payload = vec![0x11; 20];
     for (code, prefix, suffix) in [
         (0, vec![0x76, 0xa9, 0x14], vec![0x88, 0xac]),
@@ -177,7 +173,7 @@ fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
     }
     for code in [2, 3] {
         let mut encoded = vec![code];
-        encoded.extend_from_slice(&[0xff; 32]); // Not a curve point; Core preserves these bytes.
+        encoded.extend_from_slice(&[0xff; 32]);
         let mut expected = vec![0x21, code];
         expected.extend_from_slice(&[0xff; 32]);
         expected.push(0xac);
@@ -186,7 +182,7 @@ fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
             expected
         );
     }
-    // secp256k1 generator and its negation, fixed independent SEC encodings.
+
     let x = hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
     for (code, y) in [
         (
@@ -495,7 +491,6 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             if same_full_hash {
                 record[8..12].copy_from_slice(&index.to_be_bytes());
             } else {
-                // Distinct eight-byte keys, with low 32 and high 8 bits zero.
                 record[4..7].copy_from_slice(&index.to_be_bytes()[1..]);
             }
             bytes.extend(record);
@@ -514,7 +509,7 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             before
         );
     }
-    // The instrumentation observes the real successful insertion boundary.
+
     let before = crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
     assert!(
         read_and_verify(

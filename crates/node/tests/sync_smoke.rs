@@ -1,4 +1,3 @@
-//! Block sync smoke tests.
 use hashbrown::HashMap;
 use std::sync::Arc;
 

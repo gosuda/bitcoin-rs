@@ -1,13 +1,3 @@
-//! Live peer-session table: the single owner of connection leases and the
-//! handshake metadata published for them.
-//!
-//! One connection per remote address is live at a time. Registration replaces
-//! and cancels any predecessor at the same address; every removal path checks
-//! connection identity so a stale handle can never evict its successor. All
-//! consumers (listener, connection threads, block sync, RPC) observe and
-//! mutate peer sessions only through this type, so the registration,
-//! replacement, and cancellation rules have exactly one implementation.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -249,10 +239,7 @@ impl PeerTable {
                 if current.lease.same_connection(&lease) {
                     return Some(lease);
                 }
-                // A live inbound predecessor is displaced by this insert, so
-                // the net count is unchanged. An outbound predecessor, or an
-                // inbound one already cancelled (and therefore outside the
-                // live count), leaves the new lease as a net addition.
+
                 !current.lease.is_inbound() || current.lease.is_cancelled()
             }
             None => true,
@@ -1021,7 +1008,7 @@ mod tests {
             let table = PeerTable::new();
             let activity = crate::NetworkActivity::from_shared(Arc::new(AtomicBool::new(false)));
             let current = if inbound { inbound_lease() } else { lease() };
-            // The public fixture/registration API retains its unconditional contract.
+
             assert!(!table.register(addr(1), current.clone()));
             let replacement = if inbound { inbound_lease() } else { lease() };
             for (address, candidate) in [
@@ -1304,7 +1291,6 @@ mod tests {
         assert_eq!(table.len(), 1);
     }
 
-    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
     #[test]
     fn note_announced_height_credits_only_the_delivering_connection() {
         let table = PeerTable::new();
@@ -1313,8 +1299,6 @@ mod tests {
         table.register(addr(1), stale.clone());
         let stale_source = stale.source(addr(1));
 
-        // Same-address replacement: the stale connection is cancelled and
-        // the new connection takes the slot.
         let (current_tx, _current_rx) = crossbeam_channel::unbounded();
         let current = PeerLease::new(current_tx);
         table.register(addr(1), current.clone());
@@ -1351,7 +1335,6 @@ mod tests {
         );
     }
 
-    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
     #[test]
     fn note_announced_height_raises_monotonically_and_reports_actual_updates() {
         let table = PeerTable::new();
@@ -1397,8 +1380,6 @@ mod tests {
         table.register(addr(1), stale.clone());
         let stale_source = stale.source(addr(1));
 
-        // Same-address replacement: the stale connection is cancelled and
-        // the new connection takes the slot.
         let (current_tx, _current_rx) = crossbeam_channel::unbounded();
         let current = PeerLease::new(current_tx);
         table.register(addr(1), current.clone());

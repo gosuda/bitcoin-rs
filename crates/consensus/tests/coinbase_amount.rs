@@ -1,5 +1,3 @@
-//! Block subsidy schedule and the coinbase-amount rule.
-
 use bitcoin_rs_consensus::{ConsensusError, block_subsidy, verify_coinbase_amount};
 use bitcoin_rs_primitives::Network;
 
@@ -16,19 +14,15 @@ fn the_subsidy_halves_on_the_network_s_schedule_and_saturates_to_zero() {
     assert_eq!(Network::Signet.subsidy_halving_interval(), MAINNET);
     assert_eq!(Network::Regtest.subsidy_halving_interval(), REGTEST);
 
-    // (height, interval, subsidy)
     let cases: [(u32, u32, u64); 11] = [
         (0, MAINNET, FIFTY_BTC),
         (209_999, MAINNET, FIFTY_BTC),
         (210_000, MAINNET, FIFTY_BTC / 2),
         (419_999, MAINNET, FIFTY_BTC / 2),
         (420_000, MAINNET, FIFTY_BTC / 4),
-        // The first halving landing on an odd satoshi count, where rounding
-        // or floating point would diverge.
         (630_000, MAINNET, 625_000_000),
         (64 * MAINNET, MAINNET, 0),
         (u32::MAX, MAINNET, 0),
-        // Regtest halves every 150 blocks; the mainnet interval has not.
         (150, REGTEST, FIFTY_BTC / 2),
         (150, MAINNET, FIFTY_BTC),
         (u32::MAX, REGTEST, 0),
@@ -47,7 +41,6 @@ fn the_subsidy_halves_on_the_network_s_schedule_and_saturates_to_zero() {
 /// Core; an allowance that leaves the satoshi range is refused, not wrapped.
 #[test]
 fn a_coinbase_may_claim_the_halved_subsidy_plus_the_fees_and_no_more() {
-    // (claimed, fees, height, verdict)
     let cases: [(u64, u64, u32, Result<(), ConsensusError>); 6] = [
         (FIFTY_BTC + 999, 999, 1, Ok(())),
         (0, 999, 1, Ok(())),

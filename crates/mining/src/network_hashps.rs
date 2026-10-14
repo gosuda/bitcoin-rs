@@ -1,5 +1,3 @@
-//! Network hash-rate estimation for `getnetworkhashps` and `getmininginfo`.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
@@ -10,7 +8,6 @@ use crate::MiningControlError;
 
 /// Core `GetNetworkHashPS` for `getnetworkhashps` (API-06). Owns lookup and
 /// height validation.
-// CONTRACT: docs/contracts/external-api.md#API-06
 pub fn network_hash_ps(
     tree: &BlockTree,
     tip: Option<&TipSnapshot>,
@@ -23,8 +20,7 @@ pub fn network_hash_ps(
             "Invalid nblocks. Must be a positive number or -1.",
         )));
     }
-    // Any height the snapshot cannot resolve is Core's invalid-parameter
-    // error: below -1, above the tip, or absent from the tip's ancestry.
+
     let missing_height = || {
         MiningControlError::InvalidRequest(CompactString::from(
             "Block does not exist at specified height",
@@ -53,7 +49,6 @@ pub fn network_hash_ps(
 /// node, min/max header time, `chainwork` delta over that span. A missing
 /// start or unwalkable window is a zero rate so `getmininginfo` can stay
 /// best-effort.
-// CONTRACT: docs/contracts/external-api.md#API-06
 pub fn estimate_network_hashps(
     tree: &BlockTree,
     start_id: NodeId,
@@ -69,7 +64,7 @@ pub fn estimate_network_hashps(
         lookup
     }
     .min(i64::from(start_node.height));
-    // A negative lookup other than -1 has no window; treat it as an empty walk.
+
     let walk = u32::try_from(walk).unwrap_or(0);
     if walk == 0 {
         return 0.0;

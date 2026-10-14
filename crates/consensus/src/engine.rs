@@ -1,5 +1,3 @@
-//! The one runtime validation-engine selector.
-
 use core::fmt;
 
 /// Which script-verification engine the validation pipeline runs.

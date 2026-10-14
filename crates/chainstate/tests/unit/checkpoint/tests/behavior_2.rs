@@ -7,7 +7,7 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
         let (tree, _, applied) = chain_with_applied_height(0, 0)?;
         let applied_tip = tip_snapshot(&tree, applied)?;
         let tree = RwLock::new(tree);
-        // The applied tip carries the count the checkpoint writes.
+
         let applied_tip = bitcoin_rs_chain::TipSnapshot {
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::from_wire(chain_tx_count),
             ..applied_tip
@@ -77,9 +77,7 @@ fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
-    // The ordering claim needs a count disagreement to actually exist: an
-    // UNKNOWN tip count is skipped by validation, which would report the
-    // height error even if count validation ran first.
+
     let applied_tip = bitcoin_rs_chain::TipSnapshot {
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(2),
         ..applied_tip

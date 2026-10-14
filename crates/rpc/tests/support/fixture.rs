@@ -1,13 +1,3 @@
-//! Strict bounded loader for the checked-in Core 31.1 fixture corpus.
-//!
-//! The corpus under `crates/rpc/tests/corpus/core-31.1/` is custody, not a
-//! second method manifest: the const [`bitcoin_rs_rpc::manifest::MANIFEST`]
-//! stays the sole method authority and [`manifest_check`] only proves every
-//! replayed method exists there. Loading enforces every ceiling from
-//! [`super::limits`], parses with `sonic-rs` into types that reject unknown
-//! fields, measures JSON depth on the raw bytes before parsing, and pins the
-//! exact Core provenance (version, binary digest, network).
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -20,8 +10,6 @@ use super::compare::EnvelopeCheck;
 use super::limits::{MAX_CORPUS_BYTES, MAX_FIXTURE_BYTES, MAX_FIXTURE_COUNT, MAX_JSON_DEPTH};
 use super::manifest_check;
 
-// Reuse the process gates' typed identity owner in this test binary; no
-// production crate dependency or second reference parser is introduced.
 #[expect(
     dead_code,
     reason = "the RPC fixture gate consumes only the release identity"
@@ -305,24 +293,16 @@ fn load_corpus_from(
     dir: &Path,
     release: &reference_set::ReleaseIdentity,
 ) -> Result<BTreeMap<String, Fixture>, LoadError> {
-    // Root custody: the corpus directory itself is opened once, and every
-    // entry is read from and opened relative to that one handle. A
-    // replacement of the directory name after this point cannot redirect
-    // any child open, because no child is ever resolved by full pathname.
     let corpus_dir = corpus_io::open(dir)?;
-    // Enumeration streams: the entry-count ceiling below stops the walk at
-    // the first over-limit item instead of materializing a directory of
-    // unbounded size.
+
     let entries = corpus_io::entries(&corpus_dir, dir)?;
     let mut fixture_count = 0_usize;
     let mut corpus_bytes = 0_u64;
     let mut fixtures = BTreeMap::new();
-    // One custody walk does both custody accounting and reading: there is no
-    // second pathname-based pass whose view could disagree with this one.
+
     for name in entries {
         let name = name?;
-        // Every entry counts against the ceiling BEFORE any name-shape
-        // filtering: unlimited non-JSON junk can no longer bypass the cap.
+
         fixture_count += 1;
         if fixture_count > MAX_FIXTURE_COUNT {
             return Err(LoadError::Violation(format!(
@@ -444,9 +424,7 @@ mod corpus_io {
                 path.display()
             ))
         };
-        // `NOFOLLOW` refuses a final symlink outright; `NONBLOCK` keeps a
-        // FIFO from blocking the open itself, so its type can be judged by
-        // `fstat`.
+
         let file_fd = rustix::fs::openat(
             dir,
             name,
@@ -463,8 +441,7 @@ mod corpus_io {
                 LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
             }
         })?;
-        // The type is now a property of this open description, not of a name
-        // that another process could have replaced in the meantime.
+
         let stat = rustix::fs::fstat(&file_fd).map_err(|error| {
             LoadError::Violation(format!("{}: fstat failed: {error}", path.display()))
         })?;
@@ -512,9 +489,6 @@ mod corpus_io {
     pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
         use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-        // `BACKUP_SEMANTICS` admits a directory as a file handle;
-        // `OPEN_REPARSE_POINT` opens a junction or symlink as the reparse
-        // object instead of its target.
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
@@ -704,9 +678,7 @@ fn validate_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".to_owned()));
         }
-        // Accept both capture forms: RFC 9110 §8.6 omission and the
-        // libevent-era Core `Content-Length: 0`; the negative probe pins
-        // the node's own omission.
+
         if let Some(value) = declared.first() {
             if *value != "0" || declared.len() != 1 {
                 return Err(fail(
@@ -761,10 +733,6 @@ fn validate_fixture(
         )));
     }
 
-    // The replayed body must itself be a valid single or batch JSON-RPC
-    // request, and the derived method names must equal `request.methods`
-    // exactly. Malformed bytes are only accepted for the parse-error case:
-    // an HTTP 500 capture with an empty derived method list.
     let derived = derive_request_methods(&fixture.request.body, fixture.core.status)
         .map_err(|why| LoadError::Violation(format!("{}: {why}", path.display())))?;
     if derived != fixture.request.methods {
@@ -878,9 +846,6 @@ fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
     if fixture.checks.headers.body_length
         && fixture.checks.headers.class_of("content-length").is_some()
     {
-        // `Content-Length` is owned by the derived body_length invariant:
-        // classifying it again as exact, volatile or gap would be stale
-        // dual ownership.
         return Err(fail(
             "header Content-Length is owned by the derived body_length class and \
              must not also be classified exact, volatile or gap"
@@ -978,10 +943,6 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                     )));
                 }
                 if class == "gap" {
-                    // A gap key is exactly a position where the live node
-                    // answers differently from Core (a different value, or a
-                    // member Core omits): the pinned current tuple must carry
-                    // the live shape, and the divergence must be real.
                     if fixture.relation != Relation::KnownGap {
                         return Err(fail(
                             "gap classification requires a known-gap relation".to_owned(),
@@ -1001,8 +962,6 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                         )));
                     };
                     let Some(core_value) = result_object.get(key.as_str()) else {
-                        // Core omits the member entirely while this node
-                        // answers: a real divergence at this path.
                         continue;
                     };
                     if super::compare::value_equal(core_value, current_value) {

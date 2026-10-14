@@ -1,5 +1,3 @@
-//! Fixtures and in-memory test doubles shared by in-crate unit tests.
-
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;

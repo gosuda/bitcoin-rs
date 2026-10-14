@@ -1,11 +1,3 @@
-//! Keyless BIP352 v0 scan material for already validated transactions.
-//!
-//! This is an experimental library codec, not a wallet or a deployed tweak
-//! server. Call the existing `BlockUndoSource` directly to obtain a certified
-//! `BlockSpends`, then project it with [`block_tweaks`]. Retention, receipt,
-//! pruning and recovery authority remain with that source. See
-//! `docs/silent-payments.md` for coverage and external protocol limitations.
-
 use bitcoin_hashes::{Hash as _, hash160};
 use bitcoin_rs_primitives::{BlockHash, Script, Tx, TxIn, Txid, consensus_bytes};
 use bitcoin_rs_utxo::contract::{BlockSpends, BlockSpendsError};
@@ -105,8 +97,7 @@ fn transaction_tweak_with_ctx<C: secp256k1::Verification>(
         return Err(TweakError::PrevoutCount);
     }
     let mut bytes = 0_usize;
-    // Establish completeness before any eligibility shortcut. A missing script
-    // could be an unknown witness version that invalidates the whole transaction.
+
     for (input, script) in prevouts.iter().enumerate() {
         let script = script.ok_or(TweakError::Unavailable { input })?;
         bytes = bytes.saturating_add(script.len());
@@ -142,8 +133,7 @@ fn transaction_tweak_with_ctx<C: secp256k1::Verification>(
             keys.push(key);
         }
     }
-    // Combine all keys at once: a zero intermediate sum is permitted. A final
-    // point at infinity (or no eligible inputs) is BIP352 ineligibility.
+
     let refs: Vec<_> = keys.iter().collect();
     let Ok(sum) = PublicKey::combine_keys(&refs) else {
         return Ok(None);
@@ -281,8 +271,6 @@ fn is_p2wpkh(script: &[u8]) -> bool {
     script.len() == 22 && script[..2] == [0x00, 0x14]
 }
 
-// Nested witness spends require exactly one canonical push of the redeem
-// program (BIP141). There is no general script interpreter in this codec.
 fn redeem_script(input: &TxIn) -> Option<&[u8]> {
     let bytes = input.script_sig.as_bytes();
     let (&len, program) = bytes.split_first()?;
@@ -327,9 +315,6 @@ fn input_key(input: &TxIn, script: &[u8], index: usize) -> Result<Option<PublicK
         return Ok(input.witness.last().and_then(|bytes| compressed_key(bytes)));
     }
     if script.len() == 25 && script[..3] == [0x76, 0xa9, 0x14] && script[23..] == [0x88, 0xac] {
-        // Match the BIP's reference extraction, including malleated non-template
-        // scriptSigs. Hash-match before accepting a compressed point; do not
-        // guess that the final push is always the signing public key.
         return Ok(input.script_sig.windows(33).rev().find_map(|bytes| {
             (hash160::Hash::hash(bytes).as_byte_array()[..] == script[3..23])
                 .then(|| compressed_key(bytes))

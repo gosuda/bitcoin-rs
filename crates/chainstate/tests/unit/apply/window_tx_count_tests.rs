@@ -1,20 +1,3 @@
-//! Grouped-window publication contract for the cumulative chain tx count.
-//!
-//! A staged block's outcome tip carries that block's own cumulative count —
-//! never the group-final count unless the block is the final one — while one
-//! durable batch certifies only the final count of the committed prefix
-//! (`docs/contracts/recovery.md`, `RCV-02`; the `WindowGroup` docs in
-//! `src/window.rs` state the same rule for the staged tips).
-//!
-//! PRE: a regtest genesis applied with count 1 and committed as the
-//! durable head — the state a header-first sync that already applied
-//! genesis leaves before a body window — plus three one-transaction
-//! children whose headers are already in the tree.
-//! POST: one `ChainTransition::connect_window` call drains one
-//! outcome per block in order; outcome `n` carries `1 + n` transactions;
-//! every prefix published (the event sequence advanced once per block);
-//! the applied cell and the durable head name the final count.
-
 use std::sync::Arc;
 
 use bitcoin_rs_chain::ChainTxCount;
@@ -31,8 +14,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
-    // A real header-first sync that applied genesis also committed its
-    // durable head; seed it so the window's lineage fence actually runs.
+
     handles.durable_head.commit(
         None,
         &DurableHead {
@@ -82,9 +64,6 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
         );
     }
 
-    // Publication happened per block, in order, not once per group: the
-    // event sequence advanced once per staged block. Publishing only the
-    // final tip would leave the sequence at 1.
     let events = handles.chain_events.snapshot();
     assert_eq!(events.sequence, 3);
     assert_eq!(events.tip_height, 3);

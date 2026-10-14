@@ -1,12 +1,3 @@
-//! Deterministic regtest seed chain, mined through ordinary validation.
-//!
-//! The blocks are built natively with trivial regtest proof of work (grinding
-//! the nonce against the minimum target), each coinbase paying the
-//! anyone-can-spend `OP_TRUE` output, and applied through the real
-//! `NodeState::apply_block` path. Nothing here fakes mining evidence: the
-//! chain exists so the replay has a real, reproducible tip to bind
-//! chain-bound keys to.
-
 use super::{GateResult, fail};
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -54,8 +45,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::null(),
-                // BIP34 height push plus one pad byte: consensus requires a
-                // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
+
                 script_sig: [push_int(i64::from(height)), push_int(0)].concat().into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),

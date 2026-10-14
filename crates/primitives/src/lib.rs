@@ -90,8 +90,6 @@ mod float_conversion_tests {
     use super::{i64_to_f64, u64_to_f64};
 
     #[test]
-    // suboptimal_flops fires on 1.99 clippy but not 1.97 — toolchain-dependent
-    // suppression, so expect's self-audit can't be used here.
     #[allow(clippy::suboptimal_flops)]
     fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
         for value in [
@@ -102,7 +100,6 @@ mod float_conversion_tests {
             1_315_805_869,
             1 << 52,
         ] {
-            // Independently derived: the halves recombined by hand.
             let expected = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX))
                 * 4_294_967_296.0_f64
                 + f64::from(u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX));

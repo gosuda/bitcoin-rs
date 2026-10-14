@@ -1,4 +1,3 @@
-//! Shared mining integration fixtures.
 #![allow(dead_code)]
 
 use std::error::Error;

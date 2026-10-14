@@ -1,9 +1,3 @@
-//! Ordered raw transactions use consensus costs with copied previous outputs.
-//!
-//! Core 31.1 `GetTransactionSigOpCost` owns the expected legacy/P2SH scaling
-//! and witness activation. rust-bitcoin independently checks active costs;
-//! these fixtures exercise accounting, not script validity or admission.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
@@ -52,7 +46,7 @@ fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
                 segwit_active,
             )?;
             assert_eq!(snapshot.entries[0].sigop_cost, expected);
-            // The P2PKH coinbase contributes four more cost units.
+
             let mut context = CandidateContext {
                 segwit_active,
                 max_sigops: u64::from(expected) + 4,
@@ -98,8 +92,7 @@ fn raw_children_resolve_only_earlier_selected_outputs() -> TestResult {
             let snapshot = snapshot_for_selection(pool.mining_snapshot(), &selection, &[], true)?;
             assert_eq!(snapshot.entries[1].sigop_cost, case.active_cost);
         }
-        // Neither an unselected pool entry nor a later listed parent resolves
-        // the raw child's input. Missing-input rejection stays with validation.
+
         for items in [
             vec![GenerateTx::Raw(child.clone())],
             vec![GenerateTx::Raw(child.clone()), GenerateTx::Raw(parent)],

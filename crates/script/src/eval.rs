@@ -1,14 +1,3 @@
-//! The opcode evaluator: a bounded stack machine mirroring Bitcoin Core's
-//! `EvalScript`.
-//!
-//! Behavioral authority: `.references/bitcoin/src/script/interpreter.cpp`
-//! (`EvalScript`, `CheckMinimalPush`, `CScriptNum`, `FindAndDelete`). The
-//! structure is idiomatic Rust rather than a transliteration: one dispatch
-//! loop over [`Instruction`]s, a [`Stack`] pair for main/alt stacks, and a
-//! compact condition stack. Every failing path returns a
-//! [`ScriptError::Invalid`] carrying Core's `SCRIPT_ERR_*` name; nothing
-//! panics on malformed input.
-
 use std::borrow::Cow;
 
 use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};
@@ -94,9 +83,6 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
         });
     }
     if require_minimal && !bytes.is_empty() {
-        // Check that the number is encoded with the minimum possible number
-        // of bytes: the most significant byte must not be a redundant sign
-        // extension (this also rejects the negative-zero encoding 0x80).
         let last = bytes.last().copied().unwrap_or(0);
         if last.trailing_zeros() >= 7 {
             let second_to_last_significant = bytes.len() > 1 && bytes[bytes.len() - 2] & 0x80 != 0;
@@ -117,8 +103,7 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
     if bytes[bytes.len() - 1] & 0x80 != 0 {
         let mask = !(0x80_u64 << (8 * (bytes.len() - 1)));
         let magnitude = value & mask;
-        // A 5-byte negative number can exceed i64's positive range in raw
-        // form but its magnitude is at most 2^39-1, so the negation fits.
+
         let magnitude = i64::try_from(magnitude).map_err(|_| ScriptError::Invalid {
             code: ScriptErrCode::ScriptNum,
         })?;
@@ -136,8 +121,7 @@ fn script_num_serialize(value: i64) -> Bytes {
         return SmallVec::new();
     }
     let negative = value < 0;
-    // `unsigned_abs` returns u64: |i64::MIN| is exactly representable, no
-    // conversion can fail.
+
     let mut abs = value.unsigned_abs();
     let mut result = SmallVec::new();
     while abs > 0 {
@@ -236,15 +220,14 @@ pub(crate) fn eval_script(
     let mut altstack = Stack::new();
     let mut op_count: usize = 0;
     let mut codeseparator_pos: u32 = CODESEPARATOR_POSITION;
-    // Byte offset of the instruction start, tracked for codeseparator
-    // positioning relative to the whole script.
+
     let mut instruction_start: usize = 0;
     let mut iter = instructions(script);
 
     while let Some(parsed) = iter.next() {
         let instruction = match parsed {
             Ok(instruction) => instruction,
-            // Core's GetOp returning false is a BAD_OPCODE.
+
             Err(_) => {
                 return Err(ScriptError::Invalid {
                     code: ScriptErrCode::BadOpcode,
@@ -254,17 +237,13 @@ pub(crate) fn eval_script(
         let opcode_byte = match instruction {
             Instruction::PushBytes(data) => {
                 let opcode_byte = script[instruction_start];
-                // Core checks push size unconditionally (interpreter.cpp:457),
-                // before testing fExec — a >520-byte push in a non-executed
-                // branch is still PUSH_SIZE.
+
                 if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
                     return Err(ScriptError::Invalid {
                         code: ScriptErrCode::PushSize,
                     });
                 }
                 if conditions.all_true() {
-                    // Core checks MINIMALDATA only in executed branches
-                    // (interpreter.cpp:489, inside `if (fExec && ... <= OP_PUSHDATA4)`).
                     if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte)
                     {
                         return Err(ScriptError::Invalid {
@@ -280,7 +259,6 @@ pub(crate) fn eval_script(
         };
 
         if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
-            // OP_RESERVED does not count towards the opcode limit.
             if opcode_byte > opcode::OP_PUSHNUM_16 {
                 op_count += 1;
                 if op_count > MAX_OPS_PER_SCRIPT {
@@ -297,8 +275,6 @@ pub(crate) fn eval_script(
             });
         }
 
-        // With CONST_SCRIPTCODE, OP_CODESEPARATOR in non-segwit script is
-        // rejected even in an unexecuted branch.
         if opcode_byte == OP_CODESEPARATOR
             && sigversion == SigVersion::Base
             && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
@@ -358,21 +334,20 @@ fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
 const fn is_disabled(op: u8) -> bool {
     matches!(
         op,
-        0x7e // OP_CAT
-            | 0x7f // OP_SUBSTR
-            | 0x80 // OP_LEFT
-            | 0x81 // OP_RIGHT
-            | 0x83 // OP_INVERT
-            | 0x84 // OP_AND
-            | 0x85 // OP_OR
-            | 0x86 // OP_XOR
-            | 0x8d // OP_2MUL
-            | 0x8e // OP_2DIV
-            | 0x95 // OP_MUL
-            | 0x96 // OP_DIV
-            | 0x97 // OP_MOD
-            | 0x98 // OP_LSHIFT
-            | 0x99 // OP_RSHIFT
+        0x7e | 0x7f
+            | 0x80
+            | 0x81
+            | 0x83
+            | 0x84
+            | 0x85
+            | 0x86
+            | 0x8d
+            | 0x8e
+            | 0x95
+            | 0x96
+            | 0x97
+            | 0x98
+            | 0x99
     )
 }
 
@@ -417,9 +392,6 @@ fn dispatch(
     tapleaf_hash: Option<&Hash256>,
     script: &[u8],
 ) -> Result<(), ScriptError> {
-    // Push value: OP_1NEGATE and the OP_1..OP_16 small integers. OP_RESERVED
-    // (0x50) sits between them and pushes nothing - it falls through to the
-    // dispatch below, where an executed OP_RESERVED is a BAD_OPCODE.
     if op == OP_1NEGATE {
         push_bytes(stack, &script_num_serialize(-1))?;
         return Ok(());
@@ -570,8 +542,6 @@ fn dispatch(
             })?;
         }
         OP_2OVER => {
-            // Core: push stacktop(-4) then stacktop(-3) — the pair two positions
-            // below the top, in their original order.
             let pair_first = stack.peek_at(3).map_err(|_| invalid_stack())?.clone();
             let pair_second = stack.peek_at(2).map_err(|_| invalid_stack())?.clone();
             stack.push(pair_first).map_err(|_| ScriptError::Invalid {
@@ -602,8 +572,6 @@ fn dispatch(
             })?;
         }
         OP_2SWAP => {
-            // Core: swap(stacktop(-4), stacktop(-3)) then swap(stacktop(-2),
-            // stacktop(-1)) — two independent pair swaps.
             stack.swap_at(3, 1).map_err(|_| invalid_stack())?;
             stack.swap_at(2, 0).map_err(|_| invalid_stack())?;
         }
@@ -785,9 +753,6 @@ fn dispatch(
             push_bytes(stack, &digest)?;
         }
         OP_CODESEPARATOR => {
-            // Core sets pbegincodehash = pc (the byte *after* the CODESEPARATOR
-            // opcode, since GetOp already advanced pc). The scriptCode for
-            // sighash must start after the CODESEPARATOR byte, not at it.
             *codeseparator_pos =
                 u32::try_from(instruction_start + 1).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::ScriptSize,
@@ -922,8 +887,6 @@ pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
     let mut iter = instructions(haystack);
     let mut start = 0_usize;
     while let Some(item) = iter.next() {
-        // A malformed tail is one instruction: it is compared and emitted
-        // whole, the same span Core's failed GetOp leaves behind.
         let end = if item.is_err() {
             haystack.len()
         } else {
@@ -1123,9 +1086,6 @@ fn check_multisig(
         }
     }
 
-    // Clean up the actual arguments (keys + sigs + the two counts). The last
-    // `sigs` pops are the signature operands; NULLFAIL requires them empty
-    // on failure.
     let mut args = keys + sigs + 2;
     while args > 0 {
         if !success && flags.contains(VerifyFlags::NULLFAIL) && args <= sigs {

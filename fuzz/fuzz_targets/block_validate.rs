@@ -38,8 +38,7 @@ fn validate_block(data: &[u8]) {
             script_pubkey: Script::from(vec![0x51]),
         },
     };
-    // No softfork is active at height 1; the mandatory-only flag set keeps
-    // sigop accounting active without any fork-dependent rules.
+
     for tx in &block.txs {
         let _ = verify_transaction_non_script(tx, &view, 1, 0, VerifyFlags::MANDATORY);
     }

@@ -1,4 +1,3 @@
-//! ARCH-07b: verified installation, isolated replay, and fail-closed convergence.
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -182,7 +181,7 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
 fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult {
     let fixture = Fixture::new()?;
     let mut bytes = fixture.snapshot.clone();
-    // Snapshot header (52), transaction record header (45), vout height offset (12).
+
     let offset = 52 + 45 + 12;
     let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
     assert!(height <= fixture.pinned.height);
@@ -206,8 +205,6 @@ fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult 
     Ok(())
 }
 
-// Core 31.1 ActivateSnapshot rejects an invalid base and any base outside
-// m_best_header's ancestry before making the snapshot chainstate active.
 #[test]
 fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResult {
     for invalid_height in [2, 1] {
@@ -275,9 +272,7 @@ fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>
 fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResult {
     let fixture = Fixture::new()?;
     let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
-    // Authenticate the candidate before changing header selection. Invoke the
-    // final installation owner directly so a manager-only precheck cannot
-    // replace its guarded best-header admission rule.
+
     let loaded = fixture.load()?;
     assert_eq!(
         (loaded.tip_hash, loaded.height),
@@ -338,8 +333,6 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     );
     assert!(!fixture.active.is_closed_for_recovery());
 
-    // Invalidating the competing branch restores the pinned ancestry; an
-    // operational refusal must not poison the next legitimate activation.
     fixture
         .active
         .block_tree
@@ -362,8 +355,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
 fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
     let fixture = Fixture::new()?;
     let mut harder = competing_snapshot_headers()?.remove(0);
-    // Tree-level work-order fixture: this harder declared target makes a
-    // shorter branch win. It does not claim regtest difficulty admission.
+
     harder.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
     harder.header.nonce = 0;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut harder)?;
@@ -442,11 +434,6 @@ fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult 
     Ok(())
 }
 
-// These fixtures exercise the shared installation owner with unequal-work
-// forks. Coin contents come from ordinarily applied regtest blocks; changing
-// only the declared header target does not change their coinbase transactions.
-// Every replacement header meets its declared target, but this is not a claim
-// that regtest's fixed contextual difficulty would admit those replacements.
 fn snapshot_work_branch(
     height: u32,
     bits: u32,
@@ -658,7 +645,6 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
 
 #[test]
 fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> TestResult {
-    // Isolate identity, height and count mismatches, including equal hashes.
     for (change_hash, height_delta, count_delta) in [(true, 0, 0), (false, 1, 0), (false, 0, 1)] {
         let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x207f_ffff)?;
         let applied = fixture
@@ -877,7 +863,7 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
     }
     let manager = fixture.manager(dir.path())?;
     let before = fixture.active.durable_head.load()?;
-    // This is an ordinary user refusal, not an unresolved storage mutation.
+
     assert!(matches!(
         {
             let loaded = fixture.load()?;
@@ -1155,8 +1141,7 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                         reader.progress(Network::Regtest, bitcoin_rs_primitives::unix_time_secs());
                     let _ = sent.send(progress);
                 });
-                // A storage callback may wait on slow I/O while public readers
-                // continue to describe the previously committed chainstate.
+
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();

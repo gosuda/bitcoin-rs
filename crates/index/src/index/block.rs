@@ -1,5 +1,3 @@
-//! Parse-once block preparation and authoritative spent-script anchoring.
-
 use super::{
     capability::{IndexCapabilities, IndexCapability},
     error::IndexError,
@@ -89,9 +87,6 @@ fn pending_rows_for_block_with_header(
         }
         let position = crate::types::TxPosition::new(span.start(), span.len());
 
-        // A live output's row needs the transaction id, and that id is only
-        // computed when something needs it, so the outputs of one transaction
-        // are staged here until its id exists.
         let mut pending_live: Vec<(u32, Option<ScriptHash>)> = Vec::new();
 
         for input in tx.inputs() {
@@ -134,8 +129,7 @@ fn pending_rows_for_block_with_header(
                     position,
                 });
             }
-            // Genesis is exempt: its coinbase output never entered the UTXO
-            // set, so it must not enter the live view either.
+
             if capabilities.contains(IndexCapability::ScriptLive)
                 && height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
                 && let Ok(vout) = u32::try_from(index)
@@ -213,10 +207,7 @@ fn push_live_ops(
             continue;
         };
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
-        // At a BIP30 exception height the output outpoint can already be
-        // live. The undo record carries that replaced coin as a restore, so
-        // use the same anchor to remove its old script row before publishing
-        // the new one. The inverse operation restores the old row on rollback.
+
         if let Some(old_script) = spent_scripts.script_bytes(&txid, vout) {
             rows.live_ops
                 .push(LiveOp::Delete(crate::types::ScriptLiveRow::new(

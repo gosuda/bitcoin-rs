@@ -1,4 +1,4 @@
-#![allow(clippy::inline_always)] // PERF: Criterion shows forced inlining improves MuHash insert hot paths.
+#![allow(clippy::inline_always)]
 
 use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
@@ -89,14 +89,7 @@ impl Num3072 {
             let mut d1 = 0_u64;
             let mut d2 = 0_u64;
             mul_limb(&mut d0, &mut d1, left[j + 1], right[LIMBS - 1]);
-            // PERF: split the high-column accumulation into two independent
-            // triple-carry chains so the 128-bit multiplies issue without
-            // waiting on the carry chain of the previous `muladd3`. Both chains
-            // sum a disjoint subset of the same products and are merged before
-            // the column total is consumed, so the 192-bit column value is
-            // byte-identical to the serial accumulation: integer addition is
-            // associative/commutative and every partial sum is bounded by the
-            // full column total, which the original algorithm keeps < 2^192.
+
             let mut e0 = 0_u64;
             let mut e1 = 0_u64;
             let mut e2 = 0_u64;
@@ -118,11 +111,6 @@ impl Num3072 {
             add3(&mut d0, &mut d1, &mut d2, e0, e1, e2);
             mulnadd3(&mut c0, &mut c1, &mut c2, d0, d1, d2, MAX_PRIME_DIFF);
 
-            // PERF: same split for the low-column accumulation. The seed
-            // (carry-in plus the `mulnadd3` fold above) stays in the (c0,c1,c2)
-            // chain; the second chain (f0,f1,f2) starts at zero and collects the
-            // odd-offset products. Merging before `extract3` preserves the exact
-            // column total and therefore the emitted limb and carry-out.
             let mut f0 = 0_u64;
             let mut f1 = 0_u64;
             let mut f2 = 0_u64;
@@ -698,8 +686,6 @@ mod tests {
 
     #[test]
     fn finalize_byte_identical_after_optimized_multiply_chain() {
-        // Confirms the optimized path also matches the ruint reference through
-        // finalize() across a seeded operation chain.
         let mut rng = SplitMix64::new(0xf1_0a11_2e57_3072);
         for _ in 0..2_000 {
             let mut candidate = MuHash3072::new();

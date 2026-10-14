@@ -1,9 +1,3 @@
-//! Object-safe access to the existing durable index writer.
-//!
-//! Preparation takes a shared lock; fence capture, resets, and commits take
-//! an exclusive lock. This is the same writer and the same persistence
-//! protocol, not a second representation or a parallel mutation path.
-
 use bitcoin_rs_primitives::OutPoint;
 use parking_lot::RwLock;
 

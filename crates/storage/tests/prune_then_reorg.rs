@@ -1,4 +1,3 @@
-//! Pruning retention coverage for shallow reorg safety.
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -561,8 +560,7 @@ fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
             (12, b"block-body"),
         ],
     )?;
-    // The legacy shape: one row was deleted, the requested line was
-    // persisted, and no executed-frontier record exists.
+
     let mut deleted = store.new_batch();
     deleted.delete(BLOCK_DATA_CF, &block_body_key(10, fake_hash(10)));
     store.write(deleted)?;
@@ -582,8 +580,6 @@ fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
     assert!(retention.acquire(10).is_err());
     assert_eq!(retention.acquire(11)?.floor(), 11);
 
-    // A pass that finds nothing left below its line still pins the
-    // reconstruction, so the next restart does not re-derive it from rows.
     let staged = prune_to_height(
         &*store,
         &block_files,
@@ -641,9 +637,7 @@ fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
     let store = Arc::new(MemoryStore::default());
     let data_dir = tempdir()?;
     let block_files = FlatFileBlockStore::open(data_dir.path())?;
-    // Bodies survive from 30 up; undo rows survive from 20 up. Each
-    // family proves its own deletions below its floor, and the persisted
-    // requested line predates both.
+
     write_body_rows(
         &store,
         &block_files,
@@ -673,8 +667,7 @@ fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
         retention.acquire(29).is_err(),
         "a lease below the bodies floor would pin deleted bodies"
     );
-    // Undo rows at 20 and 21 survive yet stay ungrantable: the
-    // over-refusal is the documented cost of the safe join.
+
     assert!(retention.acquire(20).is_err());
     assert_eq!(retention.acquire(30)?.floor(), 30);
     Ok(())
@@ -935,7 +928,6 @@ impl KvStore for MemoryStore {
         Ok(guard[cf.index()].get(key).cloned())
     }
 
-    // RATIONALE: `KvIter` outlives the lock guard, so test rows are cloned before returning.
     #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
@@ -1044,7 +1036,6 @@ impl KvSnapshot for MemorySnapshot {
         Ok(self.cfs[cf.index()].get(key).cloned())
     }
 
-    // RATIONALE: the returned `KvIter` must not borrow the caller-owned prefix slice.
     #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,

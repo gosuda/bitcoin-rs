@@ -608,10 +608,6 @@ impl Mempool {
     /// This is an explicit wholesale reset for standalone pools and fixtures.
     /// Ordinary block, reorg, and snapshot paths preserve fee history.
     pub fn clear(&mut self) -> MutationResult {
-        // Every entry leaves the pool here, so this is the same retire funnel
-        // Core walks during a bulk clear: fire `mempool:removed` per entry
-        // before the arena is emptied. The explicit-clear class reports
-        // `unknown`, Core's `MemPoolRemovalReason::UNKNOWN` string.
         let mut txids = Vec::with_capacity(self.entries.len());
         for (_id, entry) in self.entries.iter() {
             bitcoin_rs_consensus::trace::removed(|| {
@@ -825,9 +821,7 @@ impl Mempool {
         self.account_insert(id, admitted_sequence);
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
-        // Core fires `mempool:added` from `CTxMemPool::addUnchecked`, the
-        // pool-internal install funnel, after the entry is linked into the
-        // pool. `prepare` runs only while a consumer is attached.
+
         bitcoin_rs_consensus::trace::added(|| {
             (
                 txid.as_bytes().as_ptr(),
@@ -1177,18 +1171,6 @@ impl Mempool {
     pub fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
 
-        // The arena is charged at **capacity**, not at length. The slot
-        // array keeps its backing allocation across removals and across
-        // `clear`, so a pool that grew to a million entries and then emptied
-        // still holds the arena -- and charging `len()` reported that
-        // retained memory as zero, which is exactly the moment an operator
-        // looks at `usage` to find out where it went. Core charges its own
-        // pool the same way: `mapTx`'s allocator does not return nodes to
-        // the OS either.
-        //
-        // Everything below stays keyed to live entries. They are payload
-        // terms -- the transactions and the index keys -- and a removed
-        // entry's payload really is gone.
         let arena = u64::try_from(self.entries.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
@@ -1682,9 +1664,7 @@ impl Mempool {
                 continue;
             };
             let entry = retired.entry;
-            // Core fires `mempool:removed` from `CTxMemPool::removeUnchecked`,
-            // the pool-internal retire funnel, per entry as it leaves the
-            // pool. `prepare` runs only while a consumer is attached.
+
             bitcoin_rs_consensus::trace::removed(|| {
                 (
                     entry.txid.as_bytes().as_ptr(),
@@ -2020,8 +2000,6 @@ impl Mempool {
     }
 
     fn ancestor_ids_for_tx(&self, tx: &Tx) -> Vec<EntryId> {
-        // For a candidate that has no entry yet: resolve its direct parents
-        // through the txid index, then walk the cached links like any entry.
         self.collect_ancestors(self.in_pool_parents(tx))
     }
 
@@ -2188,10 +2166,6 @@ mod tests {
         result.changes.iter().map(|change| change.txid).collect()
     }
 
-    // MPL-02 (docs/contracts/mempool-mutations.md): sequence assignment,
-    // batch-base reconstruction, and per-change lookup are modulo 2^64, so a
-    // batch assigned `[u64::MAX, 0]` carries sequence zero as a valid
-    // in-range value rather than an empty mutation.
     #[test]
     fn mutation_batch_crossing_sequence_rollover_keeps_base_and_lookups() {
         let mut pool = Mempool::new(MempoolLimits::default());
@@ -2321,7 +2295,7 @@ mod tests {
     #[test]
     fn iter_by_fee_rate_desc_orders_highest_first() {
         let mut pool = Mempool::new(MempoolLimits::default());
-        // Two distinct txs with different fee rates.
+
         let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let low_txid = low_tx.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
@@ -2556,9 +2530,9 @@ mod tests {
     fn iter_above_fee_rate_filters_to_high_fee_only() {
         let mut pool = Mempool::new(MempoolLimits::default());
         let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0)); // fee_rate = 1000
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
         let high_tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0)); // fee_rate = 100_000
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
         let high_only = pool.iter_above_fee_rate(50_000);
         assert_eq!(high_only.len(), 1);
         let both = pool.iter_above_fee_rate(500);
@@ -2570,7 +2544,7 @@ mod tests {
     #[test]
     fn iter_replaceable_txids_returns_only_rbf_signaled_txs() {
         let mut pool = Mempool::new(MempoolLimits::default());
-        // RBF-signalled tx (sequence < 0xFFFFFFFE).
+
         let rbf_tx = Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2587,7 +2561,7 @@ mod tests {
         };
         let rbf_txid = rbf_tx.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0));
-        // Non-RBF tx (sequence = MAX = 0xFFFFFFFF).
+
         let non_rbf_tx = Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2824,9 +2798,7 @@ mod tests {
         let first = spender_tx(99_000);
         let first_txid = first.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 10_000, 1, 7, 0));
-        // A second spender of the same outpoint is a pool invariant violation
-        // that insertion does not police; the query must still answer with
-        // the first indexed entry, like the scan it replaces did.
+
         let _ = pool.insert_entry(MempoolEntry::new(
             Arc::new(spender_tx(98_000)),
             100,
@@ -3317,8 +3289,7 @@ mod tests {
         assert_eq!(parent_entry.txid, parent_txid);
         assert_eq!(child_entry.ancestors, vec![1], "positions are in-snapshot");
         assert_eq!(parent_entry.ancestors, Vec::<u32>::new());
-        // Metadata fidelity: copied scalars are the ones derived from the
-        // transaction itself, not policy reconstructions of them.
+
         assert_eq!(child_entry.fee, 2_000);
         assert_eq!(child_entry.fee_delta, 0);
         assert_eq!(child_entry.vsize, 100);
@@ -3585,13 +3556,6 @@ mod tests {
         assert!(seated_by.is_ok(), "bystander must fit: {seated_by:?}");
         assert_eq!(pool.len(), 2);
 
-        // Replacement: conflicts with the original (same prevout), higher
-        // absolute fee (BIP125 rule 3: 15_000 > 10_000), higher fee rate
-        // than the original (BIP125 rule 6: 150 > 100 sat/vbyte), but
-        // 900 vbytes at a far lower fee rate than the bystander
-        // (166 vs 10_000). After evicting the original (100 vbytes freed),
-        // the pool has 850 + 900 = 1750 > 1000, so the trim evicts the
-        // lowest-fee-rate entry — the replacement itself.
         let replacement = single_output_tx(
             &[prev],
             Sequence::ENABLE_RBF_NO_LOCKTIME,
@@ -4190,8 +4154,7 @@ mod spend_index_tests {
     #[test]
     fn cluster_limits_default_to_cores_values_and_follow_configuration() {
         let pool = Mempool::new(MempoolLimits::default());
-        // Core `policy.h`: DEFAULT_CLUSTER_LIMIT{64} and
-        // DEFAULT_CLUSTER_SIZE_LIMIT_KVB{101}, the latter in kvB.
+
         assert_eq!(pool.cluster_limits(), (64, 101_000));
 
         let limits = MempoolLimits {
@@ -4467,8 +4430,7 @@ mod spend_index_tests {
         let before = pool.len();
         let removed = pool.remove_for_block(&[&root_tx], &[root_txid], 8);
         assert_ne!(removed.len(), 0);
-        // The root left, while its descendants remain as transactions that
-        // now spend confirmed outputs.
+
         assert!(pool.entry_id_by_txid(&root_txid).is_none());
         assert_eq!(pool.len(), before - 1);
         assert_ne!(pool.len(), 0);
@@ -5336,7 +5298,6 @@ mod graph_tests {
                         }
                     }
                     9 if pool.len() > 8 => {
-                        // Trim pressure.
                         let target = u64::try_from(rng.below(200) * 100).unwrap_or(0);
                         crate::evict_lowest_fee_packages(&mut pool, target)
                             .expect("valid graph eviction");

@@ -1,35 +1,3 @@
-//! Deletion of historical block bodies and undo records, once the active
-//! chain no longer needs them.
-//!
-//! [`crate::pruning::stage_block_and_undo_prune`] is the main entry point. It stages
-//! block-body and undo-row deletion together with prune-height metadata into
-//! one caller-owned atomic batch, so node wiring commits them in a single
-//! backend commit. Both kinds of data are pruned against the durable tip
-//! rather than the in-memory tip: a crash restores to the last durable
-//! checkpoint, and bodies between that base and the crash-recovery sidecar tip
-//! are evidence needed for local replay while undo records are needed to
-//! disconnect back through the restored chain. After the index rows commit,
-//! [`crate::pruning::reclaim_staged_flat_block_files`] deletes the staged flat block files,
-//! and [`crate::pruning::PruneOutcome`] reports the bytes and row counts freed.
-//!
-//! Rows pinned by a live [`RetentionLease`] are never staged: the pass
-//! reserves its deletion line through [`RetentionRegistry::reserve`], which
-//! folds every live lease floor into that line before any deletion is
-//! selected, so a reader holding a lease keeps exactly its required
-//! history.
-//!
-//! Three prune meanings stay separate. The *requested* height is operator
-//! intent (`node:pruneheight`). The *effective* line is that intent folded
-//! with reorg safety, live retention, and the byte target. The
-//! [`crate::pruning::ExecutedFrontier`] (`node:prune_executed`) is the durable, monotonic
-//! fact of what a committed pass deleted, written in the same batch as its
-//! deletions: it is what a restart reconstructs and what refuses a lease,
-//! and no consumer infers it from the intent line.
-//!
-//! [`PrunePolicy`] converts the configured mebibyte target to bytes and applies the
-//! reorg-safety retention floor. The node supplies the policy; the pruning
-//! pass selects and stages deletions.
-
 use alloc::sync::Arc;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
@@ -72,7 +40,6 @@ impl PrunePolicy {
     /// Returns the effective retention depth below tip.
     #[must_use]
     pub fn retention_depth(self) -> u32 {
-        // SPEC: Core's reorg-safety margin is 288 blocks.
         self.keep_below_tip.max(CORE_REORG_SAFETY_MARGIN)
     }
 }

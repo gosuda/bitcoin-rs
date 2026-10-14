@@ -1,8 +1,3 @@
-//! Bounded, cancellable reads of the authoritative UTXO set.
-//!
-//! The reservation belongs to the set, including across snapshot replacement.
-//! No coins or scan state are persisted here. A dropped reservation is idle.
-
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -123,8 +118,7 @@ impl<'a> UtxoScanPermit<'a> {
                 .checked_add(script.len())
                 .filter(|bytes| *bytes <= MAX_SCAN_SCRIPT_BYTES)
                 .ok_or(UtxoScanError::Limit("1 MiB of scripts"))?;
-            // Both the next payload and tree entry have been admitted before
-            // allocation. A repeated needle is never cloned speculatively.
+
             needles.insert(script.clone());
         }
         let (complete, scan) = self.scan(&needles, || false)?;
@@ -272,8 +266,7 @@ mod tests {
     #[test]
     fn complete_scan_deduplicates_before_charging_script_budgets() {
         let reader = UtxoReader::new(coins(1));
-        // Raw input exceeds both budgets, but there are only two distinct
-        // needles. The compatibility API retains distinct-script semantics.
+
         let mut scripts = vec![vec![0u8; 1_024]; MAX_SCAN_SCRIPTS + 1];
         scripts.push(vec![0x51]);
         let scan = reader

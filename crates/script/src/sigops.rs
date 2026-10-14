@@ -1,11 +1,3 @@
-//! Native sigop counting over scripts, transactions, and blocks.
-//!
-//! Counting semantics follow Core: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
-//! cost 1, `OP_CHECKMULTISIG`/`OP_CHECKMULTISIGVERIFY` cost 20 under legacy
-//! counting or the preceding small-integer push value under accurate counting,
-//! data pushes are skipped, and a malformed push ends the count (Core's
-//! `if (!GetOp(pc, opcode)) break;`).
-
 use bitcoin_rs_primitives::Tx;
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
@@ -109,11 +101,8 @@ mod tests {
         ]
         .concat();
 
-        // (name, script, legacy cost, accurate cost)
         let cases: [(&str, Vec<u8>, u32, u32); 7] = [
             (
-                // Core updates lastOpcode for every opcode, so OP_NOP (0x61)
-                // between the pushnum and the multisig loses the key count.
                 "a non-sigop opcode clearing the cached key count",
                 vec![pushnum(2), 0x61, opcode::OP_CHECKMULTISIG],
                 20,
@@ -160,8 +149,6 @@ mod tests {
                 "oracle: {name}"
             );
 
-            // A P2WSH spend counts its witness script accurately; anything that
-            // is not a witness program costs nothing.
             let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
             assert_eq!(count_segwit(&p2wsh, &[script]), accurate, "p2wsh: {name}");
         }

@@ -1,11 +1,3 @@
-//! Bitcoin Core-compatible REST surface used by remote clients.
-//!
-//! The twelve supported route prefixes mirror Core's `StartREST` registration table.
-//! JSON projections come from `crate::render` and `crate::tx_render`; hex
-//! and binary payloads use consensus serialization. Applied-chain membership is
-//! always resolved through [`crate::context::Context`] ancestry facts — never
-//! from the header tip alone.
-
 use alloc::sync::Arc;
 use std::str::FromStr;
 
@@ -87,8 +79,7 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
     if !enabled {
         return not_found();
     }
-    // Order matters: `/rest/block/notxdetails/` must be checked before
-    // `/rest/block/` so the longer prefix wins.
+
     if let Some(suffix) = path.strip_prefix("/rest/tx/") {
         return route_tx(ctx, suffix);
     }
@@ -153,10 +144,6 @@ pub(crate) fn getutxos_body_too_large() -> Response {
         "getutxos request body exceeds {MAX_GETUTXOS_BODY_BYTES} bytes"
     ))
 }
-
-// ---------------------------------------------------------------------------
-// Route handlers
-// ---------------------------------------------------------------------------
 
 /// Core: `/rest/tx/<txid>.<ext>`.
 fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
@@ -352,8 +339,7 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
     let Some(format) = format else {
         return not_found_with("output format not found");
     };
-    // One capture serves the run selection and every returned header, so the
-    // response cannot describe two different applied publications.
+
     let view = ctx.chain.applied_view();
     release_applied_capture();
     let records = header_records(ctx, &view, hash, count);
@@ -388,9 +374,6 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
     }
 }
 
-// Records that a route has captured its applied view, so a test can publish a
-// competing tip at that exact instant. This seam never adds state or an API to
-// production builds.
 #[cfg(test)]
 std::thread_local! {
     static AFTER_APPLIED_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -443,9 +426,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    // The checkmempool branch pairs UTXO facts with pool facts, so a chain
-    // transition between the reads could confirm a spend the transition
-    // already reversed. The entry check refuses while a change is active.
+
     let entry_generation = if check_mempool {
         match ctx.mempool.gateway.stable_generation() {
             Some(generation) => Some(generation),
@@ -454,14 +435,10 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
     } else {
         None
     };
-    // A pool read cannot exclude a chain change that already began: the
-    // gateway releases its writer after setting the odd generation. Plain
-    // reads therefore use the existing transition read role, while mixed
-    // reads use the checked generation and retain one pool snapshot.
+
     let transition = (!check_mempool).then(|| ctx.chain.chain_transition.lock());
     let pool = check_mempool.then(|| ctx.mempool.gateway.read());
-    // Height and hash describe one publication, so a response cannot pair one
-    // block's height with another block's hash.
+
     let view = ctx.chain.applied_view();
     release_applied_capture();
 
@@ -492,9 +469,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
     }
     drop(pool);
     drop(transition);
-    // The end check compares for exact equality only; a generation that
-    // moved while the reads ran discards the assembled results and asks the
-    // client to retry.
+
     if entry_generation.is_some_and(|entry| ctx.mempool.gateway.stable_generation() != Some(entry))
     {
         return service_unavailable("chain generation is odd; retry");
@@ -512,7 +487,7 @@ fn getutxos_response(
     let active_height = view.height();
     let active_hash = view.hash(network);
     let mut bitmap = vec![0_u8; hits.len().div_ceil(8)];
-    // Bitmap packs the least-significant hit bit first per byte, matching Core.
+
     for (index, hit) in hits.iter().enumerate() {
         if *hit {
             bitmap[index / 8] |= 1 << (index % 8);
@@ -700,10 +675,6 @@ fn route_spent_txouts(ctx: &Context, suffix: &str) -> Response {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Header chain walk
-// ---------------------------------------------------------------------------
-
 /// Walks the applied chain from `hash`, bounded by the response's captured
 /// publication.
 ///
@@ -812,10 +783,6 @@ fn invalid_count(value: &str) -> Response {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Getutxos helpers
-// ---------------------------------------------------------------------------
-
 /// Parses at most fifteen outpoints without allocating from a wire count.
 /// Full consumption is required, including for a zero-length vector.
 fn parse_getutxos_body(
@@ -914,7 +881,7 @@ fn serialize_getutxos_bin(
     body.extend_from_slice(bitmap);
     append_compact_size(&mut body, outs.len());
     for (height, txout) in outs {
-        body.extend_from_slice(&0_u32.to_le_bytes()); // CCoin version dummy
+        body.extend_from_slice(&0_u32.to_le_bytes());
         body.extend_from_slice(&height.to_le_bytes());
         body.extend_from_slice(&consensus_bytes(txout));
     }
@@ -927,10 +894,6 @@ fn append_compact_size(body: &mut Vec<u8>, len: usize) {
     };
     body.extend_from_slice(bitcoin_rs_primitives::varint::encode(value).as_slice());
 }
-
-// ---------------------------------------------------------------------------
-// Chain context helpers
-// ---------------------------------------------------------------------------
 
 /// Builds the applied-chain facts [`crate::render`] needs to project a block or
 /// header.
@@ -999,10 +962,6 @@ fn header_chain_context(
     build_chain_context(ctx, view, &real, &record.header)
 }
 
-// ---------------------------------------------------------------------------
-// Format and query helpers
-// ---------------------------------------------------------------------------
-
 /// Splits an endpoint suffix into its text portion and trailing data format.
 /// Recognized formats are stripped; an unknown suffix stays in the path so
 /// endpoint validation returns Core's malformed-parameter error.
@@ -1039,20 +998,6 @@ fn sonic_bytes(value: &Value) -> Vec<u8> {
         .unwrap_or_else(|_| "null".to_owned())
         .into_bytes()
 }
-
-// ---------------------------------------------------------------------------
-// Response constructors
-// ---------------------------------------------------------------------------
-//
-// One owner for every HTTP response the RPC crate emits. REST and Esplora
-// routes both build responses here, so status, reason phrase, content type,
-// and body encoding cannot drift between the two surfaces.
-//
-// PRE: `message`/`body` bytes are already in their final wire encoding.
-// POST: a [`Response`] carrying exactly the named status and reason, with
-//   the named content type and the message or body as its payload.
-// INVARIANT: no constructor inspects handler state or mutates shared state;
-//   the same arguments always produce the same bytes.
 
 /// Answers a serialized value as a 200 JSON response.
 ///
@@ -1455,7 +1400,7 @@ mod tests {
         );
         let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
         assert_eq!(values.len(), 3);
-        // render::header_json always includes previousblockhash (all-zeros for genesis)
+
         assert_eq!(
             values[0].get("previousblockhash").and_then(Value::as_str),
             Some("0000000000000000000000000000000000000000000000000000000000000000")
@@ -1737,10 +1682,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // New route tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn route_status_table() {
         const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -1759,7 +1700,6 @@ mod tests {
             ("/rest/block/not-a-hash.json".into(), "", 400),
             (format!("/rest/blockpart/{HASH}.bin"), "", 404),
             (format!("/rest/blockpart/{HASH}.hex"), "", 404),
-            // blockpart serves bin and hex only.
             (format!("/rest/blockpart/{HASH}.json"), "", 404),
             ("/rest/chaininfo.json".into(), "", 200),
             ("/rest/chaininfo.bin".into(), "", 404),
@@ -1783,9 +1723,7 @@ mod tests {
             ("/rest/deploymentinfo.json".into(), "", 200),
             ("/rest/deploymentinfo.bin".into(), "", 404),
             ("/rest/deploymentinfo/not-a-hash.json".into(), "", 400),
-            // A well-formed but unknown hash is a bad request, not a 404.
             (format!("/rest/deploymentinfo/{HASH}.json"), "", 400),
-            // An empty context still knows genesis at height 0.
             ("/rest/blockhashbyheight/0.json".into(), "", 200),
             ("/rest/blockhashbyheight/0.hex".into(), "", 200),
             ("/rest/blockhashbyheight/0.bin".into(), "", 200),
@@ -1856,8 +1794,7 @@ mod tests {
         for field in ["chain", "blocks", "headers", "bestblockhash"] {
             assert!(value.get(field).is_some(), "{field}: {value:?}");
         }
-        // Core 31.1 rpc/blockchain.cpp only inserts pruning/signet facts
-        // when applicable; an unpruned mainnet context has none of them.
+
         for field in [
             "automatic_pruning",
             "prune_target_size",
@@ -1887,8 +1824,7 @@ mod tests {
     #[test]
     fn getutxos_post_canonical_wire_and_input_boundaries() {
         let ctx = Arc::new(Context::new());
-        // Independent BIP64 wire fixture: nonzero bool, one little-endian
-        // txid (display 00..01), vout 0. This outpoint does not exist.
+
         let mut wire = vec![2, 1, 1];
         wire.resize(38, 0);
         let get = route(&ctx, &GETUTXOS_JSON.replace(".json", ".bin"), "", true);
@@ -2104,10 +2040,7 @@ mod tests {
 
         let mut seen_a = false;
         let mut seen_b = false;
-        // Sampling runs until both publications have answered, not for a fixed
-        // count: the swapper's first store publishes the new tip, but thread
-        // startup is the scheduler's call, so a fixed budget can expire before
-        // the new publication is ever observed.
+
         for iteration in 0..100_000 {
             let response = route(&ctx, GETUTXOS_JSON, "", true);
             assert_eq!(response.status, 200);

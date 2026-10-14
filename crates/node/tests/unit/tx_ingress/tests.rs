@@ -1,5 +1,3 @@
-// CONTRACT: `docs/contracts/mempool-mutations.md#MPL-04` owns peer admission,
-// orphan/reject lifecycle, connection attribution, generation fencing, and retries.
 use super::*;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
@@ -34,8 +32,6 @@ fn coinbase_tx(value: u64) -> Tx {
     }
 }
 
-// Empty `scriptSig` plus an `OP_TRUE` prevout satisfy `SCRIPT_VERIFY_CLEANSTACK`;
-// the `OP_RETURN` payload pads the non-witness size to the 65-byte floor.
 fn spending_tx() -> Tx {
     let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
     Tx {
@@ -266,9 +262,7 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
-    // Witness counts 1× toward BIP141 weight. A 400_000-byte stack
-    // item puts the body over the 400k standard cap so MissingInputs
-    // cannot consume orphan quota.
+
     let tx = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -304,14 +298,12 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
-    // Spend an unfunded parent so the tx lands in the orphan pool.
+
     let mut orphan = spending_tx();
     orphan.inputs[0].previous_output =
         OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0xEE; 32])), 0);
     let txid = orphan.txid();
 
-    // The fixture source was never registered in this consumer's peer table,
-    // which models a connection disappearing before the next ingress poll.
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(orphan, test_source()));
     assert_eq!(gateway.orphan_count(), 1);
 

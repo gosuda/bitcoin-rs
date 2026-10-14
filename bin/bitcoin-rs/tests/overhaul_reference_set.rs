@@ -1,7 +1,3 @@
-//! REF-02/REF-03/REF-07: reference identities fail closed when malformed,
-//! unbound to their artifacts, or confused with a different reference.
-//! The manifest owns pin values; these tests mutate its parsed fields.
-
 #![expect(clippy::expect_used, reason = "reference identity rejection tests")]
 
 #[expect(
@@ -122,14 +118,14 @@ fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
                 .insert("target".to_owned(), target.into());
         })
     };
-    // Renaming the platform row's target detaches it from its binding.
+
     assert_eq!(
         load_reference_set(&edit_platform_target("x86_64-apple-darwin")),
         Err(ReferenceError::CustodyMismatch {
             identity: "reference.release",
         })
     );
-    // A row claiming the canonical target is ambiguous, not extra coverage.
+
     assert_eq!(
         load_reference_set(&edit_platform_target("x86_64-linux-gnu")),
         Err(ReferenceError::DuplicateArtifactTarget {

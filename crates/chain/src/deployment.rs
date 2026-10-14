@@ -1,9 +1,3 @@
-//! BIP9/softfork lookups over a [`BlockTree`].
-//!
-//! Consensus owns the state machine and deployment parameters. This module
-//! owns the tree walk, the BIP9 cache, and the CSV/Segwit snapshot an apply
-//! or mining caller needs at a connect height.
-
 use bitcoin_rs_consensus::bip9::versionbits_block_version;
 use bitcoin_rs_consensus::bip30::BIP34_IMPLIES_BIP30_LIMIT;
 use bitcoin_rs_consensus::{
@@ -18,8 +12,7 @@ use crate::{BlockTree, NodeId};
 struct DeploymentView<'a> {
     tree: &'a BlockTree,
     tip_id: NodeId,
-    // Only reporting captures an off-header-chain ancestry; validation keeps
-    // its existing direct view. The temporary IDs are not a state cache.
+
     ancestry: Option<Vec<NodeId>>,
 }
 
@@ -305,8 +298,7 @@ pub fn deployment_statuses(
         let state_at = |height| cached_deployment_state(tree, view, height, id, params);
         let state = state_at(height);
         let next = state_at(next_height);
-        // States never return to a previous state. Binary search the first
-        // period with this state instead of walking every historical period.
+
         let mut low = 0;
         let mut high = height / params.period;
         while low < high {
@@ -525,9 +517,7 @@ mod tests {
         let mut activation_id = None;
         for height in 0..=activation_height.saturating_add(1) {
             let header = synthetic_header(prev_hash, height);
-            // The activation header must enter the index under its
-            // authenticated hash; mutating afterwards would leave the child
-            // prev_blockhash and the by_hash key pointing at a discarded hash.
+
             let node_id = if height == activation_height {
                 tree.insert_header_with_hash(header, expected_hash, NodeStatus::HeaderValid)?
             } else {
@@ -553,8 +543,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
         let mut tree = BlockTree::new();
         let previous_tip = seed_known_bip34_activation_chain(&mut tree, network)?;
-        // The child of the activation header must commit to the authenticated
-        // hash, not to a pre-mutation synthetic hash.
+
         let expected = network
             .bip34_activation_hash()
             .ok_or_else(|| std::io::Error::other("network has no fixed BIP34 activation hash"))?;

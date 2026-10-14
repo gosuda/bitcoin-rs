@@ -1,5 +1,3 @@
-//! Coherent write fences and cooperative, versioned capability-reset recovery.
-
 use super::{
     capability::COMPACT_FILTERS_WATERMARK_KEY, capability::IndexCapabilities,
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
@@ -11,8 +9,6 @@ use bitcoin_rs_storage::{
 };
 use tracing::debug;
 
-// Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
-// TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
 /// On-disk format 5: big-endian height suffixes, 43-byte live rows with u24

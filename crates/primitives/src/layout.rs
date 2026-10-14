@@ -1,27 +1,3 @@
-//! Checked borrowed wire layout for blocks and transactions.
-//!
-//! This module is the sole owner of block and transaction wire parsing. Every
-//! byte range it hands out is a [`layout::ByteSpan`] that was bounds-checked against
-//! one immutable byte image at parse time, and the `'a` borrow on
-//! [`layout::ParsedBlock`] and [`layout::ParsedTransaction`] ties every offset to that image,
-//! so a span can never outlive the bytes it indexes. Positions inside the
-//! parsed metadata vectors use the distinct [`layout::MetadataRange`] type, so byte
-//! offsets and metadata indices can never be confused.
-//!
-//! Parsing establishes wire *shape* only: BIP144 marker/flag rules, canonical
-//! compact-size lengths, and counts that could still fit in the remaining
-//! bytes. Consensus acceptance (amounts, maturity, script validity, weight
-//! limits) is deliberately not evaluated here; [`layout::ParsedTransaction::materialize`]
-//! hands the owned form to the callers that own those rules. Record counts
-//! whose minimal serialized footprint already exceeds the remaining bytes are
-//! rejected up front, so a malformed length can never drive an oversized
-//! allocation or an out-of-bounds access.
-//!
-//! Span offsets are `u32` relative to the parsed image.
-//! Lengths outside the representable span domain surface as an impossible
-//! [`DecodeError::EndOfData`] requirement, following `read_script`'s
-//! convention for lengths beyond `usize`.
-
 use std::ops::Range;
 
 use sha2::{Digest, Sha256};
@@ -364,8 +340,6 @@ impl<'a> ParsedTransaction<'a> {
         let mut output_count_override: Option<(u64, ByteSpan)> = None;
         let mut segwit = false;
         if input_count_value == 0 {
-            // Core treats a zero flag as the legacy empty-input/empty-output form,
-            // while 0x01 is the BIP144 segwit marker; any other value is rejected.
             let (flag, flag_span) = cur.read_u8()?;
             if flag == 0 {
                 output_count_override = Some((0, flag_span));
@@ -424,9 +398,7 @@ impl<'a> ParsedTransaction<'a> {
                 let limit = widening(witness_spans.len());
                 input.witness = MetadataRange::new(first, limit, limit)?;
             }
-            // BIP144 round-trip rule (checked before the lock time): the marker/flag exists
-            // only to carry witness data, so an all-empty witness section can never
-            // re-encode byte-identically and is not a parseable shape.
+
             if inputs.iter().all(|input| input.witness.is_empty()) {
                 return Err(DecodeError::SuperfluousWitness);
             }
@@ -537,15 +509,11 @@ impl<'a> ParsedTransaction<'a> {
     /// The input and output byte range of a `SegWit` transaction's base
     /// serialization, between the marker/flag and the witness section.
     fn segwit_base_body(&self) -> &'a [u8] {
-        // An empty final script still ends after its CompactSize prefix. With
-        // no outputs, the output-count prefix itself is the end of the base
-        // body.
         let body_end = self.outputs.last().map_or_else(
             || self.output_count_span.end(),
             |output| output.script_pubkey().end(),
         );
-        // Layout offsets are image-relative, not transaction-relative.
-        // Subtract the transaction origin before indexing the borrowed slice.
+
         let bytes = slice_at(self.bytes, self.span);
         let origin = u64::from(self.span.start());
         let start = usize::try_from(u64::from(self.input_count_span.start()) - origin)

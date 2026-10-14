@@ -165,13 +165,10 @@ fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
 
     state.bounded_index_shutdown(Duration::from_secs(5))?;
     assert!(!state.derived_index.is_running());
-    // A second call is a no-op, not a second stop or a panic.
+
     state.bounded_index_shutdown(Duration::from_secs(5))?;
     drop(state);
 
-    // The worker joined cleanly, so the namespace is free and the store
-    // reopens: a replacement worker starts, opens the store, and leaves
-    // Opening for a real capability state — never Failed or abandoned.
     let mut reopened = NodeState::open(config, None)?;
     reopened.start_index_workers()?;
     assert!(reopened.derived_index.is_running());
@@ -183,9 +180,7 @@ fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    // The lifecycle slot — not the derived capability row — is the durable
-    // open signal: a progress read that raced a moving watermark answers a
-    // transient `Failed` while the worker is Serving.
+
     assert!(
         !reopened.derived_index.lifecycle_is_failed(),
         "the replacement worker must open the reclaimed namespace"
@@ -209,8 +204,7 @@ fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> 
     assert!(state.derived_index_query().is_none());
     assert!(state.esplora_derived_index_query().is_some());
     assert!(state.script_index_query().is_some());
-    // The script-index worker shares the txindex storage; it is created
-    // asynchronously once the worker's open completes.
+
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !state.data_dir().join("txindex").exists() {
         assert!(
@@ -232,13 +226,8 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
     use bitcoin_rs_index::ScriptHash;
     use bitcoin_rs_rpc::context::TxQueryError;
 
-    // Genesis is applied in each case so the index worker has a published
-    // chain tip to anchor. The disabled case has no adapter; the enabled
-    // modes must publish their own capability watermarks independently.
     let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
-    // `disabled`: no script index at all, so no query adapter is handed
-    // out. The answer is a definite "not available", not a retry.
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -253,8 +242,6 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
     );
     drop(state);
 
-    // `utxo`: the compact live-output view is independently usable while
-    // historical script rows are not maintained.
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -294,8 +281,6 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
         }
     }
 
-    // `full`: the accepted mode. It converges on a concrete answer — an
-    // empty set for an unfunded script — rather than retrying forever.
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -319,8 +304,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
                 );
                 break;
             }
-            // The worker indexes asynchronously, so it is legitimately
-            // still opening for a bounded interval.
+
             Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
                 assert!(
                     std::time::Instant::now() < deadline,

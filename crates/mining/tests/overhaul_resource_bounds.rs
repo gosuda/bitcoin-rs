@@ -1,12 +1,3 @@
-//! Resource-bound evidence for the mempool surfaces changed by #639.
-//!
-//! Raw count-bound chains isolate graph costs; verified P2WSH chains check
-//! sigop-adjusted and fractional weight boundaries against rust-bitcoin.
-//! Process custody is covered by `overhaul_process_harness`. Linux RSS is
-//! process `VmHWM`; other platforms explicitly leave RSS unavailable. Retained
-//! bytes are the pool's capacity-based estimates at operation endpoints. A vsize limit is not an RSS
-//! limit. These samples do not certify unrelated resources or performance.
-
 use bitcoin_rs_consensus::{ValidationEngine, transaction_sigop_cost};
 use std::error::Error;
 use std::path::PathBuf;

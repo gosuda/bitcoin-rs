@@ -1,5 +1,3 @@
-//! Deterministic initial-sync proxy benchmark.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![expect(
     clippy::as_conversions,
     reason = "benchmark casts are intentionally lossy for perf measurement"
@@ -47,7 +45,7 @@ use bitcoin_rs_primitives::{
     Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_script::push_int;
-// seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
+
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::{All, Message as SecpMessage, Secp256k1, SecretKey};
@@ -712,9 +710,7 @@ impl SyncFixture {
     fn new_reverse_scan_overflow(tx_index_mode: DerivedIndexMode) -> Self {
         let mut fixture =
             Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
-        // The bench stages 128 received blocks and still needs to request a
-        // full pending window, so the received-block budget must cover both
-        // the staged blocks and the new requests.
+
         let mut budget = default_sync_budget(bitcoin_rs_primitives::Network::Regtest);
         budget.max_received_blocks = budget
             .max_pending_blocks
@@ -765,10 +761,6 @@ impl SyncFixture {
             }
         }
 
-        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
-        // Send the out-of-order tail, tick, then deliver the contiguous head and
-        // tick again — same send order and tick interleaving as before, but the
-        // clone+serialize now happens in setup, not the timed region.
         let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
         let contiguous = prebuilt
             .next_back()
@@ -1007,10 +999,7 @@ impl ProductionStateSyncFixture {
         sync.tick();
         self.assert_getdata_batch();
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
-        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
-        // Send the out-of-order tail, tick, then deliver the contiguous head and
-        // tick again — same send order and tick interleaving, with clone+serialize
-        // moved to setup.
+
         let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
         let contiguous = prebuilt
             .next_back()
@@ -1440,10 +1429,6 @@ fn coinbase_script_sig(height: u32) -> Vec<u8> {
     script
 }
 
-// ---------------------------------------------------------------------------
-// Signed-spend corpus: real ECDSA signatures verified by the script engine.
-// ---------------------------------------------------------------------------
-
 /// BIP141 witness commitment prefix: `OP_RETURN OP_PUSH36 BIP141_COMMITMENT_TAG`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
@@ -1552,7 +1537,7 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
 
 fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     let mut outputs = Vec::with_capacity(SPEND_PROXY_FANOUT as usize + 1);
-    // P2PKH outputs (indices 0..22).
+
     for i in 0..22u32 {
         let pkh = keys.p2pkh[usize::try_from(i).unwrap()].pubkey_hash();
         let script = OracleScriptBuf::new_p2pkh(&pkh);
@@ -1561,7 +1546,7 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // P2WPKH outputs (indices 22..44).
+
     for i in 0..22u32 {
         let pkh = keys.p2wpkh[usize::try_from(i).unwrap()]
             .wpubkey_hash()
@@ -1572,7 +1557,7 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // P2WSH 2-of-3 outputs (indices 44..64).
+
     for i in 0..20u32 {
         let redeem = p2wsh_2of3_redeem_script(keys, i);
         let script_hash = redeem.wscript_hash();
@@ -1582,7 +1567,7 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // BIP141 witness commitment output.
+
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
         value: Amount::from_sat(0),
@@ -1620,7 +1605,6 @@ fn p2wsh_2of3_redeem_script(keys: &SigningKeys, _index: u32) -> OracleScriptBuf 
 /// the only transaction in these blocks, so the root is all-zero and the
 /// commitment is `SHA256d(zeros || reserved)`.
 fn witness_commitment_for_coinbase(_outputs: &[TxOut]) -> Hash256 {
-    // Single-tx block: witness merkle root = [0; 32].
     let root = [0u8; 32];
     let mut buffer = [0u8; 64];
     buffer[..32].copy_from_slice(&root);
@@ -1652,9 +1636,9 @@ fn child_signed_spend_fanout_block(
         .unwrap_or_else(|| panic!("signed-spend source block missing coinbase"));
     let source_txid = source_coinbase.txid();
     let mut txs = Vec::with_capacity(SPEND_PROXY_FANOUT as usize + 1);
-    // Coinbase for this spend block (witness-bearing, with commitment).
+
     txs.push(signed_fanout_coinbase_transaction(height, keys));
-    // 64 spend transactions, one per funded output.
+
     for vout in 0..SPEND_PROXY_FANOUT {
         let prevout_value = SPEND_PROXY_COINBASE_OUTPUT_VALUE;
         let spend_tx = build_signed_spend_tx(source_txid, vout, prevout_value, keys);
@@ -1672,16 +1656,16 @@ fn child_signed_spend_fanout_block(
         txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    // Recompute the coinbase witness commitment now that the full tx set is known.
+
     let commitment = block_witness_commitment(&block.txs);
     let coinbase = &mut block.txs[0];
-    // Replace the placeholder commitment output (last output) with the real one.
+
     let last = coinbase
         .outputs
         .last_mut()
         .unwrap_or_else(|| panic!("coinbase missing commitment output"));
     last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
-    // Recompute merkle root after updating the commitment.
+
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
         .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
@@ -1873,7 +1857,7 @@ fn build_signed_p2wsh_spend(
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wsh sighash: {e}"));
-    // Sign with the first two keys.
+
     let mut sigs = Vec::with_capacity(2);
     for &key_byte in &[0xC0u8, 0xC1] {
         let secret = secret_key(key_byte);
@@ -1884,7 +1868,7 @@ fn build_signed_p2wsh_spend(
         sig_bytes.push(EcdsaSighashType::All as u8);
         sigs.push(sig_bytes);
     }
-    // BIP147: empty dummy element before the signatures.
+
     let witness_items: Vec<Vec<u8>> = vec![
         Vec::new(),
         sigs[0].clone(),

@@ -1,4 +1,3 @@
-//! `MuHash3072` unit tests.
 use bitcoin_rs_utxo::stats::MuHash3072;
 
 const IDENTITY: [u8; 384] = {

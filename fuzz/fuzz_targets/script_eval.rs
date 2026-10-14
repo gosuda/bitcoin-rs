@@ -84,8 +84,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Length-prefixed cursor; every read is checked, nothing panics.
-
     fn take<'a>(rest: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
         let chunk = rest.get(..len)?;
         *rest = &rest[len.min(rest.len())..];
@@ -196,11 +194,6 @@ fuzz_target!(|data: &[u8]| {
         witness.push(element.to_vec());
     }
 
-    // Trailing optional prevout amount: seeds imported from rows that declare
-    // one (witness rows sign over it) carry it here. Legacy rows declare none
-    // and must default to Core's zero-value crediting output: the crediting
-    // txid commits to nValue, so any other default would change the outpoint
-    // txid legacy signatures hash.
     let amount = take(&mut rest, 8)
         .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
         .unwrap_or(0);
@@ -211,11 +204,7 @@ fuzz_target!(|data: &[u8]| {
         value: Amount::from_sat(amount),
         script_pubkey: script_pubkey.clone().into(),
     };
-    // Core's script-test template (BuildCrediting + BuildSpending, which
-    // btcd's txscript harness mirrors): a v1 crediting tx paying `amount` to
-    // script_pubkey, then a v1 spend returning it to an empty script. The
-    // crediting txid lands in the spend's outpoint, so signatures authored
-    // against the upstream vectors verify under their intended context.
+
     let credit = bitcoin_rs_primitives::Tx {
         version: 1,
         inputs: vec![bitcoin_rs_primitives::TxIn {

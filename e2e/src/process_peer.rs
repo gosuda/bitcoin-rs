@@ -1,8 +1,3 @@
-//! Bounded, recorded v1 wire peer for the public-process lane.
-//!
-//! Uses rust-bitcoin envelopes, never bitcoin-rs's listener or dispatcher,
-//! and journals every frame to the node's evidence directory.
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
@@ -50,8 +45,7 @@ impl ProcessPeer {
         let deadline = Instant::now() + TIMEOUT;
         let stream = connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
-        // One peer per process in this scenario; do not truncate evidence if a
-        // caller accidentally tries to replace it with a second session.
+
         let journal = File::options()
             .write(true)
             .create_new(true)
@@ -79,8 +73,7 @@ impl ProcessPeer {
             "/public-process-test:0.1/".to_owned(),
             0,
         );
-        // BIP339: rust-bitcoin's constructor still defaults to 70001;
-        // wtxidrelay requires the modern 70016 handshake used by this lane.
+
         version.version = 70016;
         peer.send(NetworkMessage::Version(version), deadline)?;
         let mut received_version = false;
@@ -130,8 +123,7 @@ impl ProcessPeer {
     fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<()> {
         let result = (|| {
             let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-            // Check each frame before the peer sends it.
-            // Use the same size limit for sent and received frames.
+
             let decoded = decode_frame(&frame)?;
             self.record("sending", Some(&decoded), &frame)?;
             let mut pending = frame.as_slice();
@@ -294,11 +286,6 @@ pub fn read_frame(
         pending.want = HEADER_BYTES;
     }
     while pending.bytes.len() < pending.want {
-        // The deadline bounds every wait, with a floor for an already
-        // lapsed deadline. The timeout is set before the buffer grows so a
-        // setup failure cannot leave placeholder bytes behind; a frame that
-        // completes inside the floor still returns, while a lapsed deadline
-        // pauses a partially-read frame after the read below.
         let wait = remaining(deadline).unwrap_or(Duration::from_millis(1));
         stream.set_read_timeout(Some(wait))?;
         let want = (pending.want - pending.bytes.len()).min(64 * 1024);

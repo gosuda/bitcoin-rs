@@ -1,6 +1,3 @@
-//! The BIP324 key schedule: the `ElligatorSwift` ECDH secret, its HKDF-SHA256
-//! expansion, and the assignment of keys to one side of the connection.
-
 use bitcoin::p2p::Magic;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftParty};

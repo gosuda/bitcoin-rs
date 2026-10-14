@@ -1,5 +1,3 @@
-//! Exact checkpoint generation names, network identity, and digest encoding.
-
 use super::CheckpointError;
 use bitcoin_rs_primitives::Network;
 

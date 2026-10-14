@@ -1,25 +1,6 @@
-//! Fault-injection matrix for the durable-head commit protocol (RCV-01).
-//!
-//! Two layers, both in isolated datadirs:
-//!
-//! - The **batch matrix** drives the exact production storage family —
-//!   Fjall key-value store, flat block files, indexed body store, undo
-//!   store, durable-head store — and arms one-shot [`PersistFault`]s at
-//!   every durability boundary of a connect-shaped and a disconnect-shaped
-//!   batch. After each fault the datadir reopens and the head row plus
-//!   every batch row must show either the complete pre-batch or the
-//!   complete post-batch state, never a cross-family mix (`P2`).
-//! - The **protocol rows** run [`NodeState`] end to end: the durable head
-//!   must name every applied block by the time `apply_block` returns
-//!   (durability precedes publication, `INV-04`), `commit_id` must advance
-//!   monotonically across connects and restarts (`P3`), every committed
-//!   body must be reachable through the real block files (`INV-06`), and a
-//!   corrupted head row must fail startup instead of decoding to absence
-//!   (`P5`).
-
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -98,13 +79,10 @@ fn assert_whole_state(
         .head
         .load()?
         .ok_or_else(|| anyhow::anyhow!("{context}: head row vanished"))?;
-    if stored == *old_head {
-        // rolled out: none of the new rows may exist
-    } else if stored == *new_head {
-        // rolled forward: all of the new rows must exist
-    } else {
-        bail!("{context}: head is neither the old nor the new state: {stored:?}");
-    }
+    ensure!(
+        stored == *old_head || stored == *new_head,
+        "{context}: head is neither the old nor the new state: {stored:?}"
+    );
     let rolled_forward = stored == *new_head;
     for (cf, key) in batch_rows {
         let present = family.store.get(*cf, key)?.is_some();
@@ -123,8 +101,6 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         let data_dir = temp.path().to_path_buf();
         let family = open_family(&data_dir)?;
 
-        // Block 1 commits cleanly: the pre-batch state every fault is
-        // measured against.
         let body_one = b"body-one";
         family.bodies.persist_block_body(1, hash_of(1), body_one)?;
         let position_one = family
@@ -150,9 +126,6 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             },
         )?;
 
-        // Block 2's bytes append first (no fault hook on the flat file —
-        // its own recovery is the append-offset rollback), then the batch
-        // hits the armed fault.
         let body_two = b"body-two";
         family.bodies.persist_block_body(2, hash_of(2), body_two)?;
         let position_two = family
@@ -180,12 +153,8 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         );
         drop(family);
 
-        // Not a rollback receipt: whichever state is on disk must be whole.
         let _ = outcome;
-        // The undo row rides the batch in both directions. The locator row
-        // does not: `persist_block_body` wrote it deferred before the batch,
-        // so with the head rolled out it may linger as an orphan tail
-        // (`P4`, discardable) — assert only the forward direction for it.
+
         let family = open_family(&data_dir)?;
         let locator_present = family
             .store
@@ -240,8 +209,6 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             .head
             .commit(None, &committed, &CommitRecords::default())?;
 
-        // Disconnect: the head advances onto the parent tip with the next
-        // commit id and no new records.
         let parent = DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: committed.commit_id + 1,
@@ -269,10 +236,6 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Protocol rows through NodeState.
-// ---------------------------------------------------------------------------
-
 fn test_config(data_dir: std::path::PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
@@ -298,9 +261,6 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let _ = state.publish_checkpoint()?;
     drop(state);
 
-    // Durability precedes publication: by the time apply_block returned,
-    // the head row, undo row, and a reachable body for every block were
-    // already on disk.
     let family = open_family(&data_dir)?;
     let head = family
         .head
@@ -329,8 +289,6 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     }
     drop(family);
 
-    // Restart: the restored tip reconciles with the head, and the next
-    // connect continues the commit-id sequence.
     let resumed = NodeState::open(test_config(data_dir.clone()), None)?;
     let restored = resumed
         .chainstate()
@@ -362,7 +320,6 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         state.apply_block(&genesis)?;
         drop(state);
 
-        // Corrupt exactly the head row.
         let raw = Arc::new(bitcoin_rs_storage::FjallStore::open(
             data_dir.join("chainstate"),
         )?);
@@ -387,7 +344,6 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         raw.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &corrupted)?;
         drop(raw);
 
-        // An unreadable commit point cannot authorize destructive tail recovery.
         let block_path = data_dir.join("blocks/blk00000.dat");
         let mut block_bytes = std::fs::read(&block_path)?;
         block_bytes.extend_from_slice(b"BR");

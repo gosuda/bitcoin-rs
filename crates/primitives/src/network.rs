@@ -54,15 +54,6 @@ pub struct AssumeUtxoData {
     pub chain_tx_count: u64,
 }
 
-// `nMinimumChainWork` and `chainTxData`, copied from `src/kernel/chainparams.cpp`
-// in the Bitcoin Core tree this workspace already links against — the one
-// vendored by `libbitcoinkernel-sys`, client version 31.99, whose chain-tx data
-// was generated 2026-02-25.
-//
-// That is the same file `MAINNET_ASSUME_VALID_HEIGHT` above comes from: its
-// `defaultAssumeValid` comment reads `// 938343`. These constants are Core's own
-// per-release tuning, not consensus rules, and they need re-copying whenever the
-// pinned Core revision moves — the assume-valid anchor is the tell that it has.
 const MAINNET_MINIMUM_CHAIN_WORK: [u8; 32] =
     decode_compiled_hex("0000000000000000000000000000000000000001128750f82f4c366153a3a030");
 
@@ -492,8 +483,7 @@ impl Network {
             Self::Testnet3 => TESTNET3_MINIMUM_CHAIN_WORK,
             Self::Testnet4 => TESTNET4_MINIMUM_CHAIN_WORK,
             Self::Signet => SIGNET_MINIMUM_CHAIN_WORK,
-            // Core leaves regtest's `nMinimumChainWork` at zero: a regtest chain
-            // is meant to be one block old and still count as synced.
+
             Self::Regtest => [0_u8; 32],
         }
     }
@@ -663,9 +653,6 @@ const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
     Hash256::from_le_bytes(&out)
 }
 
-// Bitcoin Core src/kernel/chainparams.cpp:
-// v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
-// v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
 const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
     AssumeUtxoData {
         height: 840_000,
@@ -928,8 +915,6 @@ mod tests {
             } = network.chain_tx_data();
             assert!(tx_rate > 0.0, "{network:?} needs a non-zero rate");
             if matches!(network, Network::Regtest) {
-                // Core pins regtest at a zero baseline with a non-zero rate on
-                // purpose, so progress there is a function of time alone.
                 assert_eq!((time, tx_count), (0, 0));
             } else {
                 assert!(time > 0 && tx_count > 0, "{network:?}");
@@ -939,9 +924,6 @@ mod tests {
 
     #[test]
     fn mainnet_assume_utxo_data_matches_pinned_core() -> Result<(), crate::HashError> {
-        // Independent literals from Bitcoin Core src/kernel/chainparams.cpp:
-        // v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
-        // v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
         let expected_mainnet = [
             (
                 840_000,
@@ -1149,8 +1131,6 @@ mod chain_params_tests {
 
     #[test]
     fn minimum_chain_work_compares_as_a_number_when_compared_as_bytes() {
-        // Big-endian, fixed width: array order is numeric order. The whole
-        // chain-work check rests on this, so state it rather than assume it.
         let smaller: [u8; 32] =
             decode_compiled_hex("00000000000000000000000000000000000000000000000000000000000000ff");
         let larger: [u8; 32] =

@@ -1,9 +1,3 @@
-//! Wires inbound peer transactions to mempool admission and committed outcomes.
-//!
-//! Mempool owns preparation, policy, orphan/reject state and retry progress.
-//! P2P owns inventory, parent requests and the bounded relay worker. This loop
-//! owns only channel draining and ordering admission results before consumers.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,13 +43,8 @@ pub fn spawn_tx_ingress_consumer(
         .name("bitcoin-rs-tx-ingress".to_owned())
         .spawn(move || {
             while !shutdown.load() {
-                // One bounded pass: transient retries remain with mempool and
-                // cannot starve fresh ingress or shutdown by spinning here.
                 let made_progress = consumer.process_retries();
-                // A committed retry may have readied the next generation of
-                // children. Yield to ingress, then continue without imposing
-                // one poll interval per dependency level. Transient failures
-                // still wait, and shutdown is checked on every bounded pass.
+
                 let timeout = if made_progress {
                     Duration::ZERO
                 } else {
@@ -103,8 +92,7 @@ impl TxIngressConsumer {
             bitcoin_rs_primitives::unix_time_secs(),
             &self.chain_view(),
         );
-        // The gateway has classified this body. Release its announcement and
-        // request slot before a Held outcome queues missing parent requests.
+
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
         self.dispatch_outcome(txid, wtxid, source, outcome);

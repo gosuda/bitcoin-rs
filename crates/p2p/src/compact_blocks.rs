@@ -1,27 +1,3 @@
-//! BIP152 compact-block reconstruction.
-//!
-//! One [`Reconstruction`] lives per peer message loop: it owns the bounded
-//! pending-reconstruction state for that connection and hands finished
-//! blocks to the caller, which delivers them through the ordinary block
-//! sink — the same validation and apply path as a `block` message, with no
-//! bypass. Short IDs are hints only: any ambiguity, missing piece, or bound
-//! miss degrades to a full-block `getdata` fallback on the same connection,
-//! so a wrong guess costs round trips, never a wrong block; an entry whose
-//! deadline passes is dropped silently — liveness then rests on the
-//! connection's separate stall handling.
-//!
-//! BIP152 identity direction: a peer serializes the compact blocks it sends
-//! us with the version we advertised in our own `sendcmpct`
-//! ([`compact_blocks::COMPACT_BLOCK_VERSION`], v2 = wtxid identity, witness-bearing
-//! prefills). Conversely, we serve peers at the version they recorded with
-//! us (`CompactBlockNegotiation::servable_version`, used by the chain
-//! query). The two directions are independent; decoding incoming compact
-//! blocks never reads their preference.
-//!
-//! State is released by completion, by the deadline, by a replacement, and
-//! by dropping the owner at disconnect or session cancel — a chain change
-//! cannot strand memory beyond the deadline.
-
 use crate::inv::{native_block_hash, wire_block_hash};
 
 use hashbrown::HashMap;
@@ -140,8 +116,7 @@ impl Reconstruction {
             return Outcome::Fallback(native_block_hash(compact.header.block_hash()));
         };
         let hash = header.compute_hash();
-        // Re-sending one in-flight or already completed block must never
-        // trigger another mempool-wide hint walk (or another fallback).
+
         if self.recent.iter().any(|(seen, _)| *seen == hash) {
             return Outcome::Idle;
         }
@@ -164,8 +139,6 @@ impl Reconstruction {
                 .map(|tx: &Tx| tx.total_size())
                 .sum::<usize>();
 
-        // Enforce the cheap connection-level bounds before walking the
-        // mempool. Keep the post-fill check as matched bodies add bytes.
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
             || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
         {
@@ -255,10 +228,6 @@ impl Reconstruction {
         }
         let filled = std::mem::take(&mut entry.filled);
         let Ok(block) = complete_block(entry.header, filled) else {
-            // The taken bodies are dropped, so no byte stays retained: without
-            // this reset the dead entry keeps its charge until the deadline
-            // and later compact reconstructions can be refused for bytes that
-            // no longer exist.
             entry.retained_bytes = 0;
             entry.fallback = true;
             return Outcome::Fallback(hash);
@@ -353,8 +322,7 @@ fn fill_from_hints(
     if short_id_cursor != compact.short_ids.len() || wanted.len() != compact.short_ids.len() {
         return Err(());
     }
-    // Identity scan: record one claim per slot, retire a slot the first time
-    // a second identity claims it.
+
     let mut claims: Vec<Option<(Txid, Wtxid)>> = vec![None; filled.len()];
     let mut retired = vec![false; filled.len()];
     hints.for_each_identity(&mut |txid, wtxid| {
@@ -378,7 +346,7 @@ fn fill_from_hints(
             retired[slot] = true;
         }
     });
-    // Body pass: outside the walk, fetch each surviving claim once.
+
     for (slot, claim) in claims.into_iter().enumerate() {
         let Some((txid, wtxid)) = claim else {
             continue;
@@ -1222,20 +1190,20 @@ mod tests {
     /// payload bytes separate the two inputs.
     fn colliding_tx_bytes(branch: u8, payload: u32) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(64);
-        bytes.extend_from_slice(&2_u32.to_le_bytes()); // version
-        bytes.push(1); // one input
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.push(1);
         let mut previous = [branch; 32];
         previous[0] = 0;
-        bytes.extend_from_slice(&previous); // outpoint txid
-        bytes.extend_from_slice(&0_u32.to_le_bytes()); // vout
-        bytes.push(0); // empty script_sig
-        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // sequence
-        bytes.push(1); // one output
-        bytes.extend_from_slice(&1_000_u64.to_le_bytes()); // value
-        bytes.push(6); // script len
-        bytes.extend_from_slice(&[0x6a, 0x04]); // OP_RETURN, push 4
-        bytes.extend_from_slice(&payload.to_le_bytes()); // varying payload
-        bytes.extend_from_slice(&0_u32.to_le_bytes()); // lock time
+        bytes.extend_from_slice(&previous);
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&1_000_u64.to_le_bytes());
+        bytes.push(6);
+        bytes.extend_from_slice(&[0x6a, 0x04]);
+        bytes.extend_from_slice(&payload.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
         bytes
     }
 }

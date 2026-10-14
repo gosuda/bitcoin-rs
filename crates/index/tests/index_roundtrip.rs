@@ -1,4 +1,3 @@
-//! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
 #[path = "support/common.rs"]
 mod common;
 
@@ -266,9 +265,7 @@ impl KvStore for CallTrackingStore {
         }))
     }
 
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
 }
 
 struct CallTrackingSnapshot<'a> {
@@ -311,7 +308,6 @@ impl KvSnapshot for CallTrackingSnapshot<'_> {
         Ok(observed)
     }
 
-    // SPEC: returned KvIter owns captured rows.
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -401,9 +397,6 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
         let mut writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
         let block = read_fixture(height)?;
 
-        // Watermark contiguity starts at height 0. Commit the same body at
-        // genesis so store occupancy is checked through the sole mutation
-        // owner; row cardinality does not depend on the height suffix.
         writer.commit_block(0, &block)?;
         assert_eq!(
             store.count(ColumnFamily::TxConfirmed),
@@ -508,8 +501,6 @@ fn open_rejects_incompatible_durable_metadata() -> Result<(), Box<dyn std::error
 }
 #[test]
 fn format_4_open_refuses_for_rebuild() -> Result<(), Box<dyn std::error::Error>> {
-    // Format 5 changed every row family, so a format-4 store refuses start
-    // and recovery full-resets it for rebuild. No in-place upgrade exists.
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &4_u32.to_le_bytes())?;
@@ -567,8 +558,8 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     assert_eq!(block.height, 0);
     assert_eq!(block.hash, hash);
     assert_eq!(block.parent_hash, [0u8; 32]);
-    assert_eq!(block.row_count, 3); // txid + funding + header
-    // Header row plus one positioned txid and one positioned funding row.
+    assert_eq!(block.row_count, 3);
+
     assert_eq!(
         block.encoded_bytes,
         HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
@@ -588,9 +579,6 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
 
 #[test]
 fn prepare_block_for_rejects_malformed_bodies() -> Result<(), Box<dyn std::error::Error>> {
-    // Every case must fail in the parser and leave no row behind: a body
-    // shorter than the fixed 80-byte header, a body whose last transaction is
-    // cut short, and a structurally complete body with extra bytes appended.
     type Mangle = fn(Vec<u8>) -> Vec<u8>;
     type Check = fn(&IndexError) -> bool;
     let cases: [(&str, Mangle, Check); 3] = [
@@ -683,7 +671,6 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
         2
     );
 
-    // A mismatched parent watermark must fail without changing the tip.
     let wrong_prev = IndexWatermark {
         height: 0,
         hash: [0x42; 32],
@@ -699,7 +686,6 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
     ));
     assert_eq!(writer.watermark()?, Some(block1_watermark));
 
-    // Roll back block 1, returning to block 0.
     commit_rollback_one_for(
         &mut writer,
         IndexCapabilities::HISTORICAL,
@@ -716,7 +702,6 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
         1
     );
 
-    // Rolling back with a body that does not match the current watermark fails.
     assert!(matches!(
         commit_rollback_one_for(
             &mut writer,
@@ -1021,8 +1006,6 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), Box<dyn std::error:
     writer.commit_forward(prepared)?;
     drop(writer);
 
-    // A crashed fenced reset: the marker names generation 3; the next open
-    // (generation 1) adopts it, finishes the deletion, and clears it.
     let mut interrupted = store.new_batch();
     interrupted.put(ColumnFamily::UtxoMeta, RESET_KEY, &fenced_marker(0b10, 3));
     interrupted.delete(ColumnFamily::UtxoMeta, &[0x00, b'S']);
@@ -1091,9 +1074,6 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
 
 #[test]
 fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    // A reset claim published after the fence capture must reject every
-    // ordinary mutator, leave derived rows and watermarks untouched, and
-    // leave the adopted claim completed at Idle(base_version + 1).
     #[derive(Clone, Copy)]
     enum Mutator {
         Forward,
@@ -1113,8 +1093,6 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::e
         let rollback_body = read_fixture(0)?;
         let forward_body = read_fixture(1)?;
 
-        // Prepared work and the pre-existing cursor are captured before the
-        // racing claim lands, exactly as a live writer would hold them.
         let mut prepared = PreparedBatch::new(PreparedBatchLimits {
             max_rows: 100,
             max_bytes: 1_000_000,
@@ -1160,8 +1138,6 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::e
 
         assert!(matches!(result, Err(IndexError::ResetInProgress)));
         if mask != TX_LOOKUP_MASK {
-            // The adopted claim owns only script history, so tx-lookup rows
-            // and watermark must survive the rejected write untouched.
             assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
             assert_eq!(
                 writer.watermarks()?.tx_lookup.map(|mark| mark.height),
@@ -1205,8 +1181,7 @@ fn legacy_one_byte_marker_is_adopted_durably_then_completed()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(CallTrackingStore::default());
     seed_populated_store(&store, 1)?;
-    // A pre-C2 binary crashed right after committing its unfenced 1-byte
-    // marker and the selected watermark delete.
+
     let mut interrupted = store.new_batch();
     interrupted.put(ColumnFamily::UtxoMeta, RESET_KEY, &[0b10]);
     interrupted.delete(ColumnFamily::UtxoMeta, &[0x00, b'S']);
@@ -1219,9 +1194,7 @@ fn legacy_one_byte_marker_is_adopted_durably_then_completed()
 
     let logs = store.logged_batches();
     let post = &logs[baseline..];
-    // Cooperative same-mask adoption writes no claim of its own: the only
-    // marker PUT is the durable completion, CASed from the crashed writer's
-    // exact raw 1-byte claim.
+
     let markers: Vec<BatchLog> = post
         .iter()
         .filter(|entry| entry.marker_put.is_some())
@@ -1304,13 +1277,10 @@ fn dump_all(store: &MemoryStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
 
 #[test]
 fn interrupted_reset_resumes_from_every_crash_point() -> Result<(), Box<dyn std::error::Error>> {
-    // Whatever prefix of the reset the crashed process managed to persist,
-    // reopening must converge byte-identically on the uninterrupted result.
     type CrashPoint = fn(&MemoryStore) -> Result<(), Box<dyn std::error::Error>>;
     let cases: [(&str, CrashPoint); 3] = [
         ("after the marker commit", |_store| Ok(())),
         ("mid-delete", |store| {
-            // Half the masked Funding rows are already gone.
             let mut partial = store.new_batch();
             for (key, _) in store.rows(ColumnFamily::Funding).into_iter().take(2) {
                 partial.delete(ColumnFamily::Funding, &key);
@@ -1471,9 +1441,6 @@ impl ForeignFenceStore {
     }
 
     fn take_injection(&self, ops: &[BatchOp]) -> Option<CompetingClaim> {
-        // Completion is now a marker PUT of an idle value, never a delete:
-        // classify reset-key puts by shape, then keep the derived-row delete
-        // hook for claim-change regressions.
         if let Some(value) = put_value_of(ops, ColumnFamily::UtxoMeta, RESET_KEY) {
             return if is_idle_marker(&value) {
                 self.on_clear.lock().take()
@@ -1535,9 +1502,7 @@ impl KvStore for ForeignFenceStore {
         self.inner.snapshot()
     }
 
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
 }
 
 #[test]
@@ -1586,10 +1551,6 @@ fn changed_claim_prevents_stale_row_deletion() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn competing_claim_during_claim_merges_different_masks() -> Result<(), Box<dyn std::error::Error>> {
-    // Generation 4 claims TX_LOOKUP while generation 9 races a full
-    // SCRIPT_HISTORY claim into the same conditional-write window. The
-    // losing Absent claim must retry from fresh state, adopt the union
-    // mask, and clear the union of watermarks — no sleeps, no lost claim.
     let store = racing_store(|s| &mut s.on_claim);
     seed_populated_store(&store, 1)?;
 
@@ -1687,7 +1648,6 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
 
-    // Exact boundary: one block of three rows fits, a second does not.
     let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
     let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
@@ -1707,7 +1667,6 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
         })
     );
 
-    // Oversized first block: empty batch accepts it, then refuses another.
     let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
     let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
     let mut batch = common::batch_with_limits(
@@ -1719,7 +1678,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     );
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
-    // Header row plus one positioned txid and one positioned funding row.
+
     assert_eq!(
         batch.encoded_bytes(),
         HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
@@ -1882,9 +1841,6 @@ fn inject_full_claim(
 #[test]
 fn full_reset_between_derive_and_commit_rejects_stale_work()
 -> Result<(), Box<dyn std::error::Error>> {
-    // A full reset claimed after the fence capture must reject every stale
-    // mutator, leave no watermark behind, skip any cursor bytes the caller
-    // asked to publish, and complete the adopted claim.
     let cases = [
         ("forward", false, ConsumerCursorUpdate::Keep),
         ("rollback", true, ConsumerCursorUpdate::Keep),
@@ -1951,9 +1907,6 @@ fn double_reset_same_generation_still_rejects_stale_commit()
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
     assert_eq!(stored_idle_version(&store)?, 2);
 
-    // The batch is valid against the post-reset state, so only the stale
-    // fence stands between it and the store: an Absent-style check would
-    // accept it (state exists but moved), the versioned fence must not.
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
@@ -1963,8 +1916,6 @@ fn double_reset_same_generation_still_rejects_stale_commit()
     assert!(matches!(result, Err(IndexError::ResetInProgress)));
     assert_eq!(writer.watermarks()?, IndexWatermarks::default());
 
-    // A freshly captured fence commits normally: rejection is versioned, not
-    // a permanent lockout.
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
@@ -2000,8 +1951,6 @@ fn intermediate_rollback_deletes_cursor_and_survives_reopen()
         Some(b"cursor-at-0".as_slice())
     );
 
-    // Rollback without a valid replacement clears the cursor atomically with
-    // the row mutation.
     commit_rollback_one_for(&mut writer, IndexCapabilities::HISTORICAL, None, &body0)?;
     assert!(writer.consumer_cursor()?.is_none());
 
@@ -2025,7 +1974,6 @@ fn intermediate_rollback_removes_stale_cursor() -> Result<(), Box<dyn std::error
     commit_rollback_one_for(&mut writer, IndexCapabilities::TX_LOOKUP, None, &body0)?;
     assert!(writer.consumer_cursor()?.is_none());
 
-    // A later forward that keeps the cursor must not resurrect it.
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body0), &body0)?;
     let mut prepared = PreparedBatch::new(PreparedBatchLimits {
@@ -2057,8 +2005,6 @@ fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn 
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep)?;
 
-    // The durable watermark moved after the stale fence was captured, so the
-    // cursor publish is rejected as stale state, never silently skipped.
     let result = writer.commit_consumer_cursor(stale_fence, b"lagging");
     assert!(
         matches!(result, Err(IndexError::StaleIndexState)),
@@ -2077,9 +2023,6 @@ fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn 
 
 #[test]
 fn cursor_publish_rejects_a_watermark_race() -> Result<(), Box<dyn std::error::Error>> {
-    // A watermark that moves between the fence capture and the conditional
-    // cursor write must reject the publish as stale, whatever the racing
-    // family is and whether the pre-race watermark was present or absent.
     struct Case {
         label: &'static str,
         drop_tx_watermark: bool,
@@ -2111,7 +2054,6 @@ fn cursor_publish_rejects_a_watermark_race() -> Result<(), Box<dyn std::error::E
         let store = Arc::new(CallTrackingStore::default());
         seed_populated_store(&store, 1)?;
         if case.drop_tx_watermark {
-            // The caller then expects Absent at the commit boundary.
             let mut del = store.new_batch();
             del.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
             store.write_durable(del)?;
@@ -2150,9 +2092,7 @@ fn cursor_publish_rejects_a_watermark_race() -> Result<(), Box<dyn std::error::E
 fn oversized_first_row_does_not_escape_reset() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
-    // A derived row far larger than the reset scan's whole byte budget: a
-    // backend that dropped it instead of admitting it as the first row would
-    // leave it behind after the reset completed.
+
     let oversized: Vec<u8> = vec![0xAB; 300 * 1024];
     store.put(ColumnFamily::Funding, &[0x00, 0x00], &oversized)?;
 
@@ -2326,8 +2266,6 @@ fn fenced_watermarks_captures_every_capability_in_one_coherent_snapshot()
         "watermark state was read outside the capture snapshot: {live:?}"
     );
 
-    // The next reset completes while the snapshot returns its frozen
-    // pre-reset watermark. The live-reset recheck rejects that capture.
     *store.snapshot_reset_after_tx_watermark_read.lock() = Some((2, 4));
     let result = writer.fenced_watermarks();
     assert!(
@@ -2361,7 +2299,7 @@ fn unchanged_reset_surfaces_malformed_watermark_decode() -> Result<(), Box<dyn s
         matches!(result, Err(IndexError::InvalidWatermark)),
         "with the reset unchanged, the corruption itself surfaces: {result:?}"
     );
-    // The decode failure moved no state.
+
     assert_eq!(stored_idle_version(&store)?, 1);
     assert_state_revision(&store, Some(3))?;
     Ok(())
@@ -2397,7 +2335,6 @@ fn cursor_only_contention_rejects_stale_revision() -> Result<(), Box<dyn std::er
     writer.commit_consumer_cursor(fence, b"first")?;
     assert_state_revision(&store, Some(2))?;
 
-    // Reset state and watermarks are untouched; only the revision moved.
     let result = writer.commit_consumer_cursor(fence, b"second");
     assert!(
         matches!(result, Err(IndexError::StaleIndexState)),
@@ -2426,7 +2363,6 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     assert_state_revision(&store, None)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
 
-    // 1. forward
     let body0 = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body0), &body0)?;
@@ -2434,12 +2370,10 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(1))?;
 
-    // 2. explicit consumer cursor commit
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_consumer_cursor(fence, b"cursor-1")?;
     assert_state_revision(&store, Some(2))?;
 
-    // 3. selective rollback with a cursor disposition
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_rollback_one_for_with_cursor(
         fence,
@@ -2450,14 +2384,12 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     )?;
     assert_state_revision(&store, Some(3))?;
 
-    // 4. reconnect the rolled-back capability
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body0), &body0)?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(4))?;
 
-    // 5. rollback that capability again
     commit_rollback_one_for(&mut writer, IndexCapabilities::TX_LOOKUP, None, &body0)?;
     assert_state_revision(&store, Some(5))?;
     assert_eq!(
@@ -2519,8 +2451,6 @@ fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), Box<dyn s
         seed_populated_store(&store, 1)?;
         let mut state = store.new_batch();
         if version_overflow {
-            // One real reset carries the version from MAX - 1 to MAX, so the
-            // ceiling is reached the way production reaches it.
             state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(u64::MAX - 1));
         } else {
             state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(1));
@@ -2593,9 +2523,6 @@ fn legacy_aba_rejection(marker: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     let (stale_fence, watermarks) = writer.fenced_watermarks()?;
     assert_eq!(watermarks, IndexWatermarks::default());
 
-    // A pre-revision binary replaces Idle(1) with a legacy claim. Completion
-    // returns to the same reset bytes, so only the ordinary revision can
-    // invalidate the stale fence.
     let mut crash = store.new_batch();
     crash.put(ColumnFamily::UtxoMeta, RESET_KEY, marker);
     store.write_durable(crash)?;
@@ -2650,8 +2577,7 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(CallTrackingStore::default());
     seed_populated_store(&store, 1)?;
-    // A crashed script-only reset left its canonical claim and its selected
-    // watermark delete committed.
+
     let mut crash = store.new_batch();
     crash.put(
         ColumnFamily::UtxoMeta,
@@ -2665,8 +2591,6 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
     let baseline = store.logged_batches().len();
     let writer = IndexWriter::open(Arc::clone(&store), 7)?;
 
-    // Same-mask adoption writes nothing of its own: the only marker write is
-    // the completion, CASed from the crashed writer's exact raw claim bytes.
     let markers: Vec<BatchLog> = store.logged_batches()[baseline..]
         .iter()
         .filter(|entry| entry.marker_put.is_some())
@@ -2684,7 +2608,6 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
     );
     assert_state_revision(&store, Some(2))?;
 
-    // Selective: sibling tx state survives the adopted script reset.
     assert!(writer.watermarks()?.tx_lookup.is_some());
     assert!(writer.watermarks()?.script_history.is_none());
     assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
@@ -2703,8 +2626,6 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_consumer_cursor(fence, b"pending")?;
 
-    // A crashed script-only reset left its claim; the tx watermark and the
-    // consumer cursor are still live.
     let mut crash = store.new_batch();
     crash.put(
         ColumnFamily::UtxoMeta,
@@ -2717,7 +2638,6 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
     let baseline = store.logged_batches().len();
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
-    // Mask growth rewrites only byte zero: same width, process epoch, and base.
     let markers: Vec<BatchLog> = store.logged_batches()[baseline..]
         .iter()
         .filter(|entry| entry.marker_put.is_some())

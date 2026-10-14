@@ -1,10 +1,3 @@
-//! Integration crate for running a synchronous `bitcoin-rs` node.
-//!
-//! The crate owns process-level concerns: layered configuration, storage backend
-//! selection, signal bridging, metrics/tracing setup, and the central
-//! crossbeam-driven event loop that composes chainstate with peer, mempool,
-//! mining, index, and RPC services.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;

@@ -1,10 +1,3 @@
-//! Ordered staged-block commit draining and expected-prefix caching.
-//!
-//! The window application itself — the chain transition, derived-consumer
-//! dispatch, and generation settlement — lives behind
-//! [`SyncChain::commit_window`] (node, ARCH-07); this module owns the
-//! staging/drain bookkeeping around it.
-
 use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
@@ -101,21 +94,11 @@ impl BlockSync {
         &self,
         next_expected_hash: Option<Hash256>,
     ) -> (usize, usize) {
-        // A latched Fatal settlement left the implementation's admission
-        // closed: starting another transition would bounce off the same refusal
-        // and churn staged state every tick.
         if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
             metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
         }
-        // The extension path commits only blocks whose parent is the applied
-        // tip. While a heavier branch is pending, the applied tip sits on the
-        // losing side and the connect path below the fork belongs to
-        // `switch_branch_if_outweighed`: a run drained here cannot extend the
-        // applied tip, so every commit fails `PrevHashMismatch` and the round
-        // restore-drops and re-requests the head block. The window's
-        // observation machinery still watches the real connect frontier via
-        // `next_expected_block`.
+
         if !self.applied_is_chain_ancestor() {
             return (0, 0);
         }
@@ -133,10 +116,6 @@ impl BlockSync {
         let (drained, expected_len) = self
             .drain_cached_expected_blocks(staged_count)
             .unwrap_or_else(|| {
-                // Cache miss: walk the block tree once for the expected run, drain
-                // the staged prefix, and repopulate the cache from the freshly
-                // computed hashes so subsequent rounds (as more blocks stage under
-                // the same chain/applied tip) hit instead of re-walking.
                 let horizon = self.expected_apply_horizon(staged_count);
                 let run = self.expected_block_hashes(horizon);
                 let expected_len = run.as_ref().map_or(0, |run| run.hashes.len());
@@ -156,31 +135,23 @@ impl BlockSync {
         let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
         let mut failed_hash = None;
         let mut failed_permanent = false;
-        // Applied in windows, not one at a time: the window verifies every
-        // block's input scripts in a single dispatch, which is where the
-        // measured apply win comes from.
+
         let drained: Vec<_> = drained.into_iter().collect();
         let mut chunk_start = 0_usize;
         while chunk_start < drained.len() {
-            // Bounded by block count AND by bytes, so a window of tip-sized
-            // blocks does not hold gigabytes just because the count allows it.
             let chunk_end =
                 chunk_start
                     .saturating_add(self.chain.window_len(
                         &mut drained[chunk_start..].iter().map(|d| d.serialized.len()),
                     ));
             let chunk = &drained[chunk_start..chunk_end];
-            // Borrowed, not cloned. `DrainedBlock` owns a whole block, so
-            // cloning one deep-copies every transaction and witness; doing that
-            // per block per window would spend the dispatch win on memcpy.
+
             let blocks: Vec<&Block> = chunk.iter().map(|drained| &drained.block).collect();
             let bodies: Vec<bytes::Bytes> = chunk
                 .iter()
                 .map(|drained| drained.serialized.clone())
                 .collect();
-            // The window reports how far it got rather than just failing,
-            // because only the committed prefix may be marked applied; the rest
-            // has to go back on the stager untouched.
+
             let committed = match self.chain.commit_window(&blocks, &bodies) {
                 Ok(applied) => applied,
                 Err(error) => {
@@ -207,12 +178,7 @@ impl BlockSync {
                         }
                     }
                     applied = applied.saturating_add(stopped);
-                    // Everything after the block that failed, in the order it
-                    // was drained: the rest of this chunk past the failure, then
-                    // every chunk not yet attempted. When the whole chunk
-                    // committed and only finish failed (`stopped == chunk.len()`),
-                    // there is no refused block to skip, so restoration starts
-                    // at the next chunk head.
+
                     let restore_from =
                         restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
                     self.scheduler
@@ -220,13 +186,6 @@ impl BlockSync {
                         .stager
                         .restore_many(drained[restore_from..].iter().cloned());
                     if error.disposition == WindowApplyDisposition::Permanent {
-                        // The failed block's descendants can never become
-                        // valid, so they must not occupy bounded download
-                        // state or the frontier would cycle on them forever.
-                        // Purge every invalidated hash from the stager and
-                        // from the window's pending map; the
-                        // expected-apply cache is dropped below because the
-                        // round failed.
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
@@ -247,19 +206,7 @@ impl BlockSync {
             chunk_start = chunk_end;
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
-            // A Permanent failure released the failed hash inside
-            // `purge_invalidated`: `invalidate_failed_subtree` marks the
-            // failed block as the root of its own invalidated subtree, so
-            // the purge always covers it (the one shape where the subtree
-            // comes back empty — a header the tree never resolved — cannot
-            // arise here, because the drain only yields hashes the tree
-            // holds). Re-queueing the hash again with its tree height would
-            // rewind the request cursor onto the invalidated block, so the
-            // tree-height requeue runs only for retryable dispositions.
             if let Some(hash) = failed_hash.filter(|_| !failed_permanent) {
-                // The tree owns heights: the retry cursor drops to the failed
-                // body's tree height, or stays put when the tree cannot
-                // resolve it (no rewind to genesis).
                 let failed_height = {
                     let tree = self.chain.block_tree();
                     tree.height_of_hash(hash)
@@ -290,8 +237,6 @@ impl BlockSync {
     /// `ExpectedBlockHashes` pins that equal to `PENDING_BUDGET`, so the run
     /// always fits the inline `SmallVec` capacity.
     pub(super) fn expected_apply_horizon(&self, staged_count: usize) -> usize {
-        // Snapshot the cap and release the window lock before any tree read so we
-        // never invert the tree -> window lock order used elsewhere.
         let max_pending_blocks = self.scheduler.lock().window.max_pending_blocks();
         staged_count.max(max_pending_blocks)
     }

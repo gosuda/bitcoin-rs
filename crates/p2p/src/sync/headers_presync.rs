@@ -1,24 +1,3 @@
-//! Core's download-twice header presync state: the anti-memory-DoS gate that
-//! keeps an unverified, low-work header chain out of the block tree.
-//!
-//! A peer that has not demonstrated at least the network's minimum chain work
-//! must be synchronized twice. The first pass (PRESYNC) validates each header
-//! minimally — continuity, proof of work, permitted difficulty transition, and
-//! cumulative work — and retains only one salted commitment bit per
-//! [`HeadersSyncParams::commitment_period`] headers. Once the cumulative work
-//! crosses the minimum, the second pass (REDOWNLOAD) replays the same chain
-//! from the fork point, checks every commitment at its salted offset, and
-//! releases headers to the caller only from behind the bounded redownload
-//! buffer. Only that released output may reach
-//! [`SyncChain::admit_headers`](super::chain::SyncChain::admit_headers).
-//!
-//! Core authority: `bitcoin-core/src/headerssync.h:57-100` (the design),
-//! `:103-149` (state and constructor), and
-//! `bitcoin-core/src/headerssync.cpp:72-149` (phase processing),
-//! `:150-218` (presync validation and the work transition),
-//! `:219-305` (redownload commitment checks and buffering), and
-//! `:306-326` (the locator switch).
-
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
@@ -360,16 +339,9 @@ impl HeadersSyncState {
             "commitment period must be nonzero"
         );
         let period = u64::from(params.commitment_period);
-        // Core draws the commitment offset from a fast RNG
-        // (`headerssync.cpp:24`); deriving it from the state's own salt keeps
-        // one random input per sync and stays reproducible under test.
+
         let commit_offset = u64::from_le_bytes(salt[..8].try_into().unwrap_or([0; 8])) % period;
-        // Estimate how long an honest chain could be right now: the fastest
-        // rate the median-time-past rule allows (6 blocks per second) times
-        // the seconds from the anchor's MTP to now plus the future-block
-        // bound (`headerssync.cpp:33-49`). A clock behind the anchor clamps
-        // the estimate to the bound alone, which is the safe direction: the
-        // sync aborts rather than the memory bound growing unbounded.
+
         let seconds_since_start =
             u64::from(current_unix_seconds().saturating_sub(chain_start.median_time_past))
                 .saturating_add(MAX_FUTURE_BLOCK_TIME_SECONDS);
@@ -417,8 +389,6 @@ impl HeadersSyncState {
         full_message: bool,
     ) -> Result<HeaderSyncResult, HeaderSyncError> {
         if headers.is_empty() {
-            // The route admits empty batches itself; a defensive no-op keeps
-            // the sync alive rather than spending it.
             return Ok(HeaderSyncResult {
                 ready_headers: Vec::new(),
                 request_more: true,
@@ -433,9 +403,7 @@ impl HeadersSyncState {
         } else {
             self.process_redownload(headers, full_message)
         };
-        // Core finalizes whenever a run will not continue
-        // (`headerssync.cpp:146`): a failure or a stopped download frees the
-        // temporary state in the same step that reports it.
+
         let result = match outcome {
             Ok(result) => result,
             Err(error) => {
@@ -568,9 +536,6 @@ impl HeadersSyncState {
             });
         }
         if !full_message {
-            // The peer declined to serve the full chain a second time:
-            // release whatever the buffer retired and end the sync
-            // (`headerssync.cpp:130-138`).
             return Ok(HeaderSyncResult {
                 ready_headers,
                 request_more: false,

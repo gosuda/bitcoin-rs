@@ -1,4 +1,3 @@
-//! Tests for failure records (REF-07d).
 #![expect(
     clippy::expect_used,
     reason = "test fixtures abort on their first unmet setup invariant"
@@ -134,8 +133,7 @@ fn record_write_failure_does_not_replace_the_network_error() {
 fn bytes_past_the_deadline_do_not_renew_it() {
     let (mut peer, mut remote, _dir) = fixture();
     remote.write_all(&[7]).expect("one byte before the read");
-    // Wait for the byte to reach the socket so the lapsed deadline pauses on
-    // real progress instead of timing out on an empty queue.
+
     peer.stream
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("peek timeout");
@@ -173,8 +171,7 @@ fn a_paused_frame_resumes_from_where_it_stopped() {
     remote
         .write_all(&frame[..10])
         .expect("partial header bytes");
-    // Wait for the partial header to be queued so the first call consumes
-    // it before its deadline interrupts.
+
     peer.stream
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("peek timeout");

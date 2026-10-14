@@ -1,8 +1,3 @@
-//! Metrics server and readiness gauge behaviour.
-//!
-//! The Prometheus recorder is process-global, so server tests must not run
-//! concurrently in one test binary. `SERVER_TEST_LOCK` enforces it.
-
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -206,15 +201,10 @@ fn shutdown_exits_the_listener_thread() {
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     let addr = server.local_addr();
     shutdown.store(true, Ordering::Release);
-    // The shutdown flag alone must end the scrape loop: `stop_and_join`'s
-    // own `stop` signal only fires afterwards, so binding before the
-    // deadline proves the shutdown-driven exit.
+
     let deadline = Instant::now() + Duration::from_secs(10);
     while TcpListener::bind(addr).is_err() {
         if Instant::now() >= deadline {
-            // The regression under test keeps the scrape thread alive, and
-            // `Drop` joins it; detach the handle so unwinding fails the
-            // test instead of hanging on the join.
             drop(server.thread.take());
             panic!("listener never exited on the shutdown flag");
         }
@@ -309,8 +299,6 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let samples = readiness_samples(&scrape_body(server.local_addr()));
     assert_one_active(&samples, "Ready");
 
-    // A transition must retire the previous active label in the same pass:
-    // a scrape after the move never reports two live outcomes.
     publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Rebuilding {
         processed_height: 40,
         target_height: 101,
@@ -324,8 +312,6 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
         "the retired Ready label must read 0 after the transition: {samples:?}"
     );
 
-    // The disabled outcome is a distinct documented state, not the absence
-    // of a row: the source reports enabled:false with its own label.
     publish_txindex_readiness(&FixedSource {
         enabled: false,
         state: CapabilityState::Disabled,

@@ -436,9 +436,6 @@ pub(crate) fn write_frame<W: Write + ?Sized>(
     writer: &mut W,
     frame: &FramedMessage,
 ) -> Result<usize, PeerError> {
-    // Header and payload ride in one vectored write so each message is
-    // emitted with a single syscall instead of five (avoids header/payload
-    // segment splits and per-part syscall overhead on TcpStream).
     let mut slices = Vec::with_capacity(2);
     frame.push_slices(&mut slices);
     write_all_vectored(writer, &mut slices)?;
@@ -585,10 +582,7 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    // No block serializes above 4,000,000 bytes, and Core refuses any v1
-    // message above that size, so a larger block body is never read. A BIP324
-    // packet's contents are already capped at 1 + 12 + 4,000,000 bytes by its
-    // transport; anything that still fails reaches chainstate's classification.
+
     if payload_len > MAX_MESSAGE_PAYLOAD
         || (command == "block" && payload_len > crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE)
     {
@@ -665,7 +659,6 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
 
 /// Decodes a command's payload, or an unknown command into [`Message::Unknown`].
 pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
-    // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
             command: command_string(command)?,
@@ -940,7 +933,7 @@ mod tests {
         header.extend_from_slice(&Magic::REGTEST.to_bytes());
         header.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
         header.extend_from_slice(&len.to_le_bytes());
-        header.extend_from_slice(&[0u8; 4]); // checksum (never reached / wrong on purpose)
+        header.extend_from_slice(&[0u8; 4]);
         Ok(header)
     }
 
@@ -983,7 +976,7 @@ mod tests {
         write_message(&mut ping, Magic::REGTEST, &super::Message::Ping(42))?;
         let mut pong = Vec::new();
         write_message(&mut pong, Magic::REGTEST, &super::Message::Pong(7))?;
-        // The ping stops arriving once inside its header and once inside its payload.
+
         let mut stream = StallingStream::new([
             Inbound::Bytes(ping[..10].to_vec()),
             Inbound::Stall(ErrorKind::TimedOut),
@@ -1012,9 +1005,6 @@ mod tests {
         use crate::test_support::{Inbound, OrFail, StallingStream};
         use std::io::ErrorKind;
 
-        // A peer declares a maximum-size payload, delivers a fragment, then
-        // stalls: the retained buffer holds received bytes, not the declared
-        // length.
         let dribble = [7u8; 100];
         let mut stream = StallingStream::new([
             Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),

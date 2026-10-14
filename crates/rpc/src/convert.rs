@@ -1,15 +1,3 @@
-//! Native <-> rust-bitcoin conversions and typed wire serialization.
-//!
-//! Every conversion between this node's native primitives and the
-//! `bitcoin`/`corepc-types` vocabulary crosses the RPC boundary here, by
-//! consensus-byte round trip or explicit field mapping. Representable typed
-//! fields use `corepc_types::v31` and [`typed_to_sonic`]. Verbose
-//! `getrawtransaction` uses the shared [`crate::tx_render`] projection.
-//!
-//! Address strings, `asm`, and `desc` are wire-format strings that must match
-//! Bitcoin Core byte-for-byte; they ride the sanctioned rust-bitcoin seam
-//! (`Script` formatting, `Address` rendering) at this boundary only.
-
 use alloc::string::{String, ToString};
 
 use bitcoin::Address;
@@ -116,7 +104,7 @@ pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
     let bits = bits.to_consensus();
     let exponent = bits >> 24;
     let word = u64::from(bits & 0x007f_ffff);
-    // Least-significant byte first; reversed for the wire's big-endian hex.
+
     let mut target = [0_u8; 32];
     if exponent <= 3 {
         let shifted = word >> (8 * (3 - exponent));
@@ -195,9 +183,7 @@ pub(crate) fn classify(script: &[u8]) -> ScriptShape {
             _ => ScriptShape::Nonstandard,
         };
     }
-    // Core's Solver classifies an `OP_RETURN` output `nulldata` only when the
-    // bytes after the opcode are all pushes; an interleaved opcode is
-    // `nonstandard`.
+
     if is_op_return(script) && is_push_only(&script[1..]) {
         return ScriptShape::NullData;
     }
@@ -207,9 +193,7 @@ pub(crate) fn classify(script: &[u8]) -> ScriptShape {
     if is_p2pkh(script) {
         return ScriptShape::PubkeyHash;
     }
-    // `multisig_key_count` is Core's `MatchMultisig`: it already requires
-    // valid count operands and serialized pubkeys, so the shape check alone
-    // adds nothing here.
+
     if multisig_key_count(script).is_some() {
         return ScriptShape::Multisig;
     }
@@ -226,7 +210,6 @@ pub(crate) fn classify(script: &[u8]) -> ScriptShape {
 #[must_use]
 pub(crate) const fn core_type_name(shape: ScriptShape) -> &'static str {
     match shape {
-        // Core spells an empty script `nonstandard`, like any unrecognized one.
         ScriptShape::Empty | ScriptShape::Nonstandard => "nonstandard",
         ScriptShape::Pubkey => "pubkey",
         ScriptShape::PubkeyHash => "pubkeyhash",
@@ -443,7 +426,6 @@ mod tests {
 
     #[test]
     fn compact_target_places_mantissa_bytes_core_style() {
-        // Historical pow limit 0x1d00ffff: ffff lands at bytes 4-5.
         let mut expected = String::from("00000000ffff");
         expected.push_str(&"0".repeat(52));
         assert_eq!(
@@ -451,7 +433,6 @@ mod tests {
             expected
         );
 
-        // Regtest difficulty-one 0x207fffff: 7fffff at the very top.
         let mut expected = String::from("7fffff");
         expected.push_str(&"0".repeat(58));
         assert_eq!(
@@ -462,7 +443,6 @@ mod tests {
 
     #[test]
     fn compact_target_right_shifts_sub_three_exponents() {
-        // 0x0200ff00: word 0x00ff00 >> 8 = 0xff in the lowest byte.
         let mut expected = String::new();
         expected.push_str(&"0".repeat(62));
         expected.push_str("ff");
@@ -471,7 +451,6 @@ mod tests {
             expected
         );
 
-        // Exponent three keeps all three mantissa bytes in place.
         let mut expected = "0".repeat(58);
         expected.push_str("7fff80");
         assert_eq!(
@@ -482,13 +461,11 @@ mod tests {
 
     #[test]
     fn compact_target_ignores_sign_and_drops_overflow_shifts() {
-        // The sign bit negates; the rendered magnitude is unchanged.
         assert_eq!(
             compact_target_hex(CompactTarget::from_consensus(0x1d80_ffff)),
             compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff))
         );
 
-        // Exponent 35 shifts every mantissa byte past 256 bits: zero target.
         assert_eq!(
             compact_target_hex(CompactTarget::from_consensus(0x2300_ffff)),
             "0".repeat(64)
@@ -521,12 +498,8 @@ mod tests {
 
     #[test]
     fn multisig_shape_without_valid_keys_is_nonstandard() {
-        // OP_1 <4 bytes> OP_1 OP_CHECKMULTISIG: the template shape of bare
-        // multisig with a push that is not pubkey-sized at all.
         let short_push = [0x51, 0x04, 0xde, 0xad, 0xbe, 0xef, 0x51, 0xae];
-        // OP_1 <33 bytes starting 0x04> OP_1 OP_CHECKMULTISIG: pubkey-sized
-        // but a 0x04 header promises a 65-byte key, so `CPubKey::IsValid`
-        // (and `multisig_key_count`) rejects it.
+
         let mut wrong_prefix = vec![0x51, 0x21, 0x04];
         wrong_prefix.extend([0x11; 32]);
         wrong_prefix.extend([0x51, 0xae]);

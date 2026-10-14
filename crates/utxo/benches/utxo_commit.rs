@@ -1,10 +1,3 @@
-//! Production-shaped UTXO commit benchmarks.
-//!
-//! The retained cases exercise the public `contract::commit_block_changes` path with a
-//! normal mixed-shard block, a concentrated worst-case block, and a spend-heavy
-//! block. Correctness edge cases belong in the UTXO test suite rather than in
-//! long-lived benchmark arms.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 
 #[global_allocator]

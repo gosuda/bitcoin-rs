@@ -1,5 +1,3 @@
-//! P2P's single bounded AddrMan owner, following Core31.1 placement and selection.
-//! Membership is persisted with each endpoint; lookup tables are derived indexes.
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -33,7 +31,7 @@ const REPLACEMENT_WINDOW: u64 = 4 * 60 * 60;
 const COLLISION_TEST_WINDOW: u64 = 40 * 60;
 const MAX_ANCHORS: usize = 2;
 const ANCHOR_AGE: u64 = 7 * 24 * 60 * 60;
-// min GetChance=.01*.66^8; at zero-based proposal44 its product with1.2^44>1.
+
 const MAX_SELECTION_PROPOSALS: usize = 45;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +39,7 @@ const MAX_SELECTION_PROPOSALS: usize = 45;
 enum Source {
     Ip(IpAddr),
     Internal([u8; 10]),
-    // Historical formats did not retain the seed name or full Core internal hash.
+
     LegacyDns(u64),
 }
 impl Source {
@@ -108,8 +106,6 @@ impl Candidate {
         )
     }
     fn infer_historical_services(mut self) -> Self {
-        // Old schemas cannot distinguish an unobserved DNS record from a
-        // rejected VERSION0 before Good. Preserve their exact source backup.
         if self.services == Some(0) && self.allows_unknown_services() {
             self.services = None;
         }
@@ -199,7 +195,6 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
-// Core HashWriter framing. These vectors are all shorter than253 bytes.
 fn vector(bytes: &[u8], output: &mut Vec<u8>) {
     output.push(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
     output.extend_from_slice(bytes);
@@ -352,8 +347,7 @@ impl Manager {
             self.remove_identity(index);
         }
     }
-    // Core MakeTried, with the local pending-identity guard checked before any
-    // reference is changed. Indices are reloaded after ClearNew can swap_remove.
+
     fn promote(&mut self, addr: SocketAddr) -> bool {
         let Some(&index) = self.by_addr.get(&addr) else {
             return false;
@@ -476,8 +470,7 @@ impl Manager {
         if test_before_evict && self.tried[slot] != EMPTY_SLOT {
             if self.collisions.len() < MAX_COLLISIONS && !self.collisions.contains(&addr) {
                 self.collisions.push(addr);
-                // Core's set is ordered by lifetime-stable creation ID, not
-                // Good/enqueue order or the mutable swap_remove index.
+
                 self.collisions.sort_by_key(|endpoint| {
                     self.stored.records[self.by_addr[endpoint]].creation_id
                 });
@@ -496,7 +489,6 @@ impl Manager {
         allowed: &HashSet<SocketAddr>,
         now: u64,
     ) {
-        // At most ten entries; snapshot endpoint identities, never Vec indices.
         for addr in self.collisions.clone() {
             let Some(&index) = self.by_addr.get(&addr) else {
                 self.collisions.retain(|candidate| *candidate != addr);
@@ -530,8 +522,6 @@ impl Manager {
                 }
             };
             if replace && allowed.contains(&addr) && !self.promotion_blocked(addr) {
-                // Good(false) is part of Core's resolution, including health and
-                // global failure epoch updates, not just table movement.
                 if self.good(addr, false, now) {
                     self.collisions.retain(|candidate| *candidate != addr);
                 }
@@ -574,7 +564,7 @@ impl Manager {
             if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
                 entry.last_seen = seen.saturating_sub(time_penalty);
             }
-            // Zero-bit gossip adds no service knowledge to an unknown DNS record.
+
             if let Some(services) = services.filter(|bits| *bits != 0 || entry.services.is_some()) {
                 entry.services = Some(entry.services.unwrap_or(0) | services);
             }
@@ -607,7 +597,7 @@ impl Manager {
                 return false;
             }
         }
-        // Slot geometry bounds identities without a competing global/source quota.
+
         if existing.is_none() && self.stored.records.len() == MAX_RECORDS && occupant == EMPTY_SLOT
         {
             return false;
@@ -834,8 +824,7 @@ impl AddressBook {
                     } else {
                         manager.install_indexes();
                     }
-                    // Collision state is empty on restart, so persisted record
-                    // order establishes fresh runtime IDs without a disk field.
+
                     for (index, entry) in manager.stored.records.iter_mut().enumerate() {
                         entry.creation_id = u64::try_from(index).unwrap_or(u64::MAX);
                     }
@@ -924,8 +913,7 @@ impl AddressBook {
             .filter(|addr| allowed(*addr))
             .collect();
         let mut manager = self.state.lock();
-        // Membership, health and pending state may have changed during callback
-        // evaluation. Only the pure per-address policy decisions were captured.
+
         let groups: HashSet<_> = grouped
             .iter()
             .chain(
@@ -1172,8 +1160,6 @@ impl AddressBook {
         now: u64,
         mut allowed: impl FnMut(SocketAddr) -> bool,
     ) -> Option<SocketAddr> {
-        // Core AlreadyConnectedToAddress takes CNetAddr: TCP presence at the
-        // same canonical IP is sufficient even at a different port.
         let connected: HashSet<_> = connected.iter().map(|addr| canonical(*addr).ip()).collect();
         let active: HashSet<_> = active.iter().copied().map(canonical).collect();
         let addresses: Vec<_> = {
@@ -1184,7 +1170,7 @@ impl AddressBook {
                 .iter()
                 .map(|entry| entry.addr)
                 .collect()
-        }; // Release the state lock before invoking policy callbacks.
+        };
         let allowed: HashSet<_> = addresses
             .into_iter()
             .filter(|addr| allowed(*addr))
@@ -1307,7 +1293,6 @@ impl AddressBook {
                     reserved.push(anchor);
                     changed = true;
                 } else {
-                    // Other work owns this claim; preserve undispatched metadata.
                     manager.stored.anchors.push(anchor);
                 }
             }
@@ -1326,7 +1311,7 @@ impl AddressBook {
                     manager.pending.remove(&anchor.addr);
                 }
             }
-            // Failed consumption never transfers or discards original metadata.
+
             manager.restore_anchors(reserved, now);
             return Vec::new();
         }
@@ -1448,8 +1433,6 @@ impl AddressBook {
     }
 }
 
-// Keep the supplied basename as the legacy path and add a magic suffix to
-// its stem without interpreting an existing suffix or requiring UTF-8 names.
 fn network_path(base: &Path, magic: [u8; 4]) -> PathBuf {
     let mut name = base.file_stem().unwrap_or_default().to_os_string();
     name.push(format!(
@@ -1558,7 +1541,6 @@ fn read_anchors<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_seq(Anchors)
 }
 
-// Historical v1–v4 shapes are read only for validated, backed-up migration.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyCandidate {
@@ -1633,7 +1615,6 @@ struct PrefixStored {
     records: Vec<ReferencedCandidate>,
 }
 
-// These separate structs admit only fields present in the published schemas.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnchoredLegacyStored {
@@ -1713,8 +1694,7 @@ fn validate_current(
             if tried_count > TRIED_BUCKETS * BUCKET_SIZE {
                 return Err(invalid("Tried count exceeds table"));
             }
-            // A changed map cannot reproduce the old Tried slots. Validate all
-            // map-independent structure, then back up and rebucket at open.
+
             if let Some(groups) = groups {
                 let bucket = tried_bucket(&stored.secret, entry.addr, groups);
                 let position = bucket_position(&stored.secret, entry.addr, false, bucket);
@@ -1788,7 +1768,6 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
         .records
         .into_iter()
         .map(|entry| {
-            // Core's local attempt timestamps are deliberately not restored.
             let _ = entry.last_attempt;
             Candidate {
                 creation_id: 0,
@@ -1817,8 +1796,7 @@ fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
         anchors: Vec::new(),
     })
 }
-// Historical shapes are decoded explicitly before conversion; current fields
-// cannot be smuggled into older formats through defaults or version relabeling.
+
 fn decode_legacy_book(payload: &[u8], version: u32, allow_local: bool) -> io::Result<Stored> {
     if version == 1 {
         let old = serde_json::from_slice(payload).map_err(io::Error::other)?;
@@ -1978,8 +1956,7 @@ fn backup_before_migration(path: &Path, bytes: &[u8], schema: u32) -> io::Result
             {
                 return Err(invalid("migration backup size/type"));
             }
-            // Read, revalidate and flush the same handle. Windows requires
-            // GENERIC_WRITE for FlushFileBuffers even when bytes are unchanged.
+
             let mut file = OpenOptions::new().read(true).write(true).open(&backup)?;
             let mut existing = Vec::new();
             (&mut file)
@@ -2110,8 +2087,7 @@ fn publish_bytes_with_nonce(
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
-        // Close before publication for Windows. Initial publication must not
-        // clobber an operator file created since open/migration observed absence.
+
         drop(file);
         if *replace {
             fs::rename(&tmp, path)?;
@@ -2131,7 +2107,7 @@ fn publish_bytes_with_nonce(
         bitcoin_rs_storage::checkpoint::fs::sync_dir(&dir)?;
         Ok(())
     })();
-    // Once installation vacates the name, it no longer identifies our file.
+
     if result.is_err() && temp_present {
         let _ = fs::remove_file(&tmp);
     }

@@ -72,8 +72,6 @@ pub enum UtxoError {
     AmountOutOfRange { value: u64 },
 }
 
-// Counts the actual insertion boundary, on the decoding thread only, so
-// malformed portable-input tests can prove no hash-table insertion occurred.
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static SNAPSHOT_INSERTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

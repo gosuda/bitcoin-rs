@@ -1,5 +1,3 @@
-//! Consensus validation surfaces for bitcoin-rs.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
@@ -23,7 +21,7 @@ mod block_view;
 mod engine;
 /// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
-/// Private AVX2 SHA256d64 kernel for Merkle hashing.
+/// Private AVX2 `SHA256d64` kernel for Merkle hashing.
 mod sha256d64;
 /// Shared transaction-level BIP141 sigop accounting.
 mod sigops;
@@ -173,8 +171,7 @@ pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
         return INITIAL_SUBSIDY_SATS;
     }
     let halvings = height / halving_interval;
-    // Core stops at 64 shifts; past that the subsidy is zero and shifting a
-    // u64 by 64 or more is undefined.
+
     if halvings >= 64 {
         return 0;
     }

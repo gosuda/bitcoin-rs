@@ -1,5 +1,3 @@
-//! Checkpoint codec and immutable-publication regressions.
-
 use super::headers;
 
 use std::fs;

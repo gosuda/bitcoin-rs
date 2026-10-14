@@ -1,11 +1,3 @@
-//! Wallet-facing consumer: spawn the public `bitcoin-rs` binary and talk
-//! only HTTP (Esplora + JSON-RPC) using rust-bitcoin.
-//!
-//! This is the executable proof of `docs/contracts/wallet-facing.md`. It
-//! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! The named out-of-repo consumer is `gosuda/bitcoin-wallet`
-//! (`btcw -u`).
-
 use std::cell::RefCell;
 use std::error::Error;
 use std::io::{BufRead as _, BufReader, Read};
@@ -105,8 +97,6 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "tip must have moved past genesis"
     );
 
-    // API-26: coinbase-only blocks leave the estimator with no observations,
-    // so targets are honestly omitted until real wallet traffic confirms.
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").is_none(),
@@ -151,10 +141,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         Some(false),
         "GET /api/tx/{{id}}/status must report unconfirmed: {tx_status}"
     );
-    // Confirming the first spend matures the height-2 coinbase, so a second
-    // spend confirms in the next block. API-26 needs more than a lone fresh
-    // observation (one sample decays below the minimum), and two
-    // confirmations at full success rate honestly qualify the estimate.
+
     client.mine(Coinbase::AnyoneCanSpend)?;
     wait_for_confirmation(&client, txid.trim())?;
     let second_hex = spend_anyone_can_spend(&client, 2, &p2wpkh)?;
@@ -413,9 +400,7 @@ fn locked_string(logs: &Mutex<String>) -> String {
 
 struct Client {
     logs: Arc<Mutex<String>>,
-    // The shared keep-alive transport from the harness crate: a request
-    // that reached the server is never resent, which matters because the
-    // POST /api/tx broadcast is not idempotent.
+
     conn: RefCell<Connection>,
 }
 
@@ -565,8 +550,7 @@ fn assert_esplora_namespace(
         160,
         "GET /api/block/{{hash}}/header must return 80-byte header hex: {header}"
     );
-    // API-26 (see above): no confirmed wallet traffic exists yet at this
-    // point, so the 6-block target must still be omitted here.
+
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").is_none(),
@@ -669,11 +653,6 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
 }
 
 fn spend_anyone_can_spend(client: &Client, height: u32, payout: &ScriptBuf) -> TestResult<String> {
-    // The coinbase at `height` is anyone-can-spend (`OP_TRUE`) and must be
-    // mature under the current tip. The default binary's portable interpreter
-    // verifies that class; it does not verify P2WPKH, and the node holds no
-    // keys. A wallet would sign here. Broadcast still goes through the public
-    // `POST /api/tx` path, paying a standard P2WPKH so policy accepts the output.
     let block_hash = client.esplora_text(&format!("/api/block-height/{height}"))?;
     let txid_hex = client.esplora_text(&format!("/api/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;

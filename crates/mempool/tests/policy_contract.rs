@@ -1,14 +1,3 @@
-//! Mempool policy compatibility contract: every policy row in
-//! `docs/policies/mempool-policy.md` cites one fixture here (or in
-//! `crates/rpc/tests/policy_contract.rs`).
-//!
-//! Fixtures in this file assert the mutating pool-side verdict. The preview-side
-//! verdicts retired with the removed `evaluate_package_acceptance` helper are now
-//! exercised through the real `MempoolGateway` preview path in
-//! `crates/rpc/tests/policy_contract.rs`; the missing-inputs row keeps a direct
-//! mempool-surface preview fixture below.
-//!
-//! Contract clause: `docs/contracts/mempool-policy.md` `POL-01`.
 #![deny(clippy::expect_used)]
 
 extern crate alloc;
@@ -152,10 +141,6 @@ fn configured_min_relay_floor_overrides_the_default() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// BIP125 replacement policy
-// ---------------------------------------------------------------------------
-
 /// Original (signaling or not) plus a descendant, both at 2000 sat/kvB.
 struct ConflictFixture {
     pool: Mempool,
@@ -164,7 +149,6 @@ struct ConflictFixture {
 }
 
 fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
-    // `ENABLE_RBF_NO_LOCKTIME` (BIP125 signal) is 0xFFFFFFFD.
     let sequence = if signaling {
         0xFF_FF_FF_FD
     } else {
@@ -412,10 +396,6 @@ fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// BIP68 sequence locks and coinbase maturity at admission (policy §3, §5)
-// ---------------------------------------------------------------------------
 
 /// Confirmed chain facts for finality fixtures: one snapshot height, tip
 /// median-time-past, CSV activation, and per-prevout metadata rows, mirroring

@@ -1,5 +1,3 @@
-//! Golden block fixture tests: native decode, block hash, and txids against
-//! blockstream-recorded values.
 use std::str::FromStr;
 
 use bitcoin_rs_primitives::{Block as PrimitiveBlock, BlockHash, Txid, Wtxid, deserialize};
@@ -100,9 +98,7 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
                 *expected_txid,
                 "height {height} tx index {index}"
             );
-            // BIP141: the wtxid of a transaction without witness data equals its
-            // txid; with witness data it is the double SHA-256 of the full
-            // serialization. Both sides come from independent derivations.
+
             let expected_wtxid = expected_wtxids[index];
             if !tx.has_witness() {
                 assert_eq!(

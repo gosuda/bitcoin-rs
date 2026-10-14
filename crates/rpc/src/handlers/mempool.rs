@@ -15,20 +15,13 @@ use corepc_types::v31;
 
 pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    // One typed policy record derived under this handler's read guard from
-    // the pool's live limits and the enforced standardness settings; the
-    // handler holds no policy literals of its own, so the response cannot
-    // disagree with the pool even when its limits are reconfigured at
-    // runtime.
+
     let pool = ctx.mempool.gateway.read();
     let policy = pool.policy_snapshot();
     let stats = pool.stats();
     let maxmempool = pool.limits.max_total_bytes;
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
-    // `mempoolminfee` rises above `minrelaytxfee` under size pressure. The
-    // eviction crate owns that heuristic; this handler only reports it, so
-    // the quoted floor cannot drift from the one the admission preview
-    // enforces.
+
     let mempool_min_fee_sat_per_kvb = bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb(
         &pool,
         policy.incremental_relay_fee_sat_per_kvb,
@@ -47,7 +40,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         full_rbf: policy.full_rbf,
         permit_bare_multisig: policy.permit_bare_multisig,
         max_data_carrier_size: policy.max_data_carrier_size(),
-        // Both fields come from the cluster limits enforced by admission.
+
         limit_cluster_count: i64::from(policy.cluster_count),
         limit_cluster_size: i64_saturated(policy.cluster_size_vbytes),
         optimal: policy.optimal,
@@ -75,9 +68,7 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
     let bound = spending_prevout_arguments(params)?;
     let array = super::params_array(bound.as_ref())?;
     super::ensure_at_most_params(bound.as_ref(), 2)?;
-    // Binding fills omitted positions with null. Preserve this method's
-    // existing missing-outputs error without conflating it with an explicit
-    // null supplied by the caller. Name/collision validation has already run.
+
     if params.is_object()
         && params.get("outputs").is_none()
         && params
@@ -166,7 +157,7 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
             )));
         }
         Ok(v31::GetTxSpendingPrevoutItem {
-            // Core echoes the caller's spelling, including uppercase hex.
+
             txid: txid.to_owned(),
             vout: outpoint.vout,
             spending_txid: spender.as_ref().map(|(txid, _)| txid.to_string()),
@@ -249,8 +240,6 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let verbose = optional_bool(params, 0, false)?;
     let include_sequence = optional_bool(params, 1, false)?;
     if verbose && include_sequence {
-        // Core's MempoolToJSON rejects this combination with
-        // RPC_INVALID_PARAMETER; the REST twin enforces the same rule.
         return Err(RpcError::InvalidParams(
             "Verbose results cannot contain mempool sequence values.",
         ));
@@ -363,8 +352,6 @@ fn mempool_entry_typed(
         )
     });
 
-    // No cluster diagram is tracked, so `chunk*` fields approximate a
-    // singleton cluster: the transaction's own weight and fee.
     let fees = v31::MempoolEntryFees {
         base: sat_to_btc(entry.fee),
         modified: signed_sat_to_btc(entry.modified_fee()),
@@ -413,7 +400,7 @@ mod mempoolminfee_pressure_tests {
     #[test]
     fn mempoolminfee_equals_minrelay_when_pool_below_pressure() {
         let ctx = Arc::new(Context::new());
-        // Empty pool, default limits: mempoolminfee == minrelaytxfee.
+
         let value =
             getmempoolinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getmempoolinfo: {err}"));
         let Some(mempool_min) = value.get("mempoolminfee").and_then(JsonValueTrait::as_f64) else {
@@ -422,7 +409,7 @@ mod mempoolminfee_pressure_tests {
         let Some(min_relay) = value.get("minrelaytxfee").and_then(JsonValueTrait::as_f64) else {
             panic!("minrelaytxfee missing");
         };
-        // Both should equal the default 0.00001 BTC/kvB (1000 sat/kvB).
+
         assert!((mempool_min - min_relay).abs() < 1e-9);
     }
 }
@@ -452,7 +439,6 @@ mod tests {
             panic!("minrelaytxfee missing: {result:?}");
         };
 
-        // 1000 sat/kvB / 100_000_000 = 0.00001
         assert!(
             (min_relay - 0.00001).abs() < 1e-9,
             "expected ~0.00001, got {min_relay}"
@@ -510,8 +496,6 @@ mod tests {
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
 
-        // Core `policy.h`: DEFAULT_CLUSTER_LIMIT{64},
-        // DEFAULT_CLUSTER_SIZE_LIMIT_KVB{101} expressed in vbytes.
         assert_eq!(
             result
                 .get("limitclustercount")
@@ -587,10 +571,7 @@ mod tests {
         let result = handler
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
-        // Core's getmempoolinfo carries no mempool_sequence; the sequence
-        // counter belongs to `getrawmempool` with sequence=true. The pinned
-        // v31::GetMempoolInfo shape matches, and this defends against a
-        // hand-built field reappearing.
+
         assert!(
             result.get("mempool_sequence").is_none(),
             "mempool_sequence must stay absent from getmempoolinfo: {result:?}"
@@ -604,9 +585,7 @@ mod tests {
         let result = handler
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
-        // The enforced defaults: bare multisig permitted, the 83-byte
-        // nulldata budget, the cluster limits admission enforces, and the
-        // eviction-floor increment.
+
         assert_eq!(
             result
                 .get("permitbaremultisig")
@@ -642,7 +621,7 @@ mod tests {
             panic!("incrementalrelayfee missing: {result:?}");
         };
         assert!((incremental - 0.00001).abs() < 1e-12);
-        // The projection follows the pool's signal-independent replacement policy.
+
         assert_eq!(
             result.get("fullrbf").and_then(JsonValueTrait::as_bool),
             Some(true)
@@ -652,10 +631,7 @@ mod tests {
     #[test]
     fn getmempoolinfo_policy_follows_the_configured_pool_limits() {
         let ctx = Arc::new(Context::new());
-        // Reconfigure the live pool's limits after composition, the way
-        // `policy_contract.rs` reconfigures floors mid-test: the per-guard
-        // derivation must quote them on the next call, never a stale
-        // composition-time copy.
+
         ctx.mempool.gateway.pool().write().limits.cluster_count = 7;
         ctx.mempool
             .gateway
@@ -667,8 +643,7 @@ mod tests {
         let result = handler
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
-        // The cluster fields follow the configured cluster limits; unrelated
-        // defaults stay untouched.
+
         assert_eq!(
             result
                 .get("limitclustercount")
@@ -719,8 +694,6 @@ mod tests {
 
     #[test]
     fn getrawmempool_verbose_with_sequence_is_rejected() {
-        // Core's MempoolToJSON rejects verbose=true with mempool_sequence=true
-        // with RPC_INVALID_PARAMETER. The REST twin enforces the same rule.
         let ctx = Arc::new(Context::new());
         let handler = crate::Handler::new(Arc::clone(&ctx));
         let error = handler
@@ -1123,11 +1096,6 @@ mod spentby_tests {
             5,
         );
 
-        // `spentby` is rendered in txid order, but the spend index answers in
-        // `EntryId` — that is, insertion — order. Insert the root's two spenders
-        // highest-txid-first so the two orders are opposite: a rendering that
-        // forgets to sort then produces a visibly different list, instead of
-        // passing because the fixture happened to be inserted in order already.
         let root_spenders = if child_a.txid() > child_b.txid() {
             [child_a, child_b]
         } else {

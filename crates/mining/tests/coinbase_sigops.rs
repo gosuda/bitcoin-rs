@@ -1,9 +1,3 @@
-//! BIP141 coinbase reservation and complete-block sigop-cost boundaries.
-//!
-//! Core 31.1 `GetTransactionSigOpCost` scales legacy operations by four,
-//! then returns immediately for coinbase. rust-bitcoin supplies an independent
-//! transaction-cost oracle; admitted snapshot costs are already scaled.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
@@ -35,10 +29,7 @@ fn sigop_limited(segwit_active: bool, max_sigops: u64) -> CandidateContext {
 #[test]
 fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
     let snapshot = snapshot(1, vec![]);
-    // Core uses GetSigOpCount(false) for the legacy component, including
-    // coinbase outputs: OP_1 CHECKMULTISIG counts 20 operations, not one.
-    // GetTransactionSigOpCost multiplies by four and returns for coinbase.
-    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp#L112-L153
+
     let cases = [(vec![0x51], 0), (p2pkh(), 4), (vec![0x51, 0xae], 80)];
     for segwit_active in [false, true] {
         for (payout, expected) in &cases {
@@ -105,8 +96,7 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
                 .sum::<u64>();
             assert_eq!(actual_cost, 12);
         }
-        // The fee owner joins this high-fee child with its low-fee parent.
-        // One less unit must exclude both, while ordered assembly must refuse.
+
         let limited = sigop_limited(segwit_active, 11);
         let selected = assemble_candidate(&limited, &snapshot, &payout)?;
         assert!(selected.transactions.is_empty());

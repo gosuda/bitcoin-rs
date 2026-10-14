@@ -1,5 +1,3 @@
-//! Canonical header-checkpoint representation and validation.
-
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, accept_headers};
@@ -241,10 +239,7 @@ pub(crate) fn read_headers<R: Read + Seek>(
         reader.read_exact(&mut encoded)?;
         let header: Header = deserialize(&encoded)
             .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
-        // Historical replay: already-committed checkpoint headers must not
-        // become invalid solely because the host clock rolled backwards after
-        // publication. All other contextual checks (PoW, nBits, MTP, version
-        // floors, ancestry, chainwork) still run.
+
         let ids = accept_headers(
             &mut tree,
             core::slice::from_ref(&header),

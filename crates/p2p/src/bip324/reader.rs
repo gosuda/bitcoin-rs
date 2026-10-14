@@ -1,10 +1,3 @@
-//! Resumable reads of BIP324 packets from a blocking stream.
-//!
-//! Peer sockets poll with a short read timeout. A `TimedOut` or `WouldBlock`
-//! read error leaves every byte already consumed in the reader, so the caller
-//! retries and the same packet continues. Every other error is fatal for the
-//! connection.
-
 use std::io::Read;
 
 use bytes::Bytes;

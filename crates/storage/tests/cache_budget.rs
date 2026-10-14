@@ -1,5 +1,3 @@
-//! Contract tests for the process cache-budget split.
-
 use bitcoin_rs_storage::cache_budget::{
     CHAINSTATE_CACHE_SHARE_PCT, MAX_DBCACHE_BYTES, MIN_DBCACHE_BYTES, TXINDEX_CACHE_SHARE_PCT,
     clamp_dbcache_bytes, split_cache_budget,

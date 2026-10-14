@@ -1,5 +1,3 @@
-//! Focused behavioral tests for the node-owned mining coordinator.
-
 use bitcoin_rs_chain::{compact_is_met_by, regtest_fixture};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
@@ -38,7 +36,7 @@ fn open_network(network: Network) -> anyhow::Result<NodeState> {
     let mut config = NodeConfig::default_for_network(network);
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
-    // NodeState retains open files under data_dir for the test duration.
+
     std::mem::forget(dir);
     NodeState::open(config, None)
 }
@@ -57,7 +55,6 @@ fn regtest_mining() -> anyhow::Result<(NodeState, MiningCoordinator)> {
 }
 
 fn coordinator(state: &NodeState) -> MiningCoordinator {
-    // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -265,7 +262,7 @@ fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
 }
 
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-06
+
 fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
     match mining.network_hash_ps(0, -1) {
@@ -506,7 +503,6 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     Ok(())
 }
 
-// CONTRACT: API-19
 #[test]
 fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -528,7 +524,6 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-19
 #[test]
 fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -545,7 +540,6 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -577,7 +571,6 @@ fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyh
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -614,7 +607,6 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -897,8 +889,7 @@ fn submit_header_rejects_bad_version_after_bip34_activation() -> anyhow::Result<
     let genesis = Network::Regtest.genesis_block();
     let base_time = genesis.header.time;
     let mut prev = genesis.block_hash();
-    // Regtest enforces the BIP34 version floor from candidate height 500
-    // (Core `DeploymentActiveAfter`), so heights 1..=499 still carry version 1.
+
     for height in 1..=499_u32 {
         let header = mined_regtest_header(prev, base_time + height * 600, 1);
         mining.submit_header(header)?;
@@ -934,7 +925,7 @@ fn mined_regtest_header(prev: BlockHash, time: u32, version: i32) -> Header {
 fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
     let mut block = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
-    // Ensure PoW still valid for the mutated prev hash by remine.
+
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
     block.header.nonce = 0;
@@ -970,9 +961,7 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
     let waiter =
         thread::spawn(move || mining_wait.get_block_template(template_request(Some(long_poll_id))));
     thread::sleep(Duration::from_millis(50));
-    // Bounded wait slices must observe the flag even without a direct wake:
-    // correctness does not depend on a wake notification, so the coordinator
-    // carries none.
+
     shutdown.store(true, Ordering::Release);
     let outcome = waiter
         .join()
@@ -1010,7 +999,6 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-07
 #[test]
 fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -1025,8 +1013,7 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
         rules: Vec::new(),
         long_poll_id: None,
     })?);
-    // API-11 advertises only implemented server capabilities,
-    // and omits Signet metadata on networks that are not Signet.
+
     assert_eq!(
         template
             .capabilities
@@ -1040,15 +1027,13 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-07
 #[test]
 fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
     let state = open_at_genesis(Network::Signet)?;
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    // Bitcoin Core's Signet getblocktemplate contract requires the signet rule
-    // and challenge metadata for Signet templates.
+
     assert!(template.rules.iter().any(|rule| rule.as_str() == "signet"));
     assert!(template.signet.is_some());
     Ok(())
@@ -1249,7 +1234,6 @@ fn propose_block(
     }
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -1262,7 +1246,6 @@ fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
@@ -1289,7 +1272,6 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
@@ -1337,7 +1319,6 @@ fn disconnect_applied(state: &NodeState, block: &Block) -> anyhow::Result<()> {
     .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -1374,7 +1355,6 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -1399,7 +1379,6 @@ fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -1458,16 +1437,6 @@ fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance tests: mempool-sequence wake remainder (ING-R5)
-// ---------------------------------------------------------------------------
-//
-// `publish_generation_from` builds the generation key from `applied_tip` plus
-// a caller-supplied sequence and never takes the mempool read lock. The
-// mempool observer routes through it to avoid a reentrant pool read that can
-// deadlock under the gateway's publish mutex. Long-poll waiters must return
-// immediately on that wake, not wait LONG_POLL_SLICE (1 s).
-
 /// Two threads looping `publish_generation` (tip path) and
 /// `publish_generation_from` (mempool path) must not deadlock within a 200 ms
 /// watchdog.
@@ -1496,7 +1465,6 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> anyhow::Result<()> {
         }
     });
 
-    // 200 ms watchdog — if either thread is stuck, the joins below time out.
     thread::sleep(Duration::from_millis(200));
     stop.store(true, Ordering::Relaxed);
 
@@ -1515,8 +1483,6 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> anyhow::Result<()> {
 fn publish_generation_from_does_not_take_mempool_lock() -> anyhow::Result<()> {
     let (state, mining) = regtest_mining()?;
 
-    // Hold the mempool write lock for the duration of the call — a reentrant
-    // read would deadlock (parking_lot RwLock is not reentrant).
     let mempool = state.mempool();
     let _write_guard = mempool.write();
 
@@ -1548,8 +1514,6 @@ fn publish_generation_from_does_not_take_mempool_lock() -> anyhow::Result<()> {
 fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
 
-    // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
-    // before returning on a mempool-only change. The fix returns immediately.
     let mining = Arc::new(MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -1573,7 +1537,6 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     started_rx.recv_timeout(Duration::from_secs(2))?;
     thread::sleep(Duration::from_millis(50));
 
-    // Advance the mempool sequence and wake via the lock-free path.
     advance_mempool_sequence(&state)?;
     let seq = state.mempool().read().sequence_number();
     mining.publish_generation_from(seq);
@@ -1650,7 +1613,7 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
 /// API-05: decoded generateblock hex is included without mempool lookup.
 /// Invalid spends fail Core `TestBlockValidity` before the nonce search.
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-27
+
 fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<()> {
     let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
@@ -1741,8 +1704,7 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
 #[test]
 fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
-    // The unreachable branch is valid to spend but counts 199 * 20 sigops.
-    // IF + 199 CHECKMULTISIG + ENDIF also fits the 201-op execution limit.
+
     let redeem = [vec![0x00, 0x63], vec![0xae; 199], vec![0x68, 0x51]].concat();
     let payout = bitcoin::ScriptBuf::from_bytes(redeem.clone())
         .to_p2sh()
@@ -1780,7 +1742,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: inputs[..5].to_vec(),
-        // 5 * (199 * 20 * 4) + 100 * 4 = exactly 80,000 cost units.
+
         outputs: vec![TxOut {
             value: Amount::from_sat(1_000),
             script_pubkey: vec![0xac; 100].into(),

@@ -1,6 +1,3 @@
-//! Integration test: `NodeState` opens the configured storage backend, and
-//! hands it the cache share the process budget allocated to chainstate.
-
 use std::sync::Arc;
 
 use hashbrown::HashMap;

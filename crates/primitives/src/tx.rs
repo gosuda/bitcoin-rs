@@ -1,5 +1,3 @@
-//! Native transaction types and txid/wtxid computation.
-
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -189,7 +187,7 @@ mod tests {
         let tx = native_tx();
 
         let bytes = consensus_bytes(&tx);
-        // version || marker 0x00 || flag 0x01
+
         assert_eq!(&bytes[4..6], &[0x00, 0x01]);
 
         let decoded = deserialize::<Tx>(&bytes).expect("roundtrip");
@@ -206,7 +204,6 @@ mod tests {
         let error = deserialize::<Tx>(&bytes).expect_err("trailing garbage must fail");
         assert_eq!(error, DecodeError::TrailingBytes { remaining: 2 });
 
-        // Without the garbage the same bytes decode cleanly.
         assert_eq!(deserialize::<Tx>(&consensus_bytes(&tx)), Ok(tx));
     }
 }

@@ -1,11 +1,3 @@
-//! Base64 codec for the RPC crate, with one owner for the alphabet.
-//!
-//! Auth header decoding and PSBT rendering previously carried two decoders
-//! whose acceptance rules had drifted. Both surfaces now share these
-//! functions; the decoder accepts exactly the standard alphabet with
-//! canonical padding, so every string one surface rejects the other
-//! rejects too.
-
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Decodes standard-alphabet Base64 with canonical padding.
@@ -30,9 +22,7 @@ pub(crate) fn decode(input: &str) -> Result<Vec<u8>, ()> {
         let last = index + 1 == chunk_count;
         let pad2 = chunk[2] == b'=';
         let pad3 = chunk[3] == b'=';
-        // `pad2` and `pad3` mark the `=` at positions 2 and 3. The pad bits
-        // of the preceding sextet must be zero — Core's decoder (and RFC
-        // 4648 canonical form) rejects encodings that smuggle data there.
+
         if chunk[0] == b'='
             || chunk[1] == b'='
             || pad2 && !pad3

@@ -1,13 +1,7 @@
-//! Applied-chain seam driven by the block-download executor. The
-//! implementation owns applied-tip mutation (node, ARCH-07); the executor
-//! owns download scheduling, staging, and peer policy.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 
-// Header admission is decided by the authoritative tree writer, so its
-// outcome vocabulary belongs to the chain crate; the seam shares it.
 pub use bitcoin_rs_chain::HeaderAdmission;
 pub use bitcoin_rs_chainstate::WindowApplyDisposition;
 pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;

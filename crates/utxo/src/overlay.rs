@@ -1,5 +1,3 @@
-//! Prevout lookups for a window of consecutive blocks, before any of them commit.
-
 use bitcoin_rs_primitives::{Block, OutPoint, Txid};
 use hashbrown::{HashMap, HashSet};
 

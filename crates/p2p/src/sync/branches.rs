@@ -1,5 +1,3 @@
-//! Heavier-branch handoff and committed reorganization body retirement.
-
 use super::BlockSync;
 use super::chain::ReorgError;
 use super::chain::WindowApplyDisposition;
@@ -40,15 +38,12 @@ impl BlockSync {
                 tracing::trace!(height, "block sync: heavier branch still downloading");
             }
             Err(error @ (ReorgError::Fatal(_) | ReorgError::RestorationFailed { .. })) => {
-                // The implementation has already closed admission and
-                // requested shutdown.
                 tracing::error!(
                     %error,
                     "block sync: branch switch requires chainstate recovery, shutting down"
                 );
             }
             Err(error @ ReorgError::TransitionSettlement { .. }) => {
-                // The reorg owner has closed admission and requested shutdown.
                 tracing::error!(%error, "block sync: reorg generation settlement failed");
             }
             Err(error @ ReorgError::CheckpointSettlement { .. }) => {
@@ -63,16 +58,11 @@ impl BlockSync {
                 invalidated,
                 ..
             }) => {
-                // Capture the delivering connection before the purge drops
-                // the staged entry that carries it.
                 let failed_source = self.scheduler.lock().stager.staged_source(&hash);
                 if disposition == WindowApplyDisposition::Permanent {
                     self.punish_permanent_delivery_source(failed_source, hash);
                 }
                 if disposition == WindowApplyDisposition::BodyMutated {
-                    // Only the delivered body is bad. Keep the header branch
-                    // and its descendants, but free this slot for a new body;
-                    // the tree-owned height keeps the retry cursor exact.
                     let height = {
                         let tree = self.chain.block_tree();
                         tree.lookup(hash)
@@ -85,8 +75,7 @@ impl BlockSync {
                         .window
                         .requeue_for_retry(&hash, height, Instant::now());
                 }
-                // Invalid descendants cannot occupy bounded download state or
-                // they can prevent the newly selected valid branch from refilling.
+
                 self.purge_invalidated(&invalidated);
                 tracing::warn!(
                     failed_hash = %hash,
@@ -152,8 +141,7 @@ impl BlockSync {
         let now = Instant::now();
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
-            // Invalidated hashes are never re-requested: release the pending
-            // entry without rewinding the request cursor.
+
             scheduler.window.release_pending(hash, now);
         }
     }
@@ -177,7 +165,7 @@ impl BlockSync {
         }
         let tree = self.chain.block_tree();
         let applied_id = tree.lookup(applied.hash)?;
-        // Normal IBD extends the applied chain.
+
         let applied_height = tree.node(applied_id).ok()?.height;
         if Self::is_ancestor_at_height(&tree, applied_id, applied_height, chain_tip.tip_id) {
             return None;

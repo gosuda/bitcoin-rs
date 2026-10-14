@@ -1,7 +1,3 @@
-//! Backend metric contracts: one logical write is counted exactly once per
-//! durability path, and explicit budgeted cache sizes are configured verbatim
-//! (no backend floor may raise a share above its allocation).
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use hashbrown::HashMap;
@@ -287,8 +283,7 @@ fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::e
             panic!("rocksdb durable write failed")
         };
     });
-    // Each durability path counts exactly once: write_deferred must not leak a
-    // second increment through the default write path it delegates to.
+
     assert_eq!(recorder.counter(&writes_total("rocksdb", "default")), 1);
     assert_eq!(recorder.counter(&writes_total("rocksdb", "deferred")), 1);
     assert_eq!(recorder.counter(&writes_total("rocksdb", "durable")), 1);

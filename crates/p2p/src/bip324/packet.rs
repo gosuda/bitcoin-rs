@@ -1,8 +1,3 @@
-//! BIP324 packet sealing and opening.
-//!
-//! A packet is the encrypted 3-byte contents length, then one header byte and
-//! the contents sealed together under the packet cipher, then the tag.
-
 use super::cipher::{AuthFailed, FsChaCha20, FsChaCha20Poly1305, LENGTH_FIELD_LEN, TAG_LEN};
 
 /// Bytes of the header that precedes the contents inside the sealed body.

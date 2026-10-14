@@ -414,7 +414,7 @@ mod tests {
         )?;
         let mut verack = Vec::new();
         write_message(&mut verack, magic, &Message::Verack)?;
-        // Each frame stops arriving part-way for longer than one socket poll.
+
         let stream = StallingStream::new([
             Inbound::Bytes(version[..30].to_vec()),
             Inbound::Stall(io::ErrorKind::TimedOut),

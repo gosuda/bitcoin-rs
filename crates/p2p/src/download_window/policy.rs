@@ -1,8 +1,3 @@
-//! Peer-eligibility and budget policy for the block download window.
-//!
-//! These constants and predicates mirror Core's `net_processing` download
-//! policy. [`super::DownloadWindow`] is the only caller that turns them into
-//! requests.
 use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
@@ -17,9 +12,6 @@ use crate::connection::PeerSource;
 
 use super::SyncBudget;
 use crate::PeerInfo;
-// ---------------------------------------------------------------------------
-// Download-policy constants
-// ---------------------------------------------------------------------------
 
 /// Core's `BLOCK_DOWNLOAD_TIMEOUT_BASE` in half-target-spacing units
 /// (`net_processing.cpp:153-168`): an owner with no other validated-block
@@ -70,16 +62,7 @@ const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// Consensus-maximum serialized block size in bytes: a witness-serialized
 /// block cannot exceed its 4,000,000 weight, so no valid block is larger.
 const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
-// Staller-arming reachability invariant (Phase 1 of the staller arming
-// redesign): the stall episode arms on a staged-count fraction
-// (`received >= max_received_blocks / 2`, `window_blocked_on` term 3), so the
-// staged byte budget must admit at least half the staged count window even at
-// consensus-maximum block size. If a depth bump (e.g. the w256 re-attempt)
-// outgrows the byte budget, byte backpressure would silently hold the staged
-// count below the arming fraction and byte-shaped wedges would stop arming at
-// production budgets, degrading to the 60s pending-timeout fallback. Rebalance
-// both constants together; this assertion turns silent drift into a build
-// failure. (Margin at 256: 256 * 2 MiB >= 128 * 4_000_000, ~4.9%.)
+
 const _: () = assert!(
     RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
     "staged byte budget must admit half the staged count window at max block size"
@@ -157,11 +140,6 @@ const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
 /// assignments this cheaply.
 const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
 
-// The apply-side cache horizon (`expected_apply_horizon`) stays within the
-// inline capacity below only because the staging budget equals the in-flight
-// budget; a drift would silently spill every cached run to the heap. The
-// byte-budget pair needs no twin assertion: `RECEIVED_BLOCK_BYTE_BUDGET` is
-// `PENDING_BYTE_BUDGET` by definition.
 const _: () = assert!(PENDING_BUDGET == RECEIVED_BLOCK_BUDGET);
 const _: () = assert!(
     MIN_PEERS_FOR_FANOUT * MAX_BLOCKS_IN_TRANSIT_PER_PEER <= PENDING_BUDGET,
@@ -184,10 +162,6 @@ pub(crate) const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
 const fn at_least_one(value: usize) -> usize {
     if value == 0 { 1 } else { value }
 }
-
-// ---------------------------------------------------------------------------
-// Peer-assignment policy types
-// ---------------------------------------------------------------------------
 
 /// A peer selected for block-header or block-body synchronization.
 #[derive(Clone, Copy, Debug)]
@@ -273,8 +247,7 @@ pub(crate) fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPol
     if peer.services & network != 0 {
         return true;
     }
-    // Core applies the retained window only to `NODE_NETWORK_LIMITED`
-    // (`net_processing.cpp:1637`): a peer without it serves no blocks.
+
     if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
         return false;
     }
@@ -310,7 +283,6 @@ pub(crate) fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u
         return 0;
     }
     if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
-        // No block-serving flag at all: nothing is servable.
         return u32::MAX;
     }
     u32::try_from(peer.best_known_height)

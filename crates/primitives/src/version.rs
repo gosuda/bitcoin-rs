@@ -1,5 +1,3 @@
-//! Workspace release version surfaced for wire and RPC user-agent strings.
-
 /// Current `bitcoin-rs` release version (from `[workspace.package].version`).
 pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 

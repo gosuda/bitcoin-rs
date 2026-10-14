@@ -1,11 +1,3 @@
-//! Fixed ceilings for the Core parity corpus and its replay transport.
-//!
-//! Every bound here is enforced, not documented: the loader refuses a corpus
-//! that exceeds a fixture, count, total-byte or nesting ceiling, and the HTTP
-//! decoder refuses a response that exceeds a status-line, header or body
-//! ceiling. A stalled peer is bounded by the socket deadlines rather than by
-//! waiting for end of stream.
-
 use core::time::Duration;
 
 /// Production JSON-RPC body ceiling (`crates/rpc/src/server.rs`); the replay

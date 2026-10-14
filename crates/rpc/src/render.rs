@@ -1,8 +1,3 @@
-//! Canonical Bitcoin Core block and header JSON projections.
-//!
-//! Callers supply applied-chain facts. This module never queries node state and
-//! does not choose JSON-RPC versus REST transport policy.
-
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
 use sonic_rs::{Value, json};

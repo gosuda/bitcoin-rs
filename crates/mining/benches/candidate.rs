@@ -1,9 +1,3 @@
-//! End-to-end mining candidate benchmarks for package selection and coinbase finish.
-//!
-//! Each iteration captures a mining snapshot from the mempool and assembles the
-//! observable candidate result. Budgets stay unset until a measured p95 plus
-//! run-to-run noise is recorded.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 #![allow(clippy::expect_used)]
 

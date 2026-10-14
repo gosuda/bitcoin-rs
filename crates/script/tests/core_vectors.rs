@@ -1,31 +1,3 @@
-//! Differential vector harness over Bitcoin Core's script consensus test data.
-//!
-//! Feeds Core's `script_tests.json`, `tx_valid.json` and `tx_invalid.json`
-//! through the native [`Interpreter`] and (when `--features kernel` is enabled)
-//! the bitcoinkernel oracle, then compares verdicts. `sighash.json` is graded
-//! by `checker::tests::sighash_json_corpus_legacy_path`, which reaches the
-//! crate-private `remove_all` this harness cannot call.
-//!
-//! ## Anti-vacuity
-//!
-//! Every corpus prints four counts: rows parsed, rows executed, rows skipped
-//! (with a one-line reason per category), and rows failed. The native columns
-//! pin those counts, so a row that silently stops executing fails the lane.
-//!
-//! ## Two columns
-//!
-//! The native evaluator runs the legacy, witness-v0 and taproot rows. Each column
-//! pins its remaining mismatch count, so a shrink lowers the constant with
-//! evidence and a growth fails the lane. The kernel column stays available
-//! under `--features kernel` as an oracle for the same rows.
-//!
-//! Run:
-//!
-//! ```sh
-//! cargo test -p bitcoin-rs-script --test core_vectors
-//! cargo test -p bitcoin-rs-script --features kernel --test core_vectors
-//! ```
-
 #![cfg(test)]
 
 use std::str::FromStr;
@@ -42,7 +14,6 @@ use bitcoin_rs_script::{
     Interpreter, PreparedTransaction, ScriptError, VerifyFlags, opcode, push_data, push_int,
 };
 
-// Core error names admitted by the corpus parser; verdicts compare acceptance only.
 static CORE_ERROR_NAMES: &[&str] = &[
     "OK",
     "EVAL_FALSE",
@@ -99,10 +70,6 @@ static CORE_ERROR_NAMES: &[&str] = &[
     "OP_CODESEPARATOR",
     "SIG_FINDANDDELETE",
 ];
-
-// ===========================================================================
-// Core ASM script assembler
-// ===========================================================================
 
 /// Parses a Core test-vector script string into raw bytes.
 ///
@@ -411,10 +378,6 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     Vec::from_hex(hex).map_err(|error| error.to_string())
 }
 
-// ===========================================================================
-// Transaction construction — Core's BuildCrediting/BuildSpending
-// ===========================================================================
-
 fn build_crediting_tx(script_pubkey: &[u8], amount: u64) -> Tx {
     Tx {
         version: 1,
@@ -450,10 +413,6 @@ fn build_spending_tx(script_sig: &[u8], witness: &[Vec<u8>], credit_tx: &Tx) -> 
     }
 }
 
-// ===========================================================================
-// Verdict model
-// ===========================================================================
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
     Accept,
@@ -473,9 +432,6 @@ impl Verdict {
 
     #[cfg(feature = "kernel")]
     fn from_kernel(result: &Result<(), bitcoin_rs_consensus::ConsensusError>) -> Self {
-        // The kernel reports a verdict, not Core's error name, so its column
-        // can prove accept-or-reject parity and nothing about error names.
-        // Infrastructure and setup errors must fail closed (panic), never count as Reject.
         match result {
             Ok(()) => Self::Accept,
             Err(bitcoin_rs_consensus::ConsensusError::Script { .. }) => Self::Reject(None),
@@ -490,10 +446,6 @@ impl Verdict {
         matches!(self, Self::Accept)
     }
 }
-
-// ===========================================================================
-// Counters for anti-vacuity
-// ===========================================================================
 
 #[derive(Default, Debug)]
 struct Counts {
@@ -590,23 +542,6 @@ fn assert_pinned_native_column(
     );
 }
 
-// ===========================================================================
-// Corpus 1: script_tests.json
-// ===========================================================================
-
-// Core's `script_json_test` fills three markers the JSON corpus cannot express
-// as hex (`src/test/script_tests.cpp:925-945`, `:968-974`):
-//
-//   `#SCRIPT# <asm>`            - assemble `<asm>` with ParseScript, push the
-//                                 script bytes as the witness element;
-//   `#CONTROLBLOCK#`            - TaprootBuilder::Add(0, <last element>,
-//                                 TAPROOT_LEAF_TAPSCRIPT) then Finalize(key0),
-//                                 push the resulting control block;
-//   `0x51 0x20 #TAPROOTOUTPUT#` - scriptPubKey becomes OP_1 <output key>.
-//
-// `key0` is the fixed secret `vchKey0` at `script_tests.cpp:183`, the 32-byte
-// big-endian scalar 1.
-
 /// Core's `vchKey0`: the secret scalar the placeholder tree commits to.
 const CORE_TAPROOT_INTERNAL_SECRET: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -660,8 +595,6 @@ fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, S
         .serialize();
     let output_key = spend_info.output_key().serialize();
 
-    // The tree's own merkle root must equal the tapleaf hash this workspace
-    // computes for the same leaf.
     let tapleaf = tapleaf_hash(LeafVersion::TapScript.to_consensus(), leaf_script);
     let core_root = spend_info
         .merkle_root()
@@ -717,11 +650,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             } else if arr.len() >= 4 {
                 (None, 0, 1, 2, 3, 4)
             } else if arr.len() == 1 && arr[0].is_string() {
-                // Core's reader treats a lone string the same way: it is the
-                // corpus's prose (format note, section header), not a test, and
-                // it reports `Bad test` only for other short shapes
-                // (`script_tests.cpp:955-960`). There is no scriptSig,
-                // scriptPubKey, flags, or expected error to assemble.
                 counts.record_skip(SCRIPT_TESTS_PROSE_SKIP);
                 continue;
             } else {
@@ -732,8 +660,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                 continue;
             };
 
-        // The single-leaf tree built for a row's `#SCRIPT#`/`#CONTROLBLOCK#`
-        // markers; `#TAPROOTOUTPUT#` reads the same tree for the scriptPubKey.
         let mut placeholder_tree = None;
         let (witness, amount) = if let Some(wit_arr) = witness_raw {
             let wit = wit_arr
@@ -748,9 +674,7 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                 continue;
             };
             let amount = btc_to_sats(amount_btc);
-            // Core reads the witness element-by-element and fills the two
-            // markers in place, so the assembled stack keeps the corpus order:
-            // [..., leaf script, control block].
+
             let mut items = Vec::new();
             for elem in &wit[..wit.len() - 1] {
                 let Some(s) = elem.as_str() else {
@@ -758,7 +682,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                     continue 'row;
                 };
                 if let Some(asm) = s.strip_prefix(SCRIPT_PLACEHOLDER) {
-                    // Core: `ParseScript(element.substr(SCRIPT_FLAG.size()))`.
                     let leaf = match parse_core_asm(asm) {
                         Ok(script) => script,
                         Err(e) => {
@@ -821,7 +744,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             }
         };
         let script_pubkey = if script_pubkey_str == TAPROOT_OUTPUT_ASM {
-            // Core replaces the whole string with the generated tree's program.
             if let Some(tree) = &placeholder_tree {
                 let mut spk = vec![opcode::OP_PUSHNUM_1, 0x20];
                 spk.extend_from_slice(&tree.output_key);
@@ -914,10 +836,6 @@ fn run_script_tests(
     mismatches
 }
 
-// ===========================================================================
-// Corpus 2 & 3: tx_valid.json / tx_invalid.json
-// ===========================================================================
-
 struct TxVectorRow {
     tx: Tx,
     prevouts: Vec<(OutPoint, TxOut)>,
@@ -981,7 +899,6 @@ fn load_tx_vectors(
             continue;
         };
 
-        // The two tx corpora read the same field in opposite directions.
         let flags = match if expected_accept {
             tx_valid_flags(flags_str)
         } else {
@@ -1053,8 +970,6 @@ fn load_tx_vectors(
             continue;
         }
 
-        // In Core's transaction_tests.cpp, the vector supplies a map of available
-        // UTXOs. Resolved prevouts must match the transaction in input order.
         let mut ordered_prevouts = Vec::with_capacity(tx.inputs.len());
         let mut missing_prevout = false;
         for input in &tx.inputs {
@@ -1095,8 +1010,7 @@ fn verify_native_tx(row: &TxVectorRow) -> Verdict {
         Ok(prepared) => prepared,
         Err(error) => panic!("native harness prevout error: {error}"),
     };
-    // The first failing input decides the row, and its error name is what
-    // a triage reader needs; a bare Reject says nothing.
+
     let mut first_failure = None;
     for input_idx in 0..row.tx.inputs.len() {
         let result = prepared.verify_input(input_idx, row.flags);
@@ -1148,10 +1062,6 @@ fn run_tx_vectors(
     }
     mismatches
 }
-
-// ===========================================================================
-// Helpers
-// ===========================================================================
 
 /// How many mismatch lines to print per corpus.
 ///
@@ -1251,17 +1161,12 @@ fn mismatch_print_limit() -> usize {
 }
 
 fn reference_path(name: &str) -> std::path::PathBuf {
-    // Anchored at this crate rather than the process working directory, so the
-    // corpora resolve identically from the workspace root, from a worktree at
-    // any depth, and from a bare `cargo test -p bitcoin-rs-script`.
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = crate_dir
         .ancestors()
         .find(|dir| dir.join(".references").is_dir())
         .unwrap_or(crate_dir);
-    // The tracked copy is the authority: `.references` is a local checkout of
-    // Core and is not in git, so a CI run that fell back to it would either
-    // fail to find the corpus or grade against a different one.
+
     let candidates = [
         crate_dir.join("../consensus/tests/vectors").join(name),
         workspace_root
@@ -1275,10 +1180,6 @@ fn reference_path(name: &str) -> std::path::PathBuf {
     }
     candidates[0].clone()
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[test]
 #[expect(

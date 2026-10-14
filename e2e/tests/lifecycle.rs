@@ -1,6 +1,3 @@
-//! Node lifecycle E2E: startup identity, readiness, graceful restart,
-//! and config rejection.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -75,8 +72,6 @@ fn restart_preserves_chain_tip() -> Result<()> {
 /// RPC port already held by someone else.
 #[test]
 fn startup_rejects_broken_configuration() -> Result<()> {
-    // The squatter holds the contested port for the whole table so the bind
-    // case cannot accidentally succeed.
     let squatter = std::net::TcpListener::bind("127.0.0.1:0")?;
     let held = squatter.local_addr()?;
     let timeout = Some(Duration::from_secs(30));

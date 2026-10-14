@@ -1,5 +1,3 @@
-//! Bounded script-proof windows, ordered prefix commits, and failure disposition.
-
 use super::connect::{apply_committed_block_admitted, emit_journal_record};
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
@@ -143,9 +141,7 @@ impl WindowGroup {
             "the batch certifies the last staged prefix count"
         );
         let group_blocks = self.pending.len();
-        // Per-group decomposition is a development diagnostic
-        // (`docs/observability.md`): it rides the tracing profile event, not
-        // the metrics API.
+
         tracing::debug!(
             blocks = group_blocks,
             sync_us = group_sync_us,
@@ -155,9 +151,7 @@ impl WindowGroup {
         for pending in &mut self.pending {
             pending.outcome.commit_id = receipt.commit_id;
         }
-        // The journal follows the receipt, block by block, before the
-        // prefix publishes — the same derived-after-durable order as the
-        // single-block path.
+
         for pending in &mut self.pending {
             emit_journal_record(
                 handles,
@@ -165,9 +159,7 @@ impl WindowGroup {
                 pending.outcome.height,
             );
         }
-        // The batch is the receipt; now publish the prefix in order. The
-        // values are the ones the batch certified, so this tail is as
-        // infallible as the single-block publication.
+
         self.staged_bytes = 0;
         let published = self
             .pending
@@ -221,15 +213,10 @@ pub(super) fn apply_window_admitted(
             BlockProvenance::Network,
             PublishMode::Grouped(&mut group),
         ) {
-            // The staged outcome sits in the group with commit id 0; the
-            // flushed copy published below carries the group's id.
             Ok(_) => {}
             Err(source) => {
                 let disposition = classify_apply_error(&source);
                 if disposition == WindowApplyDisposition::Fatal {
-                    // Torn or unreconcilable: the staged prefix was never
-                    // published, and retrying it here would build on state
-                    // recovery has to rebuild first.
                     group.abandon();
                     return Err(WindowApplyError {
                         applied: committed.len(),
@@ -239,19 +226,14 @@ pub(super) fn apply_window_admitted(
                         invalidated: Box::default(),
                     });
                 }
-                // Only permanent failures invalidate: operational failures
-                // (storage, UTXO commit, shutdown) leave the block retryable,
-                // and a body-mutated failure poisons only the delivered body.
+
                 let (invalidated, disposition) = if disposition == WindowApplyDisposition::Permanent
                 {
                     invalidate_permanent_failure(handles, block.block_hash().0)
                 } else {
                     (Box::default(), disposition)
                 };
-                // An invalidation that escalates to Fatal may have left the
-                // tree partially mutated: flushing the staged prefix on top
-                // of it would publish state recovery cannot certify. Abandon
-                // the group and let restart-time recovery reconcile.
+
                 if disposition == WindowApplyDisposition::Fatal {
                     group.abandon();
                     return Err(WindowApplyError {
@@ -262,10 +244,7 @@ pub(super) fn apply_window_admitted(
                         invalidated,
                     });
                 }
-                // The prefix that committed in memory stays committed: flush
-                // its durable group before reporting, so the durable head
-                // and the published tip keep moving together. A flush
-                // failure is the ambiguous-batch case: fatal, never retried.
+
                 flush_group(&mut group, handles, &mut committed)?;
                 return Err(WindowApplyError {
                     applied: committed.len(),
@@ -346,10 +325,8 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::DurableHeadCommit(_)
         | ApplyError::DurableHeadLineage { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. } => Fatal,
-        ApplyError::ProofOfWork { .. } | ApplyError::TargetAboveLimit
-        // Deterministic contextual rejections: the header's branch can
-        // never become valid under these rules, so the subtree is
-        // invalidated rather than retried.
+        ApplyError::ProofOfWork { .. }
+        | ApplyError::TargetAboveLimit
         | ApplyError::Chain(
             bitcoin_rs_chain::ChainError::BadVersion { .. }
             | bitcoin_rs_chain::ChainError::TimewarpAttack { .. }
@@ -362,10 +339,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             | ConsensusError::WitnessNonceSize
             | ConsensusError::WitnessCommitment
             | ConsensusError::UnexpectedWitness => BodyMutated,
-            // An encoding refusal names the delivered bytes, not the
-            // header's validity: the body is dropped and may be
-            // re-fetched from another peer, so it does not invalidate the
-            // subtree the way a consensus failure does.
+
             ConsensusError::Encoding(_)
             | ConsensusError::PrevoutMatrixSize { .. }
             | ConsensusError::PrevoutCount { .. }
@@ -397,10 +371,6 @@ fn prove_window<'a>(
         return Vec::new();
     };
 
-    // Context is captured before any block applies, because applying inserts
-    // headers into the shared tree and would move median-time-past and softfork
-    // state under the later blocks. Each apply re-derives all of it and
-    // compares, so a captured value that turns out wrong costs the batch only.
     let context_started = quanta::Instant::now();
     let mut contexts = Vec::with_capacity(blocks.len());
     {
@@ -426,8 +396,7 @@ fn prove_window<'a>(
                 tree.median_time_past_at(parent_id).unwrap_or(0),
                 block.header.time,
             );
-            // The next block's context needs this one in the tree. Header-first
-            // sync put it there; without it there is no window.
+
             let Some(node_id) = tree.lookup(hash) else {
                 return Vec::new();
             };
@@ -446,9 +415,6 @@ fn prove_window<'a>(
     metrics::histogram!("node.window.context_seconds")
         .record(context_started.elapsed().as_secs_f64());
 
-    // Parsing a block and planning its transactions depends on nothing but that
-    // block, so the window does all of it at once. Only the overlay walk below
-    // is order-dependent, and it is the cheaper half.
     let parse_started = quanta::Instant::now();
     let parsed: Vec<core::result::Result<_, ApplyError>> = blocks
         .par_iter()
@@ -495,20 +461,11 @@ fn prove_window<'a>(
     metrics::histogram!("node.window.prepare_seconds")
         .record(prepare_started.elapsed().as_secs_f64());
 
-    // Cheap structural checks before any script runs.
     for ((block, unit), context) in blocks.iter().zip(prepared.iter_mut()).zip(&contexts) {
-        // The one-pass derivation already reduced these txids through the
-        // production walker; comparing the stored root is the same verdict
-        // without a second tree walk.
         if !unit.view.merkle_root_matches(block.header.merkle_root) {
             return Vec::new();
         }
-        // BIP141 CheckWitnessMalleation window precheck. Under active SegWit a
-        // block with witness data must carry a matching BIP141 commitment and a
-        // 32-byte coinbase reserved nonce. The check consumes the view's cached
-        // witness IDs so a block hashes its transactions as witness IDs exactly
-        // once across the whole window. A commitment-less block without witness
-        // data is valid and is not checked here.
+
         if context
             .flags
             .contains(bitcoin_rs_script::VerifyFlags::WITNESS)
@@ -524,23 +481,11 @@ fn prove_window<'a>(
         }
     }
 
-    // One slot per input block, so a skipped unit leaves a hole rather than
-    // shifting every later block onto the wrong prepared state.
     let mut skipped = vec![false; prepared.len()];
-    // One dispatch for the whole window. The check units borrow the selected
-    // engine's parsed blocks, so they live and die inside this scope, before
-    // anything commits.
+
     {
-        // Each block's checks are built from its own prepared state, so the
-        // window builds them all at once. The overlay walk above already fixed
-        // every prevout, which is what makes this independent per block.
         let checks_started = quanta::Instant::now();
-        // Serial on purpose. Fanning this out measured worse on both axes:
-        // 58.7s wall / 585.2s CPU with it serial against 64.2s / 613.1s
-        // parallel, on the 0..150_000 replay. Each block's preparation is short
-        // enough that the dispatch costs more than it distributes, which is the
-        // same reason the script checks are batched across blocks rather than
-        // split within one.
+
         let mut units = Vec::with_capacity(prepared.len());
         for (index, ((block, unit), context)) in blocks
             .iter()
@@ -548,11 +493,6 @@ fn prove_window<'a>(
             .zip(&contexts)
             .enumerate()
         {
-            // The same predicate the single-block path applies, per block rather
-            // than per window, because the anchor height can fall inside a
-            // window. Without it the batch prepared and executed every unit
-            // before the per-block decision was ever reached, so assume-valid
-            // did nothing at all on the windowed path.
             if handles.scripts_verified_upstream(
                 BlockProvenance::Network,
                 context.height,
@@ -587,9 +527,7 @@ fn prove_window<'a>(
         let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
         let verify_us = verify_started.elapsed();
         metrics::histogram!("node.window.verify_seconds").record(verify_us.as_secs_f64());
-        // Window-stage decomposition is a development diagnostic
-        // (`docs/observability.md`); only the verify hook stays on the
-        // metrics API as the hot-path ledger requires.
+
         tracing::debug!(
             checks_us,
             verify_us = verify_us.as_micros(),

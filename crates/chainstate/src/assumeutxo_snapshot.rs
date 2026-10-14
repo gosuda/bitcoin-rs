@@ -1,5 +1,3 @@
-//! Immutable snapshot input selected only by the authoritative durable head.
-
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -19,8 +17,6 @@ use crate::recovery::{InitialChainstate, ResumeSource};
 
 const DIRECTORY: &str = "assumeutxo";
 
-// Temporary names are only reservation candidates: exclusive creation owns
-// the inode, and collisions never authorize truncating an existing artifact.
 static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
 
 fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> Result<Dir> {
@@ -31,8 +27,7 @@ fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> R
             return Err(error);
         }
         let directory = parent.open_dir_nofollow(name)?;
-        // Retry also certifies an entry left by an earlier failed directory
-        // sync; existence alone is not evidence that its parent is durable.
+
         sync_dir(parent)?;
         Ok(directory)
     }
@@ -53,8 +48,7 @@ fn write_archive(
         match create_file(directory, &temporary) {
             Ok(file) => {
                 let file = file.into_std();
-                // Recovery only reclaims a recognized reservation after taking
-                // this same exclusive lock. Acquire it before writing any bytes.
+
                 if let Err(error) = file.lock() {
                     drop(file);
                     let _ = directory.remove_file(&temporary);
@@ -78,16 +72,13 @@ fn write_archive(
         write(&mut writer)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
-        // Keep the reservation locked until it no longer has a temporary
-        // name; a concurrent recovery pass must not reclaim a live writer.
+
         directory.rename(&temporary, directory, name)?;
         sync_dir(directory)?;
         drop(writer);
         Ok(())
     })();
     if result.is_err() {
-        // Only the exclusively reserved temporary can be removed. If rename
-        // succeeded, this is already absent and the published archive remains.
         let _ = directory.remove_file(&temporary);
     }
     result
@@ -99,9 +90,6 @@ enum ReservationKind {
     Headers,
 }
 
-// Match only the exact, canonical names emitted by write_archive. Unknown
-// files, older operator-visible names such as coins.tmp, and final archives
-// are outside this owner's reclamation surface.
 fn reservation_kind(name: &str) -> Option<ReservationKind> {
     let (kind, suffix) = name
         .strip_prefix(".coins.dat.")
@@ -143,7 +131,7 @@ fn recognized_reservation(
                 {
                     Err(error)
                 }
-                // Unknown formats and unidentifiable fragments are preserved.
+
                 Err(_) => Ok(false),
             }
         }
@@ -213,8 +201,7 @@ fn reclaim_reservation(
         .follow(FollowSymlinks::No)
         .nonblock(true);
     let mut file = directory.open_with(name, &options)?.into_std();
-    // Directory-entry type is only a precheck. Validate the opened inode
-    // before locking or reading; a substituted FIFO must never wait for data.
+
     if !file.metadata()?.is_file() {
         return Ok(false);
     }
@@ -395,7 +382,7 @@ mod tests {
         )?;
         let entry = archive.entries()?.next().context("reservation entry")??;
         assert!(entry.file_type()?.is_file());
-        // Deterministically occupy the actual enumeration/open race boundary.
+
         archive.remove_file(name)?;
         let path = dir
             .path()
@@ -418,8 +405,6 @@ mod tests {
         });
         let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
         let rescue = if observed.is_err() {
-            // Unblock a regressed reader before reporting failure. O_RDWR plus
-            // NONBLOCK prevents this rescue from introducing another FIFO wait.
             let mut options = cap_std::fs::OpenOptions::new();
             options.read(true).write(true).follow(FollowSymlinks::No);
             cap_fs_ext::OpenOptionsSyncExt::nonblock(&mut options, true);
@@ -432,7 +417,7 @@ mod tests {
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("cleanup worker panicked"))?;
-        // Keep queued rescue bytes alive even if the worker started late.
+
         drop(rescue);
         assert!(!observed.context("cleanup blocked on substituted FIFO")??);
         assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());

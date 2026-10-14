@@ -1,5 +1,3 @@
-//! Explicit 10,000-record journal replay performance and memory gate.
-
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

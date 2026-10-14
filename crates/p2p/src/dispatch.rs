@@ -279,7 +279,7 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::Inv(items) => {
             step(peer, message)?;
-            // Evaluated once per `inv`.
+
             let relay_open = tx_relay_open();
             let mut requested = Vec::new();
             for item in items {
@@ -287,9 +287,7 @@ pub fn dispatch_inbound_full<S>(
                     announce_block(hash);
                     continue;
                 }
-                // Only tx-typed vectors are ever requested from an `inv`;
-                // compact, unknown, and error vectors are ignored (Core
-                // `ProcessMessage(INV)`).
+
                 let Some(hash) = inventory_tx_hash(item) else {
                     continue;
                 };
@@ -403,15 +401,10 @@ fn serve_getdata(
         return Ok(());
     }
 
-    // Fast path: no tx inventory — the original block-only behaviour. This
-    // keeps every existing call site (listener, chainless dispatch, tests)
-    // byte-identical until a TxInventory handle is wired in.
     let Some(inv) = tx_inventory else {
         return serve_getdata_blocks(chain, compact_version, items, headroom, send);
     };
 
-    // Item-by-item: tx-typed items resolve through the tx inventory; block
-    // items stream through the chain query behind the headroom gate.
     let mut not_found: Vec<Inventory> = Vec::new();
     for item in items {
         match item {
@@ -436,9 +429,7 @@ fn serve_getdata(
                     not_found.push(*item);
                 }
             }
-            // Block-typed and unknown items: resolve through the chain query
-            // one at a time so headroom is honoured per load and block misses
-            // merge into the single trailing notfound.
+
             block_item => {
                 if let Some(chain) = chain {
                     let outcome = chain.serve_inventory_blocks(

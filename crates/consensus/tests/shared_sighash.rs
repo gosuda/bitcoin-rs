@@ -1,7 +1,3 @@
-//! Shared native aggregates retain the BIP143/BIP341 input context. Digests and
-//! signatures come from the independent rust-bitcoin engine; Core transaction
-//! vectors in the script crate separately exercise the prepared interpreter.
-
 #![expect(clippy::expect_used, reason = "fixed independent-reference fixtures")]
 
 use bitcoin::hashes::Hash as _;
@@ -77,8 +73,6 @@ fn oracle_prevouts(prevouts: &[TxOut]) -> Vec<bitcoin::TxOut> {
 
 #[test]
 fn parallel_shared_digests_match_reference_for_each_input_context() {
-    // The last input has no SINGLE output: legacy's uint256-one, BIP143's
-    // zero hashOutputs and BIP341's typed failure must remain distinct.
     let (tx, prevouts) = fixture(3, 2);
     let reference = oracle_tx(&tx);
     let reference_prevouts = oracle_prevouts(&prevouts);
@@ -104,8 +98,6 @@ fn parallel_shared_digests_match_reference_for_each_input_context() {
                         ),
                     );
                     if mode != Sighash::Default {
-                        // BIP143 receives a selected suffix verbatim, including
-                        // any later unexecuted CODESEPARATOR.
                         let script = bitcoin::Script::from_bytes(&[0x51, 0xab, 0x52]);
                         let value = prevouts[input].value;
                         assert_eq!(
@@ -234,8 +226,7 @@ fn signed_fixture() -> (Tx, Vec<TxOut>) {
         let mode = MODES[index % MODES.len()];
         if index % 4 >= 2 {
             let scriptpath = index % 4 == 3;
-            // Keypath acceptance here uses its existing 64-byte DEFAULT form;
-            // tapscript exercises every explicit mode in the same prepared tx.
+
             let mode = if scriptpath { mode } else { Sighash::Default };
             let annex = [0x50, u8::try_from(index).expect("small index")];
             let digest = oracle
@@ -329,9 +320,7 @@ fn verify_block(
 fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures() {
     let (tx, prevouts) = signed_fixture();
     let mut changed_tx = tx.clone();
-    // Inputs 1 and 41 are SegWit spends. Exchange their independently valid
-    // DER signatures: witness bytes do not change any sibling's digest, unlike
-    // prevout amounts, which also affect non-ANYONECANPAY Taproot inputs.
+
     for (failed_input, signature_input) in [(1, 41), (41, 1)] {
         let mut isolated = tx.clone();
         isolated.inputs[failed_input].witness[0].clone_from(&tx.inputs[signature_input].witness[0]);
@@ -406,8 +395,7 @@ fn prepared_input_preserves_typed_bounds_and_count_precedence() {
 #[test]
 fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
     let (tx, mut outputs) = fixture(3, 2);
-    // Identical, always-true scripts cannot expose wrong row identities during
-    // execution. Preparation must reject the wiring independently of scripts.
+
     for output in &mut outputs {
         *output = TxOut {
             value: Amount::from_sat(1),
@@ -428,7 +416,7 @@ fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
             PreparedTransaction::new(&tx, &bad_rows).err(),
             Some(PrevoutError::Mismatch { input_index })
         );
-        // Even an unavailable backend rejects caller wiring before dispatch.
+
         for engine in [ValidationEngine::Native, ValidationEngine::Kernel] {
             assert_eq!(
                 verify_tx_scripts(&tx, &bad_rows, VerifyFlags::NONE, engine),

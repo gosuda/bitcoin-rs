@@ -1,5 +1,3 @@
-//! Core 31.1 package structure and ephemeral-spend policy.
-
 use bitcoin_rs_primitives::{OutPoint, Tx};
 use hashbrown::HashSet;
 

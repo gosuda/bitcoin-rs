@@ -1,9 +1,3 @@
-//! Runtime owner for the Bitcoin P2P subsystem.
-//!
-//! P2pService owns the mutable network control state and every worker that
-//! acts on it. The node supplies chain read/query and inbound event sinks, but
-//! does not construct listener, dial, DNS, or fixed-peer workers itself.
-
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -334,7 +328,6 @@ impl BannedReader {
         !self.is_noban(ip) && self.discouraged.lock().contains(ip, Instant::now())
     }
 
-    // Only current, typed remote violations at the connection boundary call this.
     pub(crate) fn discourage(&self, ip: std::net::IpAddr) {
         self.discouraged.lock().insert(ip, Instant::now());
     }
@@ -529,8 +522,6 @@ impl P2pService {
         listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
         outbound: Option<JoinHandle<()>>,
     ) {
-        // Leave the start-scoped token asserted. Retrying start installs a
-        // new token; resetting this one would un-cancel leftover workers.
         self.session_cancel.lock().store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
         self.peer_table.cancel_all();
@@ -565,8 +556,7 @@ impl P2pService {
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
                 let mut active: HashMap<SocketAddr, ActiveOutbound> = HashMap::new();
-                // Automatic dials that arrived while the automatic cap was
-                // full, retried in order once a slot opens.
+
                 let mut parked: VecDeque<OutboundDial> = VecDeque::new();
                 let mut handles = Vec::new();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
@@ -594,14 +584,7 @@ impl P2pService {
                         .block_sync
                         .as_ref()
                         .is_some_and(|sync| sync.allow_extra_full_relay_dial());
-                    // Manual dials bypass admission and do not consume
-                    // automatic slots. Automatic dials at capacity are
-                    // parked and retried in order once a slot opens. When
-                    // the parked queue is full, the request is shed and its
-                    // Pending selection is cleared so the book can retry an
-                    // address that was never dialed. A stale tip raises the
-                    // automatic cap by one so an extra full-relay peer can
-                    // form beside a full slot set.
+
                     for _ in 0..parked.len() {
                         let Some(dial) = parked.pop_front() else { break; };
                         if !dial_has_capacity(&dial, &active, active_limit, block_relay_slots, extra_dial) {
@@ -1053,9 +1036,7 @@ fn spawn_feeler(
     {
         return;
     }
-    // TCP presence is separate from queued/in-flight work. Core's
-    // AlreadyConnectedToAddress may Good a TCP-present collision incumbent;
-    // a pending dial must not manufacture that success evidence.
+
     let connected: Vec<_> = shared
         .peer_table
         .sessions()
@@ -1190,9 +1171,6 @@ fn dial_outbound_role(
     )
 }
 
-// PeerTable registers outbound leases only after TCP establishment. Like Core's
-// CNode census, handshake-in-progress and manual persistent sessions count;
-// queued/inflight dial work and inbound/cancelled sessions do not.
 fn count_address_failure(
     peer_table: &crate::PeerTable,
     maximum: usize,
@@ -1257,9 +1235,6 @@ fn spawn_outbound_dial(
             !session.lease.is_cancelled() && crate::addrman::canonical(session.addr) == dial.addr
         })
     {
-        // A manual request cannot release a queued automatic request's claim.
-        // A duplicate automatic request also cannot release a running automatic
-        // thread's ownership; otherwise the next maintenance tick can reselect it.
         if !dial.manual && active.get(&dial.addr).is_none_or(|running| running.manual) {
             if let Some(book) = &shared.address_book {
                 defer_rejected_dial(&dial, book, active);
@@ -1347,11 +1322,7 @@ fn next_outbound_role(
     extra_full_relay: bool,
 ) -> crate::peer_info::PeerRole {
     use crate::peer_info::PeerRole;
-    // One snapshot classifies every dial exactly once: a dial the table has
-    // taken counts in its class here and not in flight, a dial it has not
-    // taken counts in flight and not here. Reading the counts and the
-    // liveness checks from separate table passes could drop a dial that
-    // registers in between into neither population and over-dial its class.
+
     let sessions = peer_table.sessions();
     let census: Vec<&crate::peer_table::PeerSession> = sessions
         .iter()
@@ -1370,8 +1341,7 @@ fn next_outbound_role(
         .iter()
         .filter(|session| session.lease.role() == PeerRole::BlockRelayOnly)
         .count();
-    // A live connection stays in `pending` until its thread exits, so only a
-    // dial the table has not taken yet adds to its class.
+
     let in_flight = |want: PeerRole| {
         pending
             .iter()
@@ -1458,10 +1428,6 @@ fn newest_excess_full_relay(
     now: Instant,
     is_downloading: impl Fn(crate::PeerSource) -> bool,
 ) -> Option<crate::peer_table::PeerSession> {
-    // A hand-pinned full-relay connection is outside the census, as Core's
-    // `IsFullOutboundConn()` excludes `ConnectionType::MANUAL`
-    // (`net_processing.cpp:5558-5604`): it creates no excess and the victim
-    // selection below only ever sees automatic connections.
     let sessions: Vec<crate::peer_table::PeerSession> = peer_table
         .sessions()
         .into_iter()
@@ -1548,9 +1514,6 @@ fn park_automatic_dial(
     true
 }
 
-// One census preserves all automatic ready roles for recovery. Active peer
-// timestamps are not refreshed while connected to prevent topology leakage;
-// only disconnect updates full-relay timestamps in the book.
 fn ready_address_count(peer_table: &crate::PeerTable, book: &crate::addrman::AddressBook) -> usize {
     peer_table
         .sessions()
@@ -1675,8 +1638,7 @@ fn queue_restart_anchors(
 
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
-    // Give a populated book one cooldown to establish a connection before
-    // asking seeds for replacements. Pending/failed dials are not successes.
+
     let mut next_dns = Instant::now()
         + if maintenance.address_book.len() < 64 {
             Duration::ZERO
@@ -1699,14 +1661,13 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 anchors = maintenance.address_book.take_restart_anchors(now).into();
                 anchors_taken = true;
             }
-            // Durable anchor consumption can block; activity may change during I/O.
+
             if maintenance.shutdown.load(Ordering::Acquire)
                 || !maintenance.network_active.load(Ordering::Acquire)
             {
                 continue;
             }
-            // Hold operator policy through the owner's timer mutation; callbacks
-            // execute outside the address-book lock and use one ban snapshot.
+
             let connected: Vec<_> = maintenance
                 .peer_table
                 .sessions()
@@ -1728,8 +1689,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                         !is_manual_endpoint(&manual, addr) && policy.allows(addr.ip())
                     });
             }
-            // A fresh but unreachable book must not permanently suppress seed
-            // recovery. Retained candidates remain usable with DNS disabled.
+
             if dns_recovery_due(
                 maintenance.address_book.len(),
                 ready_count,
@@ -1817,9 +1777,7 @@ fn queue_address_candidates(
             .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
     );
     let sessions = maintenance.peer_table.sessions();
-    // Connected-endpoint exclusion covers every direction; group diversity
-    // suppression counts outbound sessions only, so inbound peers cannot
-    // shrink the candidate space.
+
     let mut active: Vec<_> = sessions
         .iter()
         .filter(|session| !session.lease.is_cancelled())
@@ -1846,8 +1804,7 @@ fn queue_address_candidates(
         .collect();
     let occupied = automatic.len() + maintenance.address_book.pending_count_excluding(&automatic);
     let needed = (maintenance.target + extra).saturating_sub(occupied + reserved_anchors);
-    // Snapshot the ban table before taking the address-book lock. All candidates
-    // in this tick see the same expiry time and no nested ban lock per record.
+
     let policy = maintenance.banned.automatic_snapshot(tick_time);
     let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
@@ -3138,7 +3095,7 @@ mod tests {
         );
         assert_eq!(receiver.try_recv().expect("diverse second").addr, other);
         assert_eq!(anchors, VecDeque::<SocketAddr>::new());
-        // A queued but never accepted anchor is returned, not discarded.
+
         book.defer_anchor(other);
         book.return_restart_anchors(10_004);
         assert_eq!(book.take_restart_anchors(10_004), vec![other]);
@@ -3250,8 +3207,7 @@ mod tests {
         assert_eq!(anchors, VecDeque::<SocketAddr>::new());
         let (headers, _) = crossbeam_channel::bounded(1);
         let (blocks, _) = crossbeam_channel::bounded(1);
-        // An inactive transport makes a regression fail locally before any TCP
-        // dial: this test never opens connections to its public-looking fixtures.
+
         let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&maintenance.peer_table),
             maintenance.banned.clone(),
@@ -3328,7 +3284,6 @@ mod tests {
     #[test]
     fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
         for target in [1, 2] {
-            // block-only total1; then one full plus one block slot
             let (mut maintenance, queue) = maintenance_fixture(target);
             maintenance.block_slots = 1;
             let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
@@ -3387,7 +3342,7 @@ mod tests {
                 "a racing feeler cannot claim a reserved anchor"
             );
             assert_eq!(anchors, VecDeque::from(vec![second]));
-            book.unqueue(first); // first attempt failed and its thread was reaped
+            book.unqueue(first);
             let reserved = queue_restart_anchors(
                 &maintenance,
                 &mut anchors,
@@ -3593,8 +3548,7 @@ mod tests {
         let same_as: SocketAddr = "9.9.0.1:8333".parse().expect("same ASN");
         book.learn_dns("seed", &[anchor], 10_000);
         book.succeeded(anchor, 9, 10_000);
-        // Promotion frees New before learning the same-AS peer: two fresh
-        // entries may otherwise collide in the keyed slot and drop that peer.
+
         book.learn_dns("seed", &[same_as], 10_000);
         assert_eq!(
             book.select(&[], &[], 10_000, u64::MAX, |addr| addr == same_as),
@@ -3914,9 +3868,7 @@ mod tests {
             .expect("read timeout");
         let mut byte = [0];
         let received = std::io::Read::read(&mut remote, &mut byte);
-        // Close before joining: the old unconditional registration would send a
-        // VERSION and wait for a response. Its failure must be the leaked byte,
-        // not a second fixture pause or the production handshake deadline.
+
         let _ = remote.shutdown(std::net::Shutdown::Both);
         drop(remote);
         let result = worker.join().expect("outbound worker");

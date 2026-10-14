@@ -1,10 +1,3 @@
-//! Fixed BIP141 witness-commitment vector.
-//!
-//! The candidate assembly output is pinned three ways: against hard-coded
-//! commitment bytes derived out-of-band with coreutils `sha256sum`, against
-//! `bitcoin::Block::witness_root` (rust-bitcoin's own BIP141 implementation),
-//! and against the byte layout of the `OP_RETURN` commitment script.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
@@ -50,16 +43,12 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         .witness_commitment
         .ok_or("segwit-active candidate must carry a commitment")?;
 
-    // 1. Pinned out-of-band vector.
     assert_eq!(
         commitment.as_byte_array(),
         &VECTOR_COMMITMENT,
         "assembled commitment diverges from the pinned BIP141 vector"
     );
 
-    // 2. rust-bitcoin's witness root over the same tx set (coinbase wtxid
-    //    replaced with zeros per BIP141). Both roots are compared as raw
-    //    consensus bytes so the digest byte order has exactly one owner.
     let oracle_block = block::Block {
         header: block::Header {
             version: block::Version::from_consensus(0x2000_0000),
@@ -79,7 +68,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         .witness_root()
         .ok_or("oracle block must yield a witness root")?;
 
-    // 3. Commitment recomputed from the oracle root over the reserved value.
     let mut engine = sha256d::Hash::engine();
     engine.input(bitcoin_serialize(&oracle_root).as_slice());
     engine.input(&WITNESS_RESERVED_VALUE);
@@ -90,7 +78,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         "commitment is not dSHA256(witness_root || reserved_value)"
     );
 
-    // Byte equality of the commitment output script against the pinned bytes.
     let script = witness_commitment_script(&commitment);
     assert_eq!(
         script,
@@ -98,7 +85,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         "commitment output script diverges from the pinned BIP141 script bytes"
     );
 
-    // The coinbase actually carries the commitment output and the reserved value.
     let commitment_output = candidate
         .coinbase
         .outputs
@@ -112,7 +98,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         "coinbase witness must be exactly the 32-byte reserved value"
     );
 
-    // Legacy fallback: no commitment anywhere when segwit is inactive.
     let legacy = assemble_candidate(
         &CandidateContext {
             segwit_active: false,

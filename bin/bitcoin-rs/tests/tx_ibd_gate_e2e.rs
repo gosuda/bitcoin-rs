@@ -1,18 +1,3 @@
-//! L1: transaction ingress is gated on initial block download, over the real
-//! P2P wire against a spawned bitcoin-rs daemon (regtest, fjall).
-//!
-//! Bitcoin Core requests no announced transaction and drops unsolicited `tx`
-//! bodies while in initial block download (net_processing.cpp:4401-4404,
-//! :4713-4716). This test pins the same behavior on the wire:
-//!
-//!  * phase 1: a fresh node reports `initialblockdownload == true`; an
-//!    announced transaction draws no `getdata`, and its body is neither
-//!    admitted nor relayed to a bystander peer.
-//!  * phase 2: a locally built, mature regtest chain is applied, the applied
-//!    tip becomes recent, and the node leaves initial block download.
-//!  * phase 3: the same announcement is now requested, the delivered body is
-//!    admitted, and the mempool grows to exactly one entry.
-
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,10 +25,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounded window during which an absence must persist: admission and relay
 /// run asynchronously behind the bounded ingress channel.
 const ABSENCE_WINDOW: Duration = Duration::from_millis(1_500);
-
-// ---------------------------------------------------------------------------
-// Minimal wire peer
-// ---------------------------------------------------------------------------
 
 struct GatePeer {
     wire: Peer,
@@ -95,8 +76,6 @@ impl GatePeer {
                 Ok(NetworkMessage::Pong(reply)) if reply == nonce => return Ok(()),
                 Ok(NetworkMessage::GetData(items)) => self.record_getdata(&items),
                 Ok(NetworkMessage::GetHeaders(_)) => {
-                    // Keep the wire quiet: an empty headers reply is always a
-                    // valid answer and never advances header sync.
                     let _ = self
                         .wire
                         .send(NetworkMessage::Headers(Vec::new()), deadline);
@@ -123,9 +102,6 @@ impl GatePeer {
                 }
                 Ok(NetworkMessage::Inv(items)) => {
                     for item in items {
-                        // The peer negotiated wtxid relay, so the node may
-                        // announce either encoding; both name the same
-                        // transaction for the purposes of this gate.
                         let announced = match item {
                             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                                 Some(txid.to_string())
@@ -190,10 +166,6 @@ impl GatePeer {
             .any(|announced| announced == &txid || announced == &wtxid)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Fixtures: the relayed transaction and the mature funding chain
-// ---------------------------------------------------------------------------
 
 /// UNIX seconds now, clamped into u32.
 fn now_unix() -> u32 {
@@ -326,10 +298,6 @@ fn hex_body(block: &Block) -> String {
     bitcoin::consensus::encode::serialize_hex(block)
 }
 
-// ---------------------------------------------------------------------------
-// RPC helpers
-// ---------------------------------------------------------------------------
-
 fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
     node.rpc(method, &json!([]))
 }
@@ -369,17 +337,12 @@ fn wait_with_pump(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The L1 test
-// ---------------------------------------------------------------------------
-
 #[test]
 fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = GatePeer::connect(&node, "gate")?;
     let mut bystander = GatePeer::connect(&node, "bystander")?;
 
-    // Phase 1a: a fresh node is in initial block download.
     assert!(
         initial_block_download(&mut node),
         "a node with no applied tip must report initial block download"
@@ -389,14 +352,12 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
     let relayed = relayed_tx(&funding, 30_000);
     let txid = relayed.compute_txid();
 
-    // Phase 1b: an announced transaction draws no getdata while in IBD.
     peer.announce_with_barrier(vec![Inventory::Transaction(txid)], 7_001)?;
     assert!(
         !peer.txid_requested(&txid.to_string()),
         "the node requested a transaction while in initial block download"
     );
 
-    // Phase 1c: the delivered body is not admitted and not relayed.
     let deadline = Instant::now() + REQUEST_TIMEOUT;
     peer.wire
         .send(NetworkMessage::Tx(relayed.clone()), deadline)?;
@@ -416,8 +377,6 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
         );
     }
 
-    // Phase 2: apply the mature funding chain; the recent applied tip ends
-    // initial block download.
     let genesis = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
     node.rpc("submitblock", &json!([hex_body(&genesis)]))?;
     for block in &blocks {
@@ -434,7 +393,6 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
         "the node never left initial block download after applying a recent tip"
     );
 
-    // Phase 3: the same announcement is now requested and admitted.
     peer.announce_with_barrier(vec![Inventory::Transaction(txid)], 7_003)?;
     let request_deadline = Instant::now() + REQUEST_TIMEOUT;
     while !peer.txid_requested(&txid.to_string()) && Instant::now() < request_deadline {

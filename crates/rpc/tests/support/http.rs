@@ -1,17 +1,3 @@
-//! Bounded HTTP/1.1 replay client for the Core parity gate.
-//!
-//! Response framing comes only from an exact `HTTP/1.1` status line with
-//! CRLF line endings, a 3-digit status, the status-defined empty body for
-//! 204 or a strict ASCII-decimal `Content-Length`, and explicit refusal of
-//! `Transfer-Encoding` and conflicting framing — never from end of stream.
-//! Every read is byte-bounded before it happens, and the absolute
-//! per-connection deadline is recomputed and re-armed before *every* syscall (a
-//! multi-syscall `write_all` or buffered read can never outlive the window
-//! set once), the read buffer is retained across responses so pipelined or
-//! trailing bytes survive to the next framed response instead of being
-//! dropped with a temporary reader, and one outstanding request
-//! legitimizes exactly one decoded response.
-
 use core::time::Duration;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -122,7 +108,7 @@ pub(crate) fn base64(input: &[u8]) -> String {
         let b1 = chunk.get(1).map_or(0, |b| u32::from(*b));
         let b2 = chunk.get(2).map_or(0, |b| u32::from(*b));
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        // A masked 6-bit value always fits `usize`.
+
         let index = |bits: u32| usize::try_from(bits).unwrap_or_default();
         out.push(char::from(ALPHABET[index((triple >> 18) & 0x3f)]));
         out.push(char::from(ALPHABET[index((triple >> 12) & 0x3f)]));
@@ -226,8 +212,7 @@ impl Connection {
                 self.buffered_end = n;
                 Ok(())
             }
-            // The timeout was just re-armed to the remaining deadline, so a
-            // timeout here means the absolute deadline passed mid-read.
+
             Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 Err(HttpError::DeadlineExceeded)
             }
@@ -358,10 +343,10 @@ impl Connection {
                 "no request is outstanding on this connection",
             ));
         }
-        // Status line.
+
         let status_line = self.read_bounded_line(MAX_STATUS_LINE_BYTES)?;
         let (version, status, reason) = parse_status_line(&status_line)?;
-        // Header block.
+
         let mut headers = Vec::new();
         loop {
             if headers.len() >= MAX_RESPONSE_HEADERS {
@@ -376,7 +361,7 @@ impl Connection {
             };
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         }
-        // Conflicting or chunked framing is refused outright.
+
         if headers.iter().any(|(name, _)| name == "transfer-encoding") {
             return Err(HttpError::Framing(
                 "transfer-encoding is refused; only Content-Length framing is accepted",
@@ -452,9 +437,6 @@ fn parse_content_length(headers: &[(String, String)], status: u16) -> Result<usi
         .map(|(_, value)| value.as_str())
         .collect();
     if status == 204 {
-        // Accept both capture forms: RFC 9110 §8.6 omission and the
-        // libevent-era Core `Content-Length: 0`. The omission form is
-        // pinned by `decoder_refusal_tests::content_length_table`.
         return match declared.as_slice() {
             [] => Ok(0),
             [single] if *single == "0" => Ok(0),

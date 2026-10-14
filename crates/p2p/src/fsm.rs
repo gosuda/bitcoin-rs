@@ -18,8 +18,7 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
         }
         Message::WtxidRelay => {
             ensure_negotiating_or_ready(peer)?;
-            // BIP339 requires negotiation before verack. Once Ready, keep
-            // the published per-connection relay preference unchanged.
+
             if peer.state == PeerState::Ready {
                 return Ok(());
             }

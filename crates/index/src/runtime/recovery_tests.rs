@@ -1,10 +1,3 @@
-//! Recovery-contract tests for the txindex worker (`docs/contracts/recovery.md`).
-//!
-//! Each test drives `Worker::reconcile_once` against an authoritative
-//! `BlockTree` plus applied tip and observes only the contract surface: the
-//! durable watermarks, the published `ReconcilePhase`, and the rollback
-//! evidence reported through the `IndexAheadSink` seam.
-
 use crate::reconcile::{ReconcileLeg, ReconcilePhase};
 use arc_swap::ArcSwapOption;
 
@@ -206,7 +199,7 @@ fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
         assert!(!harness.runtime.should_stop());
         assert!(harness.watermarks().compact_filters.is_none());
         assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
-        // A later reorg still rolls back and catches up both body-only indexes.
+
         harness.set_tip(&fixture.tip(fixture.b[1]));
         harness.settle(&mut None);
         harness.assert_at(&fixture.tip(fixture.b[1]));
@@ -339,8 +332,7 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
         IndexCapabilities::HISTORICAL.with_compact_filters(true),
     );
     let a2 = f.tip(f.a[1]);
-    // Publish valid filter rows from the fixture's known spent script. The
-    // history store has bodies but no undo when the worker later rolls back.
+
     let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
     let mut batch = PreparedBatch::new(DEFAULT_BATCH_LIMITS);
     for identity in identities {
@@ -388,7 +380,6 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Chainstate restored to an older checkpoint on the same branch.
     let a1 = f.tip(f.a[0]);
     h.set_tip(&a1);
     h.settle(&mut pending);
@@ -424,7 +415,6 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Depth 3 to the common ancestor (genesis) exceeds cutover 1.
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     let first = h.worker.reconcile_once(&mut pending).expect("reset pass");
@@ -450,10 +440,6 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
 /// the store cannot yet show is a wait.
 #[test]
 fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
-    // Pruned below the frontier: the owner says gone. The rollback hits the
-    // frontier, the capabilities reset, and the rebuild anchors at the first
-    // surviving height — then the forward leg actually converges on the new
-    // tip instead of stalling on rows that never return.
     let f = ForkFixture::new(3);
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
@@ -462,12 +448,8 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Commit the frontier at 2: heights below it are permanently gone.
     h.retention.reserve(2).commit(2);
 
-    // Move the tip to the rival branch. The rollback unwinds to height 1,
-    // where the frontier refuses the body read, so the owner routes the
-    // index to a rebuild anchored at height 1 on the B branch.
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
@@ -488,15 +470,10 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     );
     assert_eq!(watermarks.script_history, anchored);
 
-    // The leg converges: the rebuilt index covers the retained heights and
-    // reports the B tip, proving the anchor let it restart above the
-    // frontier rather than resetting forever.
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 
-    // Granted but absent: the owner says the history is retained, so the
-    // worker waits and keeps the rows it already derived.
     let f = ForkFixture::new(3);
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;

@@ -1,12 +1,3 @@
-//! RAII harness: a real regtest `NodeState`, the real authenticated
-//! `RpcServer` on loopback, and the replay client that exercises them.
-//!
-//! Every handle the RPC context consumes comes from the live `NodeState`
-//! exactly the way the daemon wires them (`crates/node/src/run.rs`); nothing
-//! here constructs a fake or empty context. The server thread and the
-//! shutdown flag are joined and released by `Drop`, and the temporary data
-//! directory is deleted after the node state closes.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,9 +114,6 @@ impl ServerHarness {
                 ..ChainHandles::default()
             },
             mempool: MempoolHandles {
-                // The daemon wires this handle as `state.mempool_gateway()`
-                // (lifecycle.rs): the gateway constructed with the resolved
-                // `config.validation.engine`, not a separate Native one.
                 gateway: state.mempool_gateway(),
             },
             indexes: IndexHandles {
@@ -159,7 +147,6 @@ impl ServerHarness {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let join = std::thread::spawn(move || {
-            // Shutdown errors at teardown are expected and ignored.
             let _ignored = server.serve_with_shutdown(flag);
         });
         wait_for_server(address)?;
@@ -233,7 +220,6 @@ impl Drop for ServerHarness {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
-            // A join failure at teardown must not panic inside Drop.
             let _ignored = join.join();
         }
     }

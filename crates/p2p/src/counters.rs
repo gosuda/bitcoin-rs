@@ -1,5 +1,3 @@
-//! Per-connection traffic counters.
-
 use bitcoin_rs_primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
@@ -192,9 +190,7 @@ impl<S: Read> CountingStream<S> {
         if self.read_buf.len() < INBOUND_READ_BUFFER {
             self.read_buf.resize(INBOUND_READ_BUFFER, 0);
         }
-        // Indices move only after a successful read. Resetting `read_pos`
-        // first would make a timeout revive already-consumed leftover bytes;
-        // the handshake and message loops retry TimedOut/WouldBlock.
+
         let filled = self.inner.read(&mut self.read_buf)?;
         self.read_pos = 0;
         self.read_end = filled;

@@ -1,10 +1,3 @@
-//! Script verification, sigop counting, and native script utilities.
-//!
-//! The interpreter executes every consensus spend class natively: legacy and
-//! P2SH through the opcode evaluator, `SegWit` v0 through BIP143 sighashes,
-//! and taproot key-path and script-path spends through local BIP341/BIP342
-//! verification.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 mod checker;

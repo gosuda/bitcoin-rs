@@ -1,12 +1,3 @@
-//! The chainstate-facing apply/commit/disconnect contract.
-//!
-//! Chainstate hands this crate one connected block at a time and gets back the
-//! mutation payload, its undo record, and the value totals consensus checks
-//! need; a disconnect loads the same block's undo record and rolls it back.
-//! Everything the contract reads — resolved prevouts, the live set at BIP30
-//! exception heights — enters through the two read traits here, so record,
-//! shard, event, and codec machinery never leaves the crate.
-
 use std::borrow::Borrow;
 
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
@@ -493,19 +484,13 @@ pub fn build_block_changes<'a>(
     overwritten: Option<&UtxoSet>,
     max_script_size: usize,
 ) -> Result<(BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals), BlockChangeError> {
-    // Zipping would silently drop whichever sequence is longer, leaving
-    // trailing transactions out of the changes, undo, and value totals while
-    // reporting success - the window overlay refuses the same mismatch. This
-    // runs before the genesis early return so a mismatched slice is refused at
-    // every height, matching the documented contract.
     if block.txs.len() != txids.len() {
         return Err(BlockChangeError::TxidCountMismatch {
             transactions: block.txs.len(),
             txids: txids.len(),
         });
     }
-    // Bitcoin Core indexes genesis but does not connect its transactions into
-    // CoinsView; its coinbase is unspendable and absent from UTXO/MuHash state.
+
     if height == 0 {
         return Ok((
             BlockChanges::default(),
@@ -554,7 +539,7 @@ pub fn build_block_changes<'a>(
                     previous.coinbase,
                     previous.height,
                 )),
-                // Disconnecting the block deletes what it created.
+
                 None => undo.remove(outpoint),
             }
         }
@@ -568,9 +553,7 @@ pub fn build_block_changes<'a>(
                     continue;
                 }
                 changes.remove(previous_output);
-                // ...and restores what it spent. A spend with no resolved
-                // prevout would make the record unable to restore that output,
-                // so refuse rather than persist an undo that silently loses it.
+
                 let spent = resolved.entry(&tx_input.previous_output).ok_or(
                     BlockChangeError::UndoPrevoutMissing {
                         txid: previous_output.txid,
@@ -717,9 +700,6 @@ pub fn rollback_block_recovery(
     tx_count_delta: u64,
     undo: &UndoBatch,
 ) -> Result<(), RollbackError> {
-    // Refuse mismatched stats before the UTXO mutation: a recovery that
-    // fails closed after undoing the block would retry against a partially
-    // rewound set.
     coin_stats
         .check_rewind(height, tx_count_delta)
         .map_err(RollbackError::CoinStats)?;
@@ -790,7 +770,7 @@ mod tests {
         let same_block = OutPoint::new(parent.txid(), 0);
         let child = spend(same_block, 700);
         let mut undo = UndoBatch::empty();
-        // BIP30 overwrite restoration precedes inputs in native rollback order.
+
         undo.restore(UtxoAdd::new(OutPoint::new(cb.txid(), 0), coin(60), true, 1));
         undo.restore(UtxoAdd::new(FUNDED, coin(900), true, 2));
         let block = Block {
@@ -824,9 +804,7 @@ mod tests {
             block_spent_outputs(&block, HEIGHT, &missing),
             Err(BlockSpendsError::Corrupt(_))
         ));
-        // The bounded codec rejects counts that cannot belong to this body
-        // before allocating decoded restores. Ordinary persistence decoding is
-        // deliberately unchanged.
+
         cb.outputs.clear();
         let no_outputs = Block {
             header: block.header,

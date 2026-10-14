@@ -1,5 +1,3 @@
-//! Undo flush, segment sync, and atomic durable-head publication in dependency order.
-
 use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;

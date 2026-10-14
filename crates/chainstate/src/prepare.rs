@@ -1,5 +1,3 @@
-//! Exact serialized-body validation, transaction planning, and resolved prevout preparation.
-
 use super::SameBlockSpentSet;
 use super::{
     BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
@@ -20,8 +18,7 @@ pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
         equal: true,
     };
     block.consensus_encode(&mut sink);
-    // `offset` accumulated every written byte, so a longer `raw` (trailing
-    // bytes) fails here just as a shorter one fails in the sink.
+
     sink.equal && sink.offset == raw.len()
 }
 
@@ -30,13 +27,6 @@ pub(super) fn parse_block_for_apply(
     provided_serialized: Option<bytes::Bytes>,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<(bitcoin_rs_consensus::kernel::BlockParse, Vec<Txid>), ApplyError> {
-    // Preserved bytes must BE this block, not merely agree with it on
-    // transaction count. The parse below drives the txids and the transactions
-    // that script verification runs, while the witness commitment check and
-    // the UTXO mutation use the decoded block. Changing a witness does not
-    // change a txid, so a count check lets a caller pair a block carrying an
-    // invalid witness with bytes carrying a valid one: the scripts verify
-    // against the bytes and the invalid block gets applied.
     if let Some(raw) = provided_serialized.as_deref()
         && !bytes_are_block(raw, block)
     {
@@ -46,13 +36,7 @@ pub(super) fn parse_block_for_apply(
             ),
         ));
     }
-    // Every engine's parse shares one shape — parse once, count check,
-    // txids — so the caller stays uniform whichever selection resolved the
-    // value. The kernel parse hashes every transaction on the way past using
-    // Core's runtime-selected SHA-256; the native parse's checked borrowed
-    // layout derives txids, witness IDs, weight, byte positions, and Merkle
-    // verdicts in a single pass. Either way there is no second transaction
-    // tree decode.
+
     let raw_block: bytes::Bytes =
         provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
     let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(&raw_block, engine)
@@ -206,12 +190,6 @@ pub(super) fn resolve_block_prevouts(
         }
         Ok(resolved)
     } else {
-        // Serial on purpose, for the same reason as `ResolvedUtxoView::resolve`:
-        // each item is a hashmap hit plus a `TxOut` clone, which is cheaper than
-        // handing the work to another thread. Pinned 3x medians on mainnet
-        // 0..150_000, parallel and serial interleaved, serial winning every
-        // round: 139.4s vs 125.4s overall, and this stage 6.9s vs 1.63s. The
-        // fan-out was adding 5.3s of dispatch on top of 1.6s of work.
         Ok(block
             .txs
             .iter()
@@ -297,8 +275,7 @@ pub(super) fn verify_block_transactions(
         }
         return Ok(());
     }
-    // The decision is owned by `scripts_verified_upstream`, which covers the
-    // live assume-valid gate and locally validated crash-recovery replay.
+
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
         return run_non_script_checks_only(
@@ -311,13 +288,7 @@ pub(super) fn verify_block_transactions(
             context.flags,
         );
     }
-    // Full-verify: resolve every transaction's prevouts serially in block order
-    // into an owned `Vec<Vec<Option<TxOut>>>` (coinbase -> empty inner Vec), then
-    // hand it to consensus, which runs the per-input script checks concurrently
-    // and returns the first failure in block order. Resolution is the only
-    // order-sensitive step: the overlay walk advances a `BlockLocalUtxoView` so a
-    // later transaction sees outputs an earlier one created (or spent) in the same
-    // block; the non-overlay case reads the committed shared set directly.
+
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
         resolve_block_prevouts(resolved, block, tx_plan, context.height, view.txids());
@@ -328,11 +299,7 @@ pub(super) fn verify_block_transactions(
     );
     let resolved = resolution_result?;
     view.set_resolved(resolved);
-    // Consensus owns preparation and parallel input-check fan-out internally and reports both
-    // sub-stage durations back; report them on the success and error paths
-    // before propagating the verdict, mirroring the surrounding `*_result`
-    // idiom. These sub-stages are development diagnostics (`docs/observability.md`):
-    // they ride the tracing profile event, not the metrics API.
+
     let mut script_timings = bitcoin_rs_consensus::ScriptStageTimings::default();
     let script_input_result = bitcoin_rs_consensus::verify_block_input_scripts(
         view,

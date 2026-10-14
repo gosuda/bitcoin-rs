@@ -1,12 +1,9 @@
-//! Coinbase and witness-commitment candidate tests.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
 use std::error::Error;
 use std::sync::Arc;
 
-// rust-bitcoin differential oracles: witness merkle root and sha256d commitment.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -101,7 +98,6 @@ fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<()
         vec![WITNESS_RESERVED_VALUE.to_vec()]
     );
 
-    // rust-bitcoin differential oracle for witness merkle and sha256d commitment.
     let mut leaves = vec![OracleWtxid::all_zeros()];
     leaves.extend(
         candidate
@@ -204,8 +200,6 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     use bitcoin::hashes::{hash160, sha256};
     use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 
-    // Both scripts succeed without signatures. Sigops in an unexecuted branch
-    // are still counted: one legacy CHECKSIG costs 4, two-key witness multisig 2.
     let redeem = vec![0x00, 0x63, 0xac, 0x68, 0x51];
     let witness_script = vec![0x00, 0x63, 0x52, 0xae, 0x68, 0x51];
     let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x44; 32])), 0);
@@ -286,10 +280,7 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     let mut limited = context(101, true);
     limited.max_sigops = 5;
     let candidate = assemble_candidate(&limited, &snapshot, PAYOUT)?;
-    // POL-05: a dependency fee chunk is indivisible for mining. The child
-    // raises the pair's rate, so both entries share a chunk whose 4+2 sigops
-    // exceed 5. Core 31.1 node/miner.cpp addChunks uses SkipBuilderChunk
-    // when TestChunkBlockLimits fails; it does not retry this chunk's parent.
+
     assert!(
         candidate.transactions.is_empty(),
         "the complete CPFP chunk exceeds the sigop budget"

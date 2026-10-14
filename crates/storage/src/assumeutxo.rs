@@ -1,5 +1,3 @@
-//! Snapshot identity and validation state committed with the authoritative head.
-
 use bitcoin_rs_primitives::Hash256;
 
 /// One body durably retained before validation, but not exposed to index readers.

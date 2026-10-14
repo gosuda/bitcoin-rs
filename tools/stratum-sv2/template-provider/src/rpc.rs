@@ -1,8 +1,3 @@
-//! Minimal bitcoin-rs JSON-RPC client (HTTP/1.1, basic auth).
-//!
-//! Covers exactly what the bridge needs: `getblocktemplate` (blocking
-//! long-poll), `submitblock`, and `getblockcount` (post-submit tip check).
-
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -33,8 +28,7 @@ impl RpcClient {
             url: url.to_owned(),
             user: user.to_owned(),
             pass: pass.to_owned(),
-            // Long-poll holds requests open, so timeouts are per-request
-            // (see `call`), not on the client; connect setup stays bounded.
+
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()

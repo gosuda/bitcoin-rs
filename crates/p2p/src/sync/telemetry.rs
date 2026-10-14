@@ -1,5 +1,3 @@
-//! Read-only synchronization progress and bounded-window metrics.
-
 use super::BlockSync;
 
 impl BlockSync {

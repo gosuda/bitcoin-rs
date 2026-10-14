@@ -1,9 +1,3 @@
-//! Whole-block resource limits, checked against rust-bitcoin serialization.
-//!
-//! BIP141 / Core 31.1 `GetBlockWeight` counts both the fixed header and the
-//! `CompactSize` transaction count. POL-05 keeps fee chunks indivisible and
-//! configured capacity inclusive.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
@@ -72,7 +66,6 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
                 assert_serialized_limits(&exact)?;
 
                 for field in ["weight", "size"] {
-                    // Isolate each dimension while leaving the other generous.
                     let mut limited = context.clone();
                     lower_limit(&mut limited, field);
                     assert!(matches!(
@@ -102,8 +95,7 @@ fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResul
         let child = entry(252, Some(parent.txid), 1_000, segwit_active, vec![250]);
         let descendant = entry(253, Some(child.txid), 1, segwit_active, vec![250, 251]);
         snapshot.entries.extend([parent, child]);
-        // 250 independent transactions plus this two-member fee chunk produce
-        // 253 total transactions including coinbase, growing CompactSize by 2.
+
         let mut context = context(segwit_active);
         let boundary = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
         assert_serialized_limits(&boundary)?;
@@ -164,7 +156,7 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
         Network::Regtest.subsidy_halving_interval(),
     );
     let fees = candidate.transactions.iter().map(|tx| tx.fee).sum::<u64>();
-    // Greedy assembly claims selected fees; ordered assembly claims none.
+
     assert!(
         candidate.coinbase_value == subsidy + fees || candidate.coinbase_value == subsidy,
         "coinbase value is neither subsidy plus claimed fees nor bare subsidy"

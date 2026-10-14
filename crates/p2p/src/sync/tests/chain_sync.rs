@@ -1,7 +1,3 @@
-//! Chain-sync eviction: the twenty-minute timeout, the one probe that ends
-//! it, the two-minute response window, and the protection that spares the
-//! first four outbound connections to reach the tip.
-
 use std::time::Duration;
 
 use super::*;

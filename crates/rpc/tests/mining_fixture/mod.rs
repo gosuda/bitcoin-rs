@@ -1,9 +1,3 @@
-//! Shared canned mining fixtures for the rpc integration tests.
-//!
-//! `compat_template`/`smoke_template` and `compat_info`/`smoke_info` were
-//! byte-identical literals duplicated across test binaries; both now read the
-//! same fixture, parameterized on the only differing fields.
-
 extern crate alloc;
 
 use alloc::sync::Arc;

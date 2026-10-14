@@ -1,5 +1,3 @@
-//! Bounded inbound body draining and exact staged-body admission.
-
 use super::BlockSync;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
@@ -87,9 +85,6 @@ impl BlockSync {
         let dropped = self.scheduler.lock().stager.prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
-            // The tree owns heights: a pruned body requeues at its tree
-            // height, or without a cursor move when the tree cannot resolve
-            // it (the old 0-sentinel rewind to genesis is unrepresentable).
             let requeues: Vec<(Hash256, Option<u32>)> = {
                 let tree = self.chain.block_tree();
                 dropped
@@ -110,10 +105,7 @@ impl BlockSync {
         }
 
         self.switch_branch_if_outweighed();
-        // The gate recheck runs after the branch switch so admissibility
-        // reads the settled applied tip: a body on a winning branch that
-        // just replaced the applied tip must not be judged against the old
-        // one, and a body the switch consumed is already gone.
+
         self.recheck_staged_gates();
         let (applied, failed) = self.apply_buffered_blocks(apply_head_check);
         if received > 0 || applied > 0 || failed > 0 {
@@ -192,9 +184,6 @@ impl BlockSync {
             .filter_map(|(_, source)| *source)
             .filter(|source| {
                 if self.peer_table.disconnect_source(*source) {
-                    // Every removal path releases a `getheaders` gate
-                    // the peer owned, or a same-address reconnect
-                    // inherits a dead deadline.
                     self.clear_header_request_for(*source);
                     true
                 } else {
@@ -253,11 +242,7 @@ impl BlockSync {
                 .filter(|(hash, _, _)| tree.lookup(*hash).is_none())
                 .collect()
         };
-        // Every staged header reaches `route_headers_batch` as a
-        // synthetic single-header batch, which never opens or feeds a
-        // download-twice sync state: below the committed-work floor it
-        // retires here and retries once the wire sync commits the header,
-        // and a rejection can still commit a valid prefix.
+
         let mut missing_parent = false;
         let mut credit_refresh_needed = false;
         let mut invalid: Vec<(Hash256, Option<crate::PeerSource>)> = Vec::new();
@@ -271,10 +256,6 @@ impl BlockSync {
                     active_height,
                     ..
                 } => {
-                    // A staged retry that now admits is the same
-                    // announcement the headers drain credits — the
-                    // delivering connection demonstrated the tip even if
-                    // its forwarded batch raced or was refused.
                     if let Some(source) =
                         source.filter(|source| self.peer_table.is_current(*source))
                     {
@@ -297,10 +278,7 @@ impl BlockSync {
         if !invalid.is_empty() {
             self.discard_inadmissible_header_bodies(&invalid);
         }
-        // A staged retry that just admitted may have attached the ancestry
-        // a deferred owned fetch was waiting on — resolve it now. A mark
-        // resolving onto an already-staged body is that body's request
-        // evidence: `mark_owned_fetch` settles its owed gate directly.
+
         self.resolve_owned_body_fetches();
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
@@ -362,12 +340,7 @@ impl BlockSync {
                 scheduler.stager.clear_gate_pending(&hash);
                 continue;
             }
-            // While a heavier headers branch is still switching, the
-            // applied tip sits on the losing branch, so a body on the
-            // winning branch can fail the work clauses only for that
-            // reason. It keeps its flag for the recheck after the switch
-            // completes rather than being evicted from under the apply
-            // that is about to need it.
+
             let on_tip_branch = chain_tip.as_deref().is_some_and(|tip| {
                 tree.lookup(hash)
                     .and_then(|id| tree.node(id).ok().map(|node| (id, node.height)))
@@ -406,9 +379,6 @@ impl BlockSync {
         blocks: &mut Vec<InboundBlock>,
         next_expected_hash: Option<Hash256>,
     ) -> usize {
-        // A cold-start hedge can arrive after its original copy was applied.
-        // Drop only blocks proven to lie on the applied ancestry; a known
-        // side-chain block at the same or lower height must remain eligible.
         if let Some(applied_tip) = self.chain.applied_tip() {
             let tree = self.chain.block_tree();
             let indexed_tip = Self::indexed_applied_ancestry_tip(&tree, &applied_tip);
@@ -427,21 +397,6 @@ impl BlockSync {
             });
         }
 
-        // Already-staged precheck: skip the expensive body-binding hashes for
-        // blocks whose hash is already in the stager. A correct body already
-        // staged must not be displaced by a late malformed duplicate (P2-3).
-        //
-        // The same pass gates unrequested bodies: a body that no connection
-        // has in flight (Core's `fRequested` is false) stages only when
-        // Core's `AcceptBlock` would process it, and it additionally needs a
-        // genuinely free staging slot at insert time — an insert at the
-        // count budget would count-evict already-downloaded work, possibly
-        // requested, for a delivery nobody asked for. The slot is charged at
-        // insert rather than here so a body that never stages (failed
-        // binding, byte-budget refusal, a same-chunk duplicate) cannot burn
-        // a reservation a later admissible body could have used. A
-        // discarded body leaves no staged state and queues no retry.
-        // Lock order: tree, then scheduler.
         let admission_plan: Vec<BodyAdmission> = {
             let chain_tip = self.chain.chain_tip();
             let applied_tip = self.chain.applied_tip();
@@ -469,10 +424,7 @@ impl BlockSync {
                     return false;
                 }
                 let header_unknown = tree.lookup(hash).is_none();
-                // A body staged while its header is unknown passed the
-                // gate's missing-header arm without facing the clauses —
-                // flag it so `recheck_staged_gates` re-gates it once the
-                // tree resolves it, wherever the header lands.
+
                 admission_plan.push(if requested {
                     BodyAdmission::Requested
                 } else {
@@ -492,10 +444,6 @@ impl BlockSync {
             admission_plan
         };
 
-        // For non-staged blocks, the chain side derives segwit_active from
-        // the tree (the same canonical softfork_state path as apply) and runs
-        // the consensus body-binding check, so the gate reproduces exact
-        // consensus semantics without the executor owning the rule.
         let binding_results: Vec<Result<(), SyncChainError>> = blocks
             .iter()
             .zip(&admission_plan)
@@ -508,8 +456,6 @@ impl BlockSync {
             })
             .collect();
 
-        // Stager lock: TOCTOU recheck + insert. Binding-failed blocks are
-        // tracked separately for the window's source-aware reject_delivery.
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         let mut reject_deliveries = Vec::new();
         let mut refused_at_budget = 0_usize;
@@ -524,15 +470,13 @@ impl BlockSync {
             {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
-                // The body has left the ingress channel: release the delivering
-                // connection's unsolicited forwarding slot.
+
                 drop(inbound.forward_credit);
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
                 }
-                // The header-derived block hash does not bind the
-                // delivered transaction or witness bytes by itself.
+
                 if let Err(error) = binding_result {
                     metrics::counter!("node.sync.body_binding_drops").increment(1);
                     let witness = inbound
@@ -552,27 +496,19 @@ impl BlockSync {
                     reject_deliveries.push((hash, source));
                     continue;
                 }
-                // TOCTOU: recheck under the stager lock before inserting.
+
                 if stager.contains(&hash) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
                 }
-                // A body nobody requested may only stage into a genuinely
-                // free slot: charging it here — after binding and the
-                // TOCTOU recheck — means a body that never occupies staging
-                // cannot refuse a later admissible body in this chunk.
+
                 if matches!(admission, BodyAdmission::Unrequested { .. })
                     && stager.count_headroom() == 0
                 {
                     refused_at_budget = refused_at_budget.saturating_add(1);
                     continue;
                 }
-                // The unresolved-body quota is enforced here too — after
-                // binding and the same-chunk recheck, on the entry that will
-                // actually occupy staging — so dropped predecessors cannot
-                // burn the chunk's quota, and one chunk still cannot stage a
-                // burst past `MAX_UNRESOLVED_STAGED_BODIES`: each insert
-                // raises `gate_pending_count` before the next body is seen.
+
                 if matches!(admission, BodyAdmission::Unrequested { gate_pending: true })
                     && stager.gate_pending_count() >= MAX_UNRESOLVED_STAGED_BODIES
                 {
@@ -608,12 +544,6 @@ impl BlockSync {
             );
         }
 
-        // Resolve staged sources before taking the scheduler lock. Request
-        // sends hold PeerTable's read lock while marking the window, so no
-        // scheduler holder may acquire PeerTable in the opposite order.
-        //
-        // The source is the whole connection identity: a cancelled lease is
-        // not a schedulable peer, so deliveries from one carry no credit.
         let staged_blocks: Vec<_> = staged_blocks
             .into_iter()
             .map(|(hash, source, staged)| {
@@ -622,9 +552,6 @@ impl BlockSync {
             })
             .collect();
 
-        // The block tree owns heights: bodies this insert count-evicts are
-        // requeued at their tree-resolved heights, never at a stored sentinel
-        // (there is no stored height).
         let staged_blocks: Vec<_> = {
             let tree = self.chain.block_tree();
             staged_blocks
@@ -675,14 +602,6 @@ impl BlockSync {
                         }
                     }
                     StagedBlock::DroppedForRetry { hash } => {
-                        // Count-evicted before staging: release what the
-                        // window holds without a cursor rewind. Unlike the
-                        // `Memory` arm's evictions — staged victims whose
-                        // pending left at staging, so the tree height is
-                        // the only rewind evidence — this body never
-                        // staged, so a live pending still carries its
-                        // request height and an unrequested body must not
-                        // move the cursor at all.
                         window.requeue_for_retry(&hash, None, now);
                         retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
@@ -690,11 +609,7 @@ impl BlockSync {
                 }
             }
         }
-        // Delivery credit is stamped only while the delivering connection is
-        // still current: `with_current` holds the table authority across the
-        // window mutation, so a same-address replacement registering between
-        // the liveness check above and this point voids the credit rather
-        // than clearing stall or timeout state for a retired connection.
+
         for (hash, source_peer, credit) in delivery_credits {
             self.peer_table.with_current(source_peer, || {
                 let mut scheduler = self.scheduler.lock();
@@ -798,11 +713,11 @@ pub(super) fn unrequested_body_admissible(
     let Some(chain_tip) = chain_tip else {
         return false;
     };
-    // Core's `ActiveHeight()` is -1 on an empty chain.
+
     let max_height = applied_tip.map_or(CORE_REORG_SAFETY_MARGIN - 1, |tip| {
         tip.height.saturating_add(CORE_REORG_SAFETY_MARGIN)
     });
-    // Big-endian, fixed width: byte order is numeric order.
+
     let node_work: [u8; 32] = node.chainwork.to_be_bytes();
     tree.node_at_height_from(chain_tip.tip_id, node.height) == Some(node_id)
         && applied_tip.is_none_or(|tip| node.chainwork >= tip.chainwork)

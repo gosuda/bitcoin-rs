@@ -1,5 +1,3 @@
-//! Canonical row accounting, grouping, and ordered live-view mutations.
-
 use super::error::IndexError;
 use crate::types::HashPrefixRow;
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily};
@@ -242,7 +240,7 @@ pub(super) fn delete_rows(
             batch.delete(cf, group[0].row.as_bytes());
         }
     }
-    // Rollback reverses the authoritative live transition, preserving op order.
+
     for (hash, _) in &rows.filter_rows {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
     }

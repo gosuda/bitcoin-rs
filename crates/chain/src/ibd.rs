@@ -1,11 +1,8 @@
-//! Process-wide initial block download latch shared by RPC and P2P.
-
 use std::sync::atomic::AtomicBool;
 
 use crate::view::{BlockTreeReader, TipReader};
 use bitcoin_rs_primitives::Network;
 
-// Core's DEFAULT_MAX_TIP_AGE; this node does not expose -maxtipage.
 const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 /// Initial block download state of the applied chain
@@ -46,9 +43,6 @@ impl InitialBlockDownload {
             return false;
         }
         if self.still_in_initial_block_download(now, network) {
-            // A concurrent caller may have latched "left IBD" while the
-            // predicate's unlocked reads ran; the latch wins so that once a
-            // caller observes false, no caller ever answers true again.
             return !self.left.load(Ordering::Acquire);
         }
         self.left.store(true, Ordering::Release);
@@ -61,13 +55,12 @@ impl InitialBlockDownload {
         let Some(tip) = self.applied_tip.load_full() else {
             return self.still_active();
         };
-        // Big-endian, fixed width: byte order is numeric order.
+
         let work: [u8; 32] = tip.chainwork.to_be_bytes();
         if work < network.minimum_chain_work() {
             return self.still_active();
         }
-        // `TipSnapshot` carries no timestamp, so the tip's header supplies it —
-        // the same route `getdifficulty` takes to the tip's `bits`.
+
         let Some(tip_time) = self
             .block_tree
             .read()
@@ -106,7 +99,6 @@ mod initial_block_download_tests {
 
     const DAY: u64 = 24 * 60 * 60;
 
-    // Two regtest headers have enough work only for regtest's zero floor.
     fn latch_with_tip_at(tip_time: u32) -> InitialBlockDownload {
         let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
         let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -188,7 +180,6 @@ mod initial_block_download_tests {
         let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
         assert!(!latch.is_active(now, Network::Regtest));
 
-        // A latched node must not re-enter IBD when its tip becomes stale.
         assert!(
             !latch.is_active(now + 2 * DAY, Network::Regtest),
             "the answer must not flip back once the node has left initial sync"
@@ -200,7 +191,7 @@ mod initial_block_download_tests {
         let now = 1_800_000_000_u64;
         let latch = latch_with_tip_at(u32::try_from(now - DAY - 60).unwrap_or(u32::MAX));
         assert!(latch.is_active(now, Network::Regtest));
-        // Same tip, asked later at a time when it *is* within the window.
+
         assert!(!latch.is_active(now - DAY, Network::Regtest));
     }
 }

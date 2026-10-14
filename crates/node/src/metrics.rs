@@ -1,26 +1,3 @@
-//! Metrics instrumentation and optional exposition.
-//!
-//! `MetricsServer` serves the Prometheus text scrape; the readiness sampler
-//! projects the txindex capability source into a gauge. `EvidenceIdentity`
-//! belongs to benchmark evidence and is deliberately not attached to operator
-//! series as high-cardinality labels.
-//!
-//! # Instrumentation boundary
-//!
-//! The metrics API is a small, stable set of operator-facing signals: rates,
-//! totals, backpressure/fallback counts, backlog gauges, and stable latency
-//! distributions. Names and semantics are an API; renaming or removing one is
-//! a breaking change. Per-event payloads, block/tx/peer identity, and any
-//! other high-cardinality label belong in `tracing::` events (diagnostics,
-//! explicitly not an API) or in the Core-compatible USDT probes of
-//! `bitcoin_rs_consensus::trace` (see `docs/tracing.md`), never here.
-//! Metric labels are limited to closed enumerations owned by the code.
-//! The measured product-stage histograms consumed by the hot-path ledger
-//! (`docs/contracts/hot-path-attribution.md`) are exempt, and only via that
-//! ledger's `histogram` keys. Before adding a call site, apply the decision
-//! table in `docs/observability.md` (OBS-01..OBS-05) and cite the clause in
-//! review.
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;

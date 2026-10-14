@@ -1,11 +1,3 @@
-//! Regtest fixture builders for cross-crate test harnesses.
-//!
-//! Every returned block meets its declared compact target, carries a
-//! version-4 header (regtest's BIP34 height is 500, and longer fixture chains
-//! must clear the shared contextual header gate), has a header merkle root
-//! equal to the consensus fold over its transactions, and spends the null
-//! outpoint at sequence MAX in its coinbase.
-
 use bitcoin_rs_consensus::{block_subsidy, compute_merkle_root};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
@@ -42,14 +34,14 @@ pub fn genesis_time() -> u32 {
 #[must_use]
 pub fn script_num_push(value: i64) -> Vec<u8> {
     if value == 0 {
-        return vec![0x00]; // OP_0
+        return vec![0x00];
     }
     if value == -1 {
-        return vec![0x4f]; // OP_1NEGATE
+        return vec![0x4f];
     }
     if (1..=16).contains(&value) {
         let small = u8::try_from(value).unwrap_or_default();
-        return vec![0x50 + small]; // OP_1..OP_16
+        return vec![0x50 + small];
     }
     let negative = value < 0;
     let mut magnitude = value.unsigned_abs();

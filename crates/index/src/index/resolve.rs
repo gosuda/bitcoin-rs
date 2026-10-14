@@ -1,5 +1,3 @@
-//! Exact transaction and script resolution over lossy prefix rows.
-
 use super::{error::IndexError, reader::Indexer};
 use bitcoin_rs_primitives::{Block, OutPoint, Tx, Txid, deserialize};
 use bitcoin_rs_storage::KvStore;
@@ -97,10 +95,7 @@ impl<S: KvStore> Indexer<S> {
                     return Ok(Some(tx));
                 }
             }
-            // The positions did not produce the transaction, which is either an
-            // 8-byte txid-prefix collision or a stale row. Both are rare, and
-            // both are answered correctly by scanning; "not found" is never
-            // reported on the strength of positions alone.
+
             if let Some(block) = source.block_at_height(height) {
                 for tx in &block.txs {
                     if tx.txid() == txid {

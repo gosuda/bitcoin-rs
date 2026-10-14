@@ -1,5 +1,3 @@
-//! Maps block changes into journal records and replays authenticated records at boot.
-
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus};
 use bitcoin_rs_primitives::{Hash256, Header, deserialize};
 use bitcoin_rs_storage::chainstate_journal::{
@@ -150,9 +148,6 @@ impl ReplayAccumulator {
     }
 
     fn apply(&mut self, record: &JournalRecord) -> Result<(), JournalReplayError> {
-        // An unknown base stays unknown: adding the suffix would fabricate
-        // a chain total, while the tip, UTXO set, and coin stats still
-        // advance per record.
         let mut chain_tx_count = self.applied_tip.chain_tx_count.to_wire();
         if !self.unknown_base {
             chain_tx_count = chain_tx_count

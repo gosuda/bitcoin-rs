@@ -1,9 +1,3 @@
-//! Derived-index reconciliation state and policy over supplied authoritative chain facts.
-//!
-//! The index owner decides how durable derived state reaches consistency with a
-//! supplied active chain; agreement between index watermarks alone
-//! never proves query readiness.
-
 use bitcoin_rs_primitives::Hash256;
 
 use crate::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};

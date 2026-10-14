@@ -1,10 +1,3 @@
-//! Node-facing mining contract: one template model, one control trait.
-//!
-//! RPC projects these types onto BIP22/BIP23 JSON. The node implements
-//! [`MiningControl`]. Caching and long-poll live in this crate's
-//! [`MiningService`](crate::MiningService); proposal validation and solved-block
-//! submission stay on the node's authoritative apply path.
-
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

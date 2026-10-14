@@ -1,7 +1,3 @@
-//! Window invalidation must keep the published header tip and the
-//! assume-valid gate in sync with the mutated tree, exactly as reorg
-//! invalidation does.
-
 use std::sync::Arc;
 
 use bitcoin_rs_chain::NodeStatus;
@@ -38,8 +34,6 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
     let mut handles: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles).map_err(|error: ApplyError| error.to_string())?;
 
-    // The empty child at height 1 becomes both the assume-valid anchor and
-    // the published header tip, so the gate starts trusted.
     let anchor = empty_child(genesis.block_hash(), 1)?;
     let anchor_hash = Hash256::from(anchor.block_hash());
     handles
@@ -60,9 +54,6 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.invalidated.to_vec(), vec![anchor_hash]);
 
-    // The invalidation removed the anchor from the active chain. The shared
-    // operation must have republished the best valid tip and re-evaluated
-    // the gate against the mutated tree under the same write lock.
     assert!(
         !handles.assume_valid_gate.trusted(),
         "window invalidation must re-evaluate the assume-valid gate"

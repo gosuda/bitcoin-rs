@@ -1,5 +1,3 @@
-//! Shared parse-once block facts for native validation.
-
 use bitcoin_rs_primitives::{
     Header, Tx, TxOut, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},
@@ -139,7 +137,6 @@ impl BlockFacts {
 
     pub(crate) fn or_insert_wtxids_from(&mut self, txs: &[Tx]) {
         if self.wtxids.is_none() {
-            // Reuse legacy txids; iterate over txs so malformed ID counts cannot truncate.
             self.wtxids = Some(
                 txs.iter()
                     .enumerate()

@@ -1,12 +1,3 @@
-//! Mutation records for the mempool's mutation API.
-//!
-//! Every mutating [`Mempool`](crate::Mempool) method returns a
-//! [`MutationResult`] describing exactly what it committed, in commit order.
-//! The pool advances its [`Mempool::sequence_number`] counter exactly once
-//! per emitted change while the write lock is held, so each change in a
-//! batch carries a distinct, contiguous sequence value that observers can
-//! publish verbatim.
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_primitives::{Hash256, Txid};
@@ -202,8 +193,6 @@ pub struct MutationEnvelope {
 mod tests {
     use super::*;
 
-    // MPL-02 (docs/contracts/mempool-mutations.md): each emitted change owns
-    // one sequence; a position beyond that batch owns none.
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
         let result = MutationResult {
@@ -233,8 +222,6 @@ mod tests {
         assert_eq!(result.sequence_of(2), None);
     }
 
-    // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
-    // no sequence, including at index zero.
     #[test]
     fn empty_mutation_has_no_sequence_at_any_index() {
         let result = MutationResult::empty();

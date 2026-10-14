@@ -1,11 +1,3 @@
-//! Scenario tests for the checked borrowed wire layout (`layout` module).
-//!
-
-//! These pin the layout owner's contract against the golden block corpus and
-//! synthetic malformations: every span a parsed structure hands out is
-//! in-bounds by construction, malformed encodings fail with a defined
-//! [`DecodeError`] before any out-of-bounds access or oversized allocation,
-//! and materialized values are byte-identical to the consensus form.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
@@ -62,7 +54,7 @@ fn golden_blocks_validate_all_spans_and_consumed_counts() {
             );
             per_tx_total += transaction.consumed_len();
         }
-        // Header (80) + count prefix width + transaction regions == block.
+
         let prefix = if u64::try_from(parsed.tx_count()).is_ok_and(|count| count <= 0xfc) {
             1
         } else {
@@ -117,7 +109,6 @@ fn trailing_byte_is_rejected() {
 /// rejected before any allocation sized by the count.
 #[test]
 fn impossible_counts_are_rejected_before_allocation() {
-    // version + marker/flag + u64::MAX-sized input count, nothing else.
     let mut tx_bytes = Vec::new();
     tx_bytes.extend_from_slice(&1_i32.to_le_bytes());
     tx_bytes.extend_from_slice(&[0x00, 0x01]);
@@ -131,8 +122,6 @@ fn impossible_counts_are_rejected_before_allocation() {
 /// Non-canonical compact-size encodings are rejected with `Varint`.
 #[test]
 fn noncanonical_varints_are_rejected() {
-    // version + input count 0xFD 0x05 0x00 (little-endian 5; the canonical
-    // form of 5 is one byte), then padding so only the varint is at fault.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&1_i32.to_le_bytes());
     bytes.extend_from_slice(&[0xFD, 0x05, 0x00]);
@@ -161,7 +150,7 @@ fn segwit_flag_rules_hold() {
 
     let mut corrupted = golden.clone();
     let mut replaced = false;
-    let mut cursor = 81; // past header and transaction count
+    let mut cursor = 81;
     while cursor + 1 < corrupted.len() {
         if corrupted[cursor] == 0x00 && corrupted[cursor + 1] == 0x01 {
             corrupted[cursor + 1] = 0x02;
@@ -206,7 +195,7 @@ fn metadata_ranges_distinct_from_byte_spans() {
             "witness item {index} span stays in bounds"
         );
     }
-    // ByteSpan and MetadataRange are distinct types with no conversion.
+
     let _: Option<ByteSpan> = None;
 }
 

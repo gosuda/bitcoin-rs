@@ -572,7 +572,6 @@ fn apply_combined_run(
         let add_unique = vouts_are_strictly_increasing(None, parts.iter().map(|part| part.vout));
         let fresh = UtxoRecord::add_run_replacement(None, txid, parts, add_unique, None)?;
         match fresh.edit_replacement(vouts, &[])? {
-            // Nothing of the fresh record was spent: the additions stand.
             RemovedRecord::Unchanged => RecordMutation::Replace(fresh),
             RemovedRecord::Emptied => RecordMutation::Delete,
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
@@ -835,8 +834,7 @@ mod tests {
             false,
             1,
         );
-        // vout 5 was never created under this txid: the spend no-ops and
-        // the addition still lands.
+
         shard.commit_single_shard_batch(
             &[add],
             &[OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 5)],

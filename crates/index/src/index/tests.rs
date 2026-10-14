@@ -73,7 +73,6 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Store iteration order is BE byte order, so 1 precedes 256.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![1, 256],

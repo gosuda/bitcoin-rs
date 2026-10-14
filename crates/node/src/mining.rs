@@ -1,8 +1,3 @@
-//! Node-owned mining control facade.
-//!
-//! Header admission and proposal/submission projection over the authoritative
-//! chainstate. Candidate lifecycle lives in `bitcoin_rs_mining`.
-
 use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
 use bitcoin_rs_chain::ChainError;
@@ -98,7 +93,6 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
-        // Core GBT proposal looks the hash up before TestBlockValidity.
         if let Some(known) = self.known_block_result(block.block_hash().into()) {
             return Ok(known);
         }
@@ -164,16 +158,12 @@ impl MiningCoordinator {
         serialized: Option<bytes::Bytes>,
     ) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
-        // Duplicate classification and apply observe the same serialized chain state.
-        // Reserve a generation only after ruling out an already accepted body.
+
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
-        // Core v31 `submitblock` dropped the index pre-check. `ProcessNewBlock`
-        // returns `duplicate` only when the block was already accepted
-        // (`!new_block && accepted`). A header-only tree entry must still
-        // receive the body so `submitheader` then `submitblock` works.
+
         if matches!(
             self.known_block_result(block_hash),
             Some(BlockValidationResult::Duplicate)
@@ -258,8 +248,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
                 context.segwit_active,
             );
         }
-        // Keep chain inputs tied to the context tip. Match the existing
-        // transition -> mempool lock order, then release both before counting.
+
         let (snapshot, prevouts) = {
             let _guard = self.stable.lock();
             if self
@@ -418,8 +407,6 @@ impl MiningControl for MiningCoordinator {
 
     /// Admits `header` through the same Chainstate boundary inbound P2P uses.
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
-        // API-13 reports a missing parent before proof-of-work failures.
-        // Known headers stay idempotent; an empty tree also admits network genesis.
         {
             let tree = self.block_tree.read();
             let hash = header.compute_hash().into();
@@ -489,7 +476,6 @@ impl MiningControl for MiningCoordinator {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                // CONTRACT: docs/contracts/external-api.md#API-30
                 self.chainstate
                     .validate_block(&block)
                     .map_err(|error| test_block_validity_error(&error))?;
@@ -531,8 +517,7 @@ fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningCon
         ApplyError::ConcurrentChainChange => Err(MiningControlError::Unavailable(
             CompactString::from(error.to_string()),
         )),
-        // The generation counter cannot recover in-process; only a restart
-        // reserves another coordinated mutation.
+
         ApplyError::ChainChangeGenerationOverflow => Err(MiningControlError::Failed(
             CompactString::from(error.to_string()),
         )),

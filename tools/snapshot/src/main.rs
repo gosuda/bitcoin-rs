@@ -1,5 +1,3 @@
-//! Read-only inspection and verification of Bitcoin Core portable snapshots.
-
 use std::{
     fs::{self, File},
     io::{self, BufReader, Write},
@@ -213,7 +211,7 @@ fn open_input(path: &Path) -> Result<(File, u64), Error> {
         path: path.to_path_buf(),
         source,
     };
-    // Reject directories/devices/pipes before opening; the held handle is checked again.
+
     if !fs::metadata(path).map_err(input_error)?.is_file() {
         return Err(Error::NotRegularFile(path.to_path_buf()));
     }
@@ -222,7 +220,7 @@ fn open_input(path: &Path) -> Result<(File, u64), Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // A path swapped to a FIFO must not block before the held-handle check.
+
         let flags = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
             .map_err(io::Error::other)
             .map_err(input_error)?;

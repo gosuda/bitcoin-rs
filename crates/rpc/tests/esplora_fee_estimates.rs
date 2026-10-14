@@ -1,9 +1,3 @@
-//! Esplora `/fee-estimates` reflects real admitted-and-confirmed history
-//! only: a target without history is omitted from
-//! the map instead of fabricated as the old 1 sat/vB floor, and the sat/vB
-//! projection consumes the RPC surface's `sat_to_btc` feerate value so the
-//! two fee-unit projections cannot drift.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -108,12 +102,7 @@ fn fee_estimates_omits_every_target_without_history() {
 #[test]
 fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     let ctx = Arc::new(Context::new());
-    // Two low-fee entries miss target 1 when an empty block lands, then two
-    // high-fee entries confirm with the next block. The estimator answers
-    // with its lowest bucket whose cumulative success clears the threshold —
-    // the high bucket, because the lows failed target 1 — so the projected
-    // number is a real mid-range rate, not the 1 sat/vB floor the old
-    // `unwrap_or(1.0)` fabrication emitted.
+
     admit_batch(&ctx, LOW_FEE_SATS, ENTRY_HEIGHT);
     connect_block(&ctx, &[], &[], MISS_HEIGHT);
     let highs = admit_batch(&ctx, HIGH_FEE_SATS, MISS_HEIGHT);
@@ -128,10 +117,6 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
         "all declared targets carry the confirmed history: {parsed:?}"
     );
 
-    // CONTRACT: docs/contracts/external-api.md#API-26. Esplora must show the
-    // RPC surface's own answer projected to sat/vB (BTC/kvB * 100 000), so a
-    // wallet sees one rate everywhere; an omitted target would strand it and
-    // a fabricated 1.0 would undersell the honest estimate.
     let Some(estimate) = ctx.mempool.gateway.read().estimate_fee_rate(1) else {
         panic!("two confirmations against two sampled misses must qualify target 1");
     };

@@ -1,8 +1,3 @@
-//! The single owner of node startup, rollback, and ordered service shutdown.
-//!
-//! Startup returns a fully owned `Node`, not detached state and worker handles.
-//! The daemon and embedding surfaces both enter this lifecycle directly.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,8 +106,7 @@ impl ChainControl for RpcChainControl {
                 crate::reorg::ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
                 other => ChainControlError::Failed(other.to_string()),
             })?;
-        // The transition is already released; the invalid descendants must
-        // not keep occupying bounded download staging.
+
         self.sync.purge_invalidated(&invalidated);
         Ok(())
     }
@@ -183,8 +177,6 @@ fn bind_rpc(
     Ok((context, server))
 }
 
-// Records that teardown reached the bootstrap join on the current thread.
-// This seam never adds state or an API to production builds.
 #[cfg(test)]
 std::thread_local! {
     static BOOTSTRAP_DRAIN_REACHED: std::cell::Cell<bool> =
@@ -286,17 +278,13 @@ impl NodeServices {
             state.p2p().shutdown();
         }
         if let Some(tx) = self.event_loop_signal.take() {
-            // A full bounded channel already carries a wake. Blocking here
-            // could prevent teardown from reaching the worker joins.
             let _ = tx.try_send(());
         }
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
-        // Owner-local fee-estimator history: the event loop has drained, so
-        // no further mempool mutations run and this snapshot is final.
-        // docs/policies/db-migration.md — owner-local, degrade-not-fail.
+
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
@@ -315,19 +303,18 @@ impl NodeServices {
     ) {
         if let Some(handle) = self.event_loop.take() {
             if handle.join().is_err() {
-                // Event loop thread panic.
                 set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
             }
         }
         if let Some(handle) = self.rpc_thread.take() {
             match handle.join() {
                 Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
-                // RPC listener returned an I/O error.
+
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "rpc listener exited with i/o error");
                     set_first_error(first_error, anyhow::Error::new(error));
                 }
-                // RPC listener thread panic.
+
                 Err(_) => {
                     tracing::error!("rpc listener panicked");
                     set_first_error(first_error, anyhow::anyhow!("rpc listener thread panicked"));
@@ -340,20 +327,17 @@ impl NodeServices {
             set_first_error(first_error, error);
         }
         if let Some(handle) = self.readiness_sampler.take() {
-            // Readiness sampler thread panic.
             if handle.join().is_err() {
                 tracing::error!("readiness sampler panicked");
                 set_first_error(first_error, anyhow::anyhow!("readiness sampler panicked"));
             }
         }
         if let Some(state) = state {
-            // P2P core worker join failure.
             if let Err(error) = state.p2p().join_core_workers() {
                 set_first_error(first_error, error.into());
             }
         }
         if let Some(handle) = self.tx_ingress.take() {
-            // Tx ingress worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("tx ingress consumer exited cleanly");
             } else {
@@ -362,7 +346,6 @@ impl NodeServices {
             }
         }
         if let Some(handle) = self.tx_relay.take() {
-            // Tx relay worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("tx relay worker exited cleanly");
             } else {
@@ -371,7 +354,6 @@ impl NodeServices {
             }
         }
         if let Some(handle) = self.block_announce.take() {
-            // Block announce worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("block announce worker exited cleanly");
             } else {
@@ -390,14 +372,12 @@ impl NodeServices {
         first_error: &mut Option<anyhow::Error>,
     ) {
         if let Some(state) = state {
-            // P2P bootstrap worker join failure.
             if let Err(error) = state.p2p().join_bootstrap_worker() {
                 set_first_error(first_error, anyhow::Error::new(error));
             }
             mark_bootstrap_drain_reached();
         }
         if let Some(handle) = self.maintenance_worker.take() {
-            // Chainstate maintenance worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("chainstate maintenance worker exited cleanly");
             } else {
@@ -409,7 +389,6 @@ impl NodeServices {
             }
         }
         if let Some(mut handler) = self.signal_handler.take() {
-            // Signal forwarding thread failed to close or join.
             if let Err(error) = handler.close_and_join() {
                 tracing::error!(%error, "signal forwarding thread did not shut down cleanly");
                 set_first_error(first_error, error);
@@ -432,7 +411,7 @@ fn publish_clean_checkpoint_if_eligible(
             Ok(Some(generation)) => {
                 tracing::info!(generation, "published clean chainstate checkpoint");
             }
-            // Checkpoint write failure suppresses the clean-shutdown report.
+
             Err(error) => {
                 tracing::error!(%error, "clean checkpoint publication failed");
                 set_first_error(first_error, error);
@@ -451,7 +430,6 @@ fn set_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
 
 impl Drop for NodeServices {
     fn drop(&mut self) {
-        // Abandoned services still run the shared teardown.
         if let Err(error) = self.teardown(None, TeardownMode::StartupAbort) {
             tracing::warn!(%error, "dropped node services; teardown reported an error");
         }
@@ -504,17 +482,8 @@ pub(crate) fn start_node(
     runtime: RuntimeInputs,
     install_signals: bool,
 ) -> Result<Node> {
-    // The engine/build compatibility check is owned by configuration
-    // validation (`validation.engine`); repeat it on the direct embedding path
-    // so a caller that skips `resolve` cannot open chainstate or start workers
-    // on an engine this build cannot execute. It runs before anything else:
-    // not even the tracer or the rayon pool may be primed for a run that
-    // cannot start.
     config.validate()?;
-    // Registers the Bitcoin Core-compatible USDT probes with the platform
-    // tracer so consumers (bpftrace, BCC, DTrace) can discover them — shared
-    // startup, so daemon (`run`) and embedded (`Node::start`) nodes are
-    // equally discoverable. A no-op without the `usdt` feature.
+
     bitcoin_rs_consensus::trace::register_probes();
     cap_global_thread_pool();
     let injected_shutdown = runtime.shutdown;
@@ -539,9 +508,7 @@ pub(crate) fn start_node(
     } else {
         None
     };
-    // The sampler only publishes to the metrics recorder: without a bound
-    // server its writes go nowhere, so do not spend the thread (and its
-    // join latency in every start_node test) when metrics are off.
+
     guard.services.readiness_sampler = if guard.services.metrics.is_some() {
         Some(crate::metrics::spawn_readiness_sampler(
             state.derived_index_status(),
@@ -590,7 +557,7 @@ pub(crate) fn start_node(
     let sequence_wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
     let signal = state.mining_generation_signal();
-    // The signal holds a Weak reference; the RPC context owns the coordinator.
+
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
@@ -615,12 +582,9 @@ pub(crate) fn start_node(
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
-        // The node's one latch, built with the chainstate at open and already
-        // held by the block-download executor: `initialblockdownload`, the
-        // transaction-relay gate, and block-peer eligibility read one signal.
+
         ibd: Some((state.ibd(), state.config().network)),
-        // One orchestrator: the listener announces block inventory to the
-        // same sync loop the event loop drives.
+
         block_sync: Some(Arc::clone(&peer_ready_sync)),
         block_announcer: Some(block_announcer),
     };
@@ -654,11 +618,6 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::msg)?;
 
-    // A fresh chainstate leaves the applied-tip slot empty until the sync
-    // loop's first tick; applying genesis before the listener binds keeps
-    // RPC from answering mining calls it cannot yet serve, and a refused
-    // or unsettled connect aborts startup rather than serving that broken
-    // state.
     crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
         .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
     let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
@@ -706,7 +665,7 @@ const GLOBAL_RAYON_THREADS: usize = 4;
 fn cap_global_thread_pool() {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let threads = available.min(GLOBAL_RAYON_THREADS);
-    // A second node start in one process finds the pool already installed.
+
     if let Err(error) = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()

@@ -1,6 +1,3 @@
-//! Mining-surface E2E: block templates, `submitblock`/`submitheader`,
-//! `generateblock`/`generatetoaddress`, and mining introspection.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -72,8 +69,6 @@ fn template_assembly_header_then_block() -> Result<()> {
         json!(block.block_hash().to_string())
     );
 
-    // Re-submitting an applied block is a duplicate, not an error, and
-    // genesis is always already known.
     let tip_hex = node.rpc("getblock", &json!([block.block_hash().to_string(), 0]))?;
     assert_eq!(
         node.rpc("submitblock", &json!([tip_hex]))?,

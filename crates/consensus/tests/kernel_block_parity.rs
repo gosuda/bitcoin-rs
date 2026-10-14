@@ -1,7 +1,3 @@
-//! Mainnet script verdicts against bitcoinkernel; opted-in fixtures also run
-//! the interpreter directly so the differential cannot dispatch kernel twice.
-//! Per-input scripts only; fixtures include every prevout and provenance.
-
 #![cfg(feature = "kernel")]
 
 use std::error::Error;
@@ -18,7 +14,6 @@ use serde::Deserialize;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-// Engines use different error taxonomies; compare consensus accept/reject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
     Accept,
@@ -231,7 +226,6 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
                 }
             }
             if element.len() == 64 {
-                // A 64-byte signature implicitly commits to SIGHASH_DEFAULT.
                 element.push(0x03);
                 mutated = true;
                 break;
@@ -436,7 +430,7 @@ fn script_verdict_parity() -> TestResult {
                 fixture.class,
                 fixture.height,
             );
-            // Parse/precompute failures are not script rejection evidence.
+
             if mutation.expected() == Verdict::Reject {
                 assert!(
                     matches!(kernel, Err(ConsensusError::Script { .. })),

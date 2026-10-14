@@ -1,12 +1,3 @@
-//! History-based fee-rate estimator modelled on Bitcoin Core's
-//! `CBlockPolicyEstimator` but simplified.
-//!
-//! Maintains exponentially-spaced fee-rate buckets and records, per bucket,
-//! how many blocks transactions waited before confirmation.
-//! [`FeeEstimator::estimate`] returns the lowest fee rate whose historical
-//! confirmation success rate clears a threshold, or [`None`] when there is
-//! insufficient data.
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_primitives::Txid;

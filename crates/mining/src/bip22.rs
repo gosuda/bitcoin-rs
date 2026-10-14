@@ -1,5 +1,3 @@
-//! BIP22 reject-reason vocabulary for submission and header admission.
-
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::ConsensusError;
 use compact_str::CompactString;
@@ -39,7 +37,7 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
                 "BIP34" => "bad-cb-height",
                 "BIP68" | "BIP113" => "bad-txns-nonfinal",
                 "COINBASE_MATURITY" => "bad-txns-premature-spend-of-coinbase",
-                // Any other BIP rule keeps the flag-failure envelope.
+
                 _ => {
                     return CompactString::from(format!(
                         "block-script-verify-flag-failed ({bip}: {reason})"
@@ -69,8 +67,7 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
         ChainError::InvalidParent { .. } => "bad-prevblk",
         ChainError::KnownInvalidHeader { .. } => "duplicate-invalid",
         ChainError::DuplicateHeader { .. } => "duplicate",
-        // Core prints `bad-version(0x%08x)` with the rejected version's
-        // unsigned bit pattern (`src/validation.cpp:4112-4126`).
+
         ChainError::BadVersion { version, .. } => {
             return CompactString::from(format!(
                 "bad-version(0x{:08x})",

@@ -94,7 +94,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 fn decode_submitted_block(hex: &str) -> Result<(Block, Vec<u8>), RpcError> {
     let mut bytes = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
-    // See the API-15 contract for DecodeHexBlk compatibility behavior.
+
     let mut reader: &[u8] = &bytes;
     let block = <Block as ConsensusDecode>::consensus_decode(&mut reader)
         .map_err(|_| block_decode_failed())?;
@@ -112,8 +112,7 @@ const HEADER_BYTES: usize = Header::LEN;
 fn decode_block_header(hex: &str) -> Result<Header, RpcError> {
     let bytes = Vec::<u8>::from_hex(hex)
         .map_err(|_| RpcError::Deserialization("Block header decode failed".to_owned()))?;
-    // Core's DecodeHexBlockHeader unserializes CBlockHeader and ignores leftover
-    // bytes, so extra hex after 80 bytes is accepted. Fewer than 80 bytes fail.
+
     let Some(header_bytes) = bytes.get(..HEADER_BYTES) else {
         return Err(RpcError::Deserialization(
             "Block header decode failed".to_owned(),
@@ -142,7 +141,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         if array.len() > 3 {
             return Err(RpcError::InvalidParams("too many parameters"));
         }
-        // Core reads `fee_delta` from params[2] before rejecting a non-zero dummy.
+
         let fee_delta = array
             .get(2)
             .and_then(JsonValueTrait::as_i64)
@@ -169,7 +168,6 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
     if let Some(dummy) = dummy
         && !dummy.is_null()
     {
-        // Core `MaybeArg<double>`: JSON 0 and 0.0 are both zero.
         let nonzero = dummy
             .as_i64()
             .map(|n| n != 0)
@@ -182,7 +180,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             ));
         }
     }
-    // See the authoritative API-24 contract for this network-dependent rule.
+
     let prioritised = if ctx.chain.chain_network == Network::Regtest {
         ctx.mempool
             .gateway
@@ -219,7 +217,7 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let nblocks = required_u32(params, 0, "nblocks is required")?;
     let address = required_str(params, 1, "address is required")?;
     let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
-    // CONTRACT: docs/contracts/external-api.md#API-29
+
     let payout = payout_script_from_address(
         address,
         convert::bitcoin_network(ctx.chain.chain_network),
@@ -305,7 +303,6 @@ pub(crate) fn getprioritisedtransactions(
         let _ = row.insert("fee_delta", json!(entry.fee_delta));
         let _ = row.insert("in_mempool", json!(entry.in_mempool));
         if let Some(modified_fee) = entry.modified_fee {
-            // CONTRACT: docs/contracts/external-api.md#API-28
             let sats = signed_sat_to_i64(modified_fee);
             let _ = row.insert("modified_fee", json!(sats));
         }
@@ -388,8 +385,7 @@ fn parse_generateblock_transactions(
         ));
     };
     let mut transactions = Vec::with_capacity(entries.len());
-    // One lazy mining snapshot serves every pooled-txid argument; raw-tx
-    // argument lists pay nothing.
+
     let mut snapshot: Option<MempoolMiningSnapshot> = None;
     for entry in entries {
         let Some(text) = entry.as_str() else {
@@ -466,7 +462,6 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
     };
 
     if mode_text == "proposal" {
-        // API-12: proposal request parsing.
         let data = request
             .get("data")
             .and_then(JsonValueTrait::as_str)
@@ -672,10 +667,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         version_bits_required: i64::from(template.version_bits_required),
         previous_block_hash: candidate.previous_block_hash.to_string_be(),
         transactions: render_template_transactions(&candidate.transactions),
-        coinbase_aux: {
-            // Core `HexStr(COINBASE_FLAGS)`. v31's flags bytes are empty.
-            std::collections::BTreeMap::from([("flags".to_owned(), String::new())])
-        },
+        coinbase_aux: { std::collections::BTreeMap::from([("flags".to_owned(), String::new())]) },
         coinbase_value: i64_saturated(candidate.coinbase_value),
         long_poll_id: Some(candidate.template_id.as_str().to_owned()),
         target: compact_target_hex(candidate.bits),
@@ -701,12 +693,11 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     let next_bits = format!("{:08x}", info.next_bits);
     let next_target = compact_target_hex(info.next_bits);
     let next_height = u64::from(info.blocks) + 1;
-    // See docs/contracts/external-api.md#API-25 for the omission contract.
+
     typed_to_sonic_omitting_nulls(&v31::GetMiningInfo {
         blocks: u64::from(info.blocks),
         current_block_weight: info.last_candidate.map(|candidate| candidate.weight),
-        // Core's `currentblocktx` excludes the coinbase. `LastCandidateInfo`
-        // counts it because that is the candidate's transaction total.
+
         current_block_tx: info
             .last_candidate
             .and_then(|candidate| i64::try_from(candidate.transactions.saturating_sub(1)).ok()),
@@ -897,7 +888,6 @@ mod tests {
         );
     }
 
-    // API-08: mainnet GBT requires a connected peer.
     #[test]
     fn getblocktemplate_rejects_mainnet_without_peers() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -910,7 +900,6 @@ mod tests {
         assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
     }
 
-    // API-08: mainnet GBT is rejected during initial block download.
     #[test]
     fn getblocktemplate_rejects_mainnet_during_ibd() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -927,7 +916,6 @@ mod tests {
         );
     }
 
-    // API-08: proposal mode bypasses the mainnet connection gates.
     #[test]
     fn getblocktemplate_proposal_skips_mainnet_connection_gates() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1024,8 +1012,6 @@ mod tests {
             request.long_poll_id.as_deref(),
             Some(sample_candidate().template_id.as_str())
         );
-        // `submitold`/`workid` are BIP23 extras outside the pinned v17
-        // GetBlockTemplate contract and are no longer emitted.
     }
 
     /// API-14: signet must be advertised alongside segwit on signet.
@@ -1235,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: API-15
+
     fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
         let missing = Arc::new(Context::new());
         let error = submitblock(&missing, &json!(["00"]))
@@ -1254,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: API-15
+
     fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         let ctx = ctx_with_control(control.clone());
@@ -1274,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: API-15
+
     fn submitblock_rejects_non_string_bip22_dummy() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         let ctx = ctx_with_control(control.clone());
@@ -1299,14 +1285,11 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: API-15
+
     fn decode_tx_zero_input_zero_flag_accepted_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         let ctx = ctx_with_control(control.clone());
-        // A single transaction encoded as version | zero-input dummy | zero flag |
-        // lock time: Core reads the zero flag as the legacy empty transaction
-        // (zero inputs, zero outputs) and admits it to validation instead of
-        // failing with -22.
+
         let empty = Tx {
             version: 1,
             inputs: Vec::new(),
@@ -1358,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-25
+
     fn getmininginfo_omits_unset_optional_fields() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         {
@@ -1374,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    // Core emits the tip's nBits at top level and the next block's only under next.
+
     fn getmininginfo_top_level_target_is_the_tip_not_the_next_block() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         {
@@ -1451,7 +1434,7 @@ mod tests {
         let entry = pool
             .entry_by_txid(&txid)
             .expect("entry remains after prioritise");
-        // fee_delta overlay is additive across calls: 500 then 600.
+
         assert_eq!(entry.fee_delta, 1_100);
         assert_eq!(entry.fee, 1_000);
     }
@@ -1489,7 +1472,6 @@ mod tests {
         }
     }
 
-    // CONTRACT: API-24
     #[test]
     fn prioritisetransaction_rejects_dust_outputs_like_core() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1511,7 +1493,6 @@ mod tests {
         assert_eq!(error.to_string(), PRIORITISE_DUST_ERROR);
     }
 
-    // CONTRACT: API-24
     #[test]
     fn prioritisetransaction_allows_dust_overlay_on_regtest() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1532,7 +1513,6 @@ mod tests {
         assert_eq!(result.as_bool(), Some(true));
     }
 
-    // CONTRACT: API-24
     #[test]
     fn prioritisetransaction_allows_absent_txid_overlay() {
         let ctx = Arc::new(Context::new());
@@ -1657,8 +1637,6 @@ mod tests {
 
     #[test]
     fn getmininginfo_reports_testnet4_separately_from_testnet3() {
-        // Core's getmininginfo reports ChainTypeToString(TESTNET4) == "testnet4",
-        // matching getblockchaininfo. The old code collapsed both to "test".
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         {
             let mut info = control.info.lock();
@@ -1731,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-06
+
     fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         *control.fail.lock() = Some(MiningControlError::InvalidRequest(CompactString::from(
@@ -1747,7 +1725,6 @@ mod tests {
         ));
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-28
     #[test]
     fn getprioritisedtransactions_projects_the_overlay() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1792,7 +1769,7 @@ mod tests {
                 .and_then(JsonValueTrait::as_bool),
             Some(true)
         );
-        // CONTRACT: docs/contracts/external-api.md#API-28
+
         assert_eq!(
             pooled_row
                 .get("modified_fee")
@@ -1852,7 +1829,6 @@ mod tests {
         assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-29
     #[test]
     fn generatetoaddress_rejects_script_hex_and_descriptors() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2011,7 +1987,6 @@ mod tests {
         );
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-27
     #[test]
     fn generateblock_rejects_unknown_mempool_txid_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2027,7 +2002,6 @@ mod tests {
         );
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-27
     #[test]
     fn generateblock_rejects_undecodable_raw_tx_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2065,7 +2039,6 @@ mod tests {
         ));
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-29
     #[test]
     fn generateblock_rejects_invalid_supplied_checksums() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2092,7 +2065,6 @@ mod tests {
         }
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-30
     #[test]
     fn generateblock_maps_test_block_validity_to_verify_error() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2109,7 +2081,6 @@ mod tests {
         );
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-29
     #[test]
     fn generateblock_rejects_garbage_output_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2121,7 +2092,6 @@ mod tests {
         assert_eq!(error.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-31
     #[test]
     fn generateblock_rejects_multipath_before_ranged_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2152,7 +2122,6 @@ mod tests {
         assert_eq!(ranged.to_string(), GENERATEBLOCK_RANGED);
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-31
     #[test]
     fn generateblock_rejects_hardened_xpub_like_core() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -2165,8 +2134,6 @@ mod tests {
         assert_eq!(error.to_string(), GENERATEBLOCK_NEEDS_PRIVATE_KEYS);
     }
 
-    // An armed control failure must reach `submitheader` like every other
-    // result-returning operation, mapping Rejected onto the Core verify error.
     #[test]
     fn submitheader_maps_armed_control_failure() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());

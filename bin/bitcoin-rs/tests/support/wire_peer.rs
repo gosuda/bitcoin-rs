@@ -1,5 +1,3 @@
-//! Handshaken, journaled loopback peer for the binary's wire scenarios.
-
 use std::fs::File;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -123,7 +121,6 @@ impl Peer {
             Ok(())
         })();
         if let Err(error) = result {
-            // A partial frame cannot be retried on this connection.
             self.dropped = true;
             self.log("send-error", &format!("{cmd}: {error}"));
             return Err(error);

@@ -133,8 +133,6 @@ fn handshakes_agree_on_a_session_and_carry_packets_both_ways() -> TestResult {
         connected.responder.session_id
     );
 
-    // The initiator's first packet followed its version packet without a
-    // pause; the handshake left it unread for the established reader.
     let first = connected
         .responder
         .recv
@@ -173,7 +171,7 @@ fn established_reader_refuses_an_oversized_length_before_its_body() -> TestResul
         .initiator
         .send
         .seal(&vec![0; MAX_RECV_CONTENTS_LEN + 1], &[], false)?;
-    // Only the length field is delivered: the refusal must not wait for the body.
+
     connected.to_responder.bytes.extend(&packet[..3]);
     let result = connected
         .responder
@@ -254,7 +252,6 @@ fn responder_refuses_a_v1_version_from_another_network() {
 
 #[test]
 fn an_initiator_knows_whether_its_peer_answered() -> TestResult {
-    // A peer that closes without a byte: the initiator may retry as v1.
     let mut rng = StdRng::seed_from_u64(16);
     let mut silent = Handshake::initiator(MAGIC, &mut rng);
     let mut inbox = Inbox::default();
@@ -270,7 +267,6 @@ fn an_initiator_knows_whether_its_peer_answered() -> TestResult {
     );
     assert!(!silent.received_any());
 
-    // One byte is an answer, so a later failure must not fall back.
     let mut answered = Handshake::initiator(MAGIC, &mut rng);
     drop(answered.take_outbound());
     let mut inbox = Inbox {
@@ -482,7 +478,6 @@ fn a_stream_cut_anywhere_never_establishes() -> TestResult {
     stream.extend(session.send_garbage_terminator);
     stream.extend(session.send.seal(&[], &initiator.garbage, false)?);
     for cut in 0..stream.len() {
-        // The same seed rebuilds the responder whose key the stream answers.
         let mut rng = StdRng::seed_from_u64(14);
         let _initiator = ScriptedInitiator::new(&mut rng, 9);
         let mut responder = Handshake::responder(MAGIC, &mut rng);

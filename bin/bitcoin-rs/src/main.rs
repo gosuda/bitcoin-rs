@@ -1,8 +1,3 @@
-//! `bitcoin-rs` — node binary entry point.
-//!
-//! Starts the configured `bitcoin-rs` node with crash recovery, signal handling,
-//! metrics/tracing setup, and graceful shutdown.
-
 #![allow(clippy::print_stdout)]
 #![allow(clippy::print_stderr)]
 

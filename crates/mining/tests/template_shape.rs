@@ -1,11 +1,8 @@
-//! Candidate scalar, dependency-index, and shape tests.
-
 #[path = "common/fixtures.rs"]
 mod common;
 
 use std::error::Error;
 
-// rust-bitcoin differential oracles: witness merkle root and sha256d commitment.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_mining::{
@@ -111,7 +108,6 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
             + fees
     );
 
-    // rust-bitcoin differential oracle for witness merkle and sha256d commitment.
     let mut leaves = vec![OracleWtxid::all_zeros()];
     leaves.extend(
         candidate

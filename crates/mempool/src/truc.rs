@@ -1,5 +1,3 @@
-//! BIP431 TRUC topology checks over the admitted graph.
-
 use bitcoin_rs_primitives::{Tx, Txid};
 use hashbrown::HashSet;
 use thiserror::Error;

@@ -1,9 +1,3 @@
-//! Failure classification decides whether a window failure invalidates a
-//! header subtree, discards only the delivered body, or stays retryable.
-//! Misclassifying either way is a real defect: `Permanent` on a wiring bug
-//! poisons a possibly-valid subtree, `Operational` on a native script
-//! verdict retries a block that can never be valid.
-
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine, ValidationEngine};
 use bitcoin_rs_primitives::Hash256;
@@ -25,9 +19,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         reason: "script failed".to_owned(),
         engine,
     };
-    // Wiring and backend failures (#618) stay retryable; a native verdict,
-    // unmet work, and a contextual header rejection are proofs of invalidity;
-    // a mutated body names only the delivered bytes; a torn head is fatal.
+
     let cases = [
         (
             Consensus(UnsupportedEngine {

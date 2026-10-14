@@ -1,5 +1,3 @@
-//! Durable per-block UTXO undo records and the in-flight disconnect marker.
-
 use hashbrown::HashMap;
 use std::sync::Arc;
 

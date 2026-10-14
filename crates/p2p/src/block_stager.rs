@@ -1,12 +1,3 @@
-//! Out-of-order block staging bounded by the download window budget.
-//!
-//! [`BlockStager`] holds decoded inbound bodies until their predecessor is
-//! applied. Slot-count eviction and byte-budget backpressure live here;
-//! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
-//! coordinator stages arrivals and drains a contiguous apply prefix; it does
-//! not own this policy. The ownership boundary is defined by the
-//! [architecture contract](../../../docs/contracts/architecture.md).
-
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -39,12 +30,7 @@ pub(crate) struct BlockStager {
 #[derive(Debug)]
 struct ReceivedBlock {
     block: Block,
-    // Preserved P2P wire payload, reused by the unified `apply_block` to
-    // skip reserialization. This is a second buffer (~block size) held next to
-    // the decoded `block` while it waits for its predecessor, so a fully
-    // out-of-order staging window holds roughly twice `bytes` per entry; both
-    // are still bounded by the received-block budget (max_received_blocks /
-    // max_received_bytes).
+
     serialized: bytes::Bytes,
     received_at: Instant,
     bytes: usize,
@@ -189,12 +175,7 @@ impl BlockStager {
         if bytes > self.budget.max_received_bytes {
             return StagedBlock::DroppedForRetry { hash };
         }
-        // Byte-budget exhaustion is backpressure, not eviction: refuse the
-        // incoming block (it stays re-requestable through the window's
-        // drop-for-retry path) instead of evicting already-downloaded staged
-        // progress into re-download churn. The next expected block is exempt —
-        // it unblocks the apply frontier immediately, and refusing it while
-        // staged successors hold the budget would deadlock the window.
+
         if Some(hash) != next_expected_hash
             && self.received_bytes.saturating_add(bytes) > self.budget.max_received_bytes
         {

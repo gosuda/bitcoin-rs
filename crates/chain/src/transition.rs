@@ -1,5 +1,3 @@
-//! Transition exclusion: one domain, split into the two roles that serialize against it.
-
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 

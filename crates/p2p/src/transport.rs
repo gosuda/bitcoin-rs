@@ -1,7 +1,3 @@
-//! A connection's transport: legacy v1 framing or a BIP324 v2 session, split
-//! into the receive half the connection thread keeps and the send half its
-//! writer thread takes once the handshake completes.
-
 use std::io::{self, Read, Write};
 use std::time::Instant;
 

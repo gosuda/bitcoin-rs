@@ -1,19 +1,3 @@
-//! Block download orchestrator.
-//!
-//! Reads the applied-chain seam ([`crate::sync::chain::SyncChain`]), the peer table, and the
-//! inbound channels and, when a peer reports a longer chain, sends
-//! `getheaders` toward that peer. Inbound `headers` batches are admitted
-//! through [`crate::sync::chain::SyncChain::admit_headers`]; inbound full blocks are staged in
-//! the `BlockStager` and committed through [`crate::sync::chain::SyncChain::commit_window`].
-//! The download executor, window, staging, and peer policy are owned by this
-//! crate; applied-tip mutation behind `crate::sync::chain::SyncChain` remains a node-provided
-//! ARCH-07 seam.
-//!
-//! Each tick runs one canonical frontier reconciliation:
-//! observe the chain frontier and the identity-bearing usable-peer set,
-//! convict or release what no longer holds work, then either schedule
-//! concrete recovery or name the reason progress is impossible.
-
 mod branches;
 pub mod chain;
 mod commit;
@@ -553,11 +537,7 @@ impl BlockSync {
             else {
                 return false;
             };
-            // A header that admission would refuse never earns the scan. In
-            // particular its own valid proof of work must meet the target
-            // the chain requires after this parent. As in admission, a header
-            // already in the tree is not rechecked, so a clock that has since
-            // moved backwards cannot refuse it.
+
             if known.is_none()
                 && bitcoin_rs_chain::validate_contextual_header(
                     &tree,
@@ -590,26 +570,22 @@ impl BlockSync {
         self.retire_timed_out_header_syncs(Instant::now());
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
-        // Remove dead racers before queued blocks can affect peer election.
+
         self.reconcile_peer_sessions();
         self.advance_historical();
         self.drain_inbound_blocks();
         self.advance_historical();
 
         let now = Instant::now();
-        // One frontier observation feeds recovery, selection, and planning;
-        // the observation reads tips once and resolves the canonical
-        // next-required body exactly once per tick.
+
         let chain = self.observe_chain_frontier();
         self.reconcile_window_recovery(&chain, now);
-        // Convicted connections must release their work before selection so
-        // the same tick can re-request it.
+
         self.reconcile_peer_sessions();
         let frontier = self.observe_frontier(chain.clone(), now);
         self.sweep_chain_sync(&frontier, now);
         self.follow_tip_progress(&frontier, now);
-        // The sweep can disconnect a peer; re-observe so selection and body
-        // planning never address a lease the sweep just removed.
+
         let frontier = self.observe_frontier(chain, now);
         let plan = frontier.plan();
 
@@ -786,8 +762,7 @@ impl BlockSync {
                     Some(info) => info,
                     None => continue,
                 };
-                // The peer's demonstrated height on the active branch: only a
-                // tip that intersects our chain is usable for bodies.
+
                 let active_height = if demonstrated_tips.is_empty() {
                     u32::try_from(info.best_known_height).ok()
                 } else {

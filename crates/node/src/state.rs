@@ -1,11 +1,3 @@
-//! Internal node runtime composition root and capability handles.
-//!
-//! Shared handles, checkpoint publication, and index lifecycle live with
-//! `NodeState`. Construction, recovery, storage, events, and pruning retain
-//! separate private implementations. Production embedders enter through
-//! [`crate::Node`]; the module is public only under the explicit `test-seam`
-//! feature used by integration tests and benchmarks.
-
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
@@ -63,32 +55,12 @@ impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
     }
 }
 
-// Outbound full-relay slots set the automatic target. The bounded channel
-// rejects DNS requests at producers when full; the parked retry queue is a
-// second bound, whose overflow clears the address's DNS backoff for retry.
-// Bitcoin Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS`.
 pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 
-// Outbound block-relay-only slots: connections that relay blocks and nothing
-// else. Bitcoin Core's `MAX_BLOCK_RELAY_ONLY_CONNECTIONS`.
 pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
-// Bounds transient inbound-block buffering between the per-peer listener
-// threads and the single-threaded `BlockSync::tick` drain. Decoded inbound
-// blocks carry the full `Block` plus preserved wire bytes (up to ~4 MiB each),
-// so an unbounded channel lets a fast or flooding peer accumulate blocks faster
-// than they drain — an OOM vector. A full channel applies TCP backpressure to
-// the sending peer's listener thread; `tick` drains independently and holds no
-// lock a listener needs, so the bound cannot deadlock. Sized well above the
-// in-flight request window (`PENDING_BUDGET` = 256) so honest delivery, which
-// wakes the drain on every block, is never throttled.
 pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 
-// Bounds inbound peer transactions between the per-peer listener threads and
-// the single ingress consumer. A full channel applies TCP backpressure to
-// that peer's read loop; other peers keep their own threads. Sized to absorb
-// a burst of honest `tx` deliveries without stalling header/block traffic on
-// the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
 /// Internal aggregate handle to a running node.
@@ -129,16 +101,8 @@ pub struct NodeState {
 
 impl Drop for NodeState {
     fn drop(&mut self) {
-        // Closes chain admission permanently. The derived-index worker stop
-        // and join run in `DerivedIndexHost::drop` when that field drops;
-        // relative to this admission guard the order is free: `Chainstate::
-        // close()` keeps admission closed through the permanent `closed`
-        // flag, and the index worker only reads chain handles, so releasing
-        // the guard before the join is behavior-identical to holding it.
         let _admission = self.chainstate.close();
-        // Close the history boundary first, so a worker still reconciling
-        // stops on the owner's shutdown answer instead of pinning rows a
-        // process that is leaving will not serve.
+
         self.storage.retention().shutdown();
     }
 }

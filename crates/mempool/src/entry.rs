@@ -62,8 +62,7 @@ impl MempoolEntry {
     pub fn new(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32, sigop_cost: u32) -> Self {
         let own_size = u64::from(vsize);
         let txid = tx.txid();
-        // BIP141: witness-free transactions have identical txid and wtxid.
-        // A stack containing an empty item still has witness serialization.
+
         let wtxid = if tx.has_witness() {
             tx.wtxid()
         } else {
@@ -271,10 +270,6 @@ mod wire_metadata_tests {
         tx
     }
 
-    // BIP141, Specification / Transaction ID and Transaction size calculations;
-    // BIP144, Serialization. Golden digests and lengths were computed by a
-    // separate Python struct/hashlib wire encoder, not Tx's own methods.
-    // These are serialization fixtures, not admission-valid transactions.
     #[test]
     fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), Box<dyn std::error::Error>> {
         let expected_txid = Txid(Hash256::from_str_be(
@@ -342,8 +337,6 @@ mod wire_metadata_tests {
         Ok(())
     }
 
-    // MempoolEntry's vsize field is policy-adjusted; BIP141's rounded weight
-    // is a separate field. Metadata reuse must not overwrite policy inputs.
     #[test]
     fn policy_size_is_not_overwritten_by_bip141_size() {
         for mode in 0..7 {

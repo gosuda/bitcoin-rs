@@ -1,9 +1,3 @@
-//! Active-chain header walks and hash-addressed block serving.
-//!
-//! Locator interpretation, header-walk policy, and inventory serving live
-//! here. [`BlockTree`] answers active-chain identity; [`BlockBodySource`]
-//! supplies bodies.
-
 use crate::inv::native_block_hash;
 
 use std::sync::Arc;
@@ -223,8 +217,7 @@ impl ChainQuery for ActiveChainQuery {
             return Ok(true);
         }
         let stop_hash = Hash256::from_le_bytes(stop.as_byte_array());
-        // Filters follow validated, applied blocks even while a competing
-        // headers-only branch leads. The index query rechecks its snapshot.
+
         let end = self.applied_tip.load_full().and_then(|tip| {
             self.block_tree
                 .read()
@@ -272,8 +265,7 @@ impl ChainQuery for ActiveChainQuery {
         if let Some(error) = send_error {
             return Err(error);
         }
-        // Never replay a sent prefix or silently abandon its tail. A completed
-        // range remains complete even if the final snapshot check reports Retry.
+
         if emitted > 0 && emitted != end - start + 1 {
             return Err(PeerError::Io(std::io::Error::other(
                 "compact filter range interrupted",
@@ -731,7 +723,6 @@ mod tests {
                 (0, 2001, stop),
                 (0, 0, stop),
             ] {
-                // Checkpoints have no start/range limit; these two cases are valid.
                 if command == 2 && kind == 0 && stop != WireBlockHash::all_zeros() {
                     continue;
                 }
@@ -917,8 +908,6 @@ mod tests {
                 stop_hash: checkpoint_stop,
             }),
         ] {
-            // Exhaust headroom at the entry gate, before the first item, or
-            // after one item. Header/checkpoint buffers have not reached wire.
             for allowed in 0_u8..=2 {
                 let remaining = Cell::new(allowed);
                 let mut responses = Vec::new();
@@ -2311,9 +2300,6 @@ mod tests {
     #[test]
     fn stale_inventory_requires_validation_and_core_age_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Core 31.1 BlockRequestAllowed uses strict < 30 days independently
-        // for timestamp age and proof-equivalent age; regtest work is 2 and
-        // spacing 600s, so 4320 blocks is exactly 30 days.
         for (time_age, work_blocks, validated, allowed) in [
             (2_591_999, 4_319, true, true),
             (2_592_000, 4_319, true, false),
@@ -2347,8 +2333,7 @@ mod tests {
             )?;
             assert_eq!(outcome.not_found.is_empty(), allowed);
             assert_eq!(source.loads.load(Ordering::Relaxed), usize::from(allowed));
-            // Shallow HAVE_DATA requests intentionally do not inherit the
-            // inventory age/validation filter (Core GETBLOCKTXN).
+
             assert!(
                 query
                     .block_transactions(
@@ -2362,7 +2347,7 @@ mod tests {
                     .is_some()
             );
         }
-        // Deep getblocktxn takes inventory policy, including stale-age refusal.
+
         let StaleFixture {
             query,
             stale,
@@ -2501,8 +2486,7 @@ mod tests {
                 source,
                 ..
             } = stale_query(1)?;
-            // Capture the old applied tip while the competing headers already
-            // lead. The body read publishes the reorg, invalidation, or age change.
+
             {
                 let tree = query.block_tree.read();
                 let id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;

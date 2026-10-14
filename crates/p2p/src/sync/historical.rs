@@ -1,5 +1,3 @@
-//! Bounded delivery of pinned snapshot history beside the foreground window.
-
 use std::time::Instant;
 
 use bitcoin::hashes::Hash as _;
@@ -50,8 +48,7 @@ impl HistoricalDownload {
 impl BlockSync {
     pub(super) fn advance_historical(&self) {
         let _work = self.historical_work.lock();
-        // Bound consensus work per pass. Each chain-owned replay is itself
-        // bounded; a staged body never advances the authoritative cursor.
+
         for connected in 0..=8 {
             let required = match self.chain.advance_historical() {
                 Ok(required) => required,
@@ -105,8 +102,7 @@ impl BlockSync {
             network: self.chain.network(),
             requested_height: height,
         };
-        // PeerTable -> historical is the ingress lock order. Snapshot all
-        // peer data before holding download state, and stamp via send_then.
+
         let live = self
             .peer_table
             .infos()
@@ -126,7 +122,6 @@ impl BlockSync {
             let HistoricalDownload { window, stager, .. } = &mut *historical;
             window.retain_owned_by(|owner| live.iter().any(|(source, _)| source == owner));
             for hash in stager.prune_expired(now) {
-                // The next request always starts at the chain-owned frontier.
                 window.requeue_for_retry(&hash, Some(height), now);
             }
             window.set_fanout_eligible_peers(peers.len(), now);
@@ -150,7 +145,7 @@ impl BlockSync {
             let request = {
                 let mut historical = self.historical.lock();
                 let HistoricalDownload { window, stager, .. } = &mut *historical;
-                // Back off corrupt deliveries even if this is our only peer.
+
                 if window.peer_in_staller_cooldown(source.addr, now) {
                     continue;
                 }

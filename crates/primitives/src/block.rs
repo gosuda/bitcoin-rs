@@ -1,5 +1,3 @@
-//! Native block type and block-level hashing helpers.
-
 use crate::{BlockHash, Header, Tx, Txid, encode::ConsensusEncode};
 
 /// A Bitcoin block in native owned form.
@@ -176,9 +174,7 @@ mod tests {
             stripped < total,
             "the witness discount must be visible: {stripped} vs {total}"
         );
-        let manual: usize = 80
-            + 1 // compact size for one transaction
-            + block.txs.iter().map(Tx::base_size).sum::<usize>();
+        let manual: usize = 80 + 1 + block.txs.iter().map(Tx::base_size).sum::<usize>();
         assert_eq!(stripped, manual);
     }
 

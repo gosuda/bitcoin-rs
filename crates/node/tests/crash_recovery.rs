@@ -1,5 +1,3 @@
-//! Process-level crash and upgrade compatibility tests for chainstate recovery.
-
 use anyhow::{Context as _, Result, bail};
 
 use bitcoin_rs_chain::regtest_fixture;
@@ -120,9 +118,7 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
         .load()?
         .context("the durable head must survive recovery")?;
     drop(state);
-    // The refusal this defect produced repeated on every restart. A second
-    // restart must come up on the repaired checkpoint, with no marker and no
-    // new recovery work.
+
     let reopened =
         NodeState::open(config, None).context("reopening after completed recovery must succeed")?;
     assert_eq!(
@@ -154,8 +150,6 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
 /// untouched.
 #[test]
 fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
-    // The durable head commits one group of 64 blocks; this gap exceeds
-    // one group by one.
     const GAP_BLOCKS: u32 = 65;
     let temp = tempfile::tempdir()?;
     let mut config = test_config(temp.path().join("node"));
@@ -320,32 +314,24 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
         }
         "disconnect-rolledback" => {
             state.apply_block(&block1)?;
-            // The rollback completes; the kill arrives before any
-            // publication clears the marker.
+
             state.chainstate().disconnect_block(&block1)?;
         }
         "inflight-cold" => {
             state.apply_block(&block1)?;
-            // The durable head still names this block: recovery replays
-            // the certified chain onto the restored state and retires it.
+
             state
                 .undo_store()
                 .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
         }
         "disconnect-above-head" => {
             state.apply_block(&block1)?;
-            // The checkpoint lands above the block the disconnect then
-            // rewinds past: the restored tip sits at or above the durable
-            // head.
+
             state.publish_checkpoint()?;
-            // The rollback completes; the journal is disabled, so nothing
-            // clears the marker on the way down.
+
             state.chainstate().disconnect_block(&block1)?;
         }
         "prune" => {
-            // A chain long enough that the durable checkpoint leaves a real
-            // deletion range below the Core reorg margin, then one manual
-            // prune whose frontier must outlive the process.
             state.apply_block(&genesis)?;
             let mut previous = genesis.block_hash();
             for height in 1..=300_u32 {

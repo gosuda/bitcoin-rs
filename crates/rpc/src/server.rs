@@ -58,8 +58,7 @@ impl RpcServer {
         rest_enabled: bool,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
-        // A binding owns its dispatcher cancellation latch. Rebinding the
-        // same Context must not reset a latch retained by old requests.
+
         let context = Arc::clone(handler.context());
         drop(handler);
         let handler = Arc::new(Handler::new(context));
@@ -110,8 +109,7 @@ impl RpcServer {
                 Err(error) => return Err(error),
             }
         }
-        // Drop cancels the new blocking RPC capabilities even when only this
-        // server stops; the chainstate and its process latch may remain live.
+
         Ok(())
     }
 
@@ -121,7 +119,6 @@ impl RpcServer {
         stream: TcpStream,
         peer: IpAddr,
     ) -> io::Result<()> {
-        // Connection-local: a nodelay failure must not stop the accept loop.
         let mut stream = match prepare_http_socket(stream) {
             Ok(stream) => stream,
             Err(error) => {
@@ -283,8 +280,7 @@ fn serve_connection(
         if handler.is_stopping() {
             return Ok(());
         }
-        // Waiting for the next request keeps the configured idle timeout;
-        // `read_request` starts the head budget at the request's first byte.
+
         reader.get_mut().reset_deadline(idle_timeout);
         let request = match read_request(&mut reader, REQUEST_HEAD_TIMEOUT, REQUEST_BODY_TIMEOUT) {
             Ok(Some(request)) => request,
@@ -464,8 +460,6 @@ fn read_headers(
             }
             content_length = Some(parsed);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            // This server supports Content-Length framing only. Accepting
-            // both would leave body bytes to be interpreted as another request.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported transfer-encoding",
@@ -540,8 +534,6 @@ fn read_request(
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
-    // A POST without Content-Length is a framing error: the JSON-RPC path is
-    // body-carrying by definition. Other methods reach the demux and 404 there.
     let content_length = match (method, content_length) {
         ("POST", None) => {
             return Err(
@@ -670,8 +662,7 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
         |requests| requests.iter().any(crate::registry::blocking_request),
     );
     let mut response = handle_decoded_json(handler, &request);
-    // A rejected long call must not retain the reserved ordinary slot through
-    // keep-alive. Batch/notification classification uses the same registry.
+
     response.close = close;
     response
 }
@@ -1142,7 +1133,6 @@ mod tests {
 
     #[test]
     fn connection_admission_reserves_slots_for_other_peers() {
-        // Loopback gets no special treatment: it is one source like any other.
         let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
         let mut active = ActiveConnections::default();
@@ -1167,8 +1157,6 @@ mod tests {
         assert!(!small_pool.admit(source, 4));
         assert!(small_pool.admit(other, 4));
 
-        // Below four workers no share is kept: one client can hold a blocking
-        // call and still reach the ordinary slot the quota leaves it.
         let mut two_slots = ActiveConnections::default();
         assert!(two_slots.admit(source, 2));
         assert!(two_slots.admit(source, 2));
@@ -1201,8 +1189,6 @@ mod tests {
             assert!(rest_wire_request(request.as_bytes(), true)?.starts_with(b"HTTP/1.1 400 "));
         }
         for (enabled, expected) in [(true, 400), (false, 404)] {
-            // Deliberately send no body: receiving an answer proves the cap
-            // was enforced before read_exact or body allocation.
             let response = rest_wire_request(b"POST /rest/getutxos.hex?cache=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2049\r\nConnection: keep-alive\r\n\r\n", enabled)?;
             assert!(response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()));
             let text = String::from_utf8_lossy(&response);
@@ -1380,8 +1366,7 @@ mod tests {
             .nth(1)
             .and_then(|token| token.parse().ok())
             .expect("HTTP status");
-        // The connection-level framing error surfaces as a bad-request-class
-        // response before any JSON-RPC authentication or parsing runs.
+
         assert!(
             (400..500).contains(&code) && code != 401,
             "expected a framing error status, got {code}"

@@ -1,5 +1,3 @@
-//! The cumulative chain transaction count as a known-or-unknown fact.
-
 /// Cumulative transaction count through a chain tip.
 ///
 /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
@@ -57,8 +55,7 @@ impl ChainTxCount {
             Some(known) => known
                 .checked_add(delta)
                 .map_or(Self::UNKNOWN, Self::established),
-            // Genesis is the one block with nothing below it, so its own
-            // transactions are the whole chain total at that height.
+
             None if height == 0 => Self::established(delta),
             None => Self::UNKNOWN,
         }

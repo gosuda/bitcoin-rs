@@ -183,13 +183,6 @@ const MIN_TIME_OFFSET_SAMPLES: usize = 5;
 /// peer set is stable and diverge after churn, where Core still remembers a
 /// departed peer's sample and this does not.
 fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
-    // **Outbound peers only.** Core's reason, in its own words at the call
-    // site in `net_processing.cpp`: "Don't use timedata samples from inbound
-    // peers to make it harder for others to create false warnings about our
-    // clock being out of sync." Anyone can open an inbound connection and
-    // declare any time they like; medianing over all of them hands that
-    // attacker the node's reported clock offset, and with it the operator's
-    // belief about whether the machine's clock is wrong.
     let mut offsets: Vec<i64> = peers
         .iter()
         .filter(|peer| !peer.inbound)
@@ -199,19 +192,13 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
         return 0;
     }
     offsets.sort_unstable();
-    // The element at `len / 2`, on an even count as on an odd one. Core takes
-    // exactly this and says why it does not interpolate: "approximate median is
-    // good enough, keep it simple". Averaging the two middle values would
-    // answer a number neither peer reported, and would differ from Core on
-    // every even sample count.
+
     offsets.get(offsets.len() / 2).copied().unwrap_or(0)
 }
 
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    // `sessions` carries the lease — role and manual flag — that `infos`
-    // strips, so `connection_type` and `relaytxes` can report the connection
-    // kind the operator actually opened.
+
     let sessions = ctx.network.peer_table.sessions();
     let rows = sessions
         .iter()
@@ -230,8 +217,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            // Only full-relay connections carry the transaction relay
-            // stream; block-relay-only and inbound-nonrelay leases do not.
+
             relay_transactions: peer.relay_transactions
                 && session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
             last_send: i64::try_from(peer.counters.last_send()).unwrap_or(i64::MAX),
@@ -242,28 +228,17 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             bytes_received: peer.counters.bytes_recv(),
             connection_time: i64_saturated(peer.conn_time),
             time_offset: peer.time_offset,
-            // No `pingtime`, `minping` or `pingwait`. This node never sends a
-            // ping, so it has never measured a round trip, and Core omits all
-            // three until it has one. Reporting `0.0` would state a round trip
-            // of zero seconds -- a placeholder in the shape of a measurement,
-            // and the best-looking latency a peer could possibly have.
+
             ping_time: None,
             minimum_ping: None,
             ping_wait: None,
             version: peer.version,
             subversion: peer.user_agent.clone(),
             inbound: peer.inbound,
-            // Core's `bip152_hb_to`/`bip152_hb_from` (v25+): whether WE have
-            // selected this peer as a high-bandwidth compact-block relay
-            // (the announcement worker's current set), and whether the peer
-            // has selected US (its `sendcmpct(true)` preference recorded at
-            // handshake). High-bandwidth peers announce new blocks as
-            // unsolicited `cmpctblock` instead of `inv`.
+
             bip152_hb_to: session.bip152_hb_to,
             bip152_hb_from: session.bip152_hb_from,
-            // Core 31 does not emit `startingheight` at all -- the name does
-            // not appear anywhere in its source. corepc keeps the field
-            // `Option` for older versions, so `None` is what v31 looks like.
+
             starting_height: None,
             presynced_headers: Some(-1),
             synced_headers: Some(-1),
@@ -381,9 +356,7 @@ pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    // Core's `ping` schedules a P2P ping; we don't have async-ping wiring yet,
-    // so we return null per the Core contract. Per-peer pingtime surfaces via
-    // getpeerinfo when measurements are available.
+
     Ok(Value::new_null())
 }
 
@@ -435,15 +408,12 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let addr = SocketAddr::from_str(address)
         .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
 
-    // Optional nodeid — the index reported by `getpeerinfo`, used to
-    // disambiguate when several peers share one address.
     let nodeid: Option<usize> = array
         .get(1)
         .filter(|v| !v.is_null())
         .and_then(JsonValueTrait::as_u64)
         .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
 
-    // Verify the peer is currently connected before mutating anything.
     let found = {
         let peers = ctx.network.peer_table.infos();
         match nodeid {
@@ -468,9 +438,7 @@ pub(crate) fn getconnectioncount(ctx: &Arc<Context>, params: &Value) -> Result<V
 
 pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    // `PeerTable` is the single owner of traffic accounting: it measures each
-    // live connection and folds in the counters of every connection it drops,
-    // so the totals — like Core's — never decrease across disconnects.
+
     let (total_bytes_received, total_bytes_sent) = ctx.network.peer_table.traffic_totals();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -503,7 +471,6 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let mut seen: HashSet<SocketAddr> = HashSet::new();
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 
-    // Live peers carry real service flags and handshake times.
     for peer in ctx.network.peer_table.infos() {
         if !seen.insert(peer.addr) {
             continue;
@@ -517,7 +484,6 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
         });
     }
 
-    // Persisted added nodes have no known services; advertise NODE_NETWORK.
     for addr in ctx.network.p2p.added_nodes() {
         if !seen.insert(addr) {
             continue;
@@ -531,7 +497,6 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
         });
     }
 
-    // Core semantics: count == 0 returns all, otherwise truncate to count.
     if count > 0 {
         let max = usize::try_from(count).unwrap_or(usize::MAX);
         if max < entries.len() {
@@ -975,9 +940,7 @@ mod ban_state_tests {
             entry.get("address").and_then(JsonValueTrait::as_str),
             Some("192.168.1.1/32")
         );
-        // Core's listbanned entries carry only address, ban_created,
-        // banned_until, ban_duration, and time_remaining — no ban_reason —
-        // and the pinned v31::Banned shape matches.
+
         assert!(
             entry.get("ban_reason").is_none(),
             "ban_reason must stay absent from listbanned entries: {entry:?}"
@@ -1330,8 +1293,6 @@ mod peer_counter_tests {
             "four samples is below Core's floor, so there is no offset to report"
         );
 
-        // The paired case, so the zero above is the floor and not an inability
-        // to report anything at all.
         let five = context_with(outbound_peers(&[3_600, 3_600, 3_600, 3_600, 3_600]));
         assert_eq!(
             getnetworkinfo(&five, &json!(null))
@@ -1360,8 +1321,6 @@ mod peer_counter_tests {
     #[test]
     fn extreme_offsets_are_reported_at_their_own_magnitude() {
         for extreme in [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1] {
-            // Six samples, so the even-count path is the one taken, with both
-            // middle values at the extreme.
             let ctx = context_with(outbound_peers(&[
                 i64::MIN,
                 i64::MIN,
@@ -1375,10 +1334,6 @@ mod peer_counter_tests {
                 .get("timeoffset")
                 .and_then(JsonValueTrait::as_i64);
 
-            // Sorted, `[MIN, MIN, extreme, extreme, MAX, MAX]` puts an extreme
-            // at index 3 whichever way `extreme` sorts, except when it *is* an
-            // endpoint -- in which case the value at index 3 is that endpoint
-            // too. Either way the answer is a sample, never a computed number.
             let Some(reported) = reported else {
                 panic!("time_offset missing for {extreme}");
             };
@@ -1631,10 +1586,6 @@ mod setban_absolute_time_tests {
     use super::ban_until;
     use crate::error::RpcError;
 
-    // SETBAN-ABSOLUTE-01 on `ban_until` above; independent reference:
-    // Bitcoin Core v31.1 `src/rpc/net.cpp::setban` compares banTime < GetTime().
-    // Synthetic clock values cover the strict whole-second boundary without
-    // sleeps or changing any process-global clock.
     #[test]
     fn absolute_bantime_compares_whole_epoch_seconds() -> Result<(), RpcError> {
         let now_seconds = 1_000;

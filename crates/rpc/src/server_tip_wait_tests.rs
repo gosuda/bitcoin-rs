@@ -1,5 +1,3 @@
-//! Worker admission and RPC-only cancellation use the real chain wait owner.
-
 #![expect(clippy::expect_used)]
 
 use super::*;
@@ -41,7 +39,6 @@ fn send(address: SocketAddr, body: &Value) -> TcpStream {
 }
 
 fn read(mut stream: TcpStream) -> (String, Value) {
-    // Blocking calls close keep-alive on success and quota refusal.
     let mut wire = String::new();
     stream
         .read_to_string(&mut wire)
@@ -66,8 +63,6 @@ fn await_waiter(handler: &Handler) {
     }
 }
 
-// EOF can precede ConnectionPermit::drop. Retry only the observable 503
-// admission refusal; an RPC/JSON/transport error is never treated as busy.
 fn ordinary_rpc(address: SocketAddr) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(2);
     let body = serde_json::to_vec(&serde_json::json!({
@@ -273,7 +268,6 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
     );
     await_waiter(&old_handler);
 
-    // Bind/start the replacement BEFORE the old server's stop guard runs.
     let new = RpcServer::bind(
         "127.0.0.1:0",
         Arc::new(Auth::basic("parity", "parity")),
@@ -331,8 +325,7 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
         false,
     )
     .expect("bind");
-    // The public connection setting can change after bind; serve must enforce
-    // its actual value, including a server assembled through public fields.
+
     server.max_connections = 1;
     let address = server.local_addr().expect("address");
     let shutdown = Arc::new(AtomicBool::new(false));

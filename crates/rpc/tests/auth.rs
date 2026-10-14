@@ -1,4 +1,3 @@
-//! Authentication coverage for the synchronous RPC server.
 extern crate alloc;
 
 use alloc::sync::Arc;

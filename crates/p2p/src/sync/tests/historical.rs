@@ -68,8 +68,7 @@ fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order() -> TestR
         assert!(rx.try_recv().is_err());
     }
     assert_eq!(harness.sync.historical.lock().window.pending_len(), 32);
-    // All later bodies arrive before the frontier. They must neither apply
-    // out of order nor free slots for an unbounded tail of downloads.
+
     for block in blocks[1..32].iter().rev() {
         let source = harness
             .sync
@@ -148,7 +147,7 @@ fn historical_archive_replay_retires_overtaken_downloads() -> TestResult {
     harness.sync.advance_historical();
     let source = current_source(&harness.peers, addr);
     deliver(&harness.sync, &blocks[1], source);
-    // Model the manager replaying a newly available archived prefix.
+
     for _ in 0..3 {
         chain.historical.lock().pop_front();
     }
@@ -188,8 +187,6 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
 
     for competing_headers in [false, true] {
         if competing_headers {
-            // The fast applied-ancestry filter cannot run when the best header
-            // tip is another branch. The unrequested-body work gate still must.
             let mut tree = harness.block_tree.write();
             let mut parent = tree
                 .lookup(Network::Regtest.genesis_block().block_hash().0)

@@ -1,4 +1,3 @@
-//! Esplora HTTP projections over confirmed indexes and the live mempool.
 #![expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
@@ -214,9 +213,6 @@ mod tests {
     }
 
     fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
-        // OP_TRUE: an anyone-can-spend funding script, so the broadcast
-        // fixture's empty scriptSig satisfies script verification. The output
-        // stays P2WPKH: standardness only allows known output templates.
         let spendable = vec![0x51];
         let script = [vec![0x00, 0x14], vec![0x11; 20]].concat();
         let funding = transaction(
@@ -514,8 +510,6 @@ mod tests {
     }
 
     fn contract_fixture() -> Result<(Handler, Tx, Block, String), Box<dyn std::error::Error>> {
-        // p2wpkh scriptPubKey for key hash [2; 20]; the address string rides
-        // the sanctioned rust-bitcoin Address seam.
         let target = {
             let mut script = Vec::with_capacity(22);
             script.push(0x00);
@@ -732,9 +726,6 @@ mod tests {
         );
         assert_eq!(broadcast.content_type, "text/plain");
 
-        // Package relay is conditional in API.md (Bitcoin Core 28+). This node
-        // has no atomic package-admission capability, so it must not advertise
-        // sequential sendrawtransaction calls as that endpoint.
         let package = route_post(&handler, "/txs/package", b"[]");
         assert_eq!(package.status, 404);
         Ok(())
@@ -1155,10 +1146,7 @@ mod tests {
         let mut seen_b = false;
         let mut accepted = 0_usize;
         let mut attempts = 0_usize;
-        // Sampling runs until both branches have answered, not for a fixed
-        // count: the swapper's first store publishes the b2 tip, but thread
-        // startup is the scheduler's call, so a fixed budget can expire before
-        // the b2 branch is ever published.
+
         while !(accepted >= 200 && seen_a && seen_b) {
             attempts += 1;
             assert!(
@@ -1166,8 +1154,7 @@ mod tests {
                 "a publication was never observed, so coherence proved nothing"
             );
             let status_response = route(&handler, &status_path, "");
-            // A tip change inside the projection's own validation window is
-            // that guard's documented retry, not a torn response.
+
             if status_response.status == 503 {
                 continue;
             }
@@ -1475,8 +1462,6 @@ mod tests {
     #[test]
     fn history_cursors_follow_api_09_on_both_esplora_surfaces()
     -> Result<(), Box<dyn std::error::Error>> {
-        // API-09 and WF-02 own exact textual cursor equality and restart
-        // behavior. The expected page comes from the cursor-free public route.
         let (handler, transaction, _, address) = contract_fixture()?;
         let txid = transaction.txid().to_string();
         let script_hash = ScriptHash::new(&transaction.outputs[0].script_pubkey)
@@ -1546,7 +1531,7 @@ mod tests {
                 .insert_entry(MempoolEntry::new(tx, 100, 100, 0, 0, 0))
                 .expect("insert mempool fixture");
         }
-        // API-09: the router's empty sentinel selects only the mempool page.
+
         let mempool = history(&ctx, ScriptHash::new(&target), Some(""), false);
         assert_eq!(mempool.status, 200);
         let values: Value = serde_json::from_slice(&mempool.body).expect("mempool page json");
@@ -1610,8 +1595,6 @@ mod tests {
         assert_eq!(values.as_array().map(Vec::len), Some(CHAIN_PAGE));
         assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
 
-        // API-09 fixes the chain page at 25 rows and excludes the known cursor.
-        // Heights 30..6 are page one, 5..1 page two, independent of txid order.
         let cursor = records[5].txid.to_string();
         let second = history(&ctx, ScriptHash::new(&target), Some(&cursor), false);
         assert_eq!(second.status, 200);
@@ -1630,8 +1613,6 @@ mod tests {
         assert_eq!(end.body, b"[]");
         assert_eq!(calls.load(Ordering::Relaxed), 30);
 
-        // A ready post-reorg index no longer contains this previously valid
-        // cursor. Its history must restart using the same bounded renderer.
         ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: records
                 .into_iter()
@@ -1703,7 +1684,6 @@ mod tests {
             calls: Arc::clone(&tx_calls),
         }));
 
-        // Insert an unconfirmed transaction paying target into mempool.
         let mempool_tx = Arc::new(transaction(
             None,
             TxOut {
@@ -1718,7 +1698,6 @@ mod tests {
             .insert_entry(MempoolEntry::new(mempool_tx, 100, 100, 0, 0, 0))
             .expect("insert mempool entry");
 
-        // 1. Fetching chain history must NOT call unspent_outputs (ScriptLive scan).
         let chain_resp = history(&ctx, script_hash, None, false);
         assert_eq!(chain_resp.status, 200);
         let chain_val: Value = serde_json::from_slice(&chain_resp.body).expect("chain json");
@@ -1730,7 +1709,7 @@ mod tests {
         );
         assert_eq!(history_calls.load(Ordering::Relaxed), 1);
         assert_eq!(tx_calls.load(Ordering::Relaxed), CHAIN_PAGE);
-        // All transactions returned are confirmed.
+
         assert!(
             chain_val
                 .as_array()
@@ -1739,7 +1718,6 @@ mod tests {
                 .all(|tx| tx["status"]["confirmed"] == true)
         );
 
-        // 2. Fetching page 2 with cursor also does not call unspent_outputs.
         let cursor = history_records[5].txid.to_string();
         let chain_page2 = history(&ctx, script_hash, Some(&cursor), false);
         assert_eq!(chain_page2.status, 200);
@@ -1749,7 +1727,6 @@ mod tests {
             "chain page 2 must not enumerate ScriptLive"
         );
 
-        // 3. Mempool-only route with sentinel "" does NOT call confirmed history.
         let mempool_resp = history(&ctx, script_hash, Some(""), false);
         assert_eq!(mempool_resp.status, 200);
         let mempool_val: Value = serde_json::from_slice(&mempool_resp.body).expect("mempool json");
@@ -1760,16 +1737,15 @@ mod tests {
             "mempool-only query must not invoke confirmed history (still 2 from chain queries)"
         );
 
-        // 4. Wallet-facing UTXO query retains its semantics and calls unspent_outputs.
         let utxo_resp = Projection::new(&ctx)
             .script_utxos(script_hash)
             .expect("utxos");
         assert_eq!(
             unspent_calls.load(Ordering::Relaxed),
-            2, // 1 from mempool_activity_for above, 1 from script_utxos
+            2,
             "utxo endpoint retains ScriptLive scan"
         );
-        assert_eq!(utxo_resp.len(), 2); // 1 confirmed + 1 mempool
+        assert_eq!(utxo_resp.len(), 2);
     }
 
     #[test]
@@ -1777,7 +1753,7 @@ mod tests {
     fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         let target = vec![0x51];
         let script_hash = ScriptHash::new(&target);
-        // 60 transactions: 3 transactions per height across heights 1..=20.
+
         let mut transactions = Vec::with_capacity(60);
         let mut history_records = Vec::with_capacity(60);
         for height in 1_u32..=20 {
@@ -1800,8 +1776,6 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
 
-        // Simulate pruned/missing blocks: only add blocks for heights 12..=20.
-        // Heights 1..=11 are absent initially.
         for height in 12_u32..=20 {
             ctx.chain
                 .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
@@ -1820,9 +1794,6 @@ mod tests {
             calls: Arc::clone(&calls),
         }));
 
-        // Page 1 (first 25): transactions from heights 20 down to 12.
-        // Even though blocks for heights 1..=11 are missing from ctx.chain,
-        // Page 1 succeeds because confirmation resolution is truly bounded to the requested page!
         let page1 = history(&ctx, script_hash, None, false);
         assert_eq!(
             page1.status, 200,
@@ -1832,7 +1803,6 @@ mod tests {
         assert_eq!(page1_vals.as_array().map(Vec::len), Some(CHAIN_PAGE));
         assert_eq!(calls.load(Ordering::Relaxed), 25);
 
-        // Re-populate all blocks 1..=20 in ascending order so subsequent pages can resolve.
         ctx.chain.blocks.write().clear();
         for height in 1_u32..=20 {
             ctx.chain
@@ -1842,8 +1812,6 @@ mod tests {
                 ));
         }
 
-        // Full multi-page traversal:
-        // Page 1: 25 items
         let page1_txids: Vec<String> = page1_vals
             .as_array()
             .expect("page1 json array")
@@ -1852,7 +1820,6 @@ mod tests {
             .collect();
         let cursor1 = page1_txids.last().expect("page1 last txid").clone();
 
-        // Page 2: next 25 items
         let page2 = history(&ctx, script_hash, Some(&cursor1), false);
         assert_eq!(page2.status, 200);
         let page2_vals: Value = serde_json::from_slice(&page2.body).expect("page2 json");
@@ -1865,7 +1832,6 @@ mod tests {
             .collect();
         let cursor2 = page2_txids.last().expect("page2 last txid").clone();
 
-        // Page 3: remaining 10 items (60 - 50 = 10)
         let page3 = history(&ctx, script_hash, Some(&cursor2), false);
         assert_eq!(page3.status, 200);
         let page3_vals: Value = serde_json::from_slice(&page3.body).expect("page3 json");
@@ -1878,13 +1844,10 @@ mod tests {
             .collect();
         let cursor3 = page3_txids.last().expect("page3 last txid").clone();
 
-        // Page 4: empty final page
         let page4 = history(&ctx, script_hash, Some(&cursor3), false);
         assert_eq!(page4.status, 200);
         assert_eq!(page4.body, b"[]");
 
-        // Verify complete and stable traversal:
-        // Total 60 distinct transactions returned across pages 1, 2, 3.
         let mut all_traversed = Vec::new();
         all_traversed.extend(page1_txids);
         all_traversed.extend(page2_txids);
@@ -1900,7 +1863,6 @@ mod tests {
             "stable pagination must contain 0 duplicates"
         );
 
-        // Verify API-09 cursor restart rules:
         for invalid_cursor in [
             "00".repeat(32),
             "not-a-txid".to_owned(),
@@ -1920,7 +1882,7 @@ mod tests {
     fn chain_history_deduplicates_multiple_outputs_in_same_transaction() {
         let target = vec![0x51];
         let script_hash = ScriptHash::new(&target);
-        // Single transaction with 3 outputs paying target.
+
         let tx = Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -2043,9 +2005,6 @@ mod tests {
         let rows: Value = serde_json::from_slice(&per_transaction.body).expect("summary rows json");
         assert_eq!(rows.as_array().map(Vec::len), Some(30));
 
-        // Both endpoints answer from index rows alone. Reading one transaction
-        // per history entry escapes the script index's per-query budget, so a
-        // long-history address turns one request into unbounded storage I/O.
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
@@ -2244,9 +2203,6 @@ mod tests {
     #[test]
     fn stale_block_transactions_do_not_inherit_active_chain_status()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Null-prevout coinbase shape: a zero-input tx cannot be consensus
-        // encoded into a decodable body (the 0x00 vin count reads as the
-        // segwit marker, matching Core), so required_block would reject it.
         let transaction = transaction(
             Some(OutPoint::null()),
             TxOut {
@@ -2287,10 +2243,7 @@ mod tests {
                 stale_block.header,
                 NodeStatus::HeaderValid,
             )?;
-            // BlockTree::insert_node now publishes the best-work header on
-            // insert and only reorgs on strictly greater chainwork. The stale
-            // block had equal work and was inserted first, so it became the
-            // active tip. Give the active chain a lower target so it wins.
+
             let active = Header {
                 version: 1,
                 prev_blockhash: genesis.compute_hash(),
@@ -2509,8 +2462,7 @@ mod tests {
             "the summary held the pool read guard during JSON encoding"
         );
         assert_eq!(response.status, 200);
-        // The captured per-rate vsize sums preserve the descending histogram:
-        // the two 10 sat/vB entries share 300 vbytes.
+
         let rendered: Value = serde_json::from_slice(&response.body).expect("summary json");
         assert_eq!(
             rendered,
@@ -2538,8 +2490,7 @@ mod tests {
         const TOP: u64 = 1_700_000_050;
         let target = vec![0x51_u8];
         let unrelated = vec![0x52_u8];
-        // The overlay must drop the funder's spent output, keep its other
-        // target output, and append the spender's own.
+
         let funder = paying_transaction(
             &[unconfirmed_outpoint(1)],
             &[
@@ -2564,11 +2515,7 @@ mod tests {
                 time: TOP,
             },
         ];
-        // Two fillers share the top acceptance time, so the recent list has to
-        // break a `(time, txid)` tie; twelve entries are two wider than the ten
-        // the route emits, so the oldest pair drops out. The first four fillers
-        // join the funder and spender in the 10 sat/vB bin, so six entries merge
-        // into one histogram bucket.
+
         for index in 0..10_u8 {
             let vsize = 100 + u32::from(index) * 10;
             seeds.push(Seed {
@@ -2731,9 +2678,6 @@ mod tests {
             ])
         );
 
-        // The history route needs a transaction index this fixture does not
-        // carry, so the projection that feeds it is the observable: the funder
-        // and the spender, each selected once, in descending `(time, txid)`.
         let activity = Projection::new(&fixture.ctx)
             .script_activity(ScriptHash::new(&fixture.target))
             .expect("script activity resolves");

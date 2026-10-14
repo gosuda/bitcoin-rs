@@ -1,5 +1,3 @@
-//! Node configuration DTOs, resolution, and validation.
-
 use crate::options::{ChainstateJournalOverrides, UserConfig};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
@@ -82,9 +80,7 @@ impl ScriptIndexMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "utxo" => Some(Self::Utxo),
-            // `true` is the historical boolean spelling and must keep meaning
-            // `full`; it is a separate pattern for that readability, not a
-            // distinct outcome.
+
             "full" | "true" | "1" | "yes" => Some(Self::Full),
             "false" | "0" | "no" => Some(Self::Disabled),
             _ => None,
@@ -575,8 +571,6 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
     options.mode(0o600);
 
     let written = (|| -> std::io::Result<()> {
-        // A temporary file left by an interrupted start is discarded, so
-        // `create_new` never opens an existing file or symlink.
         match fs::remove_file(&temporary) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -585,8 +579,7 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
         let mut file = options.open(&temporary)?;
         writeln!(file, "__cookie__:{password}")?;
         file.sync_all()?;
-        // Windows rename cannot replace an existing file. Both operations
-        // occur before binding the listener, while the new secret is private.
+
         #[cfg(windows)]
         match fs::remove_file(path) {
             Ok(()) => {}

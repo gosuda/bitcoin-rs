@@ -1,12 +1,3 @@
-//! GBT ⇄ SV2 Template Distribution translation.
-//!
-//! Field mappings mirror the upstream reference template provider
-//! (`bitcoin-core-sv2` in stratum-mining/sv2-apps v0.8.0,
-//! `unix_capnp/v31x/template_distribution_protocol/template_data.rs`):
-//! hashes travel in internal (little-endian display-reversed) byte order, the
-//! merkle branch is ordered leaf-first, and `SetNewPrevHash.target` is the
-//! little-endian encoding of the consensus target derived from `nBits`.
-
 use bitcoin::block::{Block, Header, Version};
 use bitcoin::hashes::Hash as _;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
@@ -114,10 +105,6 @@ impl TemplateState {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // The coinbase occupies leaf 0 but its txid is unknown until the pool
-        // builds it. A placeholder leaf yields the correct index-0 branch;
-        // without it the first template tx would take the coinbase slot and
-        // every root would be wrong.
         let merkle_branch = merkle_branch(
             std::iter::once([0u8; 32])
                 .chain(txs.iter().map(|tx| tx.compute_txid().to_byte_array()))
@@ -156,10 +143,7 @@ impl TemplateState {
         let required = self.required_outputs().unwrap_or_default();
         NewTemplateOwned {
             template_id: self.id,
-            // Always `future_template: true`: the SRI pool's bootstrap gate
-            // only records future templates, and the paired SetNewPrevHash
-            // activates the job immediately — the upstream Core TP's
-            // idle behavior.
+
             future_template: true,
             version: self.version,
             coinbase_tx_version: 2,
@@ -219,8 +203,6 @@ impl TemplateState {
             bitcoin::consensus::deserialize(solution.coinbase_tx.as_ref())
                 .map_err(|e| format!("invalid coinbase tx: {e}"))?;
 
-        // Fold the coinbase txid through the leaf-first branch, exactly like
-        // the reference template provider's solution assembly.
         let mut merkle_root = coinbase.compute_txid().to_byte_array();
         for sibling in &self.merkle_branch {
             merkle_root = dsha256(&merkle_root, sibling);
@@ -405,7 +387,7 @@ mod tests {
         assert_eq!(template.coinbase_tx_input_sequence, u32::MAX);
         assert_eq!(template.coinbase_tx_value_remaining, 5_000_000_000);
         assert_eq!(template.coinbase_tx_outputs_count, 1);
-        // Serialized-TxOut list: 8 zero value bytes + compactsize + script.
+
         let script = hex::decode(COMMITMENT_HEX).unwrap();
         let mut expected = vec![0u8; 9];
         expected[8] = script.len() as u8;
@@ -442,7 +424,6 @@ mod tests {
     fn assembly_uses_solution_coinbase_and_template_branch() {
         let state = TemplateState::from_gbt(9, &gbt_fixture(&fake_txs(3))).unwrap();
 
-        // Pool rewrote the scriptSig: BIP34 prefix + signature + extranonce.
         let mut script_sig = bip34_prefix(1);
         script_sig.extend_from_slice(b"Stratum V2 SRI Pool");
         script_sig.extend_from_slice(&[0xaa; 8]);
@@ -458,7 +439,7 @@ mod tests {
         let block = state.assemble_block(&solution).unwrap();
         assert_eq!(block.txdata[0].compute_txid(), coinbase.compute_txid());
         assert_eq!(&block.txdata[1..], &state.txs[..]);
-        // The assembled header must commit to the block it ships.
+
         assert_eq!(
             block.header.merkle_root,
             block.compute_merkle_root().expect("non-empty txdata")

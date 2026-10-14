@@ -19,8 +19,6 @@ pub(crate) const TAPROOT_CONTROL_MAX_SIZE: usize =
 pub(crate) const TAPROOT_LEAF_MASK: u8 = 0xfe;
 pub(crate) const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
 
-// BIP340 "Tagged Hashes": the doubled tag digest is exactly one SHA256
-// block. Keep only these two fixed public prefixes, never request data.
 static TAPBRANCH_ENGINE: LazyLock<Sha256> = LazyLock::new(|| tagged_hash_engine(b"TapBranch"));
 static TAPTWEAK_ENGINE: LazyLock<Sha256> = LazyLock::new(|| tagged_hash_engine(b"TapTweak"));
 
@@ -55,7 +53,7 @@ pub(crate) fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256
     if nodes.is_empty() {
         return *tapleaf_hash;
     }
-    // Resolve lazy initialization once per path, not once per Merkle node.
+
     let prefix = LazyLock::force(&TAPBRANCH_ENGINE);
     for node in nodes {
         k = compute_tapbranch_hash(prefix, &k, node);
@@ -85,10 +83,7 @@ pub(crate) fn verify_taproot_commitment(
         return false;
     };
     let merkle_root = compute_taproot_merkle_root(control, tapleaf_hash);
-    // TapTweak hash: TaggedHash("TapTweak", internal_pubkey || merkle_root).
-    // The internal pubkey is serialized in big-endian (standard x-only form);
-    // the merkle root is serialized in little-endian (matching Core's uint256
-    // memory layout).
+
     let mut engine = LazyLock::force(&TAPTWEAK_ENGINE).clone();
     Digest::update(&mut engine, internal.serialize());
     Digest::update(&mut engine, merkle_root.as_byte_array());
@@ -147,7 +142,6 @@ mod tests {
             let tapleaf_bytes = tagged_hash(b"TapLeaf", &tapleaf_msg);
             let tapleaf = Hash256::from_le_bytes(&tapleaf_bytes);
 
-            // Single leaf: merkle root = tapleaf
             let mut tweak_msg = internal.serialize().to_vec();
             tweak_msg.extend_from_slice(&tapleaf_bytes);
             let tweak_bytes = tagged_hash(b"TapTweak", &tweak_msg);
@@ -248,9 +242,6 @@ mod tests {
         output: &'static str,
     }
 
-    // BIP341 wallet-test-vectors.json, scriptPubKey cases 1, 3 and 5.
-    // Source Git blob: 11261b00ba24afb90b62109505d9ca5ddd773b3b.
-    // Expected roots/output keys are published bytes, not candidate outputs.
     const BIP341_VECTORS: [CommitmentVector; 6] = [
         CommitmentVector {
             control: concat!(
@@ -349,8 +340,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP340 Tagged Hashes and BIP341 Script validation rules: compare with
-    // the direct formula at every legal Merkle depth, including equal nodes.
     #[test]
     fn cached_branch_prefix_matches_direct_hash_at_every_control_depth() {
         let leaf = Hash256::from_le_bytes(&[0x5a; 32]);
@@ -383,8 +372,6 @@ mod tests {
         }
     }
 
-    // BIP340 domain separation: concurrent callers must not contaminate the
-    // two fixed prefixes or carry one message into the next message's state.
     #[test]
     fn cached_tag_prefixes_are_independent_across_threads() {
         std::thread::scope(|scope| {

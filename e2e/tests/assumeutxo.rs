@@ -1,5 +1,3 @@
-//! Core-produced portable snapshots over the public RPC and P2P boundaries.
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
@@ -45,9 +43,6 @@ fn admit_headers(node: &mut ProcessNode, blocks: &[Block]) -> Result<()> {
 }
 
 fn states(node: &mut ProcessNode) -> Result<Value> {
-    // Sending a historical block is not an acknowledgement that validation has
-    // released the lifecycle owner. Retry only this declared transient result,
-    // with one deadline shared by transport and polling; preserve other errors.
     let deadline = Instant::now() + bitcoin_rs_e2e::node::REQUEST_TIMEOUT;
     loop {
         match node.rpc_until("getchainstates", &json!([]), deadline) {
@@ -77,8 +72,6 @@ fn reject(node: &mut ProcessNode, path: &Path, code: i64) -> Result<()> {
 }
 
 fn record_import_resources(node: &ProcessNode, snapshot: &Path) -> Result<()> {
-    // Linux reports the process-wide high-water RSS, including startup. Other
-    // platforms report unavailable instead of inventing an equivalent metric.
     let peak_rss_kib = if cfg!(target_os = "linux") {
         std::fs::read_to_string(format!("/proc/{}/status", node.pid()))
             .ok()
@@ -148,9 +141,6 @@ fn produce_core_snapshot(snapshot_path: &Path) -> Result<(ProcessNode, Vec<Block
 }
 
 fn reach_partial_history(node: &mut ProcessNode, blocks: &[Block]) -> Result<()> {
-    // Hold back history after height 10 while serving the Core-generated
-    // foreground suffix. This proves the roles can advance independently and
-    // gives restart a deterministic nonterminal point without timing races.
     let allowed: BTreeSet<_> = blocks[..10]
         .iter()
         .chain(blocks[200..].iter())
@@ -222,8 +212,7 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     let datadir = node.stop_keep_datadir()?;
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
-    // Recovery reconstructs coins from the retained historical archive; it
-    // must not fabricate the durable cursor before that replay completes.
+
     let recovered = node.wait_for(
         "recover historical archive without a peer",
         Duration::from_secs(15),
@@ -236,7 +225,6 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     assert_eq!(recovered["chainstates"][1]["blocks"], 206, "{recovered}");
     assert_eq!(recovered["chainstates"][1]["validated"], false);
 
-    // A genuine Core P2P peer supplies the remaining historical bodies.
     node.rpc("addnode", &json!([core.p2p_addr.to_string(), "onetry"]))?;
     node.wait_for(
         "snapshot historical convergence",
@@ -282,7 +270,7 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
-    // A correct portable snapshot cannot bootstrap trusted headers by itself.
+
     reject(&mut node, &snapshot, -32603)?;
     assert_eq!(states(&mut node)?["chainstates"][0]["blocks"], 0);
     admit_headers(&mut node, &core_blocks()?)?;
@@ -321,9 +309,7 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
         );
         assert_eq!(view["chainstates"][0]["blocks"], 0, "{name}: {view}");
     }
-    // The RPC argument is UTF-8, but canonicalization can resolve its symlink
-    // to a non-UTF-8 filename. Response serialization must still succeed after
-    // activation; it must not report a post-commit error.
+
     #[cfg(unix)]
     {
         use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
@@ -365,9 +351,7 @@ fn snapshot_base_must_belong_to_best_header_chain() -> Result<()> {
     let snapshot = artifacts.path().join("core200.dat");
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
     let blocks = core_blocks()?;
-    // A different height-200 header and its child beat the pinned branch.
-    // These are header-only candidates: valid PoW and timestamps are checked
-    // by both daemons; no corresponding block body is offered.
+
     let mut fork = blocks[199].header;
     fork.time += 1;
     fork.nonce = 0;
@@ -426,8 +410,7 @@ fn invalidated_snapshot_base_cannot_activate() -> Result<()> {
     let blocks = core_blocks()?;
     for kind in [Kind::Core, Kind::BitcoinRs] {
         let mut node = ProcessNode::spawn(kind)?;
-        // Keep the surviving parent fully validated so invalidation does not
-        // also need to fetch missing historical bodies on the ordinary chain.
+
         for block in &blocks[..199] {
             assert!(
                 node.rpc("submitblock", &json!([serialize_hex(block)]))?
@@ -579,8 +562,7 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     submit_genesis(&mut node)?;
     mine_bare_blocks(&mut node, 1)?;
-    // A recent ordinary tip exits the process-wide IBD latch. The pinned
-    // headers then win by work, but their coinbase bodies remain unavailable.
+
     assert_eq!(
         node.rpc("getblockchaininfo", &json!([]))?["initialblockdownload"],
         false
@@ -616,8 +598,7 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
         NetworkMessage::Tx(orphan),
         Instant::now() + Duration::from_secs(2),
     )?;
-    // A missing-parent request is positive evidence that ingress classified
-    // and retained the peer's body as an orphan. Never supply that parent.
+
     node.wait_for(
         "held orphan parent requested",
         Duration::from_secs(15),
@@ -635,8 +616,7 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
     let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
     assert_eq!(imported["tip_hash"], BASE);
     assert_eq!(imported["coins_loaded"], 200);
-    // Keep the announcing peer alive, but offer no more tx or block bodies.
-    // The normal ingress retry driver must use only the newly imported coin.
+
     node.wait_for(
         "snapshot orphan admitted",
         Duration::from_secs(15),
@@ -667,8 +647,7 @@ fn corrupt_snapshot_recovery_fails_closed() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     admit_headers(&mut node, &core_blocks()?)?;
     node.rpc("loadtxoutset", &json!([snapshot]))?;
-    // A crash leaves the committed import archive authoritative. A clean
-    // shutdown could legitimately publish a newer checkpoint superseding it.
+
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
@@ -722,18 +701,15 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
             "pre-existing {name} must be preserved"
         );
     }
-    // Model identifiable reservations left by an interrupted writer. Their
-    // payloads come from the real node's native archive, not a lookalike codec.
+
     let orphan_coins = archive.join(".coins.dat.12345.100.tmp");
     let orphan_headers = archive.join(".headers.dat.12345.101.tmp");
     std::fs::copy(archive.join("coins.dat"), &orphan_coins)?;
     std::fs::copy(archive.join("headers.dat"), &orphan_headers)?;
-    // Even an exact reservation-shaped name is not removable when its content
-    // belongs to the operator's portable artifact rather than native staging.
+
     let unknown_alias = archive.join(".coins.dat.12345.102.tmp");
     std::fs::hard_link(&source, &unknown_alias)?;
-    // Recover from the newly committed native archives, not a clean-shutdown
-    // checkpoint that could mask an invalid archive publication.
+
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);

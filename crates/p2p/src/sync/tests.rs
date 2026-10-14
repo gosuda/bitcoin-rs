@@ -862,8 +862,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
             forward_credit: None,
         })?;
     }
-    // Whichever order the pass tries the carried headers, the second drain
-    // admits whichever waited on the other's parent.
+
     sync.tick();
     sync.tick();
 
@@ -932,8 +931,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         "unattachable header must not be admitted"
     );
 
-    // The reply covers the gap; the still-missing parent body is fetched
-    // through the ordinary window path.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![block1.header, block2.header],
         source: Some(source),
@@ -976,9 +973,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
 
 #[test]
 fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline() -> TestResult {
-    // A 16-block chain: the deep single-peer window takes all 16 while
-    // the one-shot probe sends the first 8 (PREFIX_PROBE_BLOCK_LIMIT), so
-    // the probe getdata is distinguishable from the deep getdata.
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(16)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
 
@@ -1232,7 +1226,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         inbound_blocks_tx,
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
-    // Staging byte budget that exactly one staged block exhausts.
+
     install_budget(
         &sync,
         super::SyncBudget {
@@ -1259,9 +1253,6 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     );
     let _headers = stalled_rx.try_recv()?;
 
-    // Deliver only the successor: it stages (waiting on block1, which the
-    // stalled peer will never send) and exactly exhausts the staging byte
-    // budget, closing the request gate.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.drain_inbound_blocks();
     assert!(!{
@@ -1357,8 +1348,7 @@ fn apply_cache_fixture(
         ..
     } = SyncHarness::new(tree);
     let chain_tip = block_tree.write().tip_handle();
-    // Apply genesis so the applied tip starts at height 0; no block bodies
-    // are staged yet, leaving every round below to drive cache state.
+
     sync.chain.bootstrap_genesis();
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.height),
@@ -1409,10 +1399,6 @@ fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
 
 #[test]
 fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> TestResult {
-    // One valid block, then a two-coinbase body whose header the tree
-    // knows: the commit classifier treats the body as a permanent
-    // ExtraCoinbase invalidity and invalidates its subtree while the
-    // transition is held.
     let (mut tree, mut blocks) = mined_chain(1, 0)?;
     let tip_id = tree.tip_id().ok_or("missing mined tip")?;
     let extra_coinbase = regtest_fixture::mined_block_with_prev_hash(
@@ -1442,9 +1428,6 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> T
     sync.tick();
     let failing_hash = Hash256::from(extra_coinbase.block_hash());
 
-    // Deliver all three bodies: staging releases each one's pending, so
-    // the request cursor sits strictly above the failing height and a
-    // rewind onto it would be observable.
     let staged = sync.buffer_received_block_chunk(
         &mut vec![
             crate::InboundBlock::from_decoded(blocks.remove(0)),
@@ -1750,8 +1733,6 @@ type SyncFixture = (
 type InboundBlockSender = crossbeam_channel::Sender<crate::InboundBlock>;
 
 fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
-    // Dropping the sender mirrors the original fixture: a disconnected
-    // inbound-blocks channel that never yields a block.
     let (fixture, _inbound_blocks_tx) = sync_with_header_chain_and_blocks(height)?;
     Ok(fixture)
 }
@@ -1810,7 +1791,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
         harness.applied_tip.clone(),
         harness.block_tree.clone(),
     ));
-    // Model an active snapshot at height two, with ordinary work above it.
+
     chain.bootstrap_genesis();
     for block in &blocks[..2] {
         chain

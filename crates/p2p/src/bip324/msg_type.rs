@@ -1,6 +1,3 @@
-//! BIP324 message types: a one-byte ID for the commands the BIP assigns, or a
-//! zero byte followed by the 12-byte command field of the v1 header.
-
 use bitcoin::p2p::message::CommandString;
 use bytes::Bytes;
 
@@ -59,7 +56,6 @@ pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {
     if let Some(id) = short_id {
         contents.push(id);
     } else {
-        // `CommandString` holds at most 12 ASCII bytes.
         let mut field = [0u8; COMMAND_LEN];
         let len = name.len().min(COMMAND_LEN);
         field[..len].copy_from_slice(&name.as_bytes()[..len]);
@@ -146,11 +142,11 @@ mod tests {
         for id in u8::try_from(SHORT_IDS.len()).unwrap_or(u8::MAX)..=u8::MAX {
             assert_eq!(decode(&Bytes::from(vec![id, 1, 2])), None, "id {id}");
         }
-        // A long form cut short of its command field.
+
         assert_eq!(decode(&Bytes::from_static(b"\0ping")), None);
-        // A command field with bytes after its zero padding.
+
         assert_eq!(decode(&Bytes::from_static(b"\0ping\0\0\0\0\0\0\0x")), None);
-        // A long form whose command field is all padding names no type.
+
         assert_eq!(decode(&Bytes::from(vec![0u8; 1 + COMMAND_LEN + 4])), None);
     }
 }

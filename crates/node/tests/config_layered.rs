@@ -1,5 +1,3 @@
-//! Resolver tests for grouped node configuration layers.
-
 use std::str::FromStr as _;
 
 use anyhow::Result;
@@ -110,7 +108,6 @@ fn script_index_is_valid_without_core_txindex() -> Result<()> {
 
 #[test]
 fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
-    // IDX-01: `scriptindex=utxo` enables ScriptLive only; history stays off.
     let layer = UserConfig {
         indexes: bitcoin_rs_node::IndexOverrides {
             script_index: Some(ScriptIndexMode::Utxo),
@@ -412,7 +409,7 @@ fn chainstate_journal_rejects_invalid_values() {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+
 fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
     use bitcoin_rs_node::MiningOverrides;
 

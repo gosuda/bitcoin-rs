@@ -1,5 +1,3 @@
-//! REF-07/P2P-01: the compatibility lane enters through real loopback peers.
-
 #![expect(clippy::expect_used, reason = "public process test assertions")]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -176,8 +174,7 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     let mut peer = ProcessPeer::connect(process).expect("real version/verack handshake");
     peer.send_transaction(transaction)
         .expect("wire transaction and ping barrier");
-    // A pong orders wire processing but does not claim asynchronous admission
-    // completion. Observe that completion only through the public RPC.
+
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let pool = process
@@ -259,7 +256,7 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         compare_rpc(&mut core, &mut node, "getrawmempool", &json!([])).expect("initial pools"),
         json!([]),
     );
-    // Wire admission is observable only outside initial block download.
+
     advance_to_fresh_common_tip(&mut core, &mut node);
     for process in [&mut core, &mut node] {
         admit_over_p2p(process, &transaction);
@@ -329,7 +326,7 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         .expect("confirmed funding spend"),
         json!(null)
     );
-    // Block acceptance publishes the chain tip before the derived index catches up.
+
     wait_for_txindex(&mut node, 103);
     assert_eq!(
         node.http_get_json(&format!("/api/tx/{txid}/status"))

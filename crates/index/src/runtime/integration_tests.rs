@@ -189,8 +189,6 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
     )
     .expect("spawn");
 
-    // Entry is signaled from inside `open_store`, so the shutdown below lands
-    // on the abandoned-open path rather than the pre-spawn stop check.
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("open thread entered open_store");
@@ -209,16 +207,11 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    // The open thread is still parked on `open_rx` here; the worker-local
-    // flag records the abandonment durably.
+
     assert!(worker.open_was_abandoned());
     assert!(NAMESPACE_REGISTRY.is_poisoned(&dir.path().join("txindex")));
     worker.join();
 
-    // The detached opener's completion is not observable (its handle is
-    // dropped at detach), so it is never released: leaking the sender parks
-    // it on `open_rx` forever, which keeps it from reaching the real
-    // `open_store` on a tempdir the test scope is about to remove.
     std::mem::forget(open_tx);
 }
 

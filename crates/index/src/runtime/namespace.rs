@@ -1,8 +1,3 @@
-//! Process-lifetime ownership of index storage namespaces.
-//!
-//! An abandoned open permanently poisons its namespace. Only the matching
-//! generation may release or poison an active claim.
-
 use std::path::{Path, PathBuf};
 
 use hashbrown::HashMap;
@@ -101,17 +96,16 @@ mod tests {
         let registry = NamespaceRegistry::new();
         let key = PathBuf::from("/tmp/test-namespace-claim");
 
-        // First claim succeeds.
         assert!(registry.claim(key.clone(), 1));
-        // Second claim by different owner fails.
+
         assert!(!registry.claim(key.clone(), 2));
-        // Release by wrong owner does nothing.
+
         registry.release(&key, 2);
         assert!(matches!(
             registry.entries.lock().get(&key),
             Some(NamespaceEntry::Active(1))
         ));
-        // Release by correct owner removes the entry.
+
         registry.release(&key, 1);
         assert!(registry.entries.lock().get(&key).is_none());
     }
@@ -124,7 +118,7 @@ mod tests {
         assert!(registry.claim(key.clone(), 1));
         registry.poison(&key, 1);
         assert!(registry.is_poisoned(&key));
-        // Poisoned namespace cannot be claimed.
+
         assert!(!registry.claim(key, 2));
     }
 
@@ -134,7 +128,7 @@ mod tests {
         let key = PathBuf::from("/tmp/test-namespace-poison-owner");
 
         assert!(registry.claim(key.clone(), 1));
-        // Poison by wrong owner does nothing.
+
         registry.poison(&key, 2);
         assert!(!registry.is_poisoned(&key));
         assert!(matches!(

@@ -1,9 +1,3 @@
-//! Read-only, single-pass measurement of a stopped node's data directory.
-//!
-//! In `bitcoin-rs-storage-allocation-v1`, the `namespaces` key `"."` accounts
-//! only for the root directory itself. Other keys account for each top-level
-//! entry and its descendants, with hard-linked inodes counted only once.
-
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -96,8 +90,7 @@ fn visit(
             path.display()
         )));
     }
-    // Preserve the complete top-level inventory even when this path aliases
-    // an inode whose bytes were assigned to an earlier namespace.
+
     report.namespaces.entry(namespace.to_owned()).or_default();
     if !seen.insert((metadata.dev(), metadata.ino())) {
         return Ok(());
@@ -109,13 +102,11 @@ fn visit(
         .or_default()
         .add(&metadata)?;
     if metadata.is_dir() {
-        // Stable order gives cross-namespace hard links a deterministic owner.
         let mut entries = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
         entries.sort_by_key(fs::DirEntry::file_name);
         for entry in entries {
             let name;
             let child_namespace = if namespace == "." {
-                // Each top-level entry is its own namespace, including loose files.
                 name = entry
                     .file_name()
                     .into_string()
@@ -139,8 +130,7 @@ mod tests {
     fn sparse_file_and_hard_link_are_not_double_counted() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let file = fs::File::create(dir.path().join("a"))?;
-        // This creates a sparse file where supported; allocation is determined
-        // by the filesystem, not required to be smaller than the file length.
+
         file.set_len(16 * 1024 * 1024)?;
         fs::hard_link(dir.path().join("a"), dir.path().join("b"))?;
         let report = measure(dir.path())?;

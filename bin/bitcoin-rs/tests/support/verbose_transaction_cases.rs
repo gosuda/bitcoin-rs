@@ -1,4 +1,3 @@
-//! Transaction wire versions through actual accepted blocks and lookup consumers.
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hex::FromHex as _;
 use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};
@@ -119,8 +118,7 @@ fn compare_confirmed_views(
         )
         .expect("all summary fields retained");
     }
-    // Coinbase has neither an undo fee nor input prevout. This comparison does
-    // not certify the separately unimplemented non-coinbase undo projection.
+
     compare_reply(
         "nested coinbase transaction",
         &core_two["tx"][0],

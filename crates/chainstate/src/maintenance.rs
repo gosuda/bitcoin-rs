@@ -1,5 +1,3 @@
-//! Chainstate-owned idle maintenance: journal durability and retention.
-
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};

@@ -110,9 +110,6 @@ impl Handler {
             .is_blocking(params)
             .then(|| {
                 self.reserve_blocking_request().map_err(|error| {
-                    // Refusal observes the existing scan owner; it never starts
-                    // a scan without the shared blocking permit. Preserve Core's
-                    // in-progress error even when the long-operation quota is full.
                     if matches!(row.execution, crate::registry::Execution::Scan)
                         && self.ctx.chain.utxo.scan_progress().is_some()
                     {
@@ -419,9 +416,6 @@ mod registry_tests {
         );
         let handler = Handler::new(Arc::new(Context::new()));
         for entry in shipped_rpc_rows() {
-            // A subsystem a bare context runs without answers `-32601`
-            // carrying its own name (Core's wallet-disabled behavior); only
-            // a foreign name is drift.
             assert!(
                 !matches!(
                     handler.dispatch(entry.name, &json!([])),
@@ -467,10 +461,6 @@ mod registry_tests {
         ));
     }
 
-    // Bitcoin Core 31.1 parameter-error classification, probed against the
-    // pinned release: a wrong JSON type is -3 in Core's own words, a
-    // correctly typed but unacceptable value is -8, and only shape and
-    // arity remain on -32602.
     #[test]
     #[expect(clippy::expect_used)]
     fn wrong_json_type_answers_core_type_error_text() {
@@ -623,8 +613,7 @@ mod registry_tests {
             .expect_err("name validation precedes missing outputs");
         assert_eq!(error.code(), -8);
         assert_eq!(error.to_string(), "Unknown named parameter extra");
-        // The prerequisite must not newly recognize parameters whose semantics
-        // are implemented in the later raw-transaction/PSBT conversion slice.
+
         for (method, params, name) in [
             (
                 "createrawtransaction",

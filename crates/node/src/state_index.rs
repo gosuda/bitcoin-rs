@@ -1,10 +1,3 @@
-//! Derived-index (txindex/scriptindex) lifecycle: open, start, shutdown.
-//!
-//! One host owns the whole capability: the always-present status source, the
-//! configured parts (runtime, spawn, lifecycle, adapter), and the one
-//! state-machine slot for the worker. `NodeState` holds this host and
-//! delegates its index surface to it.
-
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,9 +94,7 @@ impl DerivedIndexHost {
         let DerivedIndexPhase::Ready(_) = &enabled.phase else {
             return Ok(());
         };
-        // Take the spawn out first: a failed spawn leaves `Stopped`, which
-        // permanently consumes the pending spawn exactly as the old
-        // `Option`-field code did.
+
         let DerivedIndexPhase::Ready(spawn) =
             core::mem::replace(&mut enabled.phase, DerivedIndexPhase::Stopped)
         else {
@@ -165,9 +156,6 @@ impl DerivedIndexHost {
             std::thread::sleep(Duration::from_millis(10));
         }
         if worker.is_finished() {
-            // A supervisor that exits mid-open leaves its detached backend
-            // open thread possibly writing to the store; joining it is not a
-            // clean stop, so the checkpoint must stay suppressed.
             let open_abandoned = worker.open_was_abandoned();
             worker.join();
             #[cfg(test)]
@@ -180,16 +168,14 @@ impl DerivedIndexHost {
             return Ok(());
         }
         tracing::warn!("txindex worker still blocked; abandoning join");
-        // Revoke the generation token so late publication is a no-op.
+
         worker.generation.revoke();
         enabled.lifecycle.store(Arc::new(
             bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
         ));
-        // Poison the namespace so it cannot be reclaimed in this process.
+
         worker.poison_namespace();
-        // Detach the join handle so Drop does not block on join. The
-        // worker thread continues running but will exit after shutdown is
-        // observed; Drop is a no-op for the handle.
+
         worker.detach();
         Err(anyhow::anyhow!(
             "derived-index worker did not exit within the join deadline; join abandoned"

@@ -1,30 +1,3 @@
-//! Journal writer: the single owner of journal segment files, the durable
-//! cursor, and `head.json`.
-//!
-//! Ownership and commit point: the codec (`record.rs`) turns records into
-//! bytes; this writer is the *only* component that appends those bytes to
-//! segments and advances the durable head marker. `head.json` is the journal's
-//! commit point — nothing below it (a torn tail) is acknowledged at boot, and
-//! nothing above it is claimed without the full §2.3 dependency order.
-//!
-//! Durability: appends are buffered in memory and in the page cache; the
-//! durability boundary advances in one serialized step — (1) storage flush
-//! (`KvStore::flush()`, which makes the deferred undo rows durable), (2) log
-//! fsync, (3) atomic `head.json` publish (tmp + rename + directory fsync).
-//! The order matters: undo is the sole inverse transition for reorg, so its
-//! durability must precede the head that claims the height.
-//!
-//! Recovery: a crash before the boundary leaves "record present, head older"
-//! (a torn tail, ignored); a crash after the boundary leaves a valid head.
-//! A partial append is truncated back to the last known-good cursor and the
-//! writer fails closed before the next block mutation. Restart recovery then
-//! permits the missed height to be applied and journaled again.
-//!
-//! Failure classification: append/boundary failures are never consensus-fatal
-//! (the journal only accelerates recovery); callers see [`JournalWriterError`]
-//! and apply §2.3's degraded-mode policy. Loading a corrupt journal at boot
-//! fails closed (handled by replay, later task).
-
 mod append;
 mod durability;
 mod open;

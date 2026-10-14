@@ -1,9 +1,3 @@
-//! Applied-block record log shared between the chain owner and index consumers.
-//!
-//! The node records one [`BlockRecord`] per applied block; the derived-index
-//! runtime resolves block identity against the same log. The type lives here
-//! so both owners read it without an edge on the RPC surface crate.
-
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLockWriteGuard;
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -118,7 +112,7 @@ impl BlockLog {
         self.total_body_size = self
             .total_body_size
             .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
-        // Avoid total_tx_count's debug fold on every append.
+
         let running = self
             .cumulative_tx_count
             .last()
@@ -172,10 +166,6 @@ impl BlockLog {
     /// boundary against a longer log gets the whole sum rather than a panic.
     #[must_use]
     pub fn tx_count_before(&self, count: usize) -> u64 {
-        // The prefix vector is parallel to the records. Stating it here rather
-        // than relying on the clamp below is the difference between a mutation
-        // that drops a `pop` dying on the invariant it broke and dying on an
-        // out-of-range read further along.
         debug_assert_eq!(
             self.records.len(),
             self.cumulative_tx_count.len(),
@@ -297,8 +287,7 @@ impl BlockRecord {
             hash,
             height,
             body_size: block.total_size(),
-            // Not stored: the block tree holds this block's header, and
-            // `Context::header_record` supplies it on the way out.
+
             header: None,
             tx_count: block.txs.len(),
             time: block.header.time,

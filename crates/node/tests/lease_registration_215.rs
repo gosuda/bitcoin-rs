@@ -1,9 +1,3 @@
-//! Regression for the ownership boundary between p2p sessions and node sync.
-//!
-//! `PeerTable` owns registration, same-address replacement, cancellation, and
-//! handshake metadata. Node sync observes that table rather than registering
-//! sessions through a callback or maintaining a second peer collection.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 

@@ -1,4 +1,3 @@
-//! BIP133 and delayed inventory observed over real bitcoin-rs and Core sockets.
 use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin_rs_e2e::helpers::{
     coinbase_at, funding_address, funding_output, signed_spend, submit_genesis, tx_hex,
@@ -77,10 +76,7 @@ fn scenario(kind: Kind) -> Result<()> {
             ));
         }
     }
-    // Keep observing after successful deliveries through another complete
-    // native relay window (30-second ceiling plus polling allowance). Core uses
-    // an uncapped exponential clock; this is a finite observation there too,
-    // not a claim that Core has the same deadline or cannot relay later.
+
     let observation_deadline = Instant::now() + Duration::from_secs(31);
     loop {
         assert!(

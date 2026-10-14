@@ -1,12 +1,3 @@
-//! Applied-chain seam for the block-download executor.
-//!
-//! The executor — download scheduling, staging, peer policy — lives in
-//! [`bitcoin_rs_p2p::sync`]. This module is the [`bitcoin_rs_p2p::sync::SyncChain`] implementation
-//! it drives: the applied-tip-mutating operations that stay in `node` under
-//! ARCH-07 (header admission under the chain-transition lock, window commit
-//! through `ChainTransition` + `ChainFollowers`, branch switch via
-//! [`crate::reorg::switch_to_branch`], genesis bootstrap).
-
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -242,7 +233,6 @@ impl SyncChain for NodeSyncChain {
         let transition = self
             .handles
             .begin_transition()
-            // A closed or already-active generation refuses a new window.
             .map_err(|source| WindowCommitError {
                 applied: 0,
                 disposition: WindowApplyDisposition::Operational,
@@ -270,7 +260,7 @@ impl SyncChain for NodeSyncChain {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.on_connect(block, outcome);
                 }
-                // A connect failure settles according to its disposition.
+
                 Err(settle_window_failure(transition, mempool_change, error))
             }
         };

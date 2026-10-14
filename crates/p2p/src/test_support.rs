@@ -1,5 +1,3 @@
-//! Shared unit-test helpers.
-
 use core::fmt::Display;
 
 pub(crate) trait OrFail<T> {

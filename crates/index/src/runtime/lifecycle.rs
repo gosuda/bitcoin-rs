@@ -1,5 +1,3 @@
-//! Process-owned worker spawning, joining, and explicit abandonment.
-
 use super::DerivedIndexLifecycle;
 use super::DerivedIndexOpenSpec;
 use super::DerivedIndexRuntime;
@@ -50,7 +48,7 @@ impl DerivedIndexWorker {
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
         let shutdown = shutdown.into();
-        // Compute the namespace key before moving `spec` into the thread.
+
         let namespace_key =
             NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace).ok();
         let runtime_for_thread = Arc::clone(&runtime);

@@ -79,9 +79,7 @@ fn inbound_blocks_channel_is_bounded_against_flood() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     let tx = state.inbound_blocks_sender();
     let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    // No `tick` drains the channel in this unit test, so it fills to the
-    // bound; the block past the limit must be rejected rather than queued
-    // (the OOM-flood guard), proving backpressure engages at the producer.
+
     for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
         tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
             .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));

@@ -1,18 +1,3 @@
-//! Durable chain head record and its atomic commit boundary.
-//!
-//! `RCV-02` orders every connect or disconnect as: reserve, append, sync, one
-//! atomic durable batch, publish. This module owns the record that batch
-//! commits: one versioned, CRC32C-framed row in the `UtxoMeta` family naming
-//! the committed chain tip, its strictly monotonic `commit_id`, the chain
-//! transaction count, and the committed body/undo extents (`INV-06`: the head
-//! never names a byte range that was not made durable before the batch).
-//!
-//! The framing imitates the chainstate journal's `HeadMarker` (magic, version
-//! byte, checksum over the payload) but is not a second copy of it: the
-//! journal head stays a derived recovery accelerator, while this row is the
-//! commit point the apply path advances before it publishes the tip. A head
-//! whose bytes do not decode fails closed, exactly like a torn `head.json`.
-
 use bitcoin_rs_primitives::Hash256;
 
 use crate::chainstate_journal::crc32c;

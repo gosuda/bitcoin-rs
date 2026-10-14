@@ -1,5 +1,3 @@
-//! Differential checks for the shared regtest builders.
-
 use bitcoin::hashes::Hash;
 use bitcoin::script::Builder;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};

@@ -1,8 +1,3 @@
-//! TDP server: accepts the SRI pool's Noise connection, completes the
-//! `SetupConnection` handshake, pushes templates from the [`Hub`], answers
-//! `RequestTransactionData`, and forwards `SubmitSolution` to bitcoin-rs
-//! `submitblock` — the normal production submission path.
-
 use std::sync::Arc;
 
 use stratum_apps::key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
@@ -90,7 +85,6 @@ impl Session {
         info!("pool noise handshake completed");
         let (mut reader, mut writer) = noise.into_split();
 
-        // Handshake: the pool (initiator) opens with SetupConnection.
         let mut frame = reader
             .read_frame()
             .await
@@ -129,7 +123,6 @@ impl Session {
         .await?;
         info!("pool setup connection completed");
 
-        // Push the current template, then every refresh.
         let mut templates = self.hub.subscribe();
         let state = templates.borrow_and_update().clone();
         if let Some(state) = state {
@@ -137,11 +130,7 @@ impl Session {
             info!(template_id = state.id, "pushed template to pool");
         }
         loop {
-            // NoiseTcpStream's read_frame/write_frame are not
-            // cancellation-safe, so the select races only the cancel-safe
-            // inputs (the watch flag and the read); every write runs after
-            // the select resolves. A canceled write_frame could emit a
-            // partial AEAD record and corrupt the whole stream.
+
             enum Event {
                 Refresh,
                 Tdp(TemplateDistributionOwned),
@@ -175,10 +164,7 @@ impl Session {
             };
             match event {
                 Event::Refresh => {
-                    // borrow_and_update marks the value seen — plain borrow()
-                    // would leave changed() resolved and re-push forever.
-                    // (Also: the watch Ref is !Send, so it must drop before
-                    // the await — bind, don't inline in the scrutinee.)
+
                     let state = templates.borrow_and_update().clone();
                     if let Some(state) = state {
                         push_template(&mut writer, &state).await?;
@@ -270,8 +256,7 @@ impl Session {
                 }
             }
             TemplateDistributionOwned::CoinbaseOutputConstraints(constraints) => {
-                // The pool declares how much coinbase space/sigops it needs
-                // for its own outputs; informational for this example.
+
                 debug!(
                     max_additional_size = constraints.coinbase_output_max_additional_size,
                     max_additional_sigops = constraints.coinbase_output_max_additional_sigops,

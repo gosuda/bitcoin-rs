@@ -1,10 +1,3 @@
-//! Block download window, peer-assignment, stall, and scheduling policy.
-//!
-//! This module owns the download-side policy that decides which blocks to
-//! request from which peers, how to detect and recover from stalls, and how
-//! to manage the in-flight window budget. `crate::BlockStager` owns the
-//! matching inbound staging set. The node sync coordinator drives these
-//! types; it does not own the policy.
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -434,16 +427,7 @@ impl DownloadWindow {
         let was_engaged = self.fanout_engaged;
         self.fanout_eligible_peers = count;
         let would_engage = count >= self.budget.min_peers_for_fanout;
-        // Bound the deferral: while a fresh prefix probe (age <
-        // stall_timeout_initial) is racing, hold fanout disengaged so the
-        // race is not cancelled mid-flight. The probe's elapsed time is
-        // computed from the injected `now` against the probe's
-        // `started_at` (itself an injected `Instant`), never
-        // `Instant::now()`. The bound is a strict less-than: at an elapsed
-        // time exactly equal to `stall_timeout_initial` the probe is no
-        // longer fresh (the race had its full budget), so fanout engages at
-        // the deadline — `<` rather than `<=`. The boundary is pinned by
-        // tests that cross at exactly `stall_timeout_initial`.
+
         let probe_young = self.prefix_probe.as_ref().is_some_and(|probe| {
             now.duration_since(probe.started_at) < self.budget.stall_timeout_initial
         });
@@ -628,10 +612,7 @@ impl DownloadWindow {
             .max_pending_blocks
             .saturating_sub(self.pending.len().saturating_sub(expired_blocks))
             .min(self.staged_count_headroom(stager, expired_blocks));
-        // Expired bytes are credited back to pending capacity (they will be
-        // re-requested) but not to staging byte headroom: a late arrival of
-        // the original request still stages. The count headroom does credit
-        // them — see `staged_count_headroom` for why the wedge needs it.
+
         let byte_capacity = self
             .budget
             .max_pending_bytes
@@ -717,7 +698,6 @@ impl DownloadWindow {
             None
         };
         if ctx.apply_side_busy {
-            // The no-blame guard: our own slowness is never a peer's fault.
             if self.stall.take().is_some() {
                 count_stall_episode_cleared("apply_busy");
             }
@@ -862,8 +842,6 @@ impl DownloadWindow {
             Some(stuck)
                 if stuck.height == next_apply_height && stuck.frontier_hash == frontier_hash => {}
             _ if apply_side_busy => {
-                // A new episode starts only while a body for this frontier
-                // is actually staged; an idle frontier accumulates nothing.
                 self.apply_side_stuck = Some(ApplySideStuck {
                     height: next_apply_height,
                     frontier_hash,
@@ -960,9 +938,6 @@ impl DownloadWindow {
             Some(episode) if episode.owner == owner && episode.front_hash == front_hash => episode,
             previous => {
                 if previous.is_some() {
-                    // Predicate still holds but for a different
-                    // (peer, front_hash): the front advanced (or rotated
-                    // owner) and the episode re-keyed.
                     count_stall_episode_cleared("front_moved");
                 }
                 metrics::counter!("node.sync.stall_episodes_started").increment(1);
@@ -976,15 +951,7 @@ impl DownloadWindow {
                 episode
             }
         };
-        // Phase 0 observability: one INFO line per episode, once it survives
-        // STALL_EPISODE_LOG_AGE — visible below the WARN fire line so episode
-        // dynamics (and the EWMA the threshold tracks, the design falsifier)
-        // appear in run logs.
-        //
-        // The fire threshold is the stored adaptive value, never below the
-        // ADV-DRIP-1 decay floor: on a network whose demonstrated front
-        // cadence exceeds `stall_timeout_initial`, an episode younger than
-        // twice that cadence is the uniform-slow steady state, not a stall.
+
         let effective_timeout = self.stall_timeout.max(self.stall_decay_floor());
         if !episode.info_logged && now.duration_since(episode.since) >= STALL_EPISODE_LOG_AGE {
             if let Some(stored) = self.stall.as_mut() {
@@ -1006,13 +973,7 @@ impl DownloadWindow {
             return None;
         }
         count_stall_episode_cleared("fired");
-        // Fire: blame is settled. Double the threshold for the next episode
-        // (sudden bandwidth drops must not cascade into disconnecting every
-        // peer at 2s — Core's rationale) and start the re-acquisition
-        // cooldown for this peer. Doubling starts from the effective
-        // threshold the fire was judged against, so a conviction at the
-        // adaptive floor elevates the next episode's bar just like one at
-        // the stored value.
+
         self.stall = None;
         self.stall_timeout = effective_timeout
             .saturating_mul(2)
@@ -1471,14 +1432,7 @@ impl DownloadWindow {
             Some(oldest) if removed_requested_at < oldest => {
                 self.owner_downloading_since.insert(owner, now);
             }
-            // The removed entry shares the surviving head's stamp (entries
-            // of one batched request share one `requested_at`): the head
-            // keeps that stamp, so the clock stays at the batch origin
-            // until the front itself is removed. The clock may already sit
-            // ahead of the stamp — an earlier true-head removal moved it
-            // to the removal instant — and must not regress: Core's
-            // `m_downloading_since` only ever moves forward
-            // (`max(since, now)`).
+
             Some(oldest) if removed_requested_at == oldest => {
                 self.owner_downloading_since
                     .entry(owner)
@@ -1581,9 +1535,7 @@ impl DownloadWindow {
             self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
             false
         });
-        // A released owner loses every pending it had: its queue start
-        // goes with them, so no phantom age survives to blame a later
-        // assignment to the same connection.
+
         self.owner_downloading_since
             .retain(|owner, _| retain_owner(owner));
         self.next_request_height = retry_height;
@@ -1625,8 +1577,7 @@ impl DownloadWindow {
 
         let owned = self.pending_count_for(source);
         let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
-        // Expiry already ran above, so the count headroom needs no expired
-        // credit here: `pending` reflects only live in-flight requests.
+
         let block_capacity = self
             .budget
             .max_pending_blocks
@@ -1655,9 +1606,6 @@ impl DownloadWindow {
         );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
-        // The current chain frontier outranks the forward-scan hint. A
-        // disconnect can move it backwards without changing the header tip.
-        // Rewind only an unowned frontier; retain live pending/staged work.
         if request_start_height < self.next_request_height
             && tree
                 .node_at_height_from(chain_tip.tip_id, request_start_height)
@@ -1674,9 +1622,7 @@ impl DownloadWindow {
                 "block sync: rewound unowned request frontier"
             );
         }
-        // `servable_floor` keeps a limited peer's batch inside its retained
-        // window: `serves_requested_height` certified only the first height
-        // at selection time.
+
         let height = request_start_height
             .max(self.next_request_height)
             .max(servable_floor);
@@ -2159,13 +2105,7 @@ impl DownloadWindow {
             if let Some(previous) = self.last_front_advance {
                 let sample_ms =
                     u64::try_from(now.duration_since(previous).as_millis()).unwrap_or(u64::MAX);
-                // Batch artifacts are not cadence: an in-order front run
-                // processed in one chunk shares the chunk's single timestamp
-                // (see `EWMA_MIN_SAMPLE_MS`), so sub-threshold samples are
-                // skipped entirely — never averaged in, never seeding. The
-                // anchor below still moves to `now` (all batched advances
-                // share it), so the next genuine sample correctly measures
-                // from the batch.
+
                 if sample_ms >= EWMA_MIN_SAMPLE_MS {
                     self.front_interval_ewma_ms = Some(match self.front_interval_ewma_ms {
                         None => sample_ms,
@@ -2220,9 +2160,6 @@ impl DownloadWindow {
             self.pending_timeout_observation = None;
         }
 
-        // A rejected race participant cannot remain eligible to complete the
-        // cold-front race. Clear the episode without electing a winner or
-        // blaming either peer; a later observation may arm another hedge.
         if self.cold_front.is_some_and(|state| match state {
             ColdFrontState::Waiting {
                 owner,
@@ -2327,9 +2264,6 @@ impl DownloadWindow {
             return true;
         }
         if stager.contains(&hash) {
-            // The fetch's body is already staged: the owned fetch is its
-            // request evidence, so the body counts as requested and owes
-            // no unrequested-admission gate.
             stager.clear_gate_pending(&hash);
             return true;
         }
@@ -2344,10 +2278,7 @@ impl DownloadWindow {
             entries: vec![PeerRequestEntry { hash, height }],
             next_request_height: 0,
         };
-        // `mark_requested` re-enables `prefix_probe_attempted_owner` when
-        // pending was empty — that re-arm is for a real post-drain request.
-        // An externally owned fetch is not one: keep the marker so a
-        // proven-stall owner stays ineligible for the next prefix probe.
+
         let attempted_owner = self.prefix_probe_attempted_owner;
         self.mark_requested(stager, &request, owner, now);
         self.prefix_probe_attempted_owner = attempted_owner;

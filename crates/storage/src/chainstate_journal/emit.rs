@@ -1,13 +1,3 @@
-//! Type-erased journal-writer handle for the apply path.
-//!
-//! [`JournalWriter`] is generic over the storage backend, but
-//! `Chainstate` is not (it is a concrete struct shared by every backend).
-//! This module is the single owner of that erasure: the apply path holds an
-//! [`SharedJournalWriter`] and never names `S`. The trait mirrors exactly the
-//! operations the apply path may perform: append, batched flush, fork rewinds,
-//! and the retention and checkpoint-publication transitions (`freeze`,
-//! `compact_to_checkpoint`, `resume`).
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -71,7 +61,7 @@ pub trait JournalEmit: Send + Sync {
     fn resume(&mut self) -> Result<(), JournalWriterError>;
 }
 
-#[expect(clippy::use_self)] // inherent vs trait method disambiguation requires the type path
+#[expect(clippy::use_self)]
 impl<S: KvStore> JournalEmit for JournalWriter<S> {
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
         JournalWriter::prepare_for_apply(self)

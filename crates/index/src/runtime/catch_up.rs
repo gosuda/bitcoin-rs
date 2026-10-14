@@ -1,5 +1,3 @@
-//! Bounded body-reader sessions, parallel preparation, and ordered batch admission.
-
 use super::BlockIdentity;
 use super::ChunkAction;
 use super::DerivedIndexWorkerError;
@@ -96,15 +94,7 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
-        // Ask the authority to hold this leg's history. While the grant
-        // lives no row at or above `start_height` is deleted, so a body that
-        // reads back absent is transient absence rather than lost history,
-        // and the pass never has to re-derive a prune line. A refusal is the
-        // owner's typed answer: `Pruned` disables filters (their header chain
-        // needs the full prefix); other indexes rebuild from what remains.
-        // `Reserved` and the transient answers only
-        // wait — a reservation can abort and release its range, and a missing
-        // row can still arrive.
+
         let pass_history = match self.history.request_history(start_height) {
             Ok(lease) => lease,
             Err(HistoryUnavailable::Pruned { below }) => {
@@ -113,8 +103,7 @@ impl Worker {
                     start_height,
                     "derived index needs history the pruning authority deleted"
                 );
-                // Prepared rows belong to the pre-reset position: the rebuild
-                // re-derives from the frontier, so they cannot be carried.
+
                 *pending = None;
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(
@@ -127,9 +116,6 @@ impl Worker {
                 return self.rebuild_from_pruned(capabilities, below, target);
             }
             Err(error) => {
-                // The grant is deferred, not denied: keep the prepared rows
-                // so the retry continues where this pass left off instead of
-                // re-deriving them.
                 if !state.batch.is_empty() {
                     *pending = Some(state);
                 }
@@ -173,11 +159,6 @@ impl Worker {
                 .prefetch_positions(&requests)
                 .map_err(DerivedIndexWorkerError::Storage)?;
 
-            // Sub-chunk: load bodies serially until the count or byte cap
-            // (preserving the reader's prefetch state), prepare blocks in
-            // parallel across the rayon pool, then push prepared blocks into
-            // the batch in height order. The single-writer commit and
-            // watermark publish remain the only ordering points.
             let mut remaining = identities;
             while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(
@@ -220,11 +201,7 @@ impl Worker {
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
-        // A held optional pin can still expire under a concurrent prune pass
-        // (`floor()` answers `None` once revoked). Reading past it mislabels
-        // deleted rows as transient absence and stalls this pass anyway, so
-        // stop now and let the next `request_history` route the `Pruned`
-        // refusal into the rebuild.
+
         if history.floor().is_none() {
             if !state.batch.is_empty() {
                 *pending = Some(state.take(self.batch_limits));
@@ -275,9 +252,6 @@ impl Worker {
             None
         };
 
-        // Prepare blocks in parallel. Each call takes a shared read lock on the
-        // RwLock-backed writer, so the CPU-bound decode/row-build runs
-        // concurrently across pool threads.
         let prepared: Vec<Result<PreparedBlock, IndexError>> = sub_chunk
             .par_iter()
             .zip(bodies.par_iter())
@@ -302,8 +276,6 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Push prepared blocks into the batch in height order on the single
-        // writer thread.
         for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
             let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
@@ -402,19 +374,12 @@ impl Worker {
         below: u32,
         target: &TipSnapshot,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        // `below` is at least 1: a refusal requires `floor < below` and no
-        // floor is negative.
         let anchor_height = below - 1;
         if anchor_height > target.height {
-            // The frontier has already passed the applied tip, so no
-            // surviving row is indexable: the consumer keeps its derived
-            // rows and waits rather than churning a reset every pass.
             return Ok(ReconcileAction::Stalled);
         }
         let anchored = capabilities.without(IndexCapability::ScriptLive);
-        // Resolve the anchor identity before the durable reset: it is a pure
-        // read — the block tree keeps headers for pruned heights — so a
-        // missing node fails before any derived row is erased, not after.
+
         let identity = if anchored.is_empty() {
             None
         } else {

@@ -1,11 +1,3 @@
-//! Caller-thread observability at the apply/window boundaries (OBS-02/OBS-06).
-//!
-//! The coinbase-only fixtures exercise stage timers, group publication, and
-//! window verification accounting on the caller thread. `with_local_recorder`
-//! does not observe Rayon workers: these assertions do not cover arbitrary
-//! worker emissions, spending transactions, or script-resolution sub-stages.
-//! The kept window histogram is recorded after the parallel verifier returns.
-
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{Network, consensus_bytes};
@@ -229,8 +221,6 @@ impl tracing::Subscriber for ProfileFields {
 }
 
 fn capture_profile<T>(fields: &ProfileFields, action: impl FnOnce() -> T) -> T {
-    // Two live dispatchers avoid tracing-core's single-dispatcher fast path:
-    // another test may first register these callsites without a subscriber.
     let _registration_guard = tracing::Dispatch::new(ProfileFields::default());
     let dispatch = tracing::Dispatch::new(fields.clone());
     tracing::dispatcher::with_default(&dispatch, action)

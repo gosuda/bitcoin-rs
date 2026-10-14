@@ -1,4 +1,3 @@
-//! Actual unmodified Core and native daemon block-validation comparisons.
 #[path = "../../../../crates/script/tests/support/taproot_spends.rs"]
 mod fixture;
 
@@ -67,8 +66,7 @@ fn compare_cases(
     let mut evidence = Vec::new();
     for case in cases(outpoint, &prevout) {
         let params = json!(["raw(51)", [serialize_hex(&case.tx)], false]);
-        // Proposal validation accepts consensus-valid annexes without conflating
-        // Core's mempool policy restrictions with its script verifier.
+
         let reference = core.rpc("generateblock", &params);
         let candidate = node.rpc("generateblock", &params);
         evidence.push(json!({"name":case.name,"tx":serialize_hex(&case.tx),"expected":case.accepted,"core":format!("{reference:?}"),"candidate":format!("{candidate:?}")}));

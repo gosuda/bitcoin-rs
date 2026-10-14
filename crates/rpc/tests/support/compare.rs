@@ -1,13 +1,3 @@
-//! Structural comparator for the Core parity gate.
-//!
-//! Comparison is structural only, never JSON text: HTTP status, pinned
-//! headers, the exact member set of each JSON-RPC envelope, identifier echo
-//! by value, ordered batch elements, exact scalars, `f64` equality by
-//! `to_bits`, complete pinned error objects, and required key presence.
-//! Every position of a pinned response is classified exactly once — exact,
-//! bit-exact float, chain-bound, volatile, or declared gap — and a
-//! known-gap fixture may diverge from Core only at its declared paths.
-
 use serde_json::Value;
 use sonic_rs::JsonValueMutTrait as _;
 
@@ -344,15 +334,10 @@ fn compare_tuple(
             ),
         ));
     }
-    // Derived framing: Content-Length is not pinned data. A 204 must omit it;
-    // every other tuple with a known wire body length must carry exactly one
-    // ASCII-decimal header equal to that length.
+
     check_tuple_content_length(fixture, side, expected)?;
     check_tuple_content_length(fixture, side, live)?;
-    // Header membership is complete: every name on the pinned side and on
-    // the live side — the union — must be classified exactly once as
-    // exact, volatile, or gap (Content-Length is covered by the derived
-    // `body_length` class), and each class enforces its own rule.
+
     compare_headers(fixture, side, expected, live, &checks.headers)?;
 
     match (&expected.body, &checks.body, &live.body) {
@@ -441,9 +426,7 @@ fn check_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".into()));
         }
-        // RFC 9110 §8.6 forbids Content-Length on 204, but libevent-era
-        // Core captures show `Content-Length: 0`. Accept both capture
-        // forms; the node's own omission is pinned by the negative probe.
+
         if let Some(value) = declared.first() {
             if *value != "0" || declared.len() != 1 {
                 return Err(fail(
@@ -491,8 +474,7 @@ fn compare_headers(
         position: format!("{side}.header {name}"),
         why,
     };
-    // Union of names, keyed case-insensitively, keeping the first wire
-    // spelling for display.
+
     let mut names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (name, _) in expected.headers.iter().chain(live.headers.iter()) {
         names
@@ -501,7 +483,6 @@ fn compare_headers(
     }
     for (lower, display) in names {
         if headers.body_length && lower == "content-length" {
-            // Already enforced per tuple by check_tuple_content_length.
             continue;
         }
         let Some(class) = headers.class_of(&lower) else {
@@ -661,9 +642,6 @@ fn compare_envelope(
         why,
     };
 
-    // The complete member set of the envelope is structural: the live
-    // element must carry exactly the members the dialect prescribes, no
-    // more, no fewer.
     let expected_members = envelope.member_names();
     let Some(object) = live.as_object() else {
         return Err(need(
@@ -941,8 +919,6 @@ fn compare_result(
         .map(|object| object.iter().map(|(key, _)| key.to_owned()).collect())
         .unwrap_or_default();
 
-    // Every live key must be classified exactly once; an unclassified key is
-    // a structural divergence the fixture does not declare.
     let classified: std::collections::BTreeSet<&str> = checks
         .classes()
         .iter()
@@ -978,8 +954,6 @@ fn compare_classified_keys(
     };
     for (class, keys) in checks.classes() {
         for key in keys {
-            // Chain-bound keys are handled by their own loop below against
-            // the independently read node state.
             if class == "chain-bound" {
                 continue;
             }
@@ -1066,11 +1040,6 @@ fn compare_classified_key(
             }
         }
         "gap" => {
-            // The declared divergence position: live must answer with the
-            // pinned current-tuple value, which the compared side (the
-            // current tuple in gap mode) carries. Equality is still
-            // enforced — the divergence is Core-vs-current and is proven by
-            // `assert_divergence_exactly_at`.
             if !value_equal(live_value, core_value) {
                 return Err(need(
                     format!("result.{key}"),
@@ -1114,9 +1083,7 @@ fn compare_chain_bound_keys(
                 format!("result is missing the chain-bound key {key:?}"),
             ));
         };
-        // `blocks` and `headers` are JSON numbers, `bestblockhash` a JSON
-        // string; both compare against the live node state read before the
-        // replay, never against the response under test.
+
         let diverged = match key.as_str() {
             "blocks" => live_value.as_u64() != Some(chain.blocks),
             "headers" => live_value.as_u64() != Some(chain.headers),
@@ -1218,10 +1185,7 @@ pub(crate) fn value_equal(a: &Value, b: &Value) -> bool {
     if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
         return a == b;
     }
-    // Every numeric comparison is bitwise: equal bits or no equality. This
-    // is the Core float parity doctrine — value parity, never text parity —
-    // and it keeps clippy's float comparison ban satisfied without a
-    // tolerance that could mask a real divergence.
+
     match (a.as_f64(), b.as_f64()) {
         (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
         _ => false,

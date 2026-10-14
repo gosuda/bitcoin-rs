@@ -1,10 +1,3 @@
-//! Bitcoin Core-compatible ZMQ notification protocol and transport.
-//!
-//! Bitcoin Core publishes "hashblock", "hashtx", "rawblock", and "rawtx" events
-//! via ZMQ for client subscribers. The node decides when committed transitions
-//! are published; this module owns how those notifications are represented and
-//! transported.
-
 #[cfg(feature = "zmq")]
 use anyhow::{Context as _, bail};
 use anyhow::{Result, ensure};
@@ -819,8 +812,6 @@ mod tests {
             endpoint(dedicated.clone(), vec![ZmqTopic::Sequence], 9),
         ])?;
 
-        // Read through the trait object — the path RPC consumers take — so the
-        // enumeration is proven to live on the `dyn ZmqPublisher` surface.
         let publisher: Arc<dyn ZmqPublisher> = Arc::new(publisher);
         assert_eq!(
             publisher.active_notifiers(),
@@ -935,9 +926,6 @@ mod manifest_tests {
             "published ZMQ topics and the declared ZMQ rows must name the same set"
         );
 
-        // getzmqnotifications names each topic `pub<topic>`; the manifest
-        // row is keyed by the bare topic, so the wire-visible notifier
-        // name must derive from it exactly.
         for topic in [
             ZmqTopic::HashBlock,
             ZmqTopic::HashTx,
@@ -1135,8 +1123,7 @@ mod manifest_tests {
     }
 
     #[test]
-    // End-to-end fan-out coverage in one readable sequence; splitting
-    // would scatter the arrange-act-assert across helpers with no reuse.
+
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,

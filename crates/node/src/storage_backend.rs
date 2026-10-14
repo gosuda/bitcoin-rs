@@ -1,11 +1,3 @@
-//! Runtime storage-backend composition.
-//!
-//! This module is the only node owner of concrete backend constructors. Each
-//! namespace is opened here and handed immediately to a generic consumer that
-//! constructs the narrow capability its caller needs. The visitor is not a
-//! second storage facade: all reads, writes, batches, and durability remain
-//! owned by [`bitcoin_rs_storage::KvStore`].
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,8 +24,6 @@ pub(crate) fn open_generic<C>(
 where
     C: StoreConsumer,
 {
-    // The fallback arm below is the only reader; builds with every backend
-    // feature compiled in cfg it away, so consume the label here.
     let _ = namespace;
     match backend {
         #[cfg(feature = "rocksdb")]

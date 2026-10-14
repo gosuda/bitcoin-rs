@@ -1,6 +1,3 @@
-//! Boundary vectors from pinned Core `policy/packages.cpp`, `truc_policy.cpp`,
-//! and `ephemeral_policy.cpp`. Policy-only shape vectors do not claim script validity.
-
 use super::*;
 use crate::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, MempoolGateway, MempoolLimits,
@@ -268,7 +265,7 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
     ));
     assert!(facts.results.iter().all(|fact| fact.allowed.is_none()));
     let mut txs = [parent, child, sibling];
-    // Changing the parent's version changes its txid; relink both children.
+
     txs[0].version = 2;
     txs[1].version = 2;
     txs[1].inputs[0].previous_output.txid = txs[0].txid();

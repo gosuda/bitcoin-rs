@@ -88,11 +88,7 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     };
 
     let handles = state.chainstate();
-    // Cross-role wiring proof: this read role is what bind_rpc hands RPC, and
-    // the pruning pass below enters through `PruneAuthority::begin`, which
-    // takes the mutation role from the same domain. The pass stalls until this
-    // guard drops, so the two roles provably name one domain — by behaviour,
-    // not by an identity comparison the architecture would then depend on.
+
     let barrier = state.stable_read();
     let transition = barrier.lock();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
@@ -194,8 +190,7 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(&data_dir)?);
     let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
-    // The prune line is computed from what the pass actually deletes, so
-    // seed one prunable body row at height 10.
+
     let mut seed = store.new_batch();
     seed.put(
         bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
@@ -257,8 +252,6 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(dir.path())?);
 
-    // Exercise the pruning policy of a recovered validating lifecycle. Snapshot
-    // authenticity is covered at the chainstate activation boundary.
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or_else(|| anyhow::anyhow!("pinned 110 missing"))?;

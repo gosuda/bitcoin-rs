@@ -1,9 +1,3 @@
-//! Consensus encoding, hashing, and byte presentation for native protocol types.
-//!
-//! Encoding writes into an infallible [`Sink`] — no `io::Write`, no encode-time
-//! `Result`. Decoding still yields a typed [`DecodeError`]. Segwit marker/flag
-//! handling and witness serialization follow BIP144.
-
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -438,7 +432,6 @@ mod tests {
 
     #[test]
     fn non_canonical_varint_input_count_is_rejected() {
-        // version || non-canonical 0xfd prefix || count 0x0001
         let mut bytes = 1_i32.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0xfd, 0x01, 0x00]);
         let error =
@@ -493,7 +486,7 @@ mod tests {
             lock_time: crate::LockTime::from_consensus(7),
         };
         let bytes = crate::encode::consensus_bytes(&tx);
-        // No witness data: no marker/flag is emitted.
+
         assert_eq!(&bytes[4], &0x01);
         assert_eq!(deserialize::<Tx>(&bytes)?, tx);
         assert_eq!(tx.consensus_size(), bytes.len());
@@ -518,28 +511,20 @@ mod tests {
         let stripped = crate::encode::consensus_bytes(&tx);
         assert_eq!(&stripped[4], &0x01, "witness-free tx carries no marker");
 
-        // Splice the BIP144 marker/flag after the version bytes and append an
-        // all-empty witness section (a zero item-count per input) before the lock time.
         let (prefix, lock_time) = stripped.split_at(stripped.len() - 4);
         let mut marked = prefix.to_vec();
         marked.splice(4..4, [0x00_u8, 0x01]);
         marked.extend(std::iter::repeat_n(0x00_u8, tx.inputs.len()));
         marked.extend_from_slice(lock_time);
 
-        // Marker+flag with an all-empty witness section: Core rejects this as a
-        // superfluous witness record, and so do we.
         assert_eq!(
             deserialize::<Tx>(&marked),
             Err(DecodeError::SuperfluousWitness)
         );
 
-        // The witness-stripped encoding of the same tx is accepted and round-trips.
         assert_eq!(deserialize::<Tx>(&stripped)?, tx);
         assert_eq!(crate::encode::consensus_bytes(&tx), stripped);
 
-        // Degenerate zero-input marker+flag encoding: Core rejects it ("Superfluous
-        // witness record") and so do we, since the encoder could never reproduce the
-        // marker/flag on re-encode.
         let mut zero_input = 2_i32.to_le_bytes().to_vec();
         zero_input.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(
@@ -549,7 +534,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP144 defines the marker/flag and witness serialization whose size is checked here.
     #[test]
     fn bip144_analytic_tx_size_matches_encoded_length_with_witness() {
         use crate::{OutPoint, Tx, TxIn, TxOut, Txid};

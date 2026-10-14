@@ -68,15 +68,13 @@ fn witness_aware_prevout(input: &TxIn) -> TxOut {
     let script_pubkey = match stack {
         [item] => [vec![0x51, 0x20], cycled(item, 32)].concat(),
         [_, second] => [vec![0x00, 0x14], cycled(second, 20)].concat(),
-        // P2WSH (three or more items): the program is the sha256 of the
-        // witness script (the last item), so the hash check passes and the
-        // fuzzed script bytes execute under witness rules.
+
         [.., script] => {
             let mut program = vec![0x00, 0x20];
             program.extend_from_slice(sha256::Hash::hash(script).as_byte_array());
             program
         }
-        // Empty witness: the safe legacy OP_TRUE path.
+
         [] => return op_true_prevout(),
     };
     TxOut {
@@ -99,12 +97,10 @@ fn validate_native(tx: Tx) {
     let view = SpendingView {
         prevouts: &prevouts,
     };
-    // Non-script consensus leg at the applied height.
+
     let _ =
         verify_transaction_non_script(&tx, &view, HEIGHT, LOCKTIME_CUTOFF, VerifyFlags::STANDARD);
-    // Full script leg, the same gate admission runs at the spending height:
-    // witness stacks now reach SegWit/Taproot verification through the
-    // witness-program prevouts above.
+
     let _ = verify_transaction(
         &tx,
         &view,
@@ -113,7 +109,7 @@ fn validate_native(tx: Tx) {
         VerifyFlags::STANDARD,
         ValidationEngine::Native,
     );
-    // Policy leg.
+
     let _ = is_standard_tx(&tx, &StandardnessPolicy::default());
 }
 
@@ -141,7 +137,7 @@ fn validate_tx(data: &[u8]) {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(50_000),
-            // Standard P2WPKH output: base size 82 (>= 65) and non-dust.
+
             script_pubkey: Script::from_bytes([vec![0x00, 0x14], vec![0x22; 20]].concat()),
         }],
         lock_time: LockTime::ZERO,

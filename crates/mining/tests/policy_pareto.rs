@@ -1,5 +1,4 @@
 #![allow(clippy::expect_used)]
-//! Package selection, limits, and adversarial candidate tests.
 
 #[path = "common/fixtures.rs"]
 mod common;
@@ -55,8 +54,6 @@ fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dy
     let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 50);
 
-    // Snapshot order is authoritative; the candidate must preserve package order
-    // from walking that priority index.
     assert_eq!(
         selected(&candidate),
         snapshot
@@ -74,7 +71,7 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
     insert(&mut mempool, parent, 200, 1_000, 1, 100)?;
-    // High-fee child should outrank the parent individually and pull it in.
+
     insert(
         &mut mempool,
         tx(2, 40_000, Some(parent_txid)),
@@ -119,7 +116,7 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
 #[test]
 fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> {
     let fitting = forged_entry(Arc::new(tx(4, 1_000, None)), 1_000, 0, 100, 100, 1, vec![]);
-    // Each oversized entry exceeds exactly one dimension of its own context.
+
     let cases = [
         (
             forged_entry(
@@ -169,10 +166,6 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-// POL-05/06: one fee chunk is indivisible, and its positive unconfirmed
-// BIP68 lock is not final at the next block. The valid parent cannot be
-// retried separately after the whole child-parent chunk is skipped; with CSV
-// inactive the same lock is ignored and the chunk is selected whole.
 #[test]
 fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
 -> Result<(), Box<dyn Error>> {
@@ -198,10 +191,6 @@ fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
     Ok(())
 }
 
-// POL-05: CandidateContext resource limits apply to a complete fee chunk.
-// Exact configured limits fit; one excess unit skips both child and parent.
-// Core 31.1 node/miner.cpp::addChunks likewise calls SkipBuilderChunk after
-// TestChunkBlockLimits, rather than extracting a parent from the failed chunk.
 #[test]
 fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
     let reservation = assemble_candidate(&context(), &snapshot(4, vec![]), PAYOUT)?;
@@ -353,10 +342,6 @@ fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
         Err(MiningError::MissingAncestor { .. })
     ));
 
-    // POL-05 requires an admitted dependency DAG. This fixture bypasses
-    // admission: assemble_candidate calls MempoolMiningSnapshot::fee_chunks,
-    // whose mempool-owned fee-diagram validator rejects the forged cycle
-    // with Dependencies. Mining propagates that failure without making an order.
     let cyclic = snapshot(
         2,
         vec![
@@ -374,8 +359,6 @@ fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
 
 #[test]
 fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Error>> {
-    // Coinbase reservation is ~476 WU with the default payout+commitment. Choose
-    // limits so parent alone and parent+child both overflow, while `other` fits.
     let parent = forged_entry(Arc::new(tx(1, 1_000, None)), 100, 0, 99_600, 100, 0, vec![]);
     let mut child_tx = tx(2, 1_000, Some(parent.txid));
     child_tx.lock_time = LockTime::ZERO;

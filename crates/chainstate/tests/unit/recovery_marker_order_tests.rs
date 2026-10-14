@@ -1,14 +1,3 @@
-//! Regression tests for #1270: `FULL_REVALIDATION_MARKER` must be checked
-//! BEFORE the checkpoint is opened.
-//!
-//! The corrupt-checkpoint test is the regression that proves item 1: any
-//! attempt to load the fixture returns `Err`, so with the unfixed order
-//! startup would fail on checkpoint corruption instead of selecting cold
-//! replay. The valid-checkpoint test proves the marker changes the outcome
-//! on a fixture that demonstrably restores to `Checkpoint` without it; it
-//! cannot by itself prove the checkpoint is never opened (the unfixed order
-//! would load and then discard a valid checkpoint).
-
 use std::fs;
 use std::path::Path;
 
@@ -70,10 +59,6 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn st
     let data_dir = dir.path();
     crate::events::initialize_data_dir(data_dir)?;
 
-    // A checkpoint directory whose CURRENT file points at a generation with a
-    // manifest that fails authenticated parsing: `load_checkpoint_from_dir`
-    // returns `Err` on this. Use the correct generation naming convention
-    // (`gen-{20-digit}`) so `read_current` passes before the manifest check.
     let gen_name = format!("gen-{:020}", 1u64);
     let checkpoint_root = data_dir.join(CHECKPOINT_ROOT);
     fs::create_dir_all(checkpoint_root.join(gen_name.as_str()))?;
@@ -87,9 +72,6 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn st
     );
     fs::write(checkpoint_root.join(CURRENT_FILE), current_json)?;
 
-    // Precondition: this fixture is genuinely unloadable. Without this the
-    // test would silently pass on an absent checkpoint root if the root were
-    // ever renamed.
     let preload = checkpoint::load_checkpoint(data_dir, checkpoint_config());
     assert!(
         matches!(preload, Err(checkpoint::CheckpointLoadError::Corrupt(_))),
@@ -115,8 +97,6 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     let data_dir = dir.path();
     crate::events::initialize_data_dir(data_dir)?;
 
-    // Build a real, loadable checkpoint so the marker path must prove it
-    // bypasses the checkpoint entirely rather than just skipping an absent one.
     let (tree, tip) = genesis_tip()?;
     let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
     checkpoint::write_checkpoint_from_dir(
@@ -129,8 +109,6 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     )?;
     drop(store);
 
-    // Precondition: without the marker the same fixture restores from the
-    // checkpoint (proves the fixture really is a loadable checkpoint).
     let no_marker =
         prepare_initial_chainstate(data_dir, NETWORK, ChainstateJournalConfig::default(), None)?;
     assert!(
@@ -139,10 +117,6 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
         no_marker.resume_source
     );
 
-    // Now arm the marker: the same fixture must select Cold. This is the
-    // regression for #1270 acceptance item 1 — with the unfixed order the
-    // checkpoint would still be opened and validated before the marker was
-    // consulted (and then discarded), while the fixed order never opens it.
     arm_full_revalidation_marker(data_dir);
 
     let config = ChainstateJournalConfig::default();

@@ -1,6 +1,3 @@
-//! BIP324 negotiation over real loopback sockets: inbound v1/v2 detection,
-//! outbound v2 with Core's single v1 retry, and the handshake deadline.
-
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,7 +104,7 @@ fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
     let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(1));
     let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
     assert!(matches!(negotiated.protocol, TransportProtocol::V2 { .. }));
-    // The listener's writer thread answers the ping over the session.
+
     handshake_and_ping(addr, stream, negotiated)?;
 
     shutdown.store(true, Ordering::Relaxed);
@@ -149,7 +146,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
             deadline(),
         )
         .map_err(|error| error.to_string())?;
-        // The dialer's writer thread answers the ping over the session.
+
         peer.send(&Message::Ping(42))
             .map_err(|error| error.to_string())?;
         read_until(&mut peer, &Message::Pong(42)).map_err(|error| error.to_string())?;
@@ -168,8 +165,6 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
 
 #[test]
 fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
-    // A v1-only listener reads the v2 key as a v1 header for another network
-    // and closes without answering.
     let (listener_shared, listener_table) = shared(false);
     let (addr, shutdown, handle) = listen(listener_shared)?;
 

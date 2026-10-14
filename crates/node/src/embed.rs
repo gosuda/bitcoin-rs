@@ -1,12 +1,3 @@
-//! Typed, in-process embedding surface over the node lifecycle.
-//!
-//! Startup returns a fully owned node from `lifecycle`; this module
-//! does not assemble detached state, workers, and RPC context a second time.
-//!
-//! The async methods defer the node's synchronous work until polled. They do
-//! not create an executor or make blocking storage and lifecycle work async.
-//! Embedders control placement of that work on their own runtime.
-
 use bitcoin_rs_index::CapabilitySnapshot;
 use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize, unix_time_secs};
@@ -52,9 +43,6 @@ pub struct Node {
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
-// Keep these async methods compatible with supported Clippy versions:
-// embedding defers synchronous work until polled, and the trait-impl lint
-// is newer than Rust 1.95.
 #[allow(
     unknown_lints,
     clippy::unused_async,
@@ -216,8 +204,7 @@ impl Node {
             .teardown(Some(&mut self.state), TeardownMode::CleanShutdown)
             .map_err(|error| NodeError::Shutdown(error.to_string()));
         self.services = None;
-        // Dropping self releases state and the RPC context's storage clones
-        // before this consuming operation returns, including on error.
+
         result
     }
 }
@@ -315,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
+
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
@@ -329,8 +316,6 @@ mod tests {
         ))
         .expect("embedded node starts");
 
-        // `P2WSH(OP_TRUE)`, spendable without fixture signature material;
-        // the spends below are this file's only consumers.
         let mut op_true_p2wsh = vec![0x00, 0x20];
         op_true_p2wsh.extend_from_slice(&[
             0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
@@ -394,7 +379,6 @@ mod tests {
         drop(events);
         publisher.sequence_events.lock().clear();
 
-        // Control: direct insertion cannot satisfy the gateway-publication test.
         let direct_tx = spending(direct_prevout);
         let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
         let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1, 0);
@@ -408,8 +392,6 @@ mod tests {
             "a direct pool insertion must not satisfy the gateway publication assertion"
         );
 
-        // Refusal: an unknown prevout is refused with the gateway's policy
-        // reason verbatim, and nothing is inserted or published.
         let orphan = spending(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5C; 32])), 0));
         let orphan_txid = orphan.txid();
         let refusal = block_on(node.broadcast(orphan)).expect_err("an unknown prevout is refused");

@@ -1,15 +1,3 @@
-//! In-memory UTXO set for bitcoin-rs.
-//!
-//! 256 first-byte shards, each a `hashbrown::HashTable` of compact
-//! transaction-level records behind a `parking_lot::RwLock`, with a native
-//! snapshot format and versioned undo codec.
-//!
-//! Chainstate mutates this set through one coherent contract
-//! ([`contract`]): build a block's changes, persist and load its undo record,
-//! and roll it back on disconnect. Record, shard, event, and codec machinery
-//! stays inside the crate; what leaves it is the apply/commit/disconnect
-//! contract plus the read, snapshot, and statistics surfaces.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;

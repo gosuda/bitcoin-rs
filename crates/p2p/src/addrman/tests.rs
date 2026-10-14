@@ -43,7 +43,7 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
         book.select(&[], &[same_group], 10_000, u64::MAX, |_| true),
         Some(picked)
     );
-    // Inbound connections suppress the exact endpoint but never its group.
+
     assert!(
         book.select(&[same_group], &[], 10_000, u64::MAX, |_| true)
             .is_some()
@@ -350,7 +350,7 @@ fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
     let book = book();
     book.learn_dns("seed", &[addr(1)], 10_000);
     let other = SocketAddr::new(addr(1).ip(), 18333);
-    // A vacant different new slot is needed for both same-group records.
+
     let candidate = (1..65535)
         .map(|port| SocketAddr::new(other.ip(), port))
         .find(|&candidate| {
@@ -616,7 +616,7 @@ fn global_good_epoch_limits_failures_and_good_keeps_advertised_time() {
     book.attempted(target(), true, EPOCH + 1);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 1);
-    book.succeeded(addr(77), 9, EPOCH + 10); // Core updates the epoch even when the address is absent.
+    book.succeeded(addr(77), 9, EPOCH + 10);
     book.attempted(target(), true, EPOCH + 12);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 2);
@@ -842,7 +842,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
             let before = refs(&manager, target());
             if before == 8 {
                 break;
-            } // Colliding source buckets do not manufacture a reference.
+            }
             for _ in 0..4096 {
                 if manager.learn(target(), Some(9), origin.clone(), EPOCH - 999, EPOCH, 0) {
                     break;
@@ -1196,7 +1196,7 @@ fn ring_manager(second_port: u16) -> (Manager, SocketAddr, SocketAddr) {
 }
 fn assert_fraction(hits: u32, samples: u32, expected: f64) {
     let actual = f64::from(hits) / f64::from(samples);
-    // Six binomial standard deviations plus one observation for quantization.
+
     let tolerance = 6.0_f64.mul_add(
         (expected * (1.0 - expected) / f64::from(samples)).sqrt(),
         1.0 / f64::from(samples),

@@ -1,5 +1,3 @@
-//! Public-process scan comparisons against pinned, unmodified Core 31.1.
-
 use bitcoin_rs_e2e::differential::{compare_reply, compare_rpc};
 use bitcoin_rs_e2e::helpers::submit_genesis;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
@@ -95,7 +93,7 @@ fn fixed_descriptors_scan_identical_core_created_coins() -> Result<()> {
             ]
         ]),
     )?;
-    // Infer raw descriptors from actual independently generated output bytes.
+
     let reference = core.rpc("scantxoutset", &json!(["start", descs]))?;
     let coins = reference["unspents"]
         .as_array()

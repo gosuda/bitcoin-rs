@@ -55,8 +55,7 @@ pub fn request_missing_parents(
         return false;
     }
     request_witness(&mut items, witness);
-    // The request owner retains alternate sources and shares the same cap as
-    // ordinary inv downloads. A retiring connection cannot target its successor.
+
     let retained = peers.request_parent_transactions(connection, &items);
     retained && !lease.is_cancelled()
 }

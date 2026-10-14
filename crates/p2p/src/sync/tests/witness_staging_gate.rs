@@ -1,5 +1,3 @@
-//! Executor-level body/header binding interaction tests.
-
 use super::*;
 use crate::InboundBlock;
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -80,8 +78,6 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
     let correct_block = segwit_block(prev_hash, 1, true);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
-    // Admit the header into the chain so the witness gate can derive
-    // segwit_active from the parent (genesis) and the block height.
     assert!(matches!(
         sync.chain.admit_headers(&[correct_block.header]),
         HeaderAdmission::Accepted { .. }

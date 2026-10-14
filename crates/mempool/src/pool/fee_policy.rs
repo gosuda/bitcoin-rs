@@ -1,5 +1,3 @@
-//! Immutable fee-policy projections captured from this pool's own links.
-
 use super::{
     EntryId, Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolPolicySnapshot,
     PolicyError, VisitSet,

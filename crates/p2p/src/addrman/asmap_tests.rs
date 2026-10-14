@@ -130,7 +130,7 @@ fn incoming_source_asn_controls_corroboration_without_rewriting_primary_source()
     );
     let entry = &manager.stored.records[manager.by_addr[&addr]];
     assert_eq!(entry.source, primary);
-    // Direct linked-Core reference: same ASN sources use53; the independent ASN602.
+
     assert_eq!(entry.new_buckets, vec![53, 602]);
     assert_indexes(&manager);
 }

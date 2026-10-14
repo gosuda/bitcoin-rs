@@ -1,5 +1,3 @@
-//! `AddrMan`'s public contract: learned wire addresses survive a daemon restart
-//! and remain usable when DNS is disabled and no operator peer is configured.
 #![expect(clippy::expect_used, reason = "process fixture assertions")]
 
 use std::path::Path;
@@ -56,7 +54,7 @@ fn restart_reconnects(
     .expect("timestamp");
     let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
     let deadline = Instant::now() + Duration::from_secs(10);
-    // Exercise both decoders; duplicate gossip must preserve one candidate.
+
     gossip.send(
         NetworkMessage::Addr(vec![(
             timestamp,

@@ -175,9 +175,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
             "the valid main branch must win after subtree invalidation"
         );
     }
-    // Rejecting the first rival body restores the old applied branch within
-    // the same transition, including its exact UTXO entries. A later sync
-    // tick or manual apply must not be needed to recover this valid tip.
+
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.hash),
         Some(main_tip_hash)
@@ -220,9 +218,6 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
         ),
     );
 
-    // The old body passes preflight and the disconnect-side reload, then
-    // disappears before restoration. The transition must fail closed rather
-    // than settle the fork ancestor as a normal stable result.
     let mut old_body_reads = 0;
     let outcome = adapter.switch_to_branch(
         invalid_id,
@@ -289,8 +284,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
     let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
-    // The staged body names another header's hash: the plan must refuse
-    // before touching chainstate.
+
     bodies.insert(target_hash, (wrong, wrong_bytes));
 
     let outcome = crate::reorg::switch_to_branch(
@@ -351,9 +345,7 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
     let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    // The staged block names the planned hash but its preserved bytes
-    // serialize a different block — the reorg plan must refuse before
-    // touching chainstate.
+
     let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
     bodies.insert(target_hash, (target, wrong_bytes));
 

@@ -1,5 +1,3 @@
-//! Transaction, block, and chain helpers for scenario tests.
-
 use std::time::Duration;
 
 use bitcoin::absolute::LockTime;
@@ -412,8 +410,7 @@ fn bip34_script_sig(height: u32, tag: u8) -> Vec<u8> {
 #[must_use]
 pub fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
     let reserved = [tag; 32];
-    // Coinbase-only tree: witness leaf 0 is zeroed out, so the wtxid merkle
-    // root is exactly [0;32]; commitment = sha256d(root || reserved).
+
     let mut buffer = [0_u8; 64];
     buffer[32..].copy_from_slice(&reserved);
     let commitment = bitcoin::hashes::sha256d::Hash::hash(&buffer).to_byte_array();

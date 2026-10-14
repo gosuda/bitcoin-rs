@@ -1,9 +1,3 @@
-//! Shared preparation and bounded admission retry for RPC and peer producers.
-//!
-//! Chain facts are collected without gateway locks. The existing atomic gateway
-//! operation validates exact generation/sequence tokens before either a pool
-//! commit or a peer orphan/reject transition.
-
 use alloc::{sync::Arc, vec::Vec};
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
@@ -863,7 +857,6 @@ mod tests {
         assert!(inserted.is_ok());
     }
 
-    // MPL-04: parent readiness belongs to the commit, not observer delivery.
     #[test]
     fn parent_commit_without_observers_retries_orphan_with_original_source() {
         for origin in [
@@ -904,7 +897,6 @@ mod tests {
         }
     }
 
-    // MPL-04: local failures do not populate peer lifecycle state.
     #[test]
     fn rpc_missing_inputs_does_not_create_peer_lifecycle_state() {
         for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Esplora] {
@@ -920,7 +912,6 @@ mod tests {
         }
     }
 
-    // POL-01: a local resubmission of a member succeeds without changes.
     #[test]
     fn local_submission_answers_membership_as_success_without_changes() {
         for origin in [LocalOrigin::Rpc, LocalOrigin::Esplora] {
@@ -944,7 +935,6 @@ mod tests {
         }
     }
 
-    // MPL-04: nonexistent outputs of resident parents cannot become orphans.
     #[test]
     fn nonexistent_mempool_output_is_rejected_without_holding_or_mutating() {
         for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Peer(source())] {
@@ -970,7 +960,6 @@ mod tests {
         }
     }
 
-    // MPL-04: changed pool facts must rebuild a normal chain lookup.
     #[test]
     fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1116,7 +1105,6 @@ mod tests {
         Ok(())
     }
 
-    // MPL-04: arrival resolves missing ancestry without retaining invalid outputs.
     #[test]
     fn absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry() {
         let gateway = gateway();
@@ -1148,7 +1136,6 @@ mod tests {
         assert_eq!(gateway.retry_orphans(&Coins(vec![]), 3), []);
     }
 
-    // MPL-04: only the resident body's claim may mutate its lifecycle state.
     #[test]
     fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
         let gateway = gateway();
@@ -1218,7 +1205,6 @@ mod tests {
         assert_eq!(gateway.recent_rejects_count(), 0);
     }
 
-    // MPL-04: witness rejection does not poison another body with the same txid.
     #[test]
     fn rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid() {
         let gateway = gateway();
@@ -1251,7 +1237,6 @@ mod tests {
         ));
     }
 
-    // MPL-04: stripped-body rejects cannot suppress txid inventory or valid admission.
     #[test]
     fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
         use bitcoin::hashes::{Hash as _, sha256};
@@ -1297,7 +1282,6 @@ mod tests {
         assert!(gateway.have_tx(Hash256::from(valid.wtxid()), true));
     }
 
-    // MPL-04: shared preparation carries BIP141 accounting into committed entries.
     #[test]
     fn submission_carries_prepared_fee_size_and_weighted_sigops_into_entry() {
         for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Peer(source())] {
@@ -1317,14 +1301,13 @@ mod tests {
             };
             assert_eq!(entry.fee, 1_000);
             assert_eq!(u64::from(entry.bip141_vsize), child.vsize());
-            // The sole legacy CHECKSIG in the output costs four BIP141 units.
+
             assert_eq!(entry.sigop_cost, 4);
             assert_eq!(entry.time, 7);
             assert_eq!(entry.height, 1);
         }
     }
 
-    // MPL-04: chain notifications clear rejects but cannot consume odd-generation work.
     #[test]
     fn chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work() {
         let gateway = gateway();
@@ -1373,7 +1356,6 @@ mod tests {
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
     }
 
-    // MPL-04: exhausted retries remain resident and retry only on a later poll.
     #[test]
     fn exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll() {
         let gateway = gateway();
@@ -1426,7 +1408,6 @@ mod tests {
         }
     }
 
-    // MPL-04: preparation cannot lose a parent commit between resolution and holding.
     #[test]
     fn parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake() {
         let gateway = gateway();
@@ -1479,7 +1460,6 @@ mod tests {
         }
     }
 
-    // MPL-04: changed generation invalidates rejection facts before publication.
     #[test]
     fn changed_chain_rebuilds_invalid_facts_before_recording_peer_rejection() {
         let gateway = gateway();
@@ -1506,7 +1486,6 @@ mod tests {
         }
     }
 
-    // MPL-04: confirmed-chain facts suppress peers, not RPC admission by cache lookup.
     #[test]
     fn confirmed_lookup_suppresses_peers_but_is_not_rpc_membership() {
         let gateway = gateway();
@@ -1532,7 +1511,6 @@ mod tests {
         ));
     }
 
-    // MPL-04: only standard, non-coinbase missing-input bodies may be held.
     #[test]
     fn coinbase_and_nonstandard_missing_transactions_are_not_held() {
         let gateway = gateway();
@@ -1597,7 +1575,6 @@ mod tests {
         }
     }
 
-    // MPL-04: retired retry claims cannot commit, hold, reject, or requeue work.
     #[test]
     fn refreshed_or_evicted_retry_claim_cannot_commit_hold_reject_or_requeue() {
         for refresh in [true, false] {
@@ -1670,7 +1647,6 @@ mod tests {
         }
     }
 
-    // MPL-04: base-invalid outpoints reject without orphan retention or pool mutation.
     #[test]
     fn known_parent_invalid_output_is_rejected_without_orphan_retention() {
         let gateway = gateway();
@@ -1716,7 +1692,6 @@ mod tests {
         );
     }
 
-    // MPL-04: parent arrival retires impossible orphan inputs through atomic rejection.
     #[test]
     fn orphan_retry_removes_known_invalid_outpoint_after_parent_arrival() {
         let gateway = gateway();
@@ -2071,11 +2046,8 @@ mod tests {
         Ok(())
     }
 
-    // MPL-04: witness-scoped rejects preserve txid inventory and alternative witnesses.
     #[test]
     fn witness_rejection_preserves_valid_variant_and_legacy_inventory() {
-        // BIP141 P2WSH commits to SHA256(witnessScript), excluding witness
-        // data from txid. Rejection must not suppress a correct script body.
         for stripped in [false, true] {
             let gateway = gateway();
             let (valid, chain) = witness_spend();
@@ -2118,7 +2090,6 @@ mod tests {
         }
     }
 
-    // MPL-04: a rejected witness cannot retire a different resident body or its retry.
     #[test]
     fn fresh_invalid_witness_preserves_a_different_resident_orphan_variant() {
         let gateway = gateway();
@@ -2260,8 +2231,6 @@ mod tests {
         assert!(gateway.read().contains_txid(&first.txid()));
     }
 
-    // MPL-04 and Core COutPoint::IsNull: zero-hash vout 0 is an ordinary
-    // non-null outpoint, so missing-parent requests, indexing and coin lookup agree.
     #[test]
     fn zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint() {
         use bitcoin::hashes::Hash as _;
@@ -2302,8 +2271,6 @@ mod tests {
         assert_eq!(gateway.orphan_count(), 0);
     }
 
-    // MPL-04 / Core CheckTransaction: a true null prevout in any non-coinbase
-    // input is invalid and must not consume orphan capacity.
     #[test]
     fn null_input_in_a_non_coinbase_transaction_is_not_held() {
         let reference = bitcoin::OutPoint::null();
@@ -2393,9 +2360,6 @@ mod tests {
         assert_eq!(gateway.read().sequence_number(), 0);
     }
 
-    // MPL-04; Core v31.1 CheckTransaction rejects duplicate/null outpoints
-    // independently of witness bytes and without requiring previous outputs:
-    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_check.cpp
     #[test]
     fn input_structure_duplicate_rejection_is_shared_across_witnesses() {
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[91; 32])), 0);

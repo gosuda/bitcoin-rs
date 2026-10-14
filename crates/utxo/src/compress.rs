@@ -1,8 +1,3 @@
-//! Compact encodings for UTXO record fields.
-//!
-//! Two encodings, chosen because both are pure per-output transforms with no
-//! cross-output invariant to violate:
-
 use crate::UtxoError;
 use bitcoin_rs_primitives::Amount;
 
@@ -46,7 +41,6 @@ pub(crate) const fn varint_len(value: u64) -> usize {
 pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), UtxoError> {
     let first = *bytes.get(offset).ok_or(UtxoError::CorruptRecord)?;
     if first & 0x80 == 0 {
-        // `get` succeeded, so `offset < bytes.len() <= isize::MAX`.
         return Ok((u64::from(first), offset + 1));
     }
 
@@ -57,14 +51,12 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
         let byte = *bytes.get(cursor).ok_or(UtxoError::CorruptRecord)?;
         cursor += 1;
         let payload = u64::from(byte & 0x7f);
-        // The tenth byte of a `u64` varint carries only one significant bit.
+
         if shift >= 64 || (shift == 63 && payload > 1) {
             return Err(UtxoError::CorruptRecord);
         }
         value |= payload << shift;
         if byte & 0x80 == 0 {
-            // A continuation that contributes nothing is a longer spelling of a
-            // shorter varint.
             if shift > 0 && payload == 0 {
                 return Err(UtxoError::CorruptRecord);
             }
@@ -133,15 +125,13 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     } else {
         n = n.checked_add(1)?;
     }
-    // `exponent` is `x % 10`, so the lookup is in range by construction.
+
     let scale = POW10.get(usize::try_from(exponent).ok()?)?;
     let value = n.checked_mul(*scale)?;
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
 }
 
 #[cfg(test)]
-// A codec test that cannot decode its own output has failed; panicking names
-// the offending value.
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::{
@@ -176,7 +166,6 @@ mod tests {
 
     #[test]
     fn varint_round_trips_at_every_width_boundary() {
-        // One byte per 7 bits, so each boundary is where the width steps up.
         for shift in 0..64_u32 {
             let value = 1_u64 << shift;
             varint_roundtrip(value);
@@ -188,8 +177,6 @@ mod tests {
 
     #[test]
     fn varint_costs_one_byte_for_the_values_outputs_actually_have() {
-        // This is the entire point of the change: `vout` and script lengths are
-        // small, and were costing 4 and 2 fixed bytes.
         for value in [0_u64, 1, 2, 41, 127] {
             assert_eq!(varint_roundtrip(value), 1);
         }
@@ -198,12 +185,11 @@ mod tests {
 
     #[test]
     fn varint_rejects_a_truncated_or_overlong_encoding() {
-        // Continuation bit set with nothing after it.
         assert!(read_varint(&[0x80], 0).is_err());
         assert!(read_varint(&[], 0).is_err());
-        // Eleven continuation bytes cannot be a `u64`.
+
         assert!(read_varint(&[0xff; 11], 0).is_err());
-        // Ten bytes whose final byte carries more than the one remaining bit.
+
         assert!(
             read_varint(
                 &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02],
@@ -217,7 +203,6 @@ mod tests {
     /// byte equality, which the fixed-width v4 fields gave for free.
     #[test]
     fn varint_rejects_a_non_minimal_encoding() {
-        // Longer spellings of 0, 1 and 128.
         for bytes in [
             vec![0x80, 0x00],
             vec![0x81, 0x00],
@@ -229,7 +214,7 @@ mod tests {
                 "non-minimal varint {bytes:?} was accepted"
             );
         }
-        // The minimal spellings of the same values still decode.
+
         assert_eq!(read_varint(&[0x00], 0).expect("zero decodes").0, 0);
         assert_eq!(read_varint(&[0x01], 0).expect("one decodes").0, 1);
         assert_eq!(
@@ -248,13 +233,11 @@ mod tests {
             MAX_COMPRESSIBLE_AMOUNT,
             21_000_000 * COIN,
             50 * COIN,
-            // The subsidy halvings, which is what most coinbase outputs are.
             25 * COIN,
             1_250_000_000,
             625_000_000,
         ];
-        // Every power of ten, and its neighbours, since the transform factors
-        // out powers of ten.
+
         let mut power = 1_u64;
         while let Some(next) = power.checked_mul(10) {
             if power > MAX_COMPRESSIBLE_AMOUNT {
@@ -282,7 +265,6 @@ mod tests {
 
     #[test]
     fn a_round_amount_compresses_to_fewer_varint_bytes_than_it_costs_raw() {
-        // 1 BTC is the shape the transform exists for: eight raw bytes today.
         let mut buf = [0_u8; VARINT_MAX_LEN];
         let compressed = compress_amount(100_000_000).expect("1 BTC is in range");
         let len = write_varint(compressed, &mut buf);

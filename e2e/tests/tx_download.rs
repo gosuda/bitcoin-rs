@@ -1,6 +1,3 @@
-//! Core v31.1 `p2p_tx_download.py` comparison at the real process boundary.
-//! Timing need not match: single ownership and immediate failed-source fallback do.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};
@@ -47,8 +44,6 @@ fn scenario(kind: Kind) -> Result<()> {
     if kind == Kind::BitcoinRs {
         submit_genesis(&mut node)?;
     } else {
-        // ProcessNode defaults to a fixed Core mocktime; request deadlines
-        // need an advancing clock in this live comparison.
         node.rpc("setmocktime", &json!([0]))?;
     }
     mine_bare_blocks(&mut node, 1)?;

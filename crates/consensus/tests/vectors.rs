@@ -1,5 +1,3 @@
-//! Consensus vector loading and hash-computation tests.
-
 use std::path::Path;
 
 use bitcoin::hex::FromHex;

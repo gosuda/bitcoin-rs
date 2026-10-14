@@ -1,5 +1,3 @@
-//! Switching the applied chain from one tip to another.
-
 use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };
@@ -38,8 +36,6 @@ where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
-    // Validate the block exists and is not genesis before taking mutation
-    // authority. Read-only refusal should not acquire the transition.
     let validation = (|| {
         let tree = handles.block_tree.read();
         let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
@@ -66,8 +62,7 @@ where
         }
     };
     let mut invalidated: Box<[Hash256]> = Box::default();
-    // Keep read-only planning refusals in the same settlement path as the
-    // execution outcome; an early `?` must not strand a coherent generation.
+
     let outcome = (|| {
         let target = {
             let tree = handles.block_tree.read();
@@ -484,10 +479,7 @@ where
     };
     let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
     let connect_nodes = branch_nodes(handles, &plan.connect)?;
-    // The lease must exist before the bodies are first read, so a concurrent
-    // prune can never delete what the walk is about to re-read. Only the
-    // first connect window is retained; the remainder streams in bounded
-    // windows while the authoritative transition is held.
+
     let retention = retention_lease_for(handles, &disconnect_nodes, &connect_nodes)?;
     let (connect, missing_connect) =
         load_available_branch_prefix(handles, &connect_nodes, staged_body)?;
@@ -550,8 +542,6 @@ where
             }
         };
 
-        // Preloading is optimistic. Only an identical plan recomputed while the
-        // transition lock is held may mutate chainstate.
         let authoritative = match current_reorg_plan(handles, target) {
             Ok(Some(plan)) => plan,
             Ok(None) => {
@@ -577,11 +567,7 @@ where
             &prepared.connect,
             &mut staged_body,
         );
-        // A permanently invalid first target body has committed no rival
-        // prefix. Reconnect the old, preflighted branch before releasing this
-        // transition so a rejected header branch cannot strand the applied
-        // UTXO set at its fork ancestor. Once a rival prefix has committed,
-        // the existing coherent-prefix contract remains in force.
+
         let outcome = match outcome {
             Err(
                 original @ ReorgError::ConnectFailed {
@@ -824,10 +810,6 @@ where
         connected: 0,
     };
 
-    // Disconnect: stream bodies in bounded windows. Each window is fully
-    // loaded before any of its blocks are disconnected, so a load failure
-    // within a window leaves the chain at the tip the previous window
-    // reached — no partial disconnect within the window.
     for window in disconnect_nodes.chunks(DISCONNECT_STREAM_WINDOW) {
         let mut bodies = Vec::with_capacity(window.len());
         for (hash, height) in window {
@@ -936,17 +918,11 @@ where
         }
         Err(source) => {
             let disposition = crate::classify_apply_error(&source);
-            // A permanently-invalid block must be marked invalid or surfaced:
-            // an empty `invalidated` on a failed invalidation would let the
-            // next switch retry the same block.
+
             let invalidated = if disposition == crate::WindowApplyDisposition::Permanent {
                 match invalidate_and_republish(transition.chainstate(), body.hash) {
                     Ok(invalidated) => invalidated.into_vec(),
                     Err(invalidation) => {
-                        // The tree may be partially marked; republish
-                        // whatever tip it still names so `chain_tip` cannot
-                        // keep pointing at the invalidated branch, then
-                        // surface both failures.
                         let handles = transition.chainstate();
                         let tree = handles.block_tree.read();
                         handles.chain_tip.store(tree.tip());

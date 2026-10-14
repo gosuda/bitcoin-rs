@@ -1,5 +1,3 @@
-//! Full-checkpoint publication: the chainstate maintenance export.
-
 use arc_swap::ArcSwapOption;
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -115,8 +113,7 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // One applied-tip load supplies the tip and the count it certifies,
-        // so the checkpoint and the journal compaction share one value.
+
         let applied_tip = self.applied_tip.load_full();
         let chain_tx_count = applied_tip
             .as_ref()
@@ -162,12 +159,7 @@ impl CheckpointPublisher {
                 tracing::error!(%error, "failed to resume chainstate journal after publication error");
             }
         }
-        // The disconnect marker is the recovery latch: it retires only once
-        // the checkpoint, the journal compaction, and the journal resume all
-        // succeeded. Completed recovery retires unconditionally —
-        // reconstruction already made the state coherent — while an ordinary
-        // publish merely disarms an `InFlight`-free marker. A progress
-        // checkpoint leaves the latch armed until replay reaches the head.
+
         if result.is_ok()
             && let Err(error) = match retirement {
                 DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
@@ -225,10 +217,7 @@ impl CheckpointPublisher {
                 height: marker.height,
             });
         }
-        // The durable head is the chain's commit point and publication
-        // follows it, so a checkpoint — which freezes the published state —
-        // can never legitimately name a tip the head has not certified. The
-        // two authorities must not disagree about the durable tip.
+
         if let (Some(head), Some(tip)) = (
             self.durable_head.load().map_err(|error| {
                 CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
@@ -237,10 +226,6 @@ impl CheckpointPublisher {
             })?,
             applied_tip,
         ) {
-            // A tip below the head is the committed-but-unpublished gap a
-            // crash can leave; checkpointing the older state is harmless. A
-            // tip at or above the head that the head does not certify is
-            // genuine divergence between the two authorities.
             let same_tip = head.tip == tip.hash;
             let diverged = head.height < tip.height || (head.height == tip.height && !same_tip);
             if diverged {
@@ -252,7 +237,7 @@ impl CheckpointPublisher {
                 });
             }
         }
-        // A checkpoint may name this tip only after body files then index rows sync.
+
         self.block_body_store.sync()?;
         let written = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
@@ -265,8 +250,7 @@ impl CheckpointPublisher {
             &self.coin_stats,
             applied_tip,
         )?;
-        // A2: Only after `CheckpointWrite::Published` and root fsync, write
-        // the applied-tip witness for the same captured tip.
+
         if let CheckpointWrite::Published { .. } = written
             && let Some(tip) = applied_tip
         {
@@ -286,18 +270,13 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // The disconnect marker retires in `publish_transaction`, after the
-        // journal steps that can still fail the publication.
-        // Marker retirement is a second durability step after `CURRENT`.
-        // Propagate failure so the worker retries next tick; the published
-        // checkpoint stays, and the marker stays until unlink+dirsync commits.
+
         if matches!(written, CheckpointWrite::Published { .. })
             && !matches!(retirement, DisconnectRetirement::RecoveryProgress)
         {
             retire_full_revalidation_marker(&self.data_dir)?;
         }
-        // Everything up to this tip is now recoverable, so undo records below
-        // it may be pruned.
+
         self.durable_tip_height
             .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)

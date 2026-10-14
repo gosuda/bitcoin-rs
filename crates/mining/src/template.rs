@@ -201,7 +201,6 @@ pub fn assemble_ordered_candidate(
     finish_candidate(context, snapshot, payout, &body, reservation)
 }
 
-// The fixed block header and coinbase are reserved before selecting the body.
 #[derive(Clone, Copy)]
 pub(crate) struct FixedReservation {
     pub(crate) weight: u64,
@@ -222,7 +221,7 @@ impl FixedReservation {
 pub(crate) struct SelectedBody {
     pub(crate) ordered: Vec<usize>,
     pub(crate) fees: u64,
-    // Include the exact CompactSize transaction count as well as body transactions.
+
     pub(crate) weight: u64,
 }
 
@@ -286,7 +285,6 @@ fn exact_order(
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
 
-    // Core's generateblock does not claim fees from explicitly ordered transactions.
     let mut size = transaction_count_size(snapshot.entries.len())?;
     let mut weight = size * 4;
     let mut sigops = 0_u64;
@@ -350,9 +348,6 @@ fn finish_candidate(
         witness_commitment.as_ref(),
     )?;
     let coinbase_value = coinbase.outputs[0].value.to_sat();
-    // Fees change a fixed-width amount and the witness commitment replaces a
-    // fixed-width hash, so the reserved and final coinbase have the same
-    // weight, serialized size, and sigop cost.
 
     let transactions = candidate_transactions(snapshot, &body.ordered)?;
 
@@ -430,7 +425,7 @@ fn witness_merkle_root(
     ordered: &[usize],
 ) -> Result<Hash256, MiningError> {
     let mut leaves = Vec::with_capacity(ordered.len().saturating_add(1));
-    // BIP141: the coinbase wtxid leaf is the all-zero hash, not the real wtxid.
+
     leaves.push([0_u8; 32]);
     for &index in ordered {
         leaves.push(*snapshot.entries[index].wtxid.as_bytes());

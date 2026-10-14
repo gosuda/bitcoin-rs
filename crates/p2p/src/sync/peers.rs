@@ -1,5 +1,3 @@
-//! Session reconciliation, useful-peer selection, and stalled-peer retirement.
-
 use super::BlockSync;
 use super::GetheadersOutcome;
 use super::SchedulerState;
@@ -36,19 +34,11 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         | ChainError::NonContinuousHeader { .. }
         | ChainError::ChainworkOverflow { .. }
         | ChainError::HeightOverflow { .. }
-        // A median-time-past violation is decided entirely by the chain the peer
-        // itself sent, so it is unambiguously the peer's fault. The same holds
-        // for the version floors and the BIP94 timewarp bound: each compares
-        // the candidate against the chain the peer itself announced, so
-        // blaming the sender cannot ban an honest peer.
         | ChainError::TimestampTooEarly { .. }
         | ChainError::BadVersion { .. }
         | ChainError::TimewarpAttack { .. }
-        // Re-announcing a header already marked invalid is unambiguously
-        // peer-invalid data.
         | ChainError::KnownInvalidHeader { .. } => true,
-        // Future drift is judged against OUR clock, so a wrong local clock
-        // would otherwise let us ban every honest peer and partition ourselves.
+
         ChainError::TimestampTooFarAhead { .. }
         | ChainError::DuplicateHeader { .. }
         | ChainError::MissingParent { .. }
@@ -68,10 +58,6 @@ pub(super) fn sync_peer_candidate(
     headers_horizon: Option<u32>,
     floor: u32,
 ) -> Option<SyncPeer> {
-    // The eligibility read is `min(best_known_height, headers_horizon)`: a
-    // connection whose download-twice sync already proved its headers end
-    // at the horizon stays selectable for what it can serve, but no
-    // longer outranks peers with a taller proven chain.
     let claimed = u32::try_from(peer.best_known_height).ok()?;
     let height = headers_horizon.map_or(claimed, |cap| claimed.min(cap));
     (height > floor).then_some(SyncPeer {
@@ -102,7 +88,6 @@ fn fallback_request_peer(
         .iter()
         .filter(|candidate| allow_soft || !candidate.soft_blocked)
     {
-        // First-wins on equal heights, matching the header-peer fold.
         if preferred.is_none_or(|current| outranks(current, candidate.peer)) {
             preferred = Some(candidate.peer);
         }
@@ -236,8 +221,7 @@ pub(super) fn consider_eviction(
         state.arm(tip_height, now);
         return None;
     };
-    // Progress to the tip we held when the window started buys a fresh
-    // window, even while our own tip has moved past it.
+
     let reached_benchmark = matches!(
         (state.benchmark, demonstrated),
         (Some(benchmark), Some(height)) if height >= benchmark
@@ -262,9 +246,6 @@ impl BlockSync {
     /// Sweeps scheduler state owned by dead connections when `source`
     /// becomes ready. Stale sources are ignored per P2P-02.
     pub fn on_peer_ready(&self, source: crate::PeerSource) {
-        // Identity gate first, outside the scheduler lock: validating under
-        // the scheduler can deadlock behind a queued table writer while an
-        // existing table reader waits for this scheduler.
         if !self.peer_table.is_current(source) {
             return;
         }
@@ -275,9 +256,6 @@ impl BlockSync {
     /// the table, then one sweep releases every fact owned by a connection
     /// outside the live session set.
     pub(super) fn reconcile_peer_sessions(&self) {
-        // Backstop: a session whose connection already cancelled its lease
-        // leaves the table within one tick, whatever path cancelled it, so
-        // zombie entries are never candidates for fetch work.
         self.peer_table
             .disconnect_matching(|_, lease| lease.is_cancelled());
         self.release_unowned_sessions();
@@ -351,8 +329,7 @@ impl BlockSync {
             self.escalate_stuck_staged_body(height, Some(hash), suppressed_for, now);
             return;
         }
-        // The hedge only fires with a frontier height present, so
-        // `next_apply_height` is `Some` here.
+
         if let BlockedDecision::HedgeColdFront { owner, front_hash } = decision
             && let Some(next_apply_height) = next_apply_height
             && let Some(alternate) =
@@ -423,9 +400,6 @@ impl BlockSync {
             return;
         };
         if self.next_expected_block_hash() != Some(frontier_hash) {
-            // Raced with a frontier change (e.g. a same-height branch
-            // switch): the convicted body is no longer the expected one and
-            // must not be drained.
             return;
         }
         let evicted = self
@@ -434,8 +408,6 @@ impl BlockSync {
             .stager
             .drain_expected_prefix(&[frontier_hash]);
         if evicted.is_empty() {
-            // Raced: the body was applied or pruned between the window
-            // observation and this eviction; nothing is stuck anymore.
             return;
         }
         let height = {
@@ -446,8 +418,7 @@ impl BlockSync {
         };
         {
             let mut scheduler = self.scheduler.lock();
-            // The tree owns the height: requeue drops the cursor to the
-            // body's tree height, or leaves it alone when unresolvable.
+
             scheduler
                 .window
                 .requeue_for_retry(&frontier_hash, height, now);
@@ -505,21 +476,6 @@ impl BlockSync {
 
     /// Collects the fan-out candidates from the frontier's usable peers.
     fn fanout_candidates(&self, frontier: &SyncFrontier) -> Vec<FanoutCandidate> {
-        // Height clause of the fan-out eligibility predicate (KTD6) and
-        // the pre-existing candidate filter: the peer's demonstrated chain
-        // must cover the canonical next-required body — on a reorg whose
-        // first connect node sits below the applied tip, that is lower
-        // than the applied height, so gating on the applied height would
-        // declare the body requestable yet never pick a peer for it.
-        // Like Core's `pindexBestKnownBlock`, eligibility reads the
-        // demonstrated best-known height (handshake snapshot, raised as
-        // the peer hands us accepted headers) rather than the handshake
-        // value alone — a long-lived at-tip peer would otherwise become
-        // ineligible for every newly announced block. Per-request
-        // truncation by `peer_best_height` still bounds the damage of a
-        // stale value. `peer_can_serve_height` also keeps a limited-service
-        // peer inside its retained range. With nothing required the clause
-        // reduces to the applied tip's successor, as before.
         let required_height = frontier.chain.next_required.map_or_else(
             || {
                 frontier
@@ -573,13 +529,7 @@ impl BlockSync {
         .then(|| self.chain.block_tree());
         let mut scheduler = self.scheduler.lock();
         let SchedulerState { window, stager, .. } = &mut *scheduler;
-        // Purge state the old request branch left behind before the peer
-        // budget is measured: `next_peer_request` is the only other place
-        // a retarget runs, and a stale pending/staged set that fills the
-        // window would truncate `request_peers` to zero and never reach
-        // it, leaving the winning branch unwired until the pending
-        // timeout fires. A halted apply side keeps its staged bodies —
-        // the retarget would discard state the halted path still needs.
+
         if !frontier.chain.apply_halted
             && let (Some(tree), Some(chain_tip), Some(required)) = (
                 tree.as_deref(),

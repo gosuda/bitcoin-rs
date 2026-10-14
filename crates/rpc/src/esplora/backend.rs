@@ -1,8 +1,3 @@
-//! Mempool-backend electrs extensions: `/internal/*` and `/block-template`.
-//!
-//! These are not wallet-facing. They exist so `mempool/backend` can set
-//! `ESPLORA_REST_API_URL` to the `/esplora` directory on this listener.
-
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
@@ -57,18 +52,14 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     if max_txs == 0 {
         return json_ok(Vec::<TransactionValue>::new());
     }
-    // A cursor previously matched the exact lowercase Display text. Parse
-    // once, but keep malformed, noncanonical, and absent cursors restarting
-    // at the beginning instead of silently broadening the accepted syntax.
+
     let last = last.and_then(|text| {
         let txid = Txid::from_str(text).ok()?;
         (txid.to_string() == text).then_some(txid)
     });
     let transactions = {
         let pool = ctx.mempool.gateway.read();
-        // Cursor lookup, selection, and Arc capture share one read guard.
-        // Only the selected page escapes the guard; no second lookup can
-        // observe a removal or replacement between selection and capture.
+
         let after = last
             .and_then(|txid| pool.entry_by_txid(&txid))
             .map(|entry| (entry.time, entry.txid));
@@ -77,7 +68,7 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
-        // Final ordering and transaction projection stay outside the guard.
+
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
@@ -117,13 +108,11 @@ fn select_mempool_page<'a>(
             continue;
         }
         selected.push(entry);
-        // This is len >= 2K without multiplying the caller's usize limit.
-        // K > 0 also proves the nth index is strictly below the length.
+
         if selected.len() / 2 >= max_txs {
             let (_, excluded, _) =
                 selected.select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
-            // Txids are unique in a pool snapshot. Everything retained is
-            // strictly before this first excluded key; later keys cannot win.
+
             cutoff = Some((excluded.time, excluded.txid));
             selected.truncate(max_txs);
         }
@@ -252,8 +241,6 @@ mod pagination_tests {
         let ctx = Context::new();
         let mut expected = Vec::new();
         for (index, &time) in times.iter().enumerate() {
-            // No-input fixtures isolate the projection/pagination owner;
-            // they do not claim to exercise consensus or admission validity.
             let tx = Tx {
                 version: 2,
                 inputs: Vec::new(),
@@ -274,7 +261,7 @@ mod pagination_tests {
                 .insert_entry(entry)
                 .expect("insert independent fixture entry");
         }
-        // Independent reference: fully order all admission keys, then slice.
+
         expected.sort_unstable();
         (ctx, expected)
     }
@@ -332,9 +319,6 @@ mod pagination_tests {
         }
     }
 
-    // Contract: docs/contracts/external-api.md, API-09 (Esplora dialects),
-    // which defines exact lowercase txid cursors and restart behavior for
-    // malformed, noncanonical, unknown, and missing values.
     #[test]
     fn noncanonical_and_missing_cursors_keep_restart_behavior() {
         let (ctx, expected) = fixture(&[4, 1, 4, 2, 4, 3]);
@@ -406,8 +390,6 @@ mod pagination_tests {
         assert_eq!(page(&ctx, None, "max_txs=0"), []);
     }
 
-    // API-09 in docs/contracts/external-api.md owns order and strict cursor
-    // exclusion. Full sorting is the independent selection reference.
     #[test]
     fn batched_selection_matches_full_sort_across_flush_boundaries() {
         let entries: Vec<_> = (0_u32..257)
@@ -443,7 +425,6 @@ mod pagination_tests {
         }
     }
 
-    // Regression: selection borrows candidates and clones only the returned page.
     #[test]
     fn selection_borrows_payloads_and_only_the_final_page_is_cloned() {
         let entries: Vec<_> = (0_u32..129)
@@ -494,7 +475,6 @@ mod pagination_tests {
         );
     }
 
-    // Regression: a zero-sized page must not traverse the pool.
     #[test]
     fn zero_selection_does_not_poll_the_pool_iterator() {
         let entries = std::iter::from_fn(|| -> Option<&MempoolEntry> {

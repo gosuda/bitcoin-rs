@@ -294,7 +294,6 @@ fn read_snapshot_outputs(
     output_count: u32,
     seen_vouts: &mut HashSet<u32>,
 ) -> Result<Vec<OwnedUtxoOut>, UtxoError> {
-    // The declared count is untrusted; grow only after bytes for an output arrive.
     seen_vouts.clear();
     let mut outputs = Vec::new();
     for _ in 0..output_count {

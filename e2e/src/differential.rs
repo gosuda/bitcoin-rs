@@ -1,8 +1,3 @@
-//! The differential lane: one pinned reference process and one candidate.
-//!
-//! The reference is an independent binary; a comparison either passes with
-//! identical values or fails with a typed difference naming both replies.
-
 use std::path::Path;
 
 use bitcoin::consensus::encode::deserialize_hex;

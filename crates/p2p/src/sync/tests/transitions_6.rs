@@ -66,11 +66,6 @@ fn apply_cache_invalidated_on_chain_tip_move() -> TestResult {
 
 #[test]
 fn window_failure_applies_prefix_and_restores_suffix() -> TestResult {
-    // Blocks now apply in windows, so a mid-window failure has to split the
-    // chunk three ways: the prefix committed, the one block that failed, and
-    // an untouched suffix that must go back on the stager. Getting that
-    // split wrong is invisible to the (applied, failed) counts alone, so
-    // this asserts the stager contents too.
     let fixture = apply_cache_fixture(4, 0)?;
 
     let mut corrupted = fixture.blocks[1].clone();
@@ -162,7 +157,7 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers() -> TestResult
     let mut requeued = witness_block_inventory(inventory)?;
     for (idx, rx) in receivers.iter().enumerate() {
         if idx == 1 || idx == SELECTED_PEERS {
-            continue; // disconnected peer; spare drained above
+            continue;
         }
         requeued.extend(witness_block_inventory(next_getdata(rx)?)?);
     }

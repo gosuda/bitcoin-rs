@@ -1,9 +1,3 @@
-//! Core-compatible projection of concrete service status.
-//!
-//! The derived-index runtime owns lifecycle and progress. This module owns the
-//! `getcapabilities` wire types and the one-method pull seam the RPC surface
-//! consumes. See the indexing contract's `IDX-02` for the capability rules.
-
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier used by the RPC capability report.
@@ -156,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/indexing.md#IDX-02
+
     fn missing_source_is_the_disabled_txindex_row() {
         let snapshot = txindex_snapshot(None);
         assert_eq!(snapshot.capabilities, vec![disabled_txindex()]);
@@ -173,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/indexing.md#IDX-02
+
     fn wire_names_match_the_serde_spelling() {
         for state in &CapabilityState::ALL {
             let rendered = serde_json::to_string(state)
@@ -196,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/indexing.md#IDX-02
+
     fn attached_source_is_the_worker_row() {
         let snapshot = txindex_snapshot(Some(&ReadyEnabled));
         assert_eq!(

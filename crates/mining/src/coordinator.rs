@@ -1,11 +1,3 @@
-//! Candidate lifecycle state and pure mining-domain projections.
-//!
-//! Generation is keyed by `(applied_tip_hash, mempool_sequence)`. Template
-//! assembly is single-flight per key, cached by [`TemplateId`], and woken by
-//! explicit generation publication. [`MiningService`] drives this state
-//! through capability sources implemented by the node; proposal validation
-//! and solved-block submission stay on `node`'s authoritative apply path.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -366,9 +358,7 @@ impl MiningService {
         } else {
             None
         };
-        // Candidate assembly may retry after a tip move.  Pair the deployment
-        // snapshot with the candidate it describes, rather than with a stale
-        // snapshot captured before assembly.
+
         for _ in 0..CANDIDATE_GENERATION_RETRIES {
             let candidate = self.live_candidate()?;
             let Some(tip) = self.applied_tip.applied_tip() else {
@@ -529,8 +519,7 @@ impl MiningService {
 
         let assembled = self.assemble_for_key(key);
         let mut state = self.state.lock();
-        // Recheck after acquiring the lifecycle mutex: a publication may
-        // have won while assembly was completing.
+
         let live = self.live_generation_key();
         let returned = match &assembled {
             Ok(candidate) => {
@@ -701,8 +690,7 @@ fn template_from_candidate(
     if signet.is_some() {
         rules.push(MiningRule::new("signet"));
     }
-    // API-11 advertises producer capabilities, never client-requested names.
-    // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
+
     BlockTemplate {
         rules,
         candidate,
@@ -875,7 +863,6 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 /// Signet challenge and flag for `network`, or `None` off signet.
 #[must_use]
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
-    // Core's default 1-of-2 signet challenge.
     const DEFAULT_SIGNET_CHALLENGE: [u8; 71] = [
         0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3,
         0xd4, 0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d,

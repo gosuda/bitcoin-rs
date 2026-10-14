@@ -1,17 +1,3 @@
-//! Atomic-durability proofs for the storage ladder under injected
-//! persistence faults.
-//!
-//! This matrix exercises `docs/contracts/recovery.md` RCV-02 (ordered commit
-//! and recovery fencing) and RCV-03 (prior-or-whole-proposed roots).
-//!
-//! Every fault in [`PersistFault`] is armed at each persistence boundary and
-//! fired against a multi-family batch spanning three column families. After
-//! the faulted call and a reopen, the store as a whole must hold either the
-//! complete pre-batch or the complete post-batch state across every column
-//! family — never a cross-family mix — and the call must report success only
-//! for a silently lost completion (armed by this harness alone); an observed
-//! persistence fault surfaces as `Err`, never as a durability completion.
-
 #![cfg_attr(
     any(feature = "fjall", feature = "redb", feature = "rocksdb"),
     expect(clippy::expect_used, reason = "test assertions")
@@ -151,7 +137,6 @@ fn redb_txindex_injected_faults_never_mix_families() {
             let path = dir.path().to_path_buf();
             let label = format!("redb-txindex/{}/{})", route.label(), fault_name(fault));
 
-            // Seed old state.
             {
                 let store =
                     bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("open for seed");
@@ -161,7 +146,6 @@ fn redb_txindex_injected_faults_never_mix_families() {
                 store.write_durable(batch).expect("seed write");
             }
 
-            // Arm and fire.
             let outcome = {
                 let store =
                     bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to arm");
@@ -187,7 +171,6 @@ fn redb_txindex_injected_faults_never_mix_families() {
                 }
             };
 
-            // Reopen and classify both families.
             let store =
                 bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to inspect");
             let meta = store
@@ -321,7 +304,6 @@ where
 {
     let label = format!("{backend}/{}/{})", route.label(), fault_name(fault));
 
-    // Seed the old state durably.
     let old = {
         let store = open(path).expect("open for seed");
         store
@@ -330,7 +312,6 @@ where
         snapshot_all(&store)
     };
 
-    // Arm and fire.
     let outcome = {
         let store = open(path).expect("reopen to arm");
         store.arm_persist_fault(fault);
@@ -351,8 +332,6 @@ where
         }
     };
 
-    // Reopen and classify the whole store: every family together must hold
-    // the complete pre-batch or the complete post-batch state.
     let after = {
         let store = open(path).expect("reopen to inspect");
         snapshot_all(&store)
@@ -365,8 +344,6 @@ where
         "{label}: recovered as a mix: {observed:?} (old {expected_old:?}, new {expected_new:?})"
     );
 
-    // Apply-boundary faults land nothing in any family: the store must hold
-    // the exact pre-batch state, not merely one of the two legal states.
     if matches!(
         fault,
         PersistFault::FailApply | PersistFault::LostApply | PersistFault::PartialApply
@@ -377,9 +354,6 @@ where
         );
     }
 
-    // Outcome honesty: a durability-completing route reports success only
-    // for a silently lost completion at the boundary it completes on; every
-    // fault the route actually observes surfaces as `Err`.
     assert_fault_outcome(route, fault, outcome.is_ok(), &label);
 }
 
@@ -414,9 +388,6 @@ fn retagged_new(state: &[FamilyState]) -> Vec<FamilyState> {
 fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bool, label: &str) {
     match route {
         Route::Write => {
-            // FailApply and PartialApply are contract-mandated `Err` on the
-            // plain write; `LostApply` is backend-dependent there and is
-            // covered by the exact-old state check above instead.
             if matches!(fault, PersistFault::FailApply | PersistFault::PartialApply) {
                 assert!(
                     !reported_success,
@@ -433,8 +404,7 @@ fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bo
                 !reported_success,
                 "{label}: durable route reported success despite an observed fault"
             ),
-            // Flush-boundary faults stay armed: the single-commit durable
-            // routes never call `flush`.
+
             PersistFault::FailFlush | PersistFault::LostFlush => {}
         },
         Route::FlushDeferred => match fault {
@@ -446,8 +416,7 @@ fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bo
                 !reported_success,
                 "{label}: deferred+flush route reported success despite an observed fault"
             ),
-            // Sync-boundary faults stay armed: `write_deferred` defers the
-            // sync to `flush`.
+
             PersistFault::FailSync | PersistFault::LostSync => {}
         },
     }
@@ -483,8 +452,6 @@ fn assert_mismatch_applies_nothing_and_consumes_no_fault<S: KvStore>(store: &S) 
         .write_durable(multi_family_batch(store, b"old"))
         .expect("seed");
 
-    // Arm an apply fault that must never be consulted: the mismatch returns
-    // before any persistence boundary.
     store.arm_persist_fault(PersistFault::FailApply);
 
     let committed = store
@@ -511,7 +478,6 @@ fn assert_mismatch_applies_nothing_and_consumes_no_fault<S: KvStore>(store: &S) 
         );
     }
 
-    // The armed fault is still live for a later matching call.
     let outcome = store.write_durable_if(
         &[WriteCondition::Equals {
             cf: FAMILIES[0],
@@ -720,7 +686,6 @@ impl KvStore for OneFamilyStore {
     }
 
     fn flush(&self) -> Result<(), StorageError> {
-        // The rows live in memory; nothing can lag behind durability.
         Ok(())
     }
 
@@ -731,8 +696,6 @@ impl KvStore for OneFamilyStore {
     }
 
     fn arm_persist_fault(&self, _fault: PersistFault) {
-        // Latches the one-family defect for the next commit: the strawman
-        // never consults fault identities, it just breaks once.
         self.rows.lock().defect_armed = true;
     }
 }

@@ -336,7 +336,6 @@ fn retry_delivery_resolves_original_peer_timeout_without_blame() {
         .owner_downloading_since
         .insert(original_owner, requested_at);
 
-    // First idle tick arms the suspicion on the original owner.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_some());
 
@@ -477,7 +476,6 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
         requested_at,
     );
 
-    // First idle tick arms the suspicion.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_some());
 
@@ -485,7 +483,6 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
     assert_eq!(window.pending_owner(&block_hash), None);
     assert_eq!(window.owner_queue_start_for_test(owner), None);
 
-    // The second tick clears the suspicion without blame.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_none());
     assert!(!window.peer_in_staller_cooldown(peer_addr, observed_at));
@@ -1118,13 +1115,9 @@ fn staged_backlog_fraction_arms_with_request_capacity_open() {
         "the construction must keep request capacity open: arming no longer reads it"
     );
 
-    // U7 no-blame guard, under the new arming term: while the apply
-    // side is busy the armed-shaped window must not start an episode.
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
     assert!(window.stalling_peer().is_none());
 
-    // Apply idle: the staged fraction arms, and the unchanged
-    // conviction clock fires at the unchanged threshold.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1267,7 +1260,6 @@ fn stall_fires_after_threshold_and_starts_cooldown() {
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // Episode starts on first observation; no fire before the threshold.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1308,7 +1300,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     let tree = test_tree();
     assert_eq!(window.stall_timeout(), Duration::from_secs(2));
 
-    // Fire 1 at +2s: threshold doubles to 4s.
     stall_owner(&mut window, &stager, &tree, 3, false, now);
     let mut at = now + Duration::from_secs(2);
     assert_eq!(
@@ -1317,10 +1308,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(4));
 
-    // The window state still satisfies the predicate (the disconnect and
-    // re-queue are the sync layer's job), so a fresh episode starts and
-    // must now survive the doubled threshold: fire 2 doubles to the 8s
-    // cap, fire 3 stays capped.
     stall_owner(&mut window, &stager, &tree, 3, false, at);
     at += Duration::from_secs(4);
     assert_eq!(
@@ -1336,15 +1323,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(8));
 
-    // Progress: the front block arrives — any running episode ends, and
-    // the threshold must not snap back to the 2s floor: that snap is
-    // what let the anti-cascade doubling be discarded across a peer
-    // rotation (the self-eclipse blocker). The 14s front gap is a real
-    // (non-batch) sample, so it lifts the EWMA from the 100ms seed to
-    // 100 + (14000-100)/4 = 3575ms and the adaptive floor to 7150ms —
-    // above the bare x0.85 decay (8s x0.85 = 6.8s), so the floor binds.
-    // (The bare decay arithmetic in isolation is pinned by
-    // `stall_timeout_decays_across_rotation_and_shields_slow_honest_peer`.)
     stall_owner(&mut window, &stager, &tree, 3, false, at);
     receive_staged(&mut window, &mut stager, hash(0x03), SMALL_BODY, at);
     assert_eq!(window.front_interval_ewma_ms(), Some(3575));
@@ -1407,8 +1385,6 @@ fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // With the apply side busy the clock never runs, no matter how long
-    // the state persists.
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
     assert!(window.stalling_peer().is_none());
     let later = now + Duration::from_mins(1);
@@ -1418,8 +1394,6 @@ fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
     );
     assert!(window.stalling_peer().is_none());
 
-    // Once the apply side drains, blame starts from scratch — the busy
-    // interval is never retroactively charged to the peer.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, later),
         None
@@ -1563,7 +1537,6 @@ fn stall_episode_counters_cover_every_clear_path() {
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
         let tree = test_tree();
 
-        // No running episode: the guard paths must not count a clear.
         assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 4, false, now),
@@ -1573,7 +1546,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         assert_eq!(recorder.cleared("predicate"), 0);
         assert_eq!(recorder.started(), 0);
 
-        // apply_busy: a running episode cleared by the no-blame guard.
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1582,8 +1554,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert_eq!(recorder.cleared("apply_busy"), 1);
 
-        // predicate: re-arm, then a predicate term goes false (the
-        // frontier moves past the pending front, so term 1 fails).
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1595,9 +1565,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         );
         assert_eq!(recorder.cleared("predicate"), 1);
 
-        // front_moved: re-arm, then re-key the front to another peer at
-        // the same frontier while every predicate term still holds — the
-        // old episode clears as front_moved and a new one starts.
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1668,7 +1635,6 @@ fn stall_episode_logs_info_once_per_episode_after_one_second() {
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // Below the 1s log age: episode running, nothing emitted.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1788,7 +1754,7 @@ fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
         None
     );
     assert_eq!(info_logged(&window), Some(false));
-    // The INFO latch flips at 1s; the initial floor has not elapsed.
+
     assert_eq!(
         stall_owner(
             &mut window,
@@ -1801,8 +1767,7 @@ fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
         None
     );
     assert_eq!(info_logged(&window), Some(true));
-    // Past the 2s initial floor the exact owner convicts with no EWMA
-    // sample: an unproven cadence never exempts a proven-slow front.
+
     assert_eq!(
         stall_owner(
             &mut window,
@@ -1900,7 +1865,7 @@ fn uniform_slow_streaming_saturated_fanout_never_fires() {
             );
         }
     }
-    // Nothing staged yet: download-bound, no episode regardless of time.
+
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, false, t1), None);
 
     for round in 0..3u8 {
@@ -2512,7 +2477,6 @@ fn prefix_probe_respects_estimated_byte_cutoff() -> Result<(), Box<dyn std::erro
 /// Direct window-boundary test for the bounded prefix-race-before-fanout
 /// handoff: fanout cancels the probe at exactly `stall_timeout_initial`,
 /// neither before nor after.
-
 #[test]
 fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::error::Error>> {
     let now = Instant::now();

@@ -133,7 +133,6 @@ fn verify_transaction_with_locktime_cutoff(
     engine: ValidationEngine,
     skip_scripts: bool,
 ) -> Result<(), ConsensusError> {
-    // A coinbase skips dispatch, so selection must be checked before preparation.
     if !engine.is_supported() {
         return Err(ConsensusError::UnsupportedEngine { engine });
     }
@@ -514,7 +513,7 @@ fn prepare_block_input_checks<'b>(
             checks_len,
             script_state: Some(script_state),
         });
-        // Its scripts outrank this post-error, which outranks all later transactions.
+
         if stop_after_tx {
             break;
         }
@@ -604,9 +603,6 @@ mod tests {
         }
     }
 
-    // Activation contract: BIP141, "Sigops" (https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops),
-    // as implemented by Bitcoin Core v31.1 in src/validation.cpp:
-    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp
     #[test]
     fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -633,7 +629,7 @@ mod tests {
                 script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![1; 32]].concat()),
             },
         )]);
-        // Skipping execution still accounts sigops with the active flags.
+
         assert_eq!(
             super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::P2SH),
             Ok(()),
@@ -645,7 +641,7 @@ mod tests {
                 max: crate::MAX_BLOCK_SIGOPS_COST
             }),
         );
-        // Preparation binds the execution flags for its cached post-error.
+
         let txs = vec![tx];
         let block = test_block_parse(&txs);
         let resolved = vec![vec![prevouts.get(&outpoint).cloned()]];
@@ -757,7 +753,7 @@ mod tests {
             let secret =
                 SecretKey::from_slice(&[seed; 32]).unwrap_or_else(|_| panic!("secret key"));
             let keypair = Keypair::from_secret_key(&secp, &secret);
-            // BIP341 key-only tweak: t = TaggedHash("TapTweak", x_only_pubkey || [0u8; 32])
+
             let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
             let tag = {
                 let mut h = Sha256::new();
@@ -768,7 +764,7 @@ mod tests {
             tweak_hash.update(tag);
             tweak_hash.update(tag);
             tweak_hash.update(xonly.serialize());
-            tweak_hash.update([0u8; 32]); // empty merkle root
+            tweak_hash.update([0u8; 32]);
             let tweak_arr: [u8; 32] = tweak_hash.finalize().into();
             let tweak = Scalar::from_be_bytes(tweak_arr).unwrap_or_else(|_| panic!("tweak scalar"));
             let tweaked_keypair = keypair
@@ -781,8 +777,8 @@ mod tests {
             };
             outpoints.push(outpoint);
             let mut script_pubkey = Vec::with_capacity(34);
-            script_pubkey.push(0x51); // OP_1
-            script_pubkey.push(0x20); // push 32 bytes
+            script_pubkey.push(0x51);
+            script_pubkey.push(0x20);
             script_pubkey.extend_from_slice(&output_key.serialize());
             prevouts.push(TxOut {
                 value: Amount::from_sat(50_000),
@@ -873,7 +869,7 @@ mod tests {
     #[test]
     fn locktime_finality_uses_the_height_and_the_caller_supplied_cutoff() {
         const TIMESTAMP: u32 = 500_000_100;
-        // (locktime, height, cutoff, final)
+
         let cases: [(u32, u32, u32, bool); 8] = [
             (0, 0, 0, true),
             (200, 100, 0, false),
@@ -882,7 +878,6 @@ mod tests {
             (TIMESTAMP, 1, TIMESTAMP - 1, false),
             (TIMESTAMP, 1, TIMESTAMP, false),
             (TIMESTAMP, 1, TIMESTAMP + 1, true),
-            // A height cutoff cannot retire a timestamp locktime.
             (TIMESTAMP, u32::MAX, 0, false),
         ];
         let utxos = hashbrown::HashMap::new();
@@ -914,7 +909,6 @@ mod tests {
                 );
             }
 
-            // A final sequence on every input overrides the locktime.
             tx.inputs[0].sequence = Sequence::MAX;
             assert!(is_final_tx(&tx, height, cutoff), "{label} final sequence");
         }
@@ -1145,7 +1139,7 @@ mod tests {
 
     enum Expect {
         Accepted,
-        // Backend reason text differs; both must report input zero.
+
         ScriptAtFirstInput,
         Exact(ConsensusError),
     }

@@ -1,5 +1,3 @@
-//! Indexed authoritative block bodies, read sessions, and durability.
-
 use crate::durable_head::BodyExtent;
 use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256, varint};
 
@@ -359,8 +357,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
                 limit: max_bytes,
             });
         }
-        // The flat-file reader validates the frame's length against this
-        // checked position before allocating the body buffer.
+
         self.files
             .load(position, height, *hash.as_byte_array())
             .map_err(Into::into)

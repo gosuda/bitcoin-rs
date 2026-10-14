@@ -1,5 +1,3 @@
-//! Append-only framed block-body files and compact position records.
-
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufReader, Seek as _, SeekFrom, Write as _},
@@ -213,9 +211,7 @@ impl FlatFileBlockStore {
                 .checked_add(1)
                 .ok_or(StorageError::InvalidOperation("block file number overflow"))?;
             let file = open_new_block_file(&self.blocks_dir, file_no)?;
-            // Install a self-consistent new writer before syncing its directory
-            // entry. A sync error therefore leaves a retryable dirty state, not
-            // a new file paired with the old append offset.
+
             writer.file = file;
             writer.file_no = file_no;
             writer.append_offset = 0;
@@ -239,10 +235,7 @@ impl FlatFileBlockStore {
             .offset
             .checked_add(record_len)
             .ok_or(StorageError::InvalidOperation("block file offset overflow"))?;
-        // The writer cursor is established at `append_offset` when the store
-        // opens or recovers, starts at zero on rollover, and advances by the
-        // exact record length after every successful write. Keep that invariant
-        // instead of issuing an unconditional seek for every block.
+
         let append_result =
             write_record(&mut writer.file, &header, body).and_then(|()| writer.file.flush());
         if let Err(append_error) = append_result {
@@ -421,10 +414,7 @@ impl FlatFileBlockStore {
             return Ok(false);
         }
         let path = block_file_path(&self.blocks_dir, file_no);
-        // Sized before the unlink, because afterwards there is nothing to size.
-        // A file that cannot be sized is removed without adjusting the running
-        // figure rather than guessed at; `disk_usage`'s `debug_assert` is what
-        // notices if that ever happens.
+
         let reclaimed = fs::metadata(&path).map(|metadata| metadata.len()).ok();
         match fs::remove_file(path) {
             Ok(()) => {
@@ -464,15 +454,12 @@ impl FlatFileBlockStore {
             ));
         }
         let blocks_dir = data_dir.join(BLOCK_FILE_DIRECTORY);
-        // Admit authority before opening any file with create/write permissions.
-        // Even when a checkpoint already matches the head, these bytes must
-        // survive: an apparent torn tail can instead be a damaged committed frame.
+
         if let Some(extent) = committed {
             validate_committed_extent(&blocks_dir, extent)?;
         }
         fs::create_dir_all(&blocks_dir)?;
-        // Persist the blocks-directory entry in its parent. This runs once per
-        // store open, not on the append path.
+
         sync_blocks_dir(data_dir)?;
         let file_no = highest_block_file_number(&blocks_dir)?.unwrap_or(0);
         let path = block_file_path(&blocks_dir, file_no);
@@ -482,11 +469,10 @@ impl FlatFileBlockStore {
             .read(true)
             .write(true)
             .open(path)?;
-        // The file may have been created above; persist its directory entry.
+
         sync_blocks_dir(&blocks_dir)?;
         let file_len = file.metadata()?.len();
-        // The admitted prefix has already been scanned. A newer append file
-        // lies wholly after the durable extent; its scan starts at zero.
+
         let scan_start = committed
             .filter(|extent| extent.file_no == file_no)
             .map_or(0, |extent| extent.offset);
@@ -509,9 +495,6 @@ impl FlatFileBlockStore {
         }
         file.seek(SeekFrom::Start(recovered_offset))?;
 
-        // Seeded from the files themselves, once. A store reopened over an
-        // existing directory has to start from what is there, and an incomplete
-        // tail was just truncated above, so this runs after that.
         let usage = AtomicU64::new(measure_blocks_dir(&blocks_dir)?);
 
         Ok(Self {
@@ -732,8 +715,6 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
 
 #[cfg(windows)]
 fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
-    // FlushFileBuffers needs GENERIC_WRITE on the directory handle, and
-    // FILE_FLAG_BACKUP_SEMANTICS is what lets a directory be opened at all.
     use std::os::windows::fs::OpenOptionsExt as _;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     std::fs::OpenOptions::new()
@@ -748,8 +729,6 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
 #[cfg(not(any(unix, windows)))]
 #[expect(clippy::unnecessary_wraps)]
 fn sync_blocks_dir(_blocks_dir: &Path) -> Result<(), StorageError> {
-    // std has no portable primitive for opening and syncing a directory.
-    // Keep the durability boundary explicit where the platform supports it.
     Ok(())
 }
 
@@ -872,8 +851,7 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        // `DirEntry::metadata` reuses the stale size cached by the directory
-        // enumeration on Windows; a fresh stat sees the kernel's live length.
+
         total = total.saturating_add(fs::metadata(entry.path())?.len());
     }
     Ok(total)
@@ -1021,7 +999,6 @@ mod tests {
         assert_eq!(after_first, super::measure_blocks_dir(&blocks_dir)?);
         assert!(after_first > 0, "an appended body occupies bytes");
 
-        // Past the 120-byte cap, so this rolls into a second file.
         let third = store.persist(None, 2, hash(2), b"a longer second body")?;
         let third = store.persist(None, 3, hash(3), b"third").map(|_| third)?;
         assert_eq!(third.file_no, 0, "the fixture must roll over");
@@ -1029,7 +1006,6 @@ mod tests {
         assert_eq!(after_rollover, super::measure_blocks_dir(&blocks_dir)?);
         assert!(after_rollover > after_first, "appends add bytes");
 
-        // File 0 is complete, so it is prunable; file 1 is the current one.
         assert!(
             store.delete_file_if_not_current(0)?,
             "the fixture must have a prunable file"
@@ -1186,8 +1162,6 @@ mod tests {
         let body: Vec<u8> = (0..=255_u8).cycle().take(1_000).collect();
         let position = store.persist(None, 9, hash(9), &body)?;
 
-        // Exhaustive over a coarse grid rather than a handful of cases: an
-        // off-by-one in the header skip shows up only at specific offsets.
         for offset in (0_u32..1_000).step_by(37) {
             for len in [0_u32, 1, 2, 33, 256, 999] {
                 let Some(end) = offset.checked_add(len) else {
@@ -1220,9 +1194,6 @@ mod tests {
         let store = FlatFileBlockStore::open(data_dir.path())?;
         let position = store.persist(None, 11, hash(11), b"the original body")?;
 
-        // Same frame, wrong identity: a range must be as strongly bound to
-        // (height, hash) as a whole-body load is, or a reorged-away block could
-        // serve bytes for a height it no longer owns.
         assert_eq!(store.load_range(position, 12, hash(11), 0, 4)?, None);
         assert_eq!(store.load_range(position, 11, hash(12), 0, 4)?, None);
         assert_eq!(
@@ -1243,7 +1214,7 @@ mod tests {
         assert_eq!(store.load_range(position, 5, hash(5), 11, 0)?, None);
         assert_eq!(store.load_range(position, 5, hash(5), 0, 11)?, None);
         assert_eq!(store.load_range(position, 5, hash(5), u32::MAX, 1)?, None);
-        // The exact end of the body is in bounds.
+
         assert_eq!(
             store.load_range(position, 5, hash(5), 10, 0)?,
             Some(Vec::new())

@@ -1,11 +1,3 @@
-//! Synchronization progress of the applied chain.
-//!
-//! Like the initial-block-download latch beside it, progress is chain state:
-//! [`ChainProgressReader`] derives it from the node's published tips and block
-//! tree, so `getblockchaininfo` and the embedding API report it without
-//! rebuilding it from those handles. Bitcoin Core derives the same facts from
-//! its `ChainstateManager`.
-
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, i64_to_f64, u64_to_f64};
@@ -112,9 +104,7 @@ impl ChainProgressReader {
                 ))
             })
             .unwrap_or((None, 0, 0));
-        // Core's estimate when the verified-transaction count is known, the
-        // height ratio when it is not; `None` is a pre-tracking datadir and
-        // means unknown, never zero.
+
         let verification_progress = applied
             .and_then(|tip| tip.chain_tx_count.get())
             .map_or_else(
@@ -188,12 +178,9 @@ fn verification_progress(
     };
 
     let total = if chain_tx_count <= data.tx_count {
-        // Still behind the pinned observation: extrapolate forward from it.
         let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
     } else {
-        // Past it, so this node's own count is the better baseline. Without
-        // this the fraction would pin at 1.0 and stay there.
         let elapsed = now_signed.saturating_sub(block_time);
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
     };
@@ -286,11 +273,9 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_is_transactions_verified_over_transactions_estimated() {
         let now = 1_800_000_000_u64;
-        // Ten thousand seconds behind, which is outside the two-hour window, so
-        // the tip's own timestamp is the one used.
+
         let tip_time = now - 10_000;
 
-        // 100 / (100 + 10_000 * 0.001) = 100 / 110
         let progress = verification_progress(Network::Regtest, 100, 9, 9, tip_time, now);
         assert!(
             (progress - (100.0 / 110.0)).abs() < 1e-12,
@@ -301,8 +286,7 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_is_not_the_height_ratio_it_replaced() {
         let now = 1_800_000_000_u64;
-        // Half the headers applied, on a mainnet whose pinned observation counts
-        // more than a billion transactions. The old field said 0.5 here.
+
         let progress = verification_progress(Network::Mainnet, 5_000, 50, 100, now - 10_000, now);
         assert!(
             progress < 0.001,
@@ -313,9 +297,7 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_ignores_the_tip_timestamp_when_the_tip_is_recent() {
         let now = 1_800_000_000_u64;
-        // Both inside the two-hour window: Core stops trusting the miner-set
-        // timestamp there and derives the tip's age from the header chain, so
-        // these must agree despite an hour between them.
+
         let a = verification_progress(Network::Regtest, 100, 9, 10, now - 60, now);
         let b = verification_progress(Network::Regtest, 100, 9, 10, now - 3_600, now);
         let boundary = verification_progress(Network::Regtest, 100, 9, 10, now - 2 * 60 * 60, now);
@@ -325,7 +307,6 @@ mod verification_progress_tests {
             "Core includes the exact two-hour boundary: {a} != {boundary}"
         );
 
-        // Outside the window the timestamp is used again, so this one differs.
         let outside = verification_progress(Network::Regtest, 100, 9, 10, now - 100_000, now);
         assert!(outside < a, "{outside} should trail {a}");
     }
@@ -341,10 +322,7 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_never_exceeds_one_for_a_future_dated_tip() {
         let now = 1_800_000_000_u64;
-        // A miner-set timestamp ahead of our clock by more than the two-hour
-        // window, so the tip's own time is used and the elapsed term goes
-        // negative — the estimated total lands *below* what this node has
-        // already verified. Unclamped that is a progress above 1.0.
+
         let tip_time = now + 10_000;
         let unclamped_total = 10_000.0_f64.mul_add(-0.001, 100.0_f64);
         assert!(

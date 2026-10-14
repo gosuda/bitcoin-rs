@@ -1,4 +1,3 @@
-//! BIP341 wire signature and native witness-program dispatch rules.
 #![expect(clippy::expect_used)]
 
 #[path = "support/taproot_spends.rs"]
@@ -132,7 +131,7 @@ fn inactive_taproot_and_wrapped_v1_keep_their_witness_rules() {
         Ok(true),
         "recognized native Taproot is inactive, not an unknown witness program"
     );
-    // No witness rules are active; neither annex nor Schnorr encoding is consulted.
+
     tx.input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x00]);
     assert_eq!(prepared(&tx, &prevout, VerifyFlags::NONE), Ok(true));
     assert_eq!(

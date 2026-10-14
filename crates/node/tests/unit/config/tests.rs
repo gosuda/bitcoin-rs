@@ -37,7 +37,7 @@ fn default_rpc_auth_uses_a_generated_cookie() {
 fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(".cookie");
-    // A temporary file left by an interrupted start must not block the next.
+
     std::fs::write(dir.path().join(".cookie.tmp"), "stale")?;
     let auth = Auth::GeneratedCookie;
 
@@ -138,12 +138,6 @@ fn rpc_rejects_missing_or_public_credentials() {
     ));
 }
 
-// ---- Named config-option coverage -------------------------------------
-//
-// Retained source precedence, absent nested overrides, and cross-field
-// validation are exercised here at the one resolver every input layer
-// feeds, so no adapter can bypass the named rules.
-
 fn resolved(layers: &[&UserConfig]) -> NodeConfig {
     super::resolve(layers).unwrap_or_else(|error| panic!("valid layered configuration: {error}"))
 }
@@ -215,22 +209,11 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     );
 }
 
-// ---- Unified validation engine ----------------------------------------
-//
-// The `kernel` feature is capability ("bitcoinkernel support is compiled
-// in"), not selection. `validation.engine` is the one authoritative engine
-// setting: it resolves once here, defaults to `native` in every build, and a
-// build without kernel support must reject `kernel` before any node state,
-// chainstate, or worker exists.
-
 #[test]
 fn validation_engine_defaults_to_native_and_layers_field_by_field() {
     let config = resolved(&[]);
     assert_eq!(config.validation.engine, ValidationEngine::Native);
 
-    // An explicit `native` setting resolves in every build. The
-    // lower-layer-wins claim needs a non-default engine to be observable and
-    // lives in the kernel-gated layering test below.
     let base = UserConfig {
         network: Some(NetworkSelection::Regtest),
         validation: ValidationOverrides {

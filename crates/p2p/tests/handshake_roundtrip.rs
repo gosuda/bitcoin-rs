@@ -1,4 +1,3 @@
-//! Handshake state-machine round trips.
 use std::io::Cursor;
 
 use bitcoin::p2p::Magic;

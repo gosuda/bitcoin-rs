@@ -1,5 +1,3 @@
-//! Authoritative chainstate mutation: connect, disconnect, and window apply.
-
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
@@ -225,9 +223,7 @@ impl PruneAuthority {
     /// Acquires exclusive chain-mutation authority for one pruning pass.
     pub fn begin(&self) -> core::result::Result<PruneGuard<'_>, ApplyError> {
         let transition = begin_chain_transition(&self.admission, &self.chain_transition)?;
-        // Pruning removes a prefix, so a requested height above the snapshot
-        // base still removes the history needed to validate that base. Check
-        // under the same transition lock that publishes role changes.
+
         let role = *self.role.read();
         if let Some(base_height) = role.base_height() {
             return Err(ApplyError::PruneDuringHistoricalValidation { base_height });
@@ -686,29 +682,23 @@ impl Chainstate {
                 applied_tip,
             });
         }
-        // Height cannot order unequal-difficulty forks. Require strictly
-        // greater base work; unlike Core's comparator this does not admit
-        // an equal-work alternative using block-arrival tie breakers.
+
         if applied
             .as_ref()
             .is_some_and(|tip| tip_snapshot.chainwork <= tip.chainwork)
         {
             return Err(AssumeUtxoError::ActivationBehindTip);
         }
-        // All refusals precede publication. The transition stays held across the
-        // lifecycle record and the whole coin/statistics/tip installation.
+
         persist(&tree, &tip_snapshot, prior.as_ref()).inspect_err(|error| {
             if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
                 self.fail_closed_for_recovery();
             }
         })?;
-        // The transition reservation excludes authoritative tree changes,
-        // and the retained read guard kept the captured base stable through
-        // the durable callback. Only publication needs a write guard.
+
         drop(tree);
         let mut tree = self.block_tree.write();
-        // This journal extends the old checkpoint, not the new snapshot root.
-        // Snapshot recovery uses its immutable anchor and the certified suffix.
+
         *self.journal.write() = None;
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
@@ -748,9 +738,7 @@ impl Chainstate {
                 found: node.height,
             });
         }
-        // Core 31.1 ActivateSnapshot requires the base to belong to the
-        // best-work header ancestry. Recheck at the final commit boundary:
-        // header selection may have changed while the snapshot was verified.
+
         let best_header = tree.tip();
         if best_header
             .as_ref()
@@ -816,8 +804,6 @@ impl Chainstate {
             BlockTreeReader::new(Arc::clone(&self.block_tree)),
         ));
 
-        // Sharing the mutable header tree stays inside its chainstate owner;
-        // production composition transfers an owned tree through ChainstateParts.
         let historical = Self {
             network: self.network,
             chain_tip,
@@ -1058,8 +1044,7 @@ impl Chainstate {
             bitcoin_rs_chain::current_unix_seconds(),
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
         );
-        // A rejected batch can still have inserted a valid prefix and moved
-        // the tip; the gate follows whatever active chain exists now.
+
         self.assume_valid_gate.evaluate(&tree);
         let node_ids = acceptance.map_err(HeaderAdmissionError::Rejected)?;
         let announced_tip = node_ids
@@ -1640,8 +1625,7 @@ impl ResolvedUtxoView {
             .flat_map(|tx| &tx.inputs)
             .filter(|input| same_block.is_none_or(|set| !set.contains(&input.previous_output)))
             .map(|input| input.previous_output);
-        // Serial on purpose. A UTXO lookup is a sharded hashmap hit of order
-        // 500 ns, so a rayon fan-out costs more than the work it distributes.
+
         Self {
             external: candidates
                 .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))

@@ -1,28 +1,3 @@
-//! T23 acceptance: fee estimates come from real admission and
-//! confirmation history, exercised through production wiring.
-//!
-//! Every leg drives the node's real surfaces: transactions enter through the
-//! one shared [`bitcoin_rs_mempool::MempoolGateway`] exactly like RPC ingress
-//! (`crates/node/src/tx_ingress.rs`), confirmations happen when ordinary
-//! block validation connects a block containing them
-//! (`crates/node/src/chain_effects.rs` → `remove_for_block`), replacements go
-//! through gateway admission's BIP125 path, evictions through
-//! `evict_below_fee_rate`, the reorg leg through `reorg::invalidate_block`
-//! with its reconsideration walk, and restart through `NodeState::open`
-//! adopting the owner-local `fee-estimator-history.dat` file.
-//!
-//! The declared estimator semantics are mirrored with the public
-//! [`FeeEstimator`] event API (`tx_entered` / `tx_left` / `block_connected`)
-//! and asserted byte-for-byte against the pool's persisted estimator state
-//! (`Mempool::estimator_history`, deterministic by contract). A false
-//! confirmation, a lost untrack, or a reorg double-count changes those bytes,
-//! so each leg's invariant fails loudly instead of passing on a plausible
-//! estimate value.
-//!
-//! Insufficient data answers `None` — the exact condition the RPC's
-//! `estimatesmartfee` maps to `errors: ["Insufficient data or no feerate
-//! found"]` with the fee rate omitted (`crates/rpc/src/handlers/util.rs`).
-
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use std::sync::Arc;
@@ -59,10 +34,6 @@ const REPLACEMENT_FEE_SATS: u64 = 30_000;
 const EVICT_THRESHOLD_SAT_PER_KVB: u64 = 10_000;
 /// The estimator's owner-local datadir file (`crates/mempool/src/fee_history.rs`).
 const HISTORY_FILE: &str = "fee-estimator-history.dat";
-
-// ---------------------------------------------------------------------------
-// Node and chain fixtures
-// ---------------------------------------------------------------------------
 
 /// Opens an isolated regtest `NodeState`; the guard keeps the data directory
 /// alive for the whole test body.
@@ -163,8 +134,7 @@ fn mine_and_apply(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // BIP34 height push plus one pad byte: consensus requires a
-            // 2..=100 byte coinbase scriptSig.
+
             script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -197,10 +167,6 @@ fn mine_and_apply(
     Ok(block)
 }
 
-// ---------------------------------------------------------------------------
-// Declared-semantics mirror
-// ---------------------------------------------------------------------------
-
 /// Asserts the pool's estimator state byte-matches `shadow` — the declared
 /// semantics replayed through the public event API — and that both answer
 /// identically at every confirmation target.
@@ -232,12 +198,8 @@ fn mirror_admitted(shadow: &mut FeeEstimator, state: &NodeState, txid: Txid) {
     shadow.tx_entered(txid, entry.fee_rate, entry.height);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-26
+
 fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -259,7 +221,6 @@ fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
         "genesis connect must age the estimator to height 0"
     );
 
-    // A real admission at the high tier still cannot fabricate an estimate.
     fund_utxo(&state, parent_txid(0x01), PARENT_VALUE_SATS)?;
     let tx = spending_tx(parent_txid(0x01), HIGH_FEE_SATS, 0xffff_ffff);
     admit(&state, tx.clone(), u64::from(BASE_TIME))?;
@@ -270,8 +231,6 @@ fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
         "pending admission alone must not produce an estimate"
     );
 
-    // Connected without the tx, the pending tx misses target 1: one failure
-    // is still insufficient data, never a fabricated rate.
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 1, 0, Vec::new())?;
     assert_eq!(
@@ -287,7 +246,7 @@ fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
 /// validation, with the short horizon demanding a higher rate than the long
 /// one — exactly the declared semantics, byte-for-byte.
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-26
+
 fn real_confirmations_qualify_the_estimate() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -307,8 +266,7 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
     ];
 
     let mut shadow = FeeEstimator::new();
-    // `apply_genesis` connected the genesis block, so the estimator has aged
-    // to height 0 even before any transactions are admitted.
+
     shadow.block_connected(&[], 0);
     for tx in high.iter().chain(low.iter()) {
         let txid = tx.txid();
@@ -328,7 +286,6 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
         .fee_rate;
     assert_matches_declared_semantics(&state, &shadow);
 
-    // Block 1 confirms the high tier; the low tier misses target 1.
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 1, 0, high.to_vec())?;
     shadow.block_connected(&txids(&high), 1);
@@ -360,7 +317,6 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
         "block 1 must age the estimator"
     );
 
-    // Block 2 confirms the low tier: it missed target 1 and made target 2.
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 2, 0, low.to_vec())?;
     shadow.block_connected(&txids(&low), 2);
@@ -371,7 +327,7 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
         Some(2),
         "block 2 must age the estimator"
     );
-    // The short horizon still remembers the low tier's miss.
+
     assert_eq!(
         pool.read().estimate_fee_rate(1),
         Some(estimate_short),
@@ -384,7 +340,7 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
 /// phantom failure) and the replacement's own confirmation is the only
 /// success ever recorded.
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-26
+
 fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -416,8 +372,6 @@ fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
         "replacement must pool"
     );
 
-    // Only the replacement confirms; a false victim confirmation would put a
-    // second success and a confirmed_at record into the estimator bytes.
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 1, 0, vec![replacement.clone()])?;
     shadow.block_connected(&[replacement.txid()], 1);
@@ -432,7 +386,7 @@ fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
 /// A fee-policy eviction untracks the evicted transaction: it neither stays
 /// pending (which would record a miss) nor counts as confirmed.
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-26
+
 fn eviction_untracks_without_false_confirmation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -479,7 +433,7 @@ fn eviction_untracks_without_false_confirmation() -> Result<()> {
 /// into the pool with the recorded confirmations preserved, and re-confirming
 /// them in a sibling block records exactly one observation — not two.
 #[test]
-// CONTRACT: docs/contracts/chain-events.md#EVT-02
+
 fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -503,8 +457,6 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
         .expect("two same-bucket confirmations must qualify target 1");
     let bytes_before = pool.read().estimator_history();
 
-    // Invalidate block 1: the reconsideration walk re-admits its two
-    // transactions and the estimator's recorded confirmations survive.
     bitcoin_rs_node::reorg::invalidate_block(
         &state.chainstate(),
         &state.chain_followers(),
@@ -524,9 +476,6 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
         "reorg must preserve recorded confirmations, not wipe them"
     );
 
-    // Re-confirm the same transactions in a sibling block: the dedup record
-    // must keep one physical confirmation one recorded success, so the whole
-    // estimator state returns byte-identically.
     let sibling = mine_and_apply(&state, genesis, 1, 1, txs.to_vec())?;
     assert_ne!(
         sibling.block_hash(),
@@ -550,7 +499,7 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
 /// Restart adopts the owner-local history file: the reopened node answers
 /// with the exact persisted estimate and state bytes.
 #[test]
-// CONTRACT: docs/contracts/recovery.md#RCV-11
+
 fn restart_adopts_persisted_estimator_history() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
@@ -580,7 +529,6 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
     let bytes_before = pool.read().estimator_history();
     let decayed_before = pool.read().estimator_last_decayed_height();
 
-    // Publish the owner-local history exactly as the owner would at shutdown.
     let history_path = config.data_dir.join(HISTORY_FILE);
     std::fs::write(&history_path, &bytes_before)?;
 
@@ -608,7 +556,7 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
 /// A corrupt history file degrades to insufficient data: the node starts, the
 /// rejected file stays in place, and admission still works.
 #[test]
-// CONTRACT: docs/contracts/recovery.md#RCV-11
+
 fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
@@ -633,7 +581,6 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     assert!(pool.read().estimate_fee_rate(1).is_some());
     drop(state);
 
-    // Corrupt the owner-local file out of the owner's hands.
     let history_path = config.data_dir.join(HISTORY_FILE);
     let corrupt: Vec<u8> = std::iter::repeat_n(0xFF_u8, 128).collect();
     std::fs::write(&history_path, &corrupt)?;
@@ -650,7 +597,7 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
         corrupt,
         "a rejected payload must stay in place for its owner"
     );
-    // The degraded node is fully operational: a fresh admission still tracks.
+
     fund_utxo(&reopened, parent_txid(0x63), PARENT_VALUE_SATS)?;
     let fresh = spending_tx(parent_txid(0x63), HIGH_FEE_SATS, 0xffff_ffff);
     admit(&reopened, fresh.clone(), u64::from(BASE_TIME) + 2)?;
@@ -660,10 +607,6 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Small shared helpers
-// ---------------------------------------------------------------------------
 
 fn txids(txs: &[Tx]) -> Vec<Txid> {
     txs.iter().map(Tx::txid).collect()

@@ -1,15 +1,3 @@
-//! Durable rollback evidence.
-//!
-//! Bounded, genesis-scoped JSON sidecars with a `.prev` rotation, plus the
-//! process-visible warning snapshot (RCV-12).
-//!
-//! `applied-tip-witness.json` records the applied tip at the last durable
-//! checkpoint publication; `chain-rollback-event.json` records the last
-//! detected rollback event. Publishing stages `.tmp` (`create_new`, fsync),
-//! rotates a *valid* current to `.prev`, renames, and fsyncs the directory.
-//! Reads try current then `.prev`; a missing or invalid current falls
-//! through. Never selects by greatest height.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -222,13 +210,9 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
-        // `std::fs::rename` substitutes atomically over an existing
-        // destination on both platforms — POSIX rename semantics; Windows
-        // applies MoveFileExW REPLACE_EXISTING under the hood — so a crash
-        // can never find the published evidence file gone.
+
         std::fs::rename(&tmp, &current)?;
-        // std cannot open a directory on Windows; the checkpoint fsync
-        // primitive carries the platform rules for flushing the entry.
+
         let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
         crate::checkpoint::fs::sync_dir(&capability)?;
         Ok(())

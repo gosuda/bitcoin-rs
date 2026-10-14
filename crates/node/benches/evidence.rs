@@ -1,8 +1,3 @@
-//! Recorded evidence for sync-pipeline measurements.
-//!
-//! Moved verbatim from the former `crates/node/src/metrics/evidence/` so the
-//! product-cell machinery lives with its only consumer; the shared identity
-//! types stay in `bitcoin_rs_node::metrics`.
 #![allow(dead_code, reason = "each consumer uses a different subset")]
 
 use anyhow::Result;
@@ -303,7 +298,7 @@ mod tests {
                 "{field}: {error}"
             );
         }
-        // A corpus table is optional to the type and mandatory to the ledger.
+
         let error = Ledger::parse(&ledger_without("[cells.samples.identity.corpus]"))
             .expect_err("corpus-less sample");
         assert!(
@@ -370,9 +365,7 @@ mod tests {
     #[test]
     fn repeated_samples_and_empty_cells_survive_a_round_trip() {
         let mut ledger = Ledger::parse(LEDGER_TOML).expect("checked-in ledger");
-        // The checked-in ledger accumulates samples over time, so the test
-        // pins only its own deltas: the cell under test and the surviving
-        // empty cells, never the absolute measured-cell count.
+
         let measured_before = ledger
             .cells
             .iter()

@@ -1,21 +1,4 @@
-//! Index read-path resolver benchmark.
-//!
-//! Each group measures the current position-backed resolver over a
-//! production-shaped flat-file fixture.
-//!
-//! Blocks are served from a **real `FlatFileBlockStore`**, the same path
-//! production takes through `IndexedBlockBodyStore`: open, `fstat`, seek, read.
-//! An earlier revision served them from an in-memory map, which left the syscall
-//! sequence out entirely and reported ratios roughly an order of magnitude too
-//! large — a whole-body read and a 250-byte range read differ by only about 2x
-//! once the syscalls are counted, because at these sizes the syscalls dominate,
-//! not the bytes moved.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
-// A benchmark fixture that fails to build has no meaningful degraded mode: a
-// resolver returning `Err` would be timed as a fast early return and reported
-// as a win. Panicking is the correct outcome, so `expect` is deliberate here
-// and confined to fixture setup and the timed calls' error arms.
 #![allow(clippy::expect_used)]
 
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
@@ -72,8 +55,6 @@ impl BlockSource for FlatFileBlockSource {
 /// One built fixture: a populated index, a matching block source, and the
 /// lookup keys that address the planted transactions.
 struct Fixture {
-    // Held for their `Drop`: the RocksDB and block-file directories must outlive
-    // the indexer and the source.
     _dir: tempfile::TempDir,
     _blocks_dir: tempfile::TempDir,
     indexer: Indexer<RocksDbStore>,
@@ -239,8 +220,6 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
 
     let source = FlatFileBlockSource { files, positions };
 
-    // A fixture that resolves nothing would benchmark an empty loop and report
-    // a spectacular, meaningless speedup. Prove it resolves before returning.
     let planted = indexer
         .resolve_script_history(target, &source)
         .expect("fixture history resolves");
@@ -357,24 +336,18 @@ fn end_to_end_resolve(c: &mut Criterion) {
 }
 
 fn history_resolve(c: &mut Criterion) {
-    // Height sweep at the ~250 KB block shape: isolates the per-row cost, which
-    // is what the position index removes.
     for heights in [1_u32, 8, 64] {
         let fixture = build_fixture(heights, TXS_PER_BLOCK_250K);
         bench_fixture(c, &format!("heights_{heights}_250k"), &fixture);
     }
 
-    // Block-size sweep at a fixed height count: isolates the per-block scan
-    // cost, which is the term that scales with mainnet block growth.
     let fixture = build_fixture(8, TXS_PER_BLOCK_1M);
     bench_fixture(c, "heights_8_1m", &fixture);
 }
 
 criterion_group! {
     name = benches;
-    // These resolvers run in the millisecond range at 64 heights, so the
-    // Criterion default of 100 samples would put a single group in the tens of
-    // seconds. 20 is enough to separate arms that differ by more than 1.05x.
+
     config = Criterion::default().sample_size(20);
     targets = history_resolve, end_to_end_resolve
 }

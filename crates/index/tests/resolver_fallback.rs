@@ -1,4 +1,3 @@
-//! Exact resolution of a lossy eight-byte funding-row prefix.
 #![allow(clippy::expect_used)]
 
 #[path = "support/common.rs"]
@@ -100,10 +99,6 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
     IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes)?;
     let indexer = Indexer::new(Arc::clone(&store));
 
-    // A real eight-byte collision makes the writer merge both valid positions
-    // under one row key. Model that persisted result directly; unlike the
-    // removed fallback tests, every position is an exact range in this
-    // canonical block and no row value is blank, stale, or malformed.
     let stored = store
         .get(ColumnFamily::Funding, &row)?
         .expect("target funding row");

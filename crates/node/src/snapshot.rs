@@ -1,5 +1,3 @@
-//! Node-owned bounded snapshot import and fenced consumer reconciliation.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -24,8 +22,7 @@ pub(crate) struct SnapshotControl {
     followers: ChainFollowers,
     data_dir: PathBuf,
     network: Network,
-    // One imported UTXO set may be materialized at a time. This is a resource
-    // permit, not a second lifecycle state. No chain write lock spans decoding.
+
     import: Mutex<()>,
 }
 
@@ -125,8 +122,6 @@ impl SnapshotControl {
         }
     }
 
-    // Both input formats claim the same resource permit and refuse a second
-    // activation before resolving a path, reading input or reconstructing coins.
     fn claim_import(&self) -> Result<parking_lot::MutexGuard<'_, ()>, SnapshotImportError> {
         let permit = self
             .import
@@ -149,8 +144,7 @@ impl SnapshotControl {
         if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
         }
-        // Activation publishes native recovery files only in this namespace.
-        // A portable source there must not be overwritten by that publication.
+
         let recovery = self.data_dir.canonicalize()?.join("assumeutxo");
         if path.starts_with(recovery) {
             return Err(SnapshotImportError::RecoveryInput);
@@ -161,9 +155,7 @@ impl SnapshotControl {
             coins_loaded: snapshot.metadata.coins_count,
             tip_hash: snapshot.anchor.block_hash.to_string_be(),
             base_height: snapshot.anchor.height,
-            // JSON cannot serialize arbitrary filesystem bytes. Render before
-            // committing so a valid symlink target cannot turn success into a
-            // post-commit response error.
+
             path: path.to_string_lossy().into_owned(),
         };
         self.activate(
@@ -190,15 +182,12 @@ impl SnapshotControl {
         height: u32,
     ) -> Result<(), SnapshotImportError> {
         let change = self.followers.begin_mempool_change()?;
-        // The generation fence serializes with in-flight admission and prevents
-        // new commits. Drop the pool read guard before costly activation work.
+
         if self
             .followers
             .mempool_gateway()
             .is_some_and(|gateway| !gateway.read().is_empty())
         {
-            // A guard's Drop intentionally leaves admission closed. This is an
-            // operational refusal, so settle without invoking any consumers.
             if let Some(change) = change
                 && let Err(error) = change.finish()
             {
@@ -266,9 +255,6 @@ impl SnapshotControl {
     }
 }
 
-// Core v31.1 keeps m_from_snapshot_blockhash after marking the snapshot
-// validated (validation.cpp:6104-6111). A failure likewise does not erase an
-// active assumed role's origin merely because the disk status is Failed.
 fn active_snapshot_base(
     role: ChainstateRole,
     status: &AssumeUtxoDiskStatus,
@@ -320,11 +306,6 @@ mod tests {
         );
     }
 
-    // `rustix::fs::mkfifoat` is not available on Apple platforms, so the
-    // macOS test hosts gate this fixture the same way the epoch-lock FIFO
-    // test in `tests/unit/state/tests/events.rs` does. The code under test
-    // (`open_regular_input`) keeps its platform-independent coverage
-    // elsewhere.
     #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn input_fifo_is_rejected_without_waiting_for_a_writer() -> anyhow::Result<()> {
@@ -409,7 +390,7 @@ mod tests {
                 Err(SnapshotImportError::ImportInProgress)
             ));
         }
-        // The established embedding call still selects native v4 explicitly.
+
         assert!(state.activate_assumeutxo_snapshot_file(&core_path).is_err());
         state.activate_assumeutxo_snapshot_file(&native_path)?;
         assert!(matches!(
@@ -434,8 +415,6 @@ mod tests {
         use bitcoin_rs_mempool::PrioritisedTransaction;
         use bitcoin_rs_primitives::{Hash256, Txid};
 
-        // Core 31.1 AddChainstate transfers the existing empty CTxMemPool;
-        // its mapDeltas entries for absent transactions survive that transfer.
         for native in [false, true] {
             let dir = tempfile::tempdir()?;
             let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
@@ -500,8 +479,7 @@ mod tests {
             }],
             lock_time: LockTime::ZERO,
         });
-        // Stage membership through the existing test seam. The independent
-        // process case covers admission of a real spend on both implementations.
+
         gateway.insert_entry(
             AdmissionOrigin::Rpc,
             MempoolEntry::new(Arc::clone(&transaction), 100, 1_000, 0, 0, 0),

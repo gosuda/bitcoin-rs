@@ -1,5 +1,3 @@
-//! Node-owned coordination around authoritative chainstate reorgs.
-
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
@@ -146,10 +144,7 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            // A failed sweep or trim marks settlement incomplete — but the
-            // fence must still close below: leaving the guard's odd
-            // generation live would refuse every stable admission until
-            // restart recovery.
+
             if gateway.remove_for_reorg(change, &chain).is_err()
                 || (reconsidered && trim_after_reorg(gateway).is_err())
             {

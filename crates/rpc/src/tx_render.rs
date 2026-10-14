@@ -1,11 +1,3 @@
-//! Canonical Bitcoin Core transaction JSON projections.
-//!
-//! Callers supply optional confirmed-chain context. This module never queries
-//! node state and does not choose JSON-RPC versus REST transport policy.
-
-// Address encoding uses the sanctioned rust-bitcoin seam. Core disassembly
-// uses the native instruction parser, and descriptor inference reuses the
-// existing shape owner and Miniscript parser without keys or wallet state.
 use bitcoin_rs_primitives::{BlockHash, Network, Tx, TxIn, TxOut, consensus_bytes};
 
 #[cfg(test)]
@@ -252,8 +244,7 @@ fn input_json(input: &TxIn, coinbase: bool) -> Value {
         return value;
     }
     let previous_output = input.previous_output;
-    // Field copies come before any `&self` method: `OutPoint` is `#[repr(packed)]`
-    // (consensus wire layout), so field references would be unaligned.
+
     let (prev_txid, prev_vout) = (previous_output.txid, previous_output.vout);
     let mut value = json!({
         "txid": prev_txid.to_string(),
@@ -361,8 +352,6 @@ pub(crate) fn script_descriptor(script: &[u8], network: Network) -> String {
     script_desc(script, network, None)
 }
 
-// Infer only information present in the script. There is no public/private key
-// provider here; decodescript supplies only the script behind its P2WSH wrapper.
 fn script_desc(script: &[u8], network: Network, redeem: Option<&[u8]>) -> String {
     let body = if let Some(redeem) = redeem {
         infer_inner_descriptor(redeem, true).map(|inner| format!("wsh({inner})"))
@@ -371,7 +360,7 @@ fn script_desc(script: &[u8], network: Network, redeem: Option<&[u8]>) -> String
     }
     .or_else(|| convert::script_address(script, network).map(|address| format!("addr({address})")))
     .unwrap_or_else(|| format!("raw({})", script.to_lower_hex_string()));
-    // All inferred text uses the descriptor alphabet (hex, op names, addresses).
+
     let checksum = crate::handlers::util::descriptor_checksum(&body)
         .unwrap_or_else(|| unreachable!("inferred descriptor contains only descriptor characters"));
     format!("{body}#{checksum}")
@@ -416,10 +405,6 @@ fn infer_inner_descriptor(script: &[u8], witness: bool) -> Option<String> {
         _ => {}
     }
     if witness {
-        // Core considers impossible-to-satisfy scripts such as `0` sane when
-        // their other type properties hold. rust-miniscript's default policy
-        // additionally requires a satisfaction. Reuse its parsed AST and
-        // sanity properties, applying Core's optional satisfaction bounds.
         let descriptor =
             miniscript::Miniscript::<bitcoin::PublicKey, miniscript::Segwitv0>::decode_with_ext(
                 bitcoin::Script::from_bytes(script),

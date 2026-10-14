@@ -1,6 +1,3 @@
-//! P2P E2E against a pinned Bitcoin Core 31.1 peer: initial sync, peer
-//! introspection, connection management, banning, and network toggles.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -27,9 +24,6 @@ fn wait_for_peers(node: &mut ProcessNode, label: &'static str, want: u64) -> Res
 fn fresh_node_surfaces_and_ban_list() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
 
-    // `ping` answering null is a documented deviation from Core's scheduled
-    // pong measurement; the rest are the empty address manager, peer table,
-    // and added-node list of a node that has never connected.
     for (method, expected) in [
         ("ping", Value::Null),
         ("getnodeaddresses", json!([])),
@@ -69,7 +63,7 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
         node.rpc("getbestblockhash", &json!([]))?,
         core.rpc("getbestblockhash", &json!([]))?
     );
-    // Hash-by-hash agreement over the synced range.
+
     for height in [1_u64, 6, 12] {
         assert_eq!(
             node.rpc("getblockhash", &json!([height]))?,
@@ -78,7 +72,6 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
         );
     }
 
-    // Blocks mined after the initial sync must still arrive.
     core.rpc(
         "generatetoaddress",
         &json!([6, bitcoin_rs_e2e::helpers::funding_address()?.to_string()]),
@@ -114,8 +107,7 @@ fn peer_and_network_introspection() -> Result<()> {
         peer.str_field("subver")?.starts_with("/Satoshi:"),
         "peer subver must echo the connected Core build: {peer}"
     );
-    // `synced_blocks`/`synced_headers` are honest "not measured" (-1) in this
-    // node rather than a guessed height.
+
     for field in ["synced_blocks", "synced_headers", "presynced_headers"] {
         assert_eq!(
             peer.field(field)?.as_i64(),

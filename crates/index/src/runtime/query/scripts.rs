@@ -1,5 +1,3 @@
-//! Script history, spending, and live-view reads under the shared snapshot gate.
-
 use super::{
     DerivedIndexQueryEngine, OutPoint, QueryBudget, ScriptHash, ScriptHistoryRecord,
     ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx,
@@ -265,17 +263,11 @@ impl DerivedIndexQueryEngine {
             for row in rows {
                 let outpoint = row.outpoint();
                 let Some(entry) = view.get_entry(&outpoint) else {
-                    // A ready live watermark naming an unresolvable locator is
-                    // corruption or a failed transition. Returning an empty
-                    // result would turn that into a false negative.
                     return Err(TxQueryError::Unavailable(
                         "ScriptLive locator is absent from authoritative UTXO".into(),
                     ));
                 };
                 if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
-                    // The locator is keyed by a compact hash prefix. A
-                    // prefix collision is expected to be filtered by this
-                    // exact script check.
                     continue;
                 }
                 records.push(ScriptIndexRecord {

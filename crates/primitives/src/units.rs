@@ -1,8 +1,3 @@
-//! Native protocol scalar newtypes: amounts, sequences, locktime, compact targets.
-//!
-//! Arithmetic and wire conversion live here so `Tx`, `TxIn`, `TxOut`, and
-//! `Header` do not restate satoshi, sequence, or nBits layout.
-
 use core::fmt;
 
 /// An amount in satoshis.

@@ -1,8 +1,3 @@
-//! One scripted loopback wire peer for the live-sync scenarios.
-//!
-//! Regtest v70016, `NODE_NETWORK|WITNESS`, no compact relay. Witness
-//! inventory gets the full body, a plain `MSG_BLOCK` a witness-stripped one.
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write as _;
@@ -90,9 +85,7 @@ impl LivePeer {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
-        // The journal lives inside the node's own run-* evidence dir, next to
-        // its transcript: unique per spawn, so concurrently running test
-        // binaries cannot overwrite or interleave one another's evidence.
+
         let journal = File::create(node.evidence.join(format!("{name}-peer.jsonl")))?;
         let mut peer = Self {
             stream,
@@ -129,9 +122,6 @@ impl LivePeer {
             ),
             0,
             format!("/{name}:0.1/"),
-            // Advertise the chain depth so the peer is immediately
-            // attractive for body requests once it demonstrates the tip
-            // with headers.
             start_height,
         );
         version.version = 70016;
@@ -307,9 +297,7 @@ impl LivePeer {
                     let _ = self.send(NetworkMessage::Pong(nonce), end);
                 }
                 Ok(_) => {}
-                // Soft read timeouts inside a pump slice are not a
-                // disconnect — keep observing; hard failures mark the peer
-                // dropped and end the pump.
+
                 Err(error) if is_soft_recv_error(&error) => {}
                 Err(_) => break,
             }
@@ -354,8 +342,7 @@ impl LivePeer {
 
     fn log(&mut self, direction: &str, detail: &str) {
         let line = json!({"at_ms": self.at_ms(), "dir": direction, "detail": detail});
-        // The journal is the evidence for this transcript; a write that keeps
-        // failing must be loud, not swallowed.
+
         let result = writeln!(self.journal, "{line}").and_then(|()| self.journal.flush());
         if result.is_err() && !self.journal_broken {
             self.journal_broken = true;

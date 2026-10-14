@@ -1,9 +1,3 @@
-//! Bitcoin Core `IsStandardTx` / `IsStandard` policy checks.
-//!
-//! These are mempool/relay policy checks, not consensus rules. A transaction
-//! that fails these checks may still be valid; it simply will not be accepted
-//! to the mempool or relayed by default.
-
 use alloc::vec::Vec;
 
 use hashbrown::{HashMap, HashSet};
@@ -293,9 +287,7 @@ pub(crate) fn evaluate_one(
     let wtxid = tx.wtxid();
     let weight = tx.weight();
     let vsize = context.vsize;
-    // `None` omits the floor comparison entirely (Core `bypassLimits`):
-    // a zero floor still rejects a tx whose prioritisation delta drags
-    // its modified fee negative, which bypassing must not do.
+
     let fee_rejection = match mempool_min_fee_sat_per_kvb {
         None => None,
         Some(floor) => match (
@@ -463,7 +455,6 @@ mod tests {
 
     #[test]
     fn maximum_fee_uses_core_amount_rounding_including_one_satoshi_boundaries() {
-        // Core feerate.cpp GetFee: truncation, minimum one sat, zero disables.
         for (fee, vsize, rate, rejects) in [
             (2_000, 2_000, 1_000, false),
             (2_001, 2_000, 1_000, true),
@@ -597,14 +588,11 @@ mod tests {
     #[test]
     fn accepts_three_of_three_bare_multisig() {
         let key = [0x02_u8; 33];
-        let mut script = vec![opcode::OP_PUSHNUM_1 + 2 /* OP_PUSHNUM_3 */];
+        let mut script = vec![opcode::OP_PUSHNUM_1 + 2];
         for _ in 0..3 {
             script.extend(push_data(&key));
         }
-        script.extend([
-            opcode::OP_PUSHNUM_1 + 2, /* OP_PUSHNUM_3 */
-            opcode::OP_CHECKMULTISIG,
-        ]);
+        script.extend([opcode::OP_PUSHNUM_1 + 2, opcode::OP_CHECKMULTISIG]);
 
         let mut tx = standard_tx(1);
         tx.outputs[0].script_pubkey = script.into();
@@ -618,10 +606,7 @@ mod tests {
         for _ in 0..4 {
             script.extend(push_data(&key));
         }
-        script.extend([
-            opcode::OP_PUSHNUM_1 + 3, /* OP_PUSHNUM_4 */
-            opcode::OP_CHECKMULTISIG,
-        ]);
+        script.extend([opcode::OP_PUSHNUM_1 + 3, opcode::OP_CHECKMULTISIG]);
 
         let mut tx = standard_tx(1);
         tx.outputs[0].script_pubkey = script.into();
@@ -729,7 +714,6 @@ mod tests {
         );
     }
 
-    // CONTRACT: API-24
     #[test]
     fn dust_relay_fee_changes_the_boundary() {
         let mut tx = standard_tx(1);
@@ -760,7 +744,7 @@ mod tests {
     #[test]
     fn only_one_ephemeral_dust_output_is_standard() {
         let mut tx = standard_tx(1);
-        // Core IsStandardTx permits one dust output; admission checks its fees.
+
         tx.outputs[0].value = Amount::from_sat(1);
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
         tx.outputs.push(tx.outputs[0].clone());
@@ -773,7 +757,7 @@ mod tests {
     #[test]
     fn rejects_non_standard_output_script() {
         let mut tx = standard_tx(1);
-        tx.outputs[0].script_pubkey = vec![0x74].into(); // OP_DEPTH
+        tx.outputs[0].script_pubkey = vec![0x74].into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)

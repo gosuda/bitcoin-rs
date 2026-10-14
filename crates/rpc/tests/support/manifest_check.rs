@@ -1,12 +1,3 @@
-//! Authority check against the const `MANIFEST`.
-//!
-//! The manifest is the sole method authority; fixtures are custody only.
-//! Every method a fixture replays must be exactly accounted for: a fixture
-//! that expects its method declared must find a shipped JSON-RPC row, and a
-//! fixture that deliberately speaks an unknown method (case 07) must find
-//! none, so the corpus can never drift into naming methods the dispatcher
-//! does not declare.
-
 use bitcoin_rs_rpc::manifest::{Entry, SurfaceKind};
 
 use super::fixture::Fixture;

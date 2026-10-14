@@ -1,5 +1,3 @@
-//! Contract coverage for the native version-4 UTXO snapshot format.
-
 use std::io::{Cursor, Seek};
 
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
@@ -199,8 +197,6 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dy
 
 #[test]
 fn snapshot_trailer_round_trips_without_a_listener() -> Result<(), Box<dyn std::error::Error>> {
-    // With no coinstats attached, the writer falls back to the zero trailer
-    // and the strict reader round-trips exactly those bytes.
     let set = UtxoSet::new();
 
     let op = OutPoint::new(txid(130_000).into(), 0);

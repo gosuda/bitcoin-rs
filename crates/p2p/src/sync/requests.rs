@@ -1,5 +1,3 @@
-//! Budgeted body requests, prefix probes, and cold-front hedges.
-
 use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
@@ -152,10 +150,6 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
-        // The service clause that gates tick-time selection applies here
-        // too: header-drain fetches and stripe retries reach this function
-        // without passing the selector, so the gate is enforced at the one
-        // path every body request takes (net_processing.cpp:6521-6525).
         let Some(info) = self.peer_table.info_of(source.addr) else {
             return GetdataRequestOutcome::default();
         };
@@ -195,9 +189,6 @@ impl BlockSync {
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
-        // `send_then` holds the connection's identity through the enqueue
-        // and the pending stamp under one table authority, so a replacement
-        // can never be blamed for — or credited with — this request.
         let mut has_request_capacity = false;
         if self
             .peer_table
@@ -273,10 +264,7 @@ impl BlockSync {
                 continue;
             };
             let source = session.lease.source(session.addr);
-            // One capability rule for every path that asks for a body: the
-            // same `body_capability` the frontier's usable-peer view
-            // precomputes, so the hedge and the scheduler can never disagree
-            // about whom to ask.
+
             let active_height = if session.demonstrated_tips.is_empty() {
                 u32::try_from(peer.best_known_height).ok()
             } else {

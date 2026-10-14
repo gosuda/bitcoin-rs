@@ -1,7 +1,3 @@
-//! One snapshot gate for transaction, history, and live-view queries.
-//! Resolution and script traversal stay in private child modules; all public
-//! entrypoints retain health, revision, watermark, and chain-transition checks.
-
 use super::{
     Arc, Block, BlockBodySource, BlockHash, BlockLogReader, BlockSource, BlockTree,
     DerivedIndexInfo, DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities,
@@ -284,8 +280,6 @@ impl DerivedIndexQueryEngine {
     }
 
     fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
-        // INVARIANT: the refusal text is the first unmet capability's own,
-        // scanned in IndexCapability::ALL order.
         for capability in required.iter() {
             if !self.enabled.contains(capability) {
                 return Err(TxQueryError::Unavailable(
@@ -313,11 +307,6 @@ impl DerivedIndexQueryEngine {
             return Err(TxQueryError::Unavailable(reason));
         }
 
-        // Live answers compose the index snapshot, the authoritative UTXO set,
-        // and the applied tip. Apply mutates UTXO before publishing that tip,
-        // so a before/after tip comparison cannot exclude that window. Hold
-        // chain-transition across watermark check, locator scan, and UTXO
-        // resolution. History and tx lookup never take it.
         let _chain_transition = if required.contains(IndexCapability::ScriptLive) {
             Some(
                 self.chain_transition

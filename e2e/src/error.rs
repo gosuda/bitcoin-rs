@@ -1,5 +1,3 @@
-//! Error types shared by the e2e harness.
-
 use std::fmt;
 use std::path::PathBuf;
 

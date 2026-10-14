@@ -1,13 +1,3 @@
-//! `ScriptLive` behavior over the prepared/commit path (`IDX-01`, `IDX-07`, #225).
-//!
-//! Everything here drives the same `IndexWriter` API the node's worker uses,
-//! with a map-backed [`SpentCoinScripts`] standing in for the undo-record
-//! anchor the node supplies in production. The properties under test are the
-//! ones #225 names as acceptance criteria: anchored deletes, same-block
-//! cancellation, the UTXO-admission spendability predicate, identity-specific
-//! point deletes, fail-closed unresolvable spends, watermark independence
-//! from history, and seed-then-stamp ordering.
-
 #[path = "support/common.rs"]
 mod common;
 
@@ -51,8 +41,6 @@ fn commit_rollback_one_with_spent_scripts<S: KvStore>(
         spent_scripts,
     )
 }
-
-// --- Anchor + block fixtures ---------------------------------------------
 
 /// Map-backed spent-coin source: the test's stand-in for the undo record.
 #[derive(Default)]
@@ -195,8 +183,6 @@ impl Chain {
         outpoints
     }
 }
-
-// --- Tests ----------------------------------------------------------------
 
 #[cfg(any(feature = "redb", feature = "fjall"))]
 fn persistent_writer_live_roundtrip<S: KvStore>(
@@ -352,8 +338,6 @@ fn seed_live_and_reopen<S: KvStore>(
     native: NativeOutPoint,
     scripthash: ScriptHash,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The production seed path must publish readiness only with the live rows,
-    // without resetting the independent historical/transaction watermarks.
     writer.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
     let (_, before_seed) = writer.fenced_watermarks()?;
     let seed_tip = IndexWatermark {
@@ -446,14 +430,11 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
 
-    // Height 0: genesis-shaped block. Its coinbase must produce no live rows.
     chain.connect(vec![coinbase(0)], &empty)?;
 
-    // Height 1: a payment creating two outputs of one script.
     let wallet = script(0xaa);
     let pay = spend(&[OutPoint::null()], &[wallet.clone(), wallet.clone()]);
-    // A null-prevout non-coinbase would be nonsense; give it a fake external
-    // input the anchor can resolve.
+
     let external = OutPoint {
         txid: Txid::from_byte_array([7_u8; 32]),
         vout: 0,
@@ -479,9 +460,6 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     };
     assert_eq!(chain.live(&wallet), sorted(vec![o0, o1]));
 
-    // Height 2: spend vout 0 only. The point delete must leave vout 1 alone --
-    // both rows share the full 8-byte script prefix, so anything short of an
-    // exact-key delete would take both.
     let sweep = spend(&[o0], &[script(0xcc)]);
     let mut anchor2 = MapScripts::default();
     anchor2.insert(o0, &wallet);
@@ -503,9 +481,6 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     chain.writer.commit_forward(batch)?;
     assert_eq!(chain.live(&wallet), vec![o1]);
 
-    // Disconnect height 2: the spent output returns, the block's own outputs
-    // leave. The restore script comes from the anchor, exactly as the node
-    // reads it from the undo record.
     let prev = IndexWatermark {
         height: 1,
         hash: chain.tip,
@@ -633,8 +608,7 @@ fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), Box<dyn
 
     let mut anchor = MapScripts::default();
     anchor.insert(external, &script(0xef));
-    // Deliberately no entry for the transient outpoint: if cancellation did
-    // not precede resolution, this connect would fail with MissingSpentCoin.
+
     chain.connect(vec![coinbase(1), creator, spender], &anchor)?;
 
     assert_eq!(chain.live(&transient), Vec::<OutPoint>::new());
@@ -731,8 +705,6 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), Box<dyn std
     assert_eq!(chain.live(&oversized), Vec::<OutPoint>::new());
     assert_eq!(chain.live(&normal), vec![OutPoint { txid, vout: 2 }]);
 
-    // History keeps the oversized output: it is real historical activity,
-    // and this asymmetry against Live is deliberate.
     let funding = chain
         .writer
         .indexer()

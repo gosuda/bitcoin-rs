@@ -1,6 +1,3 @@
-//! Independently signed BIP341 spends shared by native and process regressions.
-//! Fixed fixture keys never enter production code or a wallet.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::key::TapTweak as _;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};

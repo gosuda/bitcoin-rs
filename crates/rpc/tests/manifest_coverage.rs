@@ -1,20 +1,3 @@
-//! Compatibility-manifest coverage gate.
-//!
-//! Proves four invariants:
-//! 1. the dispatcher's live dispatch registry and the shipped manifest rows
-//!    are set-equal in both directions (REST and ZMQ likewise against their
-//!    live registrations), and every `Unimplemented` row really answers
-//!    `method not found`;
-//! 2. the manifest carries no duplicate rows;
-//! 3. `docs/rpc-reference.md` is byte-identical to a regeneration of the
-//!    manifest; drift names the delta and the regen command. Regeneration
-//!    is a separate ignored test, so a coverage run never writes and a
-//!    regen run never passes silently;
-//! 4. the declared claims stay honest: every `Deviation` row names its
-//!    difference, no row claims `Supported` while the pinned reference
-//!    carries no differential harness, and the reference identity still
-//!    matches `Cargo.lock`.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -215,9 +198,7 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
             .get(version_key)
             .and_then(toml::Value::as_str)
             .unwrap_or_else(|| panic!("`{version_key}` must be a string"));
-        // Every `[[package]]` block naming the crate contributes its version;
-        // a crate locked at two versions must agree at both, not just at the
-        // first substring hit.
+
         let lock: toml::Table = toml::from_str(CARGO_LOCK)
             .unwrap_or_else(|err| panic!("Cargo.lock must parse as TOML: {err}"));
         let locked: Vec<&str> = lock

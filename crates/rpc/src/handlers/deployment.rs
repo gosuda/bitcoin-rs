@@ -1,5 +1,3 @@
-//! Deployment reporting is a projection of native consensus activation.
-
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
@@ -61,8 +59,7 @@ pub(crate) fn at_hash(ctx: &Context, hash: Hash256) -> Result<Value, RpcError> {
         bitcoin_rs_chain::DeploymentQueryError::Budget { .. } => RpcError::Misc(error.to_string()),
         _ => RpcError::Internal(error.to_string()),
     })?;
-    // The same captured deployment states supply CSV/Segwit flags. Do not
-    // independently traverse a cold side branch a second time for flags.
+
     let softforks = SoftforkState {
         csv_active: statuses
             .iter()
@@ -76,8 +73,7 @@ pub(crate) fn at_hash(ctx: &Context, hash: Hash256) -> Result<Value, RpcError> {
         .into_iter()
         .map(|status| (status.name.to_owned(), deployment(&status)))
         .collect();
-    // All flags validation can emit, in Core's lexical ordering. This maps
-    // flags to wire names; their activation remains owned by verify_flags.
+
     let script_flags = [
         ("CHECKLOCKTIMEVERIFY", VerifyFlags::CHECKLOCKTIMEVERIFY),
         ("CHECKSEQUENCEVERIFY", VerifyFlags::CHECKSEQUENCEVERIFY),

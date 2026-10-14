@@ -1,8 +1,3 @@
-//! Object-safety proof for the backend-neutral store trait.
-//!
-//! The trait carries no associated types or generic methods, so a real
-//! backend dispatches every call through a `dyn KvStore` and performs the
-//! same storage operation it performs through its concrete type.
 #![cfg(feature = "fjall")]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore};

@@ -1,7 +1,3 @@
-//! Checks `probes.d` against Core's ABI and the artifact's embedded SDT notes.
-//! `SDT_ELF` selects another artifact; otherwise the test reads itself.
-//! Non-ELF hosts retain the declaration check but skip ELF note assertions.
-
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -45,7 +41,7 @@ fn layout_prefix(d_type: &str) -> &'static str {
         "int32_t" => "-4@",
         "uint32_t" => "4@",
         "int64_t" => "-8@",
-        // `char*` and byte-buffer `uint64_t` are pointer-sized unsigned.
+
         "uint64_t" | "char*" => "8@",
         other => panic!("unhandled probe argument type `{other}`"),
     }
@@ -57,7 +53,6 @@ fn layout_prefixes(def: &ProbeDef) -> Vec<&'static str> {
 
 /// Parses the declaration-order subset of `DTrace` syntax used by `probes.d`.
 fn parse_probes_d(text: &str) -> Vec<ProbeDef> {
-    // `probes.d` comments are all `/* */` blocks.
     let mut stripped = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("/*") {
@@ -237,7 +232,6 @@ fn width_index(d_type: &str) -> usize {
 /// Full operand spelling is verified on x86-64; other architectures check
 /// size/sign prefixes because register allocation and spelling differ.
 fn expected_layout(def: &ProbeDef, machine: u16) -> Option<String> {
-    // EM_X86_64: register name depends on the argument's width.
     if machine != 0x3E {
         return None;
     }

@@ -1,5 +1,3 @@
-//! Bounded, process-local avoidance of protocol-invalid remote IP addresses.
-
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, Instant, SystemTime};

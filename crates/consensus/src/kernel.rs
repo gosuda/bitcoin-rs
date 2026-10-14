@@ -1,5 +1,3 @@
-//! Block parse backends and runtime-selected script preparation.
-
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 
@@ -43,7 +41,6 @@ mod native {
 
     impl NativeBlock {
         pub fn parse(raw_block: &[u8]) -> Result<Self, ConsensusError> {
-            // Reject trailing bytes without materializing a transaction tree.
             let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
                 .map_err(|error| ConsensusError::Encoding(error.to_string()))?;
             Ok(Self {
@@ -198,8 +195,6 @@ mod kernel_backend {
             Some(amount),
             &prepared.kernel_tx,
             input_index,
-            // Fill implications before policy bits are stripped: CLEANSTACK
-            // still activates WITNESS and P2SH in the native driver and counter.
             Some(flags.filled().kernel_bits()),
             &prepared.precomputed,
         ) {
@@ -443,8 +438,7 @@ mod tests {
             &[(tx.inputs[0].previous_output, prevout.clone())],
         )
         .unwrap_or_else(|error| panic!("prepare genesis tx: {error}"));
-        // Passing an out-of-bounds input index causes bitcoinkernel::verify to return
-        // KernelError::ScriptVerify(ScriptVerifyError::TxInputIndex), a kernel API/setup error.
+
         let err =
             kernel_backend::verify_prepared_input(&prepared, &prevout, 999, VerifyFlags::NONE);
         assert!(

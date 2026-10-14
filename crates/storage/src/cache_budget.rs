@@ -1,17 +1,3 @@
-//! Process cache-budget division shared by every storage backend.
-//!
-//! `dbcache` is one process-wide budget, not a per-database knob. The node
-//! divides it across the persistent namespaces that exist in a deployment —
-//! chainstate and transaction index — and every backend receives
-//! its namespace's share in bytes through `open_with_cache`, which configures
-//! exactly those bytes. Division floors each share and hands the rounding
-//! remainder to chainstate, so the shares always sum to at most the budget.
-//!
-//! The percentages are fixed at 80/20 and are not configuration. A namespace
-//! that is disabled in a deployment
-//! contributes nothing: its share is redistributed to chainstate, which keeps
-//! the sum within budget while giving the only live namespace the full headroom.
-
 /// Chainstate share of the process cache budget, in percent.
 pub const CHAINSTATE_CACHE_SHARE_PCT: u64 = 80;
 /// Transaction-index share of the process cache budget, in percent.

@@ -1,18 +1,8 @@
-//! REF-02/REF-07 — the differential lane runs two public processes, never handlers.
-//!
-//! The pinned Core 31.1 `bitcoind` and the `bitcoin-rs` binary each start in
-//! an isolated regtest datadir, share identical block bytes, answer only
-//! through their public RPC surface, and leave no child behind. A missing or
-//! substituted reference binary is a typed failure that names the pinned
-//! digest; it is never a skipped test.
-
 #![expect(
     clippy::expect_used,
     reason = "process custody failures must name the offending identity"
 )]
 
-// The harness consumes only the release identity's binary digest; the rest
-// of the reference record stays dead in this binary.
 #[expect(dead_code, reason = "only the release bitcoind digest is read")]
 #[path = "support/reference_set.rs"]
 mod reference_set;
@@ -49,7 +39,6 @@ use bitcoin_rs_e2e::{ClockControl, Error, Kind, ProcessNode, SpawnOptions};
 use reference_set::reference_set;
 use serde_json::{Value, json};
 
-// A height-1 coinbase is mature for admission after 101 common blocks.
 const COMMON_BLOCKS: u32 = 101;
 
 /// Whether the OS still reports a live process under `pid`. On unix the
@@ -62,14 +51,16 @@ fn pid_is_alive(pid: u32) -> bool {
 
 /// Whether the OS still reports a live process under `pid`. Windows marks
 /// a terminated object's exit code, so a present-but-dead pid is not alive.
+/// The opened handle is null-checked and closed on every path; the exit
+/// code out-param is fully overwritten by the query call.
+#[allow(clippy::undocumented_unsafe_blocks)]
 #[cfg(windows)]
 fn pid_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    // SAFETY: the returned handle is checked for null and closed on every
-    // path; `code` is a plain out-param the call fully overwrites.
+
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
@@ -135,8 +126,7 @@ fn chaininfo_optional_fields_follow_core_with_blockfilters_disabled() {
         for response in [&rpc, &rest] {
             assert_eq!(response.get("chain"), Some(&json!("regtest")));
             assert_eq!(response.get("pruned"), Some(&json!(false)));
-            // Core src/rpc/blockchain.cpp inserts these keys only for the
-            // relevant pruning mode or signet, never as JSON null.
+
             for field in [
                 "automatic_pruning",
                 "prune_target_size",
@@ -252,8 +242,7 @@ fn named_rpc_arguments_follow_core() {
         compare_reply(&request.to_string(), &reference, &candidate)
             .expect("named binding and method errors match Core");
     }
-    // Arity is method-owned only after name/collision binding succeeds.
-    // The existing local compact parameter error is explicitly a deviation.
+
     for params in [json!([[], {}, false]), json!({"args": [[], {}, false]})] {
         let request = json!({"jsonrpc": "2.0", "id": "arity", "method": "gettxspendingprevout", "params": params});
         let reference = core.rpc_raw(&request).expect("Core arity control");
@@ -261,8 +250,7 @@ fn named_rpc_arguments_follow_core() {
         assert_eq!(reference["error"]["code"], json!(-1));
         assert_eq!(candidate["error"]["code"], json!(-32602));
     }
-    // Preserve repeated JSON keys until the binder rejects them. Building
-    // these requests through serde_json::Value would discard that evidence.
+
     for body in [
         r#"{"jsonrpc":"2.0","id":"duplicate","method":"createrawtransaction","params":{"inputs":[],"inputs":[],"outputs":{}}}"#,
         r#"{"jsonrpc":"2.0","id":"duplicate","method":"gettxspendingprevout","params":{"outputs":[],"mempool_only":true,"mempool_only":false}}"#,
@@ -296,8 +284,6 @@ fn named_rpc_review_boundaries_are_explicit() {
     compare_reply(&request.to_string(), &reference, &candidate)
         .expect("supported four-argument creation matches Core");
 
-    // Until the constructor implements version, every supplied form refuses;
-    // Core must actually serialize non-default version 1 for this discriminator.
     for (params, code, message) in [
         (
             json!([[], {}, 0, false, 1]),
@@ -365,7 +351,6 @@ fn named_rpc_review_boundaries_are_explicit() {
 /// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
 #[test]
 fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
-    // Each binary's startup, listener probe, and shutdown are independent.
     std::thread::scope(|scope| {
         for binary in [Kind::BitcoinRs, Kind::Core] {
             scope.spawn(move || {
@@ -386,7 +371,6 @@ fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
 /// nodes still reject an underpaying replacement without changing the pool.
 #[test]
 fn replacement_signaling_matches_pinned_core() {
-    // The signaled and unsignaled scenarios are independent node pairs.
     std::thread::scope(|scope| {
         for signals in [false, true] {
             scope.spawn(move || replacement_signaling_case(signals));
@@ -429,8 +413,6 @@ fn replacement_signaling_case(signals: bool) {
             .expect("replacement below the original's fee");
         let underpaying_raw = serialize_hex(&underpaying);
 
-        // The replacement is independently valid before there is a conflict.
-        // A script or funding failure must not masquerade as an RBF difference.
         let raws = [&replacement_raw, &underpaying_raw];
         std::thread::scope(|scope| {
             for process in [&mut core, &mut node] {
@@ -460,8 +442,6 @@ fn replacement_signaling_case(signals: bool) {
             json!(original_txid),
         );
 
-        // Independent public response expectations for the pinned fee-policy case.
-        // The per-process observation sequences are independent.
         let rejection_case = |process: &mut ProcessNode, rejection: &str| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -550,7 +530,7 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         )
     });
     let (core_pid, node_pid) = (core.pid(), node.pid());
-    // Only Core exposes a mock clock today; the gap stays visible here.
+
     assert!(matches!(core.clock, ClockControl::Mock(_)));
     assert_eq!(node.clock, ClockControl::None);
 
@@ -579,13 +559,13 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
     let input = invalid.input.first_mut().expect("signature input");
     let mut script = input.script_sig.as_bytes().to_vec();
     let signature_length = usize::from(*script.first().expect("signature push length"));
-    // Change the last S scalar byte, preserving DER structure and sighash type.
+
     *script
         .get_mut(signature_length.checked_sub(1).expect("signature length"))
         .expect("signature scalar") ^= 1;
     input.script_sig = bitcoin::ScriptBuf::from_bytes(script);
     let invalid_raw = bitcoin::consensus::encode::serialize_hex(&invalid);
-    // The per-process preview and rejection observations are independent.
+
     let signature_case = |process: &mut ProcessNode| {
         let valid = process
             .rpc("testmempoolaccept", &json!([[raw]]))
@@ -630,8 +610,7 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         compare_reply("invalid signature preview allowed", &json!(false), allowed)
             .expect("invalid signature preview");
     }
-    // Rejection text is implementation-specific; the semantic allow verdict and
-    // JSON-RPC error code are this scenario's named compatibility observations.
+
     for code in &rejection_codes {
         compare_reply("invalid signature send error code", &json!(-26), code)
             .expect("invalid signature rejection code");
@@ -724,7 +703,7 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
 
     let transcript = std::fs::read_to_string(node.evidence.join("transcript.jsonl"))
         .expect("transcript custody");
-    // All setup and scenario requests retain their ordered raw replies.
+
     assert!(transcript.lines().count() >= expected + 12);
     for line in transcript.lines() {
         let entry: serde_json::Value = serde_json::from_str(line).expect("JSONL event");
@@ -877,8 +856,6 @@ fn readiness_deadline_reaps_the_child() {
     assert_reaped(pid);
 }
 
-// A local transport peer exercises the same HTTP owner; it never stands in
-// for either node in the compatibility scenario above.
 fn serve_once(
     respond: impl FnOnce(TcpStream, Instant) + Send + 'static,
 ) -> (SocketAddr, JoinHandle<()>) {
@@ -910,17 +887,13 @@ fn serve_once(
 
 fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle<()>) {
     serve_once(move |mut stream, deadline| {
-        // Drain the entire bounded request before closing, so unread request
-        // bytes cannot turn a malformed reply into a TCP reset instead.
         let mut request = Vec::new();
         loop {
             assert!(request.len() < 4096, "unexpected oversized fixture request");
             let mut chunk = [0_u8; 512];
             let count = match stream.read(&mut chunk) {
                 Ok(count) => count,
-                // RCVTIMEO expiry arrives as WouldBlock; a loaded scheduler
-                // can stall the client past one read bound, so retry against
-                // the responder's total deadline.
+
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -949,7 +922,7 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
             }
         }
         std::thread::sleep(delay);
-        // A timed-out client may have already closed its socket.
+
         let _write_result = stream.write_all(reply);
     })
 }
@@ -1070,13 +1043,6 @@ fn stalled_response_respects_the_request_deadline() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Readiness scenarios: the txindex capability's readiness facts must be
-// one fact everywhere they render — the `getcapabilities` row, the
-// `getindexinfo` report Core parity checks, the Esplora tip, and the
-// Prometheus readiness gauge all read the same node-owned status snapshot.
-// ---------------------------------------------------------------------------
-
 /// Regtest payout for single-node block production. No readiness scenario
 /// spends from these coinbases.
 const MINING_ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
@@ -1193,8 +1159,6 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        // The transport shares the readiness deadline: a bulk mine
-        // legitimately exceeds the per-request budget on slow hosts.
         match node.rpc_until(
             "generatetoaddress",
             &json!([blocks, MINING_ADDRESS]),
@@ -1367,7 +1331,6 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     wait_txindex_synced(&mut core, deadline).expect("core txindex synced");
     wait_txindex_synced(&mut node, deadline).expect("node txindex synced");
 
-    // The capability row: enabled and Ready at the captured tip.
     let row = node
         .rpc("getcapabilities", &json!([]))
         .expect("capabilities");
@@ -1376,7 +1339,6 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(true)));
     assert_eq!(readiness_outcome(&row), "Ready");
 
-    // Core parity: both binaries render the same synced index report.
     let synced = compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
         .expect("index report parity");
     assert_eq!(
@@ -1385,16 +1347,12 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
         "parity reply: {synced}"
     );
 
-    // Esplora renders the same tip the RPC reports.
     let tip = node.rpc("getblockcount", &json!([])).expect("tip height");
     let esplora = node
         .http_get_json("/api/blocks/tip/height")
         .expect("esplora tip height");
     assert_eq!(tip, esplora, "RPC and Esplora must agree on the tip");
 
-    // The readiness gauge is that same fact in Prometheus form. The gauge
-    // is a sampled view, so require convergence with the RPC outcome within
-    // the deadline, then assert the full one-active rendering.
     let samples = wait_gauge_active(metrics_addr, "Ready", deadline);
     assert_one_active(&samples, "Ready");
 
@@ -1422,14 +1380,12 @@ fn disabled_index_reports_its_documented_disabled_row() {
     assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(false)));
     assert_eq!(readiness_outcome(&row), "Disabled");
 
-    // Both binaries report the absent index identically.
     assert_eq!(
         compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
             .expect("disabled parity"),
         json!({}),
     );
 
-    // Chain data still serves without an index; verbose history does not.
     let esplora = node
         .http_get_json("/api/blocks/tip/height")
         .expect("esplora tip height");
@@ -1491,7 +1447,6 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     wait_until_ready(&mut node, deadline).expect("initial readiness");
     wait_txindex_synced(&mut node, deadline).expect("initial sync");
 
-    // A confirmed historical row the index owns, captured before the loss.
     let txid = first_block_txid(&mut node, 5);
     let raw = node
         .rpc("getrawtransaction", &json!([txid]))
@@ -1499,9 +1454,7 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
 
     let datadir = node.take_datadir().expect("datadir custody");
     node.stop().expect("stop before recovery");
-    // The resolved data dir is `<datadir>/node`; the derived store lives
-    // beside the chainstate inside it. Destroy it only when it is really
-    // there: a silent no-op would make the rebuild vacuous.
+
     let derived_store = datadir.path().join("node").join("txindex");
     assert!(
         derived_store.is_dir(),
@@ -1535,8 +1488,7 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
         );
     }
     wait_txindex_synced(&mut rebuilt, deadline).expect("rebuilt sync");
-    // Backfill may trail the watermark report; poll the row, and on failure
-    // keep the chain-side evidence in the panic.
+
     let mut restored = None;
     let row_deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < row_deadline {
@@ -1618,7 +1570,6 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
     wait_until_ready(&mut node, deadline).expect("initial readiness");
     wait_txindex_synced(&mut node, deadline).expect("initial sync");
 
-    // Abandon the last two blocks and re-mine from height 99 on a fork.
     let fork_base = node
         .rpc("getblockhash", &json!([COMMON_BLOCKS - 2]))
         .expect("fork base hash");
@@ -1650,8 +1601,6 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
 /// ancestry after disconnect and replacement, while its raw bytes stay readable.
 #[test]
 fn retained_transaction_confirmations_match_core_after_reorg() {
-    // Compare this contract's chain fields and byte identity. Script asm and
-    // descriptor rendering have their own compatibility evidence.
     let compare_transaction = |core: &mut ProcessNode, node: &mut ProcessNode, params: &Value| {
         let reference = core
             .rpc("getrawtransaction", params)
@@ -1695,9 +1644,6 @@ fn retained_transaction_confirmations_match_core_after_reorg() {
         .expect("disconnect the containing block");
     for replaced in [false, true] {
         if replaced {
-            // The reference starts with fixed mocktime. Move it forward so
-            // mining with the same payout cannot recreate the invalidated
-            // block byte for byte.
             let replacement_time = active["time"]
                 .as_u64()
                 .expect("original block time")

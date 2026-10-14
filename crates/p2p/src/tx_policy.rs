@@ -1,11 +1,3 @@
-//! Connection-bound transaction download policy. Mempool remains the authority
-//! for accepted, orphan and rejected bodies; this owner retains identities only.
-//!
-//! Core v31.1 node/txdownloadman_impl.cpp and p2p_tx_download.py define the
-//! reference cases. Different raw txid/wtxid hashes remain independent until
-//! a body supplies the mapping. Identical bytes share request ownership only;
-//! gateway knowledge and rejection remain scoped by inventory kind.
-
 mod relay;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,8 +131,7 @@ impl TxPolicy {
             if !announcement.preferred {
                 return false;
             }
-            // A full hash must free its own slot. The same removal also frees
-            // the global slot when both limits are reached; never evict twice.
+
             let victim = if raw_count >= MAX_ALTERNATES {
                 kinds
                     .into_iter()
@@ -167,7 +158,7 @@ impl TxPolicy {
             let Some(source) = self.eviction_source(victim) else {
                 return false;
             };
-            // All cap, identity, ownership and accounting checks precede removal.
+
             if !self.remove_candidate(victim.1, source) {
                 return false;
             }
@@ -224,8 +215,7 @@ impl TxPolicy {
                 candidate.ready = candidate.ready.min(announcement.ready);
                 candidate.preferred = true;
                 candidate.priority = candidate.priority.min(announcement.priority);
-                // Upgrade TX witness serialization within its typed identity.
-                // An existing WTX hint retains its original wire identity.
+
                 if kind == key {
                     candidate.item = announcement.item;
                 }
@@ -287,9 +277,7 @@ impl TxPolicy {
         {
             return false;
         }
-        // Core's ByPeer/ByTxHash group byte-identical TX/WTX announcements
-        // together. Retire only this failed source and expedite other sources,
-        // preserving typed known/reject state and unrelated raw hashes.
+
         for kind in [key, key.same_hash_other_kind()] {
             if let Some(request) = self.requests.get_mut(&kind)
                 && request.owner.is_some_and(|(owner, _)| owner == source)
@@ -515,8 +503,7 @@ impl PeerTable {
                 && peer.info.as_ref().is_some_and(|info| info.wtxid_relay)
         });
         let preferred = !session.lease.is_inbound();
-        // Seed outside the policy lock: the generator used inside cannot
-        // reseed from the OS during a state transition.
+
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
         let mut policy = self.tx_policy.lock();
         let overloaded = policy
@@ -644,8 +631,7 @@ impl PeerTable {
                 return;
             }
             policy.next_poll = Some(now + REQUEST_POLL_INTERVAL);
-            // Lock order is policy -> peer table. Fresh announcements cannot
-            // appear between this live census and its reconciliation.
+
             let live: HashSet<_> = self
                 .usable_peers()
                 .iter()
@@ -683,9 +669,7 @@ impl PeerTable {
         commit_clock: impl FnOnce() -> Instant,
     ) {
         let planned = self.tx_policy.lock().plan(now, keys);
-        // Never reserve ownership around user/gateway callbacks. A premature
-        // notfound cannot release a planned-but-unsent request. Every identity
-        // about to be sent is checked even when its background sweep is not due.
+
         let (known, checked): (Vec<_>, Vec<_>) = planned
             .into_iter()
             .partition(|(key, _)| inventory.is_some_and(|inventory| key.known(inventory)));
@@ -693,10 +677,7 @@ impl PeerTable {
         for (key, _) in known {
             policy.forget(key);
         }
-        // Revalidation, reservation, grouping and concrete nonblocking enqueue
-        // are one policy critical section: no unlocked owner/reservation ABA.
-        // Inventory callbacks and lock contention must not consume the peer's
-        // response lifetime. Sample at commit, preserving injected event time.
+
         let committed = now.max(commit_clock());
         let selected = policy.claim(committed, &checked);
         let mut batches: HashMap<PeerSource, Vec<(Identity, Inventory)>> = HashMap::new();
@@ -928,7 +909,7 @@ mod tests {
         assert_eq!(policy.announcements, MAX_ALTERNATES);
         assert_eq!(select(&mut policy, now), []);
         assert_eq!(select(&mut policy, now + SOURCE_DELAY).len(), 1);
-        // The global limit is independent of the per-peer and per-identity caps.
+
         policy = TxPolicy::default();
         for port in 1..=21 {
             let peer = source(port);
@@ -1022,8 +1003,6 @@ mod tests {
         let new_addr = ([127, 0, 0, 1], 8334).into();
         POLL_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                // A new ready connection and its announcement both appear
-                // after poll entered but before policy reconciliation.
                 pending_table.register(new_addr, new_lease.clone());
                 pending_table.publish_info(
                     new_addr,
@@ -1043,7 +1022,7 @@ mod tests {
         poll_now += REQUEST_POLL_INTERVAL;
         table.poll_transaction_requests_at(&inventory, poll_now);
         assert_eq!(table.tx_policy.lock().announcements, 1);
-        // A following paced poll cannot duplicate the newly registered source's request.
+
         poll_now += REQUEST_POLL_INTERVAL;
         table.poll_transaction_requests_at(&inventory, poll_now);
         assert!(

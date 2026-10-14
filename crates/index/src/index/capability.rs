@@ -1,5 +1,3 @@
-//! Capability selection and the exact durable watermark representation.
-
 use super::error::IndexError;
 use crate::{
     reconcile::SelectedWatermark, reconcile::selected_watermark as reconcile_selected_watermark,
@@ -110,7 +108,7 @@ impl IndexCapability {
             Self::TxLookup => &[ColumnFamily::TxConfirmed],
             Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
             Self::ScriptLive => &[ColumnFamily::ScriptLive],
-            Self::CompactFilters => &[], // Own prefix in UtxoMeta; reset preserves its siblings.
+            Self::CompactFilters => &[],
         }
     }
 
@@ -239,7 +237,6 @@ impl IndexCapabilities {
     /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
     /// bit 3 is set.
     pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
-        // An older marker without bit 2 has no live rows to reset.
         if mask == 0 || mask & !0b1111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }

@@ -1,14 +1,3 @@
-//! Core-parity vertical gate: the real authenticated loopback
-//! server over a real regtest node, replaying the checked-in Core 31.1
-//! corpus under structural comparison.
-//!
-//! This gate never starts Bitcoin Core, never compares raw JSON text, never
-//! substitutes a fake context, and never changes production behavior. The
-//! eight probe-derived fixtures (cases 01, 04, 05, 06, 07, 17, 18, 20) carry
-//! exact provenance — pinned Core 31.1.0, the exact binary SHA-256, regtest,
-//! tip identity — and exactly one relation each: `exact`, or `known_gap`
-//! with one concrete gap identifier pinning both sides of the divergence.
-
 mod support;
 
 use std::collections::BTreeSet;
@@ -116,8 +105,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
     let (node, server) = stand_up()?;
     let live: LiveChain = node.live_chain()?;
 
-    // Authenticated getblockchaininfo must answer HTTP 200 and decode as the
-    // typed corepc v31 wire struct, before any fixture comparison runs.
     let authenticated = server.replay(
         RequestAuth::Valid,
         r#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#,
@@ -133,7 +120,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
     let envelope: Value = serde_json::from_slice(&authenticated.body)?;
     decode_result_as_chaininfo(&envelope)?;
 
-    // Replay every fixture under its declared relation.
     for fixture in corpus.values() {
         let response = server.replay(
             fixture.request.auth,
@@ -144,9 +130,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         assert_typed_chaininfo(fixture, &response)?;
     }
 
-    // Wrong credentials must be rejected outright by the live server, while
-    // the 401 response tuple itself stays a recorded production gap (the
-    // known-gap fixtures above pin both sides of it).
     let rejected = server.replay(
         RequestAuth::Invalid,
         r#"{"jsonrpc":"2.0","id":18,"method":"getblockchaininfo","params":[]}"#,
@@ -160,15 +143,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         .into());
     }
 
-    // Classification discipline: every fixture carries exactly one relation
-    // and each known gap names one concrete identifier. Every probe in this
-    // vertical slice is a known gap by construction: the probe evidence
-    // recorded Core response bodies but not the transport headers of the
-    // JSON probes, and the live error wording genuinely diverges from
-    // Core's — so no row can honestly claim the `exact` relation yet. A
-    // future capture that records Core's full header tuple and equal
-    // messages may reclassify rows as `exact`; the comparator already
-    // enforces full equality on that relation.
     let mut gaps = Vec::new();
     for fixture in corpus.values() {
         match fixture.relation {
@@ -397,7 +371,7 @@ fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::
         ))
         .into());
     }
-    // A zero-block window keeps its documented shape: no window fields.
+
     if result.get("window_tx_count").is_some() || result.get("window_interval").is_some() {
         return Err(support::fail(format!(
             "a zero-block window must omit its fields: {result}"
