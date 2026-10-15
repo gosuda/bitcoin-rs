@@ -232,6 +232,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
     let second = rx.try_recv()?;
@@ -285,6 +286,7 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately() -> TestRe
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
     assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
@@ -318,6 +320,7 @@ fn orphan_headers_keep_source_peer_connected() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.tick();

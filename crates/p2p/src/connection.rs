@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -98,6 +98,31 @@ const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_B
 /// connection may always keep the bodies it was asked for in play, and no
 /// more unsolicited ones.
 pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
+
+/// Wire and compact-block header batches one connection may have queued for
+/// sync at once.
+///
+/// Core stops reading a peer whose unprocessed messages exceed
+/// `-maxreceivebuffer` (5,000 KB, `net.cpp:4059`); eight full `headers` pages
+/// are about 1.3 MB. Sync asks one connection for one page at a time. A
+/// header carried by a block body holds no slot: the block path already
+/// bounds those (`MAX_UNSOLICITED_BLOCK_FORWARDS` and the download window).
+pub(crate) const MAX_QUEUED_HEADER_BATCHES: usize = 8;
+
+/// How often a connection at its header bound checks for a free slot.
+const HEADER_SLOT_POLL: Duration = Duration::from_millis(10);
+
+/// One queued header batch's share of its connection's
+/// [`MAX_QUEUED_HEADER_BATCHES`]; dropping it — at the end of the sync drain
+/// that took the batch, or with a discarded batch — frees the slot.
+#[derive(Debug)]
+pub(crate) struct HeaderSlot(Arc<AtomicUsize>);
+
+impl Drop for HeaderSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// One admitted unsolicited block forward.
 ///
@@ -235,6 +260,9 @@ pub struct PeerLease {
     budget: Arc<OutboundBudget>,
     /// Live unsolicited block forwards admitted by this connection.
     unsolicited_forwards: Arc<AtomicUsize>,
+    /// Live [`HeaderSlot`]s: this connection's header batches queued for
+    /// sync whose drain has not finished.
+    queued_header_batches: Arc<AtomicUsize>,
     /// Instant the writer queue last admitted a message on this connection.
     last_send: Arc<Mutex<Instant>>,
     inbound: bool,
@@ -343,6 +371,7 @@ impl PeerLease {
             close_rx,
             budget: Arc::new(budget),
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
+            queued_header_batches: Arc::new(AtomicUsize::new(0)),
             last_send: Arc::new(Mutex::new(Instant::now())),
             inbound,
             role,
@@ -494,6 +523,37 @@ impl PeerLease {
             return None;
         }
         Some(BlockForwardCredit(Some(counter)))
+    }
+
+    /// Reserves this connection a slot for one header batch in the shared
+    /// headers channel, waiting while it already holds
+    /// [`MAX_QUEUED_HEADER_BATCHES`]: the reader stops reading the socket, as
+    /// Core pauses a peer over its receive buffer.
+    ///
+    /// POST: `Some` is the slot, freed when it is dropped; `None` once the
+    ///   lease is cancelled or `stop` reports `true`, with no slot held.
+    /// INVARIANT: only this connection's own queued batches count against
+    ///   its bound.
+    pub(crate) fn reserve_header_batch(&self, stop: impl Fn() -> bool) -> Option<HeaderSlot> {
+        loop {
+            if self.is_cancelled() || stop() {
+                return None;
+            }
+            // Increment-then-compare, as for block forwards: a concurrent
+            // release can never let two reservations cross the bound.
+            if self.queued_header_batches.fetch_add(1, Ordering::AcqRel) < MAX_QUEUED_HEADER_BATCHES
+            {
+                return Some(HeaderSlot(Arc::clone(&self.queued_header_batches)));
+            }
+            self.queued_header_batches.fetch_sub(1, Ordering::AcqRel);
+            std::thread::sleep(HEADER_SLOT_POLL);
+        }
+    }
+
+    /// Header slots this connection holds.
+    #[cfg(test)]
+    pub(crate) fn queued_header_batches(&self) -> usize {
+        self.queued_header_batches.load(Ordering::Acquire)
     }
 
     /// Instant the writer queue last admitted a message on this connection.
@@ -876,6 +936,48 @@ mod tests {
         let (independent_tx, _independent_rx) = crossbeam_channel::unbounded();
         let independent = PeerLease::new(independent_tx);
         assert!(independent.send(crate::Message::Ping(1)).is_ok());
+    }
+
+    /// Reserves with a single attempt: `stop` lets one try through, then
+    /// ends any wait.
+    fn try_reserve_header_batch(lease: &PeerLease) -> Option<super::HeaderSlot> {
+        let checks = std::cell::Cell::new(0_u8);
+        lease.reserve_header_batch(|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        })
+    }
+
+    #[test]
+    fn header_slots_bound_one_connection_until_dropped_or_cancelled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new_inbound(tx);
+        let mut held = (0..super::MAX_QUEUED_HEADER_BATCHES)
+            .map(|_| try_reserve_header_batch(&lease).ok_or("below the bound"))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            try_reserve_header_batch(&lease).is_none(),
+            "the bound holds"
+        );
+        held.pop();
+        let refilled = try_reserve_header_batch(&lease);
+        assert!(refilled.is_some(), "a dropped slot is reusable");
+
+        let waiter = {
+            let lease = lease.clone();
+            std::thread::spawn(move || lease.reserve_header_batch(|| false).is_some())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        lease.cancel();
+        assert!(
+            !waiter.join().map_err(|_| "waiter thread panicked")?,
+            "cancellation ends the wait without a slot"
+        );
+        drop(refilled);
+        drop(held);
+        assert_eq!(lease.queued_header_batches(), 0);
+        Ok(())
     }
 
     fn wire_len_of(message: &crate::Message) -> usize {

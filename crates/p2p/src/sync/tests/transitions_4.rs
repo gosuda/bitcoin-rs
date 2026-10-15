@@ -46,6 +46,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
 
         wire_response: false,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -102,6 +103,7 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.tick();

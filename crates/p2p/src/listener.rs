@@ -318,18 +318,41 @@ impl ConnectionShared {
         self.session_cancel.load()
     }
 
+    /// Queues a wire or compact-block header batch once `lease` has a header
+    /// slot free.
+    ///
+    /// The headers channel itself is unbounded; each connection's share of it
+    /// is bounded by [`crate::PeerLease::reserve_header_batch`], whose wait
+    /// pauses only this connection's reader. A cancelled connection or
+    /// session queues nothing.
+    fn send_peer_headers(
+        &self,
+        lease: &crate::PeerLease,
+        source: crate::PeerSource,
+        headers: Vec<bitcoin_rs_primitives::Header>,
+        wire_response: bool,
+        body_fetch_owned: bool,
+    ) {
+        let Some(slot) = lease.reserve_header_batch(|| self.is_session_cancelled()) else {
+            return;
+        };
+        self.send_headers(source, headers, wire_response, body_fetch_owned, Some(slot));
+    }
+
     fn send_headers(
         &self,
         source: crate::PeerSource,
         headers: Vec<bitcoin_rs_primitives::Header>,
         wire_response: bool,
         body_fetch_owned: bool,
+        slot: Option<crate::connection::HeaderSlot>,
     ) {
         if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
             body_fetch_owned,
+            slot,
         }) {
             tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound headers channel disconnected");
         } else {
@@ -395,7 +418,7 @@ impl ConnectionShared {
             return;
         };
         if self.forward_block(block, serialized, source, Some(credit)) {
-            self.send_headers(source, vec![header], false, false);
+            self.send_headers(source, vec![header], false, false, None);
         }
     }
 
@@ -1819,7 +1842,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         }
                     }
                     crate::Message::Headers(headers) => {
-                        shared.send_headers(lease.source(peer_addr), headers, true, false);
+                        shared.send_peer_headers(
+                            lease,
+                            lease.source(peer_addr),
+                            headers,
+                            true,
+                            false,
+                        );
                     }
                     crate::Message::Block(block) => {
                         shared.send_block(lease, peer_addr, block, raw);
@@ -1944,7 +1973,7 @@ fn process_compact_wire_message(
             hash = %header.compute_hash(),
             "p2p compact block header does not earn reconstruction"
         );
-        shared.send_headers(lease.source(peer_addr), vec![header], false, false);
+        shared.send_peer_headers(lease, lease.source(peer_addr), vec![header], false, false);
         return;
     }
 
@@ -1984,7 +2013,13 @@ fn process_compact_wire_message(
     let fetch_issued = handle_compact_outcome(outcome, lease, peer_addr, shared);
     if let Some(header) = announced_header {
         let fetch_owned = body_fetch_owned && fetch_issued;
-        shared.send_headers(lease.source(peer_addr), vec![header], false, fetch_owned);
+        shared.send_peer_headers(
+            lease,
+            lease.source(peer_addr),
+            vec![header],
+            false,
+            fetch_owned,
+        );
         if fetch_owned && let Some(sync) = shared.block_sync.as_ref() {
             sync.record_owned_body_fetch(
                 lease.source(peer_addr),
@@ -2867,7 +2902,7 @@ mod writer_shutdown_tests {
         let serialized = bytes::Bytes::from(block_bytes);
         let source = lease.source(addr);
 
-        shared.send_headers(source, Vec::new(), true, false);
+        shared.send_headers(source, Vec::new(), true, false, None);
         shared.send_block(&lease, addr, block, serialized.clone());
 
         assert_eq!(headers_rx.try_recv()?.source, Some(source));
@@ -2905,6 +2940,105 @@ mod writer_shutdown_tests {
             !forwarded.wire_response,
             "a body-carried header is not a getheaders response"
         );
+        assert!(
+            forwarded.slot.is_none(),
+            "a body-carried header holds no header slot"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_connection_at_its_header_bound_waits_only_on_its_own_batches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        let (tx, _flooder_rx) = crossbeam_channel::unbounded();
+        let flooder = crate::PeerLease::new_inbound(tx);
+        let (tx, _honest_rx) = crossbeam_channel::unbounded();
+        let honest = crate::PeerLease::new_inbound(tx);
+        let flooder_source =
+            flooder.source(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 1), 8333)));
+        let honest_source = honest.source(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 2), 8333)));
+        for _ in 0..crate::connection::MAX_QUEUED_HEADER_BATCHES {
+            shared.send_peer_headers(&flooder, flooder_source, Vec::new(), true, false);
+        }
+
+        let (honest_done_tx, honest_done_rx) = crossbeam_channel::bounded(1);
+        let (flooder_done_tx, flooder_done_rx) = crossbeam_channel::bounded(1);
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            scope.spawn(|| {
+                shared.send_peer_headers(&honest, honest_source, Vec::new(), true, false);
+                let _ = honest_done_tx.send(());
+            });
+            scope.spawn(|| {
+                shared.send_peer_headers(&flooder, flooder_source, Vec::new(), true, false);
+                let _ = flooder_done_tx.send(());
+            });
+            let checks = || -> Result<(), Box<dyn std::error::Error>> {
+                // Another connection's batch is never held behind that backlog.
+                honest_done_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+                if flooder_done_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_ok()
+                {
+                    return Err("the bound connection's reader must wait".into());
+                }
+                // Dropping one of its drained batches frees a slot.
+                if headers_rx.try_recv()?.source != Some(flooder_source) {
+                    return Err("the flooder's backlog drains first".into());
+                }
+                flooder_done_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+                Ok(())
+            };
+            let result = checks();
+            // A failed check must not leave a reader waiting at scope exit.
+            flooder.cancel();
+            honest.cancel();
+            result
+        })?;
+        assert_eq!(
+            headers_rx.len(),
+            crate::connection::MAX_QUEUED_HEADER_BATCHES + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wire_headers_hold_their_connections_slot_until_dropped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_446));
+        let table = Arc::new(crate::PeerTable::new());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        table.register(addr, lease.clone());
+        let mut wire = Vec::new();
+        crate::wire::write_message(
+            &mut wire,
+            Magic::BITCOIN,
+            &crate::Message::Headers(Vec::new()),
+        )?;
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(table, headers_tx, crossbeam_channel::unbounded().0);
+        let mut peer = Peer::new(
+            ScriptedStream {
+                script: io::Cursor::new(wire),
+            },
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        let batch = std::thread::scope(|scope| {
+            scope.spawn(|| run_message_loop(&mut peer, addr, &lease, &shared, None));
+            let batch = headers_rx.recv_timeout(std::time::Duration::from_secs(5));
+            // Ends the loop, which otherwise polls the spent script forever.
+            lease.cancel();
+            batch
+        })?;
+        assert!(batch.slot.is_some(), "a wire headers message holds a slot");
+        assert_eq!(lease.queued_header_batches(), 1);
+        drop(batch);
+        assert_eq!(lease.queued_header_batches(), 0);
         Ok(())
     }
 
@@ -3975,6 +4109,7 @@ mod block_forward_tests {
             source: Some(source),
             wire_response: true,
             body_fetch_owned: false,
+            slot: None,
         })?;
         sync.tick();
         assert!(
@@ -4162,6 +4297,7 @@ mod block_forward_tests {
             let announced = headers_rx.try_recv()?;
             assert_eq!(announced.headers.len(), 1, "each header is still announced");
             assert!(!announced.body_fetch_owned);
+            assert!(announced.slot.is_some(), "the announcement holds a slot");
         }
 
         // Another connection owning its body fetch does not count for this one.

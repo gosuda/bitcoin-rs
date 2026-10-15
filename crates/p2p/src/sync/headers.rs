@@ -59,13 +59,18 @@ impl BlockSync {
         // Near-tip batches whose body the announcing connection can serve
         // straight away; drained after the loop with one frontier read.
         let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
+        // Slots return only after the drain, so a connection cannot refill
+        // its share while this loop runs and hold the tick away from blocks.
+        let mut slots = Vec::new();
         while let Ok(InboundHeaders {
             headers,
             source,
             wire_response,
             body_fetch_owned,
+            slot,
         }) = self.inbound_headers_rx.try_recv()
         {
+            slots.extend(slot);
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
                 continue;
             }
@@ -215,6 +220,7 @@ impl BlockSync {
                 self.note_owned_body_fetch(source, headers.last());
             }
         }
+        drop(slots);
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
         }

@@ -32,6 +32,29 @@ pub struct InboundHeaders {
     /// outside the download window — a compact `getblocktxn` or a fallback
     /// `getdata` issued during compact handling.
     pub body_fetch_owned: bool,
+    /// The delivering connection's header slot, freed when sync drops the
+    /// batch. `None` for a header carried by a block body and for local
+    /// injection.
+    pub(crate) slot: Option<crate::connection::HeaderSlot>,
+}
+
+impl InboundHeaders {
+    /// A batch that holds no connection's header slot, for local injection.
+    #[must_use]
+    pub fn new(
+        headers: Vec<Header>,
+        source: Option<crate::PeerSource>,
+        wire_response: bool,
+        body_fetch_owned: bool,
+    ) -> Self {
+        Self {
+            headers,
+            source,
+            wire_response,
+            body_fetch_owned,
+            slot: None,
+        }
+    }
 }
 
 /// A transaction received from a peer, ready for mempool admission.

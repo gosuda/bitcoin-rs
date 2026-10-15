@@ -277,6 +277,7 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -413,6 +414,7 @@ pub(crate) fn deliver_headers(
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     Ok(())
 }
