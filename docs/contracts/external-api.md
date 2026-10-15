@@ -344,10 +344,10 @@ index-server protocol compatibility claim.
   overlays such as Tailscale use), unique-local (`fc00::/7`) and link-local
   sources. The connection's source address decides, with an IPv4-mapped
   address read as IPv4. Any other source gets `403 Forbidden` instead of a
-  route response; `/api` is unaffected. Any proxy that relays public
-  connections to the node, including a reverse proxy on its host and
-  Docker's userland proxy, makes those clients look internal, so
-  `/esplora` must reach the node only from the backend's own network.
+  route response; `/api` is unaffected. A proxy that relays public
+  connections and itself connects from an internal address, such as a
+  reverse proxy on the node's host or Docker's userland proxy, makes those
+  clients look internal, so such a proxy must not forward `/esplora`.
   Proof: `rpc::server::tests`
   `internal_clients_are_loopback_private_shared_and_link_local_sources` and
   `backend_esplora_answers_only_internal_clients`.
