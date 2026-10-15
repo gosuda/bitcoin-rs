@@ -34,8 +34,12 @@ holds the reference pins and the admission-profile evidence.
 - Single preview follows the same preparation, graph and script verification
   as a single commit, stopping before mutation. Multi-transaction preview uses
   Core's `PackageTestAccept` semantics: replacement and fee aggregation are
-  disabled. Unsupported aggregate package submission is explicit in the
-  manifest, not a hidden fallback to separate successful submissions.
+  disabled. Native `submit_local_package` admits a child and its independent
+  direct parents atomically, in arbitrary input order. New members pay one
+  aggregate relay/pressure floor; resident or positively confirmed fees are excluded. It uses
+  the same preparation, scripts, graph/TRUC and ephemeral-spend owners, with
+  no replacement or capacity eviction. RPC package submission remains
+  unsupported, not a hidden fallback to separate successful submissions.
 - Chain reads, script execution and fee-diagram solving run outside write locks.
   Callbacks run after pool/lifecycle locks are released.
 
@@ -101,7 +105,8 @@ holds the reference pins and the admission-profile evidence.
   order, internal consistency and projected cluster bounds. First precheck
   failure leaves other rows unfinished. Script failures preserve only earlier
   script-success rows. `submitpackage` stays `Unimplemented` and Esplora
-  `/txs/package` stays 404; aggregate CPFP/package RBF is unsupported.
+  `/txs/package` stays 404; native CPFP does not imply RPC compatibility or
+  package RBF support.
 - TRUC requires matching unconfirmed versions, at most one ancestor/descendant,
   10,000 adjusted vB for a root and 1,000 for a child. An eligible sole sibling
   joins single-transaction RBF and remains subject to its fees and diagrams.

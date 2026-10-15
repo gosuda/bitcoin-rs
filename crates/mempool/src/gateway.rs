@@ -175,7 +175,7 @@ pub enum AdmitError {
 pub(crate) struct PreparedAdmission {
     pub(crate) fact: crate::standardness::TxAcceptanceFact,
     prevouts: Vec<(OutPoint, TxOut)>,
-    rejection: Option<(AdmitError, RejectScope)>,
+    pub(crate) rejection: Option<(AdmitError, RejectScope)>,
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
     replacement: ReplacementStage,
     /// Engine for this attempt's script checks; set by the gateway that
@@ -187,6 +187,7 @@ pub(crate) struct PreparedAdmission {
 pub(crate) enum AdmissionMode {
     Single,
     PackageTest,
+    PackageSubmit,
 }
 
 #[allow(
@@ -195,7 +196,7 @@ pub(crate) enum AdmissionMode {
 )]
 enum ReplacementStage {
     Rejected,
-    PackageTest,
+    Package,
     Captured(crate::rbf::ReplacementInputs),
     Verified(crate::rbf::PreparedPoolChange),
 }
@@ -274,8 +275,8 @@ impl PreparedAdmission {
                     self.reject(replacement_rejection(error), default_scope);
                 }
             }
-        } else if matches!(replacement, ReplacementStage::PackageTest) {
-            self.replacement = ReplacementStage::PackageTest;
+        } else if matches!(replacement, ReplacementStage::Package) {
+            self.replacement = ReplacementStage::Package;
         } else {
             self.reject(AdmitError::MempoolChanged, default_scope);
         }
@@ -864,7 +865,7 @@ impl MempoolGateway {
             _ => LimitEnforcement::Full,
         };
         let deferred = enforcement == LimitEnforcement::Deferred;
-        let floor = if deferred {
+        let floor = if deferred || mode == AdmissionMode::PackageSubmit {
             None
         } else {
             Some(crate::eviction::mempool_min_fee_sat_per_kvb(
@@ -918,9 +919,12 @@ impl MempoolGateway {
                 );
             }
         }
-        if mode == AdmissionMode::PackageTest {
-            // Core PackageTestAccept forbids replacement before fee/script
-            // checks; an already resident tx retains its duplicate result.
+        if matches!(
+            mode,
+            AdmissionMode::PackageTest | AdmissionMode::PackageSubmit
+        ) {
+            // Package previews and native submissions forbid replacement;
+            // an already resident tx retains its duplicate result here.
             if !pool.contains_txid(&request.tx.txid())
                 && !pool.conflicts_for(&request.tx).is_empty()
             {
@@ -933,7 +937,7 @@ impl MempoolGateway {
             }
             if prepared.rejection.is_none() {
                 match pool.truc_conflicts(&request.tx, prepared.fact.vsize, false) {
-                    Ok(_) => prepared.replacement = ReplacementStage::PackageTest,
+                    Ok(_) => prepared.replacement = ReplacementStage::Package,
                     Err(error) => {
                         prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
                     }
@@ -1186,7 +1190,7 @@ impl MempoolGateway {
     /// every accepted/removed change from its prevalidated plan.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<T, E>(
+    pub(crate) fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,

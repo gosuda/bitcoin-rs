@@ -23,7 +23,7 @@ use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
-use super::projection::{Confirmation, Projection};
+use super::projection::{Confirmation, ParentSource, Projection};
 use crate::context::Context;
 use crate::convert;
 use crate::handlers::Handler;
@@ -179,8 +179,8 @@ fn tx(ctx: &Context, id: &str) -> Response {
         |r| r,
         |(tx, status)| {
             projection
-                .transaction_value(&tx, status)
-                .map_or_else(|r| r, json_ok)
+                .transaction_values([(&tx, status)], None)
+                .map_or_else(|r| r, |values| json_ok(&values[0]))
         },
     )
 }
@@ -441,14 +441,15 @@ pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, block.txs.iter().skip(start).take(CHAIN_PAGE))
-        .map_or_else(|r| r, json_ok)
+    block_transaction_values(ctx, &record, &block, start, CHAIN_PAGE).map_or_else(|r| r, json_ok)
 }
 
-pub(super) fn block_transaction_values<'a>(
+pub(super) fn block_transaction_values(
     ctx: &Context,
     record: &bitcoin_rs_index::block_log::BlockRecord,
-    transactions: impl IntoIterator<Item = &'a Tx>,
+    block: &Block,
+    start: usize,
+    limit: usize,
 ) -> Result<Vec<TransactionValue>, Response> {
     // A record fetched by hash can be from a losing branch. Do not reuse the
     // active block at the same height for its transactions' confirmation data.
@@ -460,16 +461,28 @@ pub(super) fn block_transaction_values<'a>(
         time: record.time,
     });
     let projection = Projection::new(ctx);
-    transactions
-        .into_iter()
+    let transactions = block
+        .txs
+        .iter()
+        .skip(start)
+        .take(limit)
         .map(|tx| {
             let state = match block_status {
                 Some(state) => Some(state),
                 None => projection.confirmation(&tx.txid())?,
             };
-            projection.transaction_value(tx, state)
+            Ok((tx, state))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, Response>>()?;
+    // A decoded losing-branch block is not authoritative prevout history.
+    projection.transaction_values(
+        transactions,
+        Some(ParentSource::Block(if block_status.is_some() {
+            block.txs.as_slice()
+        } else {
+            &[]
+        })),
+    )
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
     let (_, block) = match Projection::new(ctx).required_block(h) {
@@ -645,28 +658,23 @@ pub(super) fn history(
             Ok(mempool) => mempool,
             Err(response) => return response,
         };
-        return mempool
-            .into_iter()
-            .take(MEMPOOL_PAGE)
-            .map(|t| projection.transaction_value(&t, None))
-            .collect::<Result<Vec<_>, _>>()
+        return projection
+            .transaction_values(
+                mempool
+                    .iter()
+                    .take(MEMPOOL_PAGE)
+                    .map(|tx| (tx.as_ref(), None)),
+                None,
+            )
             .map_or_else(|r| r, json_ok);
     }
 
-    let mut out = if include_mempool {
+    let mempool = if include_mempool {
         let mempool = match projection.mempool_activity_for(h) {
             Ok(mempool) => mempool,
             Err(response) => return response,
         };
-        match mempool
-            .into_iter()
-            .take(MEMPOOL_PAGE)
-            .map(|t| projection.transaction_value(&t, None))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(out) => out,
-            Err(r) => return r,
-        }
+        mempool.into_iter().take(MEMPOOL_PAGE).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -692,15 +700,22 @@ pub(super) fn history(
                 .confirmation_at_height(record.height)
                 .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
             let transaction = projection.confirmed_transaction(&record.txid)?;
-            projection.transaction_value(&transaction, Some(confirmation))
+            Ok((transaction, Some(confirmation)))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, Response>>()
     {
         Ok(chain) => chain,
         Err(r) => return r,
     };
-    out.extend(chain);
-    json_ok(&out)
+    projection
+        .transaction_values(
+            mempool
+                .iter()
+                .map(|tx| (tx.as_ref(), None))
+                .chain(chain.iter().map(|(tx, status)| (tx, *status))),
+            None,
+        )
+        .map_or_else(|r| r, json_ok)
 }
 
 pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Response {

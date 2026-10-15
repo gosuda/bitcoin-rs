@@ -107,6 +107,32 @@ Owners:
   authenticate, such as a missing body or undo row — still fails closed with the
   marker retained.
 
+### `EVT-06`: Public settled polling and positional replay
+
+- `Node::settled_snapshot`, `subscribe_chain`, `poll_chain` and `pin_chain`
+  capture through the existing stable-read domain and require a stable mempool
+  generation. A transition, shutdown or recovery-required fence is unavailable.
+  No commit, durable-head, follower or lock-order protocol is changed.
+- Subscription is polling, with no queue, callback, worker or durable log.
+  Hints name the previous observed cursor and a pinned target. Multiple commits,
+  epoch changes and non-adjacent moves signal a gap. Intermediate committed
+  reorg prefixes are not guaranteed. Consumer persistence remains consumer-owned;
+  a subscription cursor records observation, not successful application.
+- `replay_chain(from_hash, target, limit)` reconciles positions, disconnecting
+  before connecting. It copies at most 256 header steps with a shared 4096-hop
+  ancestry budget per call, then releases locks before consumer work. Consumers
+  advance their applied hash only after applying each step, keep the target fixed
+  across batches, and poll again afterward; they may re-pin when ancestry is
+  unavailable or the target has become stale.
+- Opaque targets belong to the minting node run. They pin identity, not body
+  retention or apply admission. After restart a persisted observation cursor
+  detects an epoch gap; re-pin and reconcile from the consumer's actual hash.
+  Unknown headers, unavailable ancestry and missing/pruned bodies are explicit
+  errors. Fetch bodies separately with `block_by_hash`; never mark a failed
+  body applied. Replay reconstructs a path, not a historical event log.
+- Proof: `chain_feed::tests` covers bounded batches, missed commits, stale
+  targets, disconnect-before-connect, restart, refusal and unsettled fences.
+
 ## Startup crash recovery
 
 On daemon start, `NodeState::open` delegates authoritative recovery to

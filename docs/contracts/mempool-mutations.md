@@ -152,6 +152,32 @@ state (`crates/mempool/src/orphan.rs`).
 - RPC duplicate submission remains an idempotent success, while preview
   reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject
   state. The writer validates every captured token before either transition.
+- Native package submission shares preview's batch input resolution and the
+  gateway's policy/script evaluator. A bounded child-with-independent-parents
+  package is ordered by the owner; duplicates and internal conflicts refuse.
+  Resident members and members positively confirmed by live-coin evidence are
+  excluded; only new members contribute to aggregate modified fees and pressure/relay
+  charges. A captured insertion plan preflights capacity and member inserts;
+  graph/TRUC/ephemeral-spend and script checks finish before the writer. The
+  single and package paths share structural entry validation and metadata
+  preparation; the native package checks cluster bounds on its combined graph
+  rather than repeating per-entry cluster checks. One captured entry vector feeds
+  both graph checks and the insertion plan. Native fee refusal uses
+  `MinRelayFeeNotMet`, pool failures retain `MempoolError`, and stale insertion
+  plans remain retryable rather than becoming replacement-policy refusals. The
+  writer revalidates the same generation, sequence and policy stamp, then
+  installs all members through the ordinary insertion funnel without registering
+  package members as fee-estimation samples, and publishes one ordered envelope.
+  Submission preserves the prepared consensus or policy error class; preview
+  keeps its existing rejection facts. Refusal changes no membership, sequence,
+  fee overlay, estimator or observer output. Four attempts bound stale facts.
+  It neither implements package RBF nor changes RPC/REST wire behavior.
+- Proof: `package::tests::native_package_aggregates_cpfp_atomically_and_ignores_input_order`
+  in `crates/mempool/src/package/tests.rs` checks successful CPFP admission,
+  ordered publication and unchanged estimator history;
+  `package::tests::native_package_consensus_failures_match_single_submission`
+  checks script and overspend error parity for single and multi-member native
+  packages, unchanged preview facts and refusal without mutation.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
@@ -163,7 +189,7 @@ state (`crates/mempool/src/orphan.rs`).
   admission or peer lifecycle results. RPC and node's peer ingress use that
   same view, with no gateway ownership, shadow version, or copied chain-state
   model. A provider may return no snapshot to request a transient retry.
-  Peer duplicate suppression uses positive live-coin evidence from
+  Peer/native package duplicate suppression uses positive live-coin evidence from
   `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation
   status unknown. RPC transaction-body cache membership supplies no such
   evidence.

@@ -20,6 +20,7 @@ use crate::{
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod fee_policy;
+pub(crate) mod package;
 
 /// Script-index key for funding index range scans.
 #[derive(
@@ -721,6 +722,22 @@ impl Mempool {
     /// Preflights one entry against the pool's structural and cluster limits.
     pub(crate) fn validate_insert(
         &self,
+        entry: MempoolEntry,
+        excluded: &HashSet<EntryId>,
+        enforcement: crate::rbf::LimitEnforcement,
+    ) -> Result<PreparedInsert, MempoolError> {
+        let prepared = self.prepare_insert(entry, excluded, enforcement)?;
+        self.check_cluster_limits(&prepared.entry.tx, prepared.entry.policy_weight(), excluded)?;
+        if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
+            return Err(MempoolError::TooManyEntries);
+        }
+        Ok(prepared)
+    }
+
+    /// Shared entry validation and metadata preparation. The enclosing single
+    /// or package plan must also preflight its graph and entry-id allocation.
+    fn prepare_insert(
+        &self,
         mut entry: MempoolEntry,
         excluded: &HashSet<EntryId>,
         enforcement: crate::rbf::LimitEnforcement,
@@ -756,12 +773,6 @@ impl Mempool {
         }
 
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
-        self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
-
-        if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
-            return Err(MempoolError::TooManyEntries);
-        }
-
         let ancestor_size = ancestors.iter().fold(u64::from(entry.vsize), |total, id| {
             total.saturating_add(
                 self.entry(*id)
