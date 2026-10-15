@@ -125,7 +125,9 @@ impl BlockSource for NativeBackend<'_> {
                 .node
                 .block_by_hash(native_hash)
                 .await
-                .map_err(BlockSourceError::transient)?
+                // A known block's pruned, corrupt or mismatched body needs
+                // data recovery; retrying this source cannot repair it.
+                .map_err(BlockSourceError::persistent)?
                 .ok_or_else(|| BlockSourceError::transient("block is not known to Node"))?;
             let bytes = bitcoin_rs_primitives::consensus_bytes(&block);
             let block = consensus::deserialize(&bytes).map_err(BlockSourceError::persistent)?;

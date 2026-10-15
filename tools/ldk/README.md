@@ -14,7 +14,7 @@ store, worker, event journal or channel persistence.
 | `BroadcasterInterface` | `broadcast`, `broadcast_package` | Single submission or atomic child-with-independent-parents package; arbitrary package order. |
 | `FeeEstimator` | `fee_estimate` | Existing history estimator, explicit fallback when insufficient. |
 | `BlockSource::get_best_block` | `settled_snapshot` | Coherent applied hash/height after node follower/mempool settlement. |
-| `BlockSource::get_block` | `block_by_hash` | Full block via consensus encoding; unavailable/missing bodies report errors. |
+| `BlockSource::get_block` | `block_by_hash` | Full block via consensus encoding; pruned, corrupt or mismatched bodies are persistent errors. Unknown blocks remain transient. |
 | `BlockSource::get_header` | `block_header` | Header, authoritative height and cumulative work, independent of advisory hints and body retention. |
 
 Conversions use consensus encoding and hash byte arrays, without display-string
