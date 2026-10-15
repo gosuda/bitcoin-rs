@@ -41,9 +41,6 @@ use std::vec::Vec;
 /// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
-/// Maximum number of received header batches processed before other sync work.
-pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 16;
-
 /// One batch's result from a connection's download-twice sync state.
 struct PresyncOutcome {
     failure: Option<HeaderSyncError>,
@@ -55,21 +52,6 @@ struct PresyncOutcome {
 }
 
 impl BlockSync {
-    /// Whether a bulk wire headers page can answer an outstanding getheaders
-    /// on this exact live connection. Small unsolicited announcements remain
-    /// supported by the listener.
-    #[must_use]
-    pub(crate) fn expects_headers_response(&self, source: PeerSource) -> bool {
-        self.peer_table.is_current(source)
-            && self
-                .scheduler
-                .lock()
-                .headers_sync
-                .get(&source)
-                .and_then(|owned| owned.request)
-                .is_some_and(|request| request.state == HeaderRequestState::AwaitingResponse)
-    }
-
     #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let mut total_headers = 0_usize;
@@ -77,17 +59,13 @@ impl BlockSync {
         // Near-tip batches whose body the announcing connection can serve
         // straight away; drained after the loop with one frontier read.
         let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
-        // Bound both admission work and the delay before body processing.
-        // A busy channel resumes on the next tick rather than monopolizing it.
-        for _ in 0..MAX_HEADER_BATCHES_PER_TICK {
-            let Ok(InboundHeaders {
-                headers,
-                source,
-                wire_response,
-                body_fetch_owned,
-            }) = self.inbound_headers_rx.try_recv() else {
-                break;
-            };
+        while let Ok(InboundHeaders {
+            headers,
+            source,
+            wire_response,
+            body_fetch_owned,
+        }) = self.inbound_headers_rx.try_recv()
+        {
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
                 continue;
             }
