@@ -47,14 +47,16 @@ COPY --from=builder /workspace/target/release/bitcoin-rs /usr/local/bin/bitcoin-
 # CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under
 # docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so
 # going that route means repeating the whole argument list
-# (`--config --data-dir --rpc-bind --p2p-listen` included).
+# (`--config --data-dir --p2p-listen` included).
 RUN install -d -o bitcoin-rs -g bitcoin-rs /etc/bitcoin-rs \
     && printf 'validation_engine = "kernel"\n' > /etc/bitcoin-rs/default.toml \
     && chown bitcoin-rs:bitcoin-rs /etc/bitcoin-rs/default.toml
 
+# RPC stays loopback-only unless an operator supplies credentials and
+# explicitly changes BITCOIN_RS_RPC_BIND. P2P remains network-accessible.
 USER bitcoin-rs
 VOLUME ["/data"]
 EXPOSE 8332 8333
 
 ENTRYPOINT ["bitcoin-rs"]
-CMD ["--config", "/etc/bitcoin-rs/default.toml", "--data-dir", "/data", "--rpc-bind", "0.0.0.0:8332", "--p2p-listen", "0.0.0.0:8333"]
+CMD ["--config", "/etc/bitcoin-rs/default.toml", "--data-dir", "/data", "--p2p-listen", "0.0.0.0:8333"]

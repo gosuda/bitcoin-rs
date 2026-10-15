@@ -816,10 +816,29 @@ evidence does not establish mainnet memory or throughput qualifications.
 - Registry execution metadata classifies the three wait methods and
   `scantxoutset`'s `start` action. Every `Handler::dispatch`, including direct
   callers, batch entries and notifications, acquires its dispatcher's
-  bounded blocking quota. A bound listener permits at most `max_connections - 1`
-  such calls (zero with one worker); the total connection bound is unchanged.
+  bounded blocking quota. A bound listener permits one fewer such call than
+  one source address may hold (`max_connections - max_connections / 4 - 1`,
+  95 of the node's 128; zero with one worker). Blocking calls therefore never
+  take a source's last connection or the whole pool. The total connection
+  bound is unchanged: once the pool is full, every source is refused, as
+  before; reserving ordinary capacity per source is not provided.
   A standalone dispatcher defaults to 16 blocking calls. Admission never
   waits for capacity. Scan status/abort remain ordinary calls.
+- Connection admission: a listener holds at most `max_connections` live
+  connections. One source address holds at most `max_connections -
+  max_connections / 4` of them (96 of the node's 128), so a quarter, rounded
+  down, stays open to other sources. A refused connection gets HTTP 503
+  `busy`. A source is an address, so clients behind loopback, a Docker gateway
+  or a reverse proxy share one. Pools below four workers keep no per-source
+  share.
+  - Once the server starts reading a request, its head must complete within
+    10 s and its body within 60 s, however slowly the bytes arrive.
+  - Waiting for the next keep-alive request keeps the listener's idle timeout
+    (30 s in the node, Core's `-rpcservertimeout` default).
+  - Proof: `rpc::server::tests` `connection_admission_reserves_slots_for_other_peers`,
+    `blocking_quota_leaves_the_busiest_source_an_ordinary_slot`,
+    `slow_drip_request_line_headers_and_body_expire` and
+    `keep_alive_wait_is_not_bounded_by_the_head_budget`.
 - Admission exhaustion is the intentional `-1` error
   `RPC blocking request limit reached`. HTTP requests containing a classified
   blocking call close keep-alive after their response, including refusals, so
