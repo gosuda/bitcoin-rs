@@ -379,20 +379,34 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
 ### `P2P-08`: Inbound admission and the outbound service gate
 
 - **Owner**: `PeerTable::try_register_inbound` (`crates/p2p/src/peer_table.rs`)
-  owns the capacity decision, and the accept loop in `serve`
-  (`crates/p2p/src/listener.rs`) is its only inbound caller.
+  owns the capacity and eviction decision, `select_inbound_to_evict`
+  (`crates/p2p/src/eviction.rs`) owns the choice of connection, and the accept
+  loop in `serve` (`crates/p2p/src/listener.rs`) is the only inbound caller.
   `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
   ordinary outbound desirable-service predicate.
 - The accept loop reserves the connection's inbound lease before it spawns the
-  handshake thread, and the reservation and the live inbound count are one
-  table write operation. A socket that arrives at `max_inbound =
-  max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots`
-  is closed with no lease and no thread (Core derives the same remainder at
-  `bitcoin-core/src/net.h:1124-1127` and applies it at `net.cpp:1838-1845`). A
-  replacement at an address already in the table is admitted: it takes the slot
-  its predecessor held. The live count is always derived from the live entry
-  set, so no independent counter can drift from it. A failed spawn releases
-  the reservation it took.
+  handshake thread, and the reservation, the live inbound count and any
+  eviction are one table write operation. A socket that arrives at
+  `max_inbound = max_peer_connections - outbound_full_relay_slots -
+  outbound_block_relay_slots` first removes and cancels the inbound connection
+  Core's `SelectNodeToEvict` would choose (Core derives the same remainder at
+  `bitcoin-core/src/net.h:1118` and evicts at `net.cpp:1819-1826`). Outbound
+  and `NoBan` connections are never chosen. When every candidate is protected,
+  or the address holds a live outbound connection the newcomer would also
+  replace, the socket is closed with no lease and no thread. A replacement at
+  an address already holding a live inbound connection is admitted without
+  eviction: it takes the slot its predecessor held. The live count is always
+  derived from the live entry set, so no independent counter can drift from
+  it. A failed spawn releases the reservation it took.
+- Eviction protects, in Core's order: four connections by a process-keyed
+  netgroup hash, the four that most recently delivered a transaction the
+  mempool accepted, up to eight block-relay-only connections with wanted
+  services that most recently delivered a committed block, the four that most
+  recently delivered a committed block, and then half of the rest by uptime,
+  up to a quarter of the candidates reserved for localhost. It then evicts the
+  newest connection of the netgroup with the most remaining candidates.
+  `docs/policies/p2p-compatibility.md` section 7 item 12 lists where this
+  differs from Core.
 - `PeerTable::set_network_active` and conditional inbound/outbound socket
   registration share the table write lock. If disable wins first, registration
   returns no lease without replacement or capacity mutation. If registration
@@ -424,6 +438,12 @@ Proof: `crates/p2p/src/peer_table.rs` tests
 `network_disable_orders_before_or_after_inbound_and_outbound_admission` and
 `inactive_registration_never_mutates_or_returns_an_existing_lease` cover both
 admission orders, inactive identity/capacity guards and re-enable behavior.
+`one_host_filling_every_inbound_slot_gives_way_to_another_netgroup`,
+`noban_inbound_connections_are_never_evicted`,
+`a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` and
+`useful_transactions_and_blocks_protect_inbound_connections` cover eviction at
+the cap, and the `crates/p2p/src/eviction.rs` tests cover each protection step
+and the final netgroup choice.
 `crates/p2p/src/service.rs` tests
 `disable_during_outbound_tip_query_refuses_registration_before_handshake`,
 `ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp`,
@@ -599,10 +619,9 @@ misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
   `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
   holds a shadow download window.
-- **Inbound eviction scoring**: Core makes room at the inbound cap by scoring
-  and disconnecting a peer (`AttemptToEvictConnection`,
-  `bitcoin-core/src/net.cpp:1695-1735`). This node refuses the new socket
-  instead; see `docs/policies/p2p-compatibility.md` section 7 item 12.
+- **Inbound eviction protections**: eviction at the inbound cap lacks Core's
+  minimum-ping protection, because no ping round trip is measured; see
+  `docs/policies/p2p-compatibility.md` section 7 item 12.
 
 ## Proven by
 

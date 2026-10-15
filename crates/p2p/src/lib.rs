@@ -23,6 +23,8 @@ pub(crate) mod counters;
 pub mod dispatch;
 /// Block download window, peer-assignment, stall, and scheduling policy.
 pub mod download_window;
+/// Inbound eviction selection when the inbound slots are full.
+pub(crate) mod eviction;
 /// Peer finite-state machine.
 pub(crate) mod fsm;
 /// Version/verack negotiation helpers.

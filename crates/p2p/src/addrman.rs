@@ -1130,6 +1130,10 @@ impl AddressBook {
     pub(crate) fn set_services(&self, addr: SocketAddr, services: u64) {
         self.state.lock().set_services(canonical(addr), services);
     }
+    /// The netgroup of `ip` under this book's classifier, `ASMap` or IP prefix.
+    pub(crate) fn netgroup(&self, ip: IpAddr) -> Vec<u8> {
+        self.state.lock().groups.group(ip)
+    }
     pub(crate) fn succeeded(&self, addr: SocketAddr, services: u64, now: u64) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();

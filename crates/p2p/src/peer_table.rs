@@ -8,10 +8,12 @@
 //! mutate peer sessions only through this type, so the registration,
 //! replacement, and cancellation rules have exactly one implementation.
 
+use std::hash::{BuildHasher, RandomState};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -73,6 +75,11 @@ struct Entry {
     demonstrated_tips: Vec<Hash256>,
     headers_horizon: Option<u32>,
     announcement: PeerAnnouncementState,
+    /// Core's `nKeyedNetGroup`, fixed at inbound admission; 0 for outbound.
+    keyed_netgroup: u64,
+    /// Recency of the last transaction from this connection the mempool
+    /// accepted; 0 when there is none.
+    useful_tx_sequence: u64,
 }
 
 impl Entry {
@@ -83,6 +90,8 @@ impl Entry {
             demonstrated_tips: Vec::new(),
             headers_horizon: None,
             announcement: PeerAnnouncementState::default(),
+            keyed_netgroup: 0,
+            useful_tx_sequence: 0,
         }
     }
 
@@ -141,6 +150,10 @@ fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
 pub struct PeerTable {
     entries: RwLock<TableView>,
     next_useful_block_sequence: AtomicU64,
+    next_useful_tx_sequence: AtomicU64,
+    /// Process-random key for inbound netgroups, so which netgroups eviction
+    /// protects is unpredictable (Core `RANDOMIZER_ID_NETGROUP`).
+    netgroup_key: RandomState,
     pub(crate) tx_policy: parking_lot::Mutex<crate::tx_policy::TxPolicy>,
 }
 
@@ -156,14 +169,14 @@ impl PeerTable {
     /// replaced; re-registering the same connection is a no-op that keeps its
     /// published metadata.
     pub fn register(&self, addr: SocketAddr, lease: PeerLease) -> bool {
-        Self::register_locked(&mut self.entries.write(), addr, lease)
+        Self::register_locked(&mut self.entries.write(), addr, Entry::fresh(lease))
     }
 
-    fn register_locked(entries: &mut TableView, addr: SocketAddr, lease: PeerLease) -> bool {
+    fn register_locked(entries: &mut TableView, addr: SocketAddr, entry: Entry) -> bool {
         match entries.get(&addr) {
-            Some(current) if current.lease.same_connection(&lease) => false,
+            Some(current) if current.lease.same_connection(&entry.lease) => false,
             Some(_) => {
-                let prior = entries.insert(addr, Entry::fresh(lease));
+                let prior = entries.insert(addr, entry);
                 if let Some(prior) = prior {
                     prior.lease.cancel();
                     Self::retain_traffic(entries, &prior);
@@ -171,7 +184,7 @@ impl PeerTable {
                 true
             }
             None => {
-                entries.insert(addr, Entry::fresh(lease));
+                entries.insert(addr, entry);
                 false
             }
         }
@@ -190,7 +203,7 @@ impl PeerTable {
         if !activity.is_active() {
             return None;
         }
-        Self::register_locked(&mut entries, addr, lease.clone());
+        Self::register_locked(&mut entries, addr, Entry::fresh(lease.clone()));
         Some(lease)
     }
 
@@ -215,28 +228,35 @@ impl PeerTable {
             .count()
     }
 
-    /// Reserves an inbound lease if the Core-derived inbound capacity is
-    /// available, registering it as the live connection at `addr`.
+    /// Reserves an inbound lease within the Core-derived inbound capacity,
+    /// evicting an inbound connection as Core does when the capacity is
+    /// full, and registers it as the live connection at `addr`.
     ///
-    /// PRE: `lease.is_inbound()` and `max_inbound` is the resolved
-    ///   automatic-connection remainder.
+    /// PRE: `lease.is_inbound()`, `netgroup` is the newcomer's netgroup from
+    ///   [`crate::netgroup::NetGroups::group`], `max_inbound` is the resolved
+    ///   automatic-connection remainder, and `best_block_depth` is
+    ///   [`crate::listener::approximate_best_block_depth`].
     /// POST: inactive admission returns `None` without mutation, even for an
-    ///   already registered lease. Otherwise returns the registered lease when the live inbound count
-    ///   stays below `max_inbound`; otherwise returns `None` and changes no
-    ///   table state. A lease at an address already holding a LIVE inbound
-    ///   connection replaces and cancels it exactly as [`Self::register`]
-    ///   does, which never grows the count; a replacement over an already
-    ///   cancelled predecessor does grow it, because the cancelled lease was
-    ///   never counted, so it faces the same capacity test as a new address.
-    /// INVARIANT: the activity/count tests and reservation are one `PeerTable`
-    ///   write operation; every reserved lease is counted until its
-    ///   identity is removed.
+    ///   already registered lease. A lease at an address already holding a
+    ///   LIVE inbound connection replaces and cancels it exactly as
+    ///   [`Self::register`] does, which never grows the count. Any other
+    ///   lease, including one over a cancelled predecessor (never counted),
+    ///   grows the count: below `max_inbound` it is registered; at
+    ///   `max_inbound` the connection [`crate::eviction`] selects is removed
+    ///   and cancelled first. When nothing is selectable, or the address
+    ///   holds a live outbound connection the newcomer would also replace,
+    ///   it returns `None` and changes no table state.
+    /// INVARIANT: the activity/count tests, eviction and reservation are one
+    ///   `PeerTable` write operation; every reserved lease is counted until
+    ///   its identity is removed.
     #[must_use]
     pub(crate) fn try_register_inbound(
         &self,
         addr: SocketAddr,
         lease: PeerLease,
+        netgroup: &[u8],
         max_inbound: usize,
+        best_block_depth: u64,
         activity: &crate::NetworkActivity,
     ) -> Option<PeerLease> {
         debug_assert!(lease.is_inbound(), "only inbound leases reserve here");
@@ -257,11 +277,78 @@ impl PeerTable {
             }
             None => true,
         };
-        if grows_count && Self::live_inbound_count_of(&entries) >= max_inbound {
+        if grows_count
+            && Self::live_inbound_count_of(&entries) >= max_inbound
+            && !Self::evict_inbound_locked(&mut entries, addr, best_block_depth)
+        {
             return None;
         }
-        Self::register_locked(&mut entries, addr, lease.clone());
+        let entry = Entry {
+            keyed_netgroup: self.netgroup_key.hash_one(netgroup),
+            ..Entry::fresh(lease.clone())
+        };
+        Self::register_locked(&mut entries, addr, entry);
         Some(lease)
+    }
+
+    /// Makes room for an inbound newcomer at `addr` by removing the
+    /// connection Core's `SelectNodeToEvict` chooses (`net.cpp:1819-1826`).
+    /// Returns whether one was removed.
+    fn evict_inbound_locked(
+        entries: &mut TableView,
+        addr: SocketAddr,
+        best_block_depth: u64,
+    ) -> bool {
+        // The newcomer would also replace a live outbound connection at its
+        // address, dropping two connections for one.
+        if entries
+            .get(&addr)
+            .is_some_and(|current| !current.lease.is_inbound() && !current.lease.is_cancelled())
+        {
+            return false;
+        }
+        let candidates = entries
+            .iter()
+            .filter_map(|(addr, entry)| Self::eviction_candidate(*addr, entry, best_block_depth))
+            .collect();
+        let Some(victim) = crate::eviction::select_inbound_to_evict(candidates) else {
+            return false;
+        };
+        if let Some(removed) = entries.remove(&victim) {
+            removed.lease.cancel();
+            Self::retain_traffic(entries, &removed);
+        }
+        tracing::debug!(peer_addr = %victim, "inbound slots full; evicted a connection for a new inbound peer");
+        true
+    }
+
+    /// The eviction view of a live inbound connection without `NoBan`, the set
+    /// Core's `ProtectNoBanConnections` and `ProtectOutboundConnections` leave.
+    fn eviction_candidate(
+        addr: SocketAddr,
+        entry: &Entry,
+        best_block_depth: u64,
+    ) -> Option<crate::eviction::EvictionCandidate> {
+        let lease = &entry.lease;
+        if !lease.is_inbound() || lease.is_cancelled() || lease.is_no_ban() {
+            return None;
+        }
+        let info = entry.info.as_ref();
+        Some(crate::eviction::EvictionCandidate {
+            addr,
+            connected: lease.connected_at(),
+            last_block: entry.announcement.useful_block_sequence,
+            last_tx: entry.useful_tx_sequence,
+            relevant_services: info.is_some_and(|info| {
+                crate::listener::has_all_desirable_service_flags(
+                    ServiceFlags::from(info.services),
+                    best_block_depth,
+                )
+            }),
+            relay_txs: info.is_some_and(|info| info.relay_transactions),
+            keyed_netgroup: entry.keyed_netgroup,
+            is_local: crate::discouragement::is_local(addr.ip()),
+        })
     }
 
     /// Linearize the service-owned activity switch with real socket admission.
@@ -469,6 +556,24 @@ impl PeerTable {
         };
         entry.announcement.useful_block_sequence = self
             .next_useful_block_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        true
+    }
+
+    /// Records that the mempool accepted a transaction the current connection
+    /// delivered (Core `m_last_tx_time`, `net_processing.cpp:4538-4541`). The
+    /// sequence orders inbound eviction protection.
+    pub fn note_useful_transaction(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.useful_tx_sequence = self
+            .next_useful_tx_sequence
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         true
@@ -984,7 +1089,7 @@ mod tests {
                     table.set_network_active(&flag, false);
                 }
                 let registered = if inbound {
-                    table.try_register_inbound(addr(1), first.clone(), 1, &activity)
+                    table.try_register_inbound(addr(1), first.clone(), &[], 1, 0, &activity)
                 } else {
                     table.try_register_outbound(addr(1), first.clone(), &activity)
                 };
@@ -1004,7 +1109,7 @@ mod tests {
                 );
                 let fresh = if inbound { inbound_lease() } else { lease() };
                 let registered = if inbound {
-                    table.try_register_inbound(addr(1), fresh.clone(), 1, &activity)
+                    table.try_register_inbound(addr(1), fresh.clone(), &[], 1, 0, &activity)
                 } else {
                     table.try_register_outbound(addr(1), fresh.clone(), &activity)
                 };
@@ -1030,7 +1135,7 @@ mod tests {
                 (addr(2), replacement.clone()),
             ] {
                 let registered = if inbound {
-                    table.try_register_inbound(address, candidate, 0, &activity)
+                    table.try_register_inbound(address, candidate, &[], 0, 0, &activity)
                 } else {
                     table.try_register_outbound(address, candidate, &activity)
                 };
@@ -1052,7 +1157,7 @@ mod tests {
         let lease = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(1), lease, 0, &active_network())
+                .try_register_inbound(addr(1), lease, &[], 0, 0, &active_network())
                 .is_none(),
             "zero capacity refuses"
         );
@@ -1065,14 +1170,14 @@ mod tests {
         let first = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(1), first, 1, &active_network())
+                .try_register_inbound(addr(1), first, &[], 1, 0, &active_network())
                 .is_some()
         );
         assert_eq!(table.live_inbound_count(), 1);
         let second = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(2), second.clone(), 1, &active_network())
+                .try_register_inbound(addr(2), second.clone(), &[], 1, 0, &active_network())
                 .is_none()
         );
         assert!(!second.is_cancelled(), "a refusal cancels nothing");
@@ -1086,7 +1191,7 @@ mod tests {
         assert_eq!(table.live_inbound_count(), 0);
         assert!(
             table
-                .try_register_inbound(addr(2), inbound_lease(), 1, &active_network())
+                .try_register_inbound(addr(2), inbound_lease(), &[], 1, 0, &active_network())
                 .is_some()
         );
         assert_eq!(table.live_inbound_count(), 1);
@@ -1096,13 +1201,13 @@ mod tests {
     fn removal_releases_inbound_capacity() -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let registered = table
-            .try_register_inbound(addr(1), inbound_lease(), 1, &active_network())
+            .try_register_inbound(addr(1), inbound_lease(), &[], 1, 0, &active_network())
             .ok_or("capacity must admit the first inbound lease")?;
         assert!(table.remove_current(addr(1), &registered));
         assert_eq!(table.live_inbound_count(), 0);
         assert!(
             table
-                .try_register_inbound(addr(2), inbound_lease(), 1, &active_network())
+                .try_register_inbound(addr(2), inbound_lease(), &[], 1, 0, &active_network())
                 .is_some()
         );
         Ok(())
@@ -1114,13 +1219,13 @@ mod tests {
         let first = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(1), first.clone(), 1, &active_network())
+                .try_register_inbound(addr(1), first.clone(), &[], 1, 0, &active_network())
                 .is_some(),
             "capacity must admit the first inbound lease"
         );
         assert!(
             table
-                .try_register_inbound(addr(1), inbound_lease(), 1, &active_network())
+                .try_register_inbound(addr(1), inbound_lease(), &[], 1, 0, &active_network())
                 .is_some(),
             "a same-address replacement never grows the count and is admitted at capacity"
         );
@@ -1134,7 +1239,7 @@ mod tests {
         let displaced = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(1), displaced.clone(), 1, &active_network())
+                .try_register_inbound(addr(1), displaced.clone(), &[], 1, 0, &active_network())
                 .is_some(),
             "capacity must admit the first inbound lease"
         );
@@ -1146,13 +1251,13 @@ mod tests {
         );
         assert!(
             table
-                .try_register_inbound(addr(2), inbound_lease(), 1, &active_network())
+                .try_register_inbound(addr(2), inbound_lease(), &[], 1, 0, &active_network())
                 .is_some(),
             "the slot the cancellation freed goes to the next address"
         );
         assert!(
             table
-                .try_register_inbound(addr(1), inbound_lease(), 1, &active_network())
+                .try_register_inbound(addr(1), inbound_lease(), &[], 1, 0, &active_network())
                 .is_none(),
             "replacing a cancelled inbound lease adds a live entry, so it must face the cap"
         );
@@ -1162,6 +1267,116 @@ mod tests {
             "the refusal must not admit a second live inbound lease"
         );
     }
+
+    fn flooder(port: u16) -> SocketAddr {
+        SocketAddr::from(([1, 2, 3, 4], port))
+    }
+
+    fn newcomer() -> SocketAddr {
+        SocketAddr::from(([5, 6, 7, 8], 8333))
+    }
+
+    fn netgroup(addr: SocketAddr) -> Vec<u8> {
+        crate::netgroup::NetGroups::default().group(addr.ip())
+    }
+
+    /// Offers an inbound `lease` from `addr` to a table capped at
+    /// `max_inbound`.
+    fn offer(
+        table: &PeerTable,
+        addr: SocketAddr,
+        lease: PeerLease,
+        max_inbound: usize,
+    ) -> Option<PeerLease> {
+        table.try_register_inbound(
+            addr,
+            lease,
+            &netgroup(addr),
+            max_inbound,
+            0,
+            &active_network(),
+        )
+    }
+
+    /// Fills `table` to `max_inbound` with inbound connections from one host,
+    /// one millisecond apart and oldest first, at ports `1..=max_inbound`.
+    #[expect(clippy::expect_used)]
+    fn flood(table: &PeerTable, max_inbound: u16, no_ban: bool) -> Vec<PeerLease> {
+        let now = std::time::Instant::now();
+        (1..=max_inbound)
+            .map(|port| {
+                let mut lease = inbound_lease().with_no_ban(no_ban);
+                lease.backdate_for_test(
+                    now.checked_sub(std::time::Duration::from_millis(u64::from(
+                        max_inbound - port + 1,
+                    )))
+                    .expect("the monotonic clock has run longer than the flood"),
+                );
+                offer(table, flooder(port), lease, usize::from(max_inbound))
+                    .expect("below capacity")
+            })
+            .collect()
+    }
+
+    fn cancelled(leases: &[PeerLease]) -> Vec<usize> {
+        (0..leases.len())
+            .filter(|index| leases[*index].is_cancelled())
+            .collect()
+    }
+
+    #[test]
+    fn one_host_filling_every_inbound_slot_gives_way_to_another_netgroup() {
+        let table = PeerTable::new();
+        let flooded = flood(&table, 20, false);
+        let honest = inbound_lease();
+        assert!(
+            offer(&table, newcomer(), honest.clone(), 20).is_some(),
+            "a full table must evict rather than refuse a newcomer"
+        );
+        assert_eq!(table.live_inbound_count(), 20);
+        assert_eq!(cancelled(&flooded).len(), 1);
+        // Reconnecting, the flooding host only displaces itself.
+        assert!(offer(&table, flooder(999), inbound_lease(), 20).is_some());
+        assert!(!honest.is_cancelled());
+        assert_eq!(cancelled(&flooded).len(), 2);
+        assert_eq!(table.live_inbound_count(), 20);
+    }
+
+    #[test]
+    fn noban_inbound_connections_are_never_evicted() {
+        let table = PeerTable::new();
+        let flooded = flood(&table, 20, true);
+        assert!(offer(&table, newcomer(), inbound_lease(), 20).is_none());
+        assert_eq!(cancelled(&flooded), Vec::<usize>::new());
+        assert_eq!(table.live_inbound_count(), 20);
+    }
+
+    #[test]
+    fn a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address() {
+        let table = PeerTable::new();
+        let outbound = lease();
+        table.register(newcomer(), outbound.clone());
+        let flooded = flood(&table, 20, false);
+        assert!(
+            offer(&table, newcomer(), inbound_lease(), 20).is_none(),
+            "evicting would drop two connections, the outbound one included, for one"
+        );
+        assert!(!outbound.is_cancelled());
+        assert_eq!(cancelled(&flooded), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn useful_transactions_and_blocks_protect_inbound_connections() {
+        let table = PeerTable::new();
+        let flooded = flood(&table, 13, false);
+        assert!(!table.note_useful_transaction(inbound_lease().source(flooder(12))));
+        assert!(table.note_useful_transaction(flooded[11].source(flooder(12))));
+        assert!(table.note_useful_block(flooded[12].source(flooder(13))));
+        assert!(offer(&table, newcomer(), inbound_lease(), 13).is_some());
+        // Without the two notes the newest connection (index 12) would go.
+        assert_eq!(cancelled(&flooded), [10]);
+    }
+
     #[test]
     fn re_registering_current_connection_is_noop_and_keeps_info() {
         let table = PeerTable::new();

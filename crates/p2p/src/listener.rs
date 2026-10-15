@@ -146,9 +146,9 @@ pub struct ConnectionShared {
     /// Block announcer for outbound block announcements and peer capability tracking.
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
-    /// the outbound slot counts. The listener refuses inbound admission at
-    /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
-    /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
+    /// the outbound slot counts. At this count an inbound newcomer evicts an
+    /// inbound connection or is refused (Core `m_max_inbound`, `net.h:1118`,
+    /// applied at `net.cpp:1819-1826`).
     pub max_inbound: usize,
     /// The services this node advertises in every `version`, inbound or
     /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
@@ -617,18 +617,24 @@ fn accept_connections(
                     continue;
                 }
                 // Reserve the inbound slot atomically with the capacity
-                // test before any thread exists: a separate count followed
-                // by an unconstrained spawn races concurrent accepts.
-                // Registration stays identity-checked, so the reservation
-                // itself is the handshaking-peer accounting Core's connman
-                // performs (`net.cpp:1838-1845`, eviction cut to refusal).
+                // test and any eviction before any thread exists: a separate
+                // count followed by an unconstrained spawn races concurrent
+                // accepts. Registration stays identity-checked, so the
+                // reservation itself is the handshaking-peer accounting
+                // Core's connman performs (`net.cpp:1819-1826`).
                 let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
                 let lease = crate::PeerLease::new_inbound(outbound_tx)
                     .with_no_ban(shared.banned.is_noban(peer_addr.ip()));
+                let netgroup = shared.address_book.as_ref().map_or_else(
+                    || crate::netgroup::NetGroups::default().group(peer_addr.ip()),
+                    |book| book.netgroup(peer_addr.ip()),
+                );
                 let Some(lease) = shared.peer_table.try_register_inbound(
                     peer_addr,
                     lease,
+                    &netgroup,
                     shared.max_inbound,
+                    approximate_best_block_depth(shared.chain_query.as_deref()),
                     &shared.activity,
                 ) else {
                     drop(stream);
@@ -2792,7 +2798,7 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new_inbound(outbound_tx);
         let lease = shared
             .peer_table
-            .try_register_inbound(peer_addr, lease, 1, &shared.activity)
+            .try_register_inbound(peer_addr, lease, &[], 1, 0, &shared.activity)
             .expect("the test lease reserves its inbound slot");
         let result = crate::listener::run_handshake(server, peer_addr, &shared, lease, outbound_rx);
         let Err(error) = result else {

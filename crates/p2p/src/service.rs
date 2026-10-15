@@ -157,8 +157,9 @@ impl P2pServiceConfig {
     /// PRE: none.
     /// POST: returns `max_peer_connections` minus both outbound slot counts,
     ///   clamped at zero.
-    /// INVARIANT: this is the only inbound capacity derivation; the listener
-    ///   refuses admission at the result, it never evicts.
+    /// INVARIANT: this is the only inbound capacity derivation; at the result
+    ///   an inbound newcomer evicts an inbound connection or is refused
+    ///   (`PeerTable::try_register_inbound`).
     #[must_use]
     pub(crate) fn max_inbound(&self) -> usize {
         self.max_peer_connections
