@@ -112,6 +112,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.tick();
@@ -153,6 +154,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         source: Some(old_source),
         wire_response: false,
         body_fetch_owned: false,
+        slot: None,
     })?;
     let mut inbound = crate::InboundBlock::from_decoded(block.clone());
     inbound.source = Some(old_source);
@@ -246,6 +248,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
         source: Some(replacement_source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     let mut parent_body = crate::InboundBlock::from_decoded(block2);
@@ -300,6 +303,7 @@ fn headers_batch_missing_parent_requests_ancestry() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.drain_inbound_headers();
@@ -337,6 +341,7 @@ fn body_carried_rejection_keeps_the_live_pending_gate() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: false,
         body_fetch_owned: false,
+        slot: None,
     };
 
     // The first rejection installs the pending gate on this connection.
@@ -397,6 +402,7 @@ fn known_header_batch_still_credits_the_announcer() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 
@@ -439,6 +445,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 
@@ -586,6 +593,7 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
         source: None,
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -635,6 +643,7 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: true,
+        slot: None,
     })?;
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
     sync.tick();
@@ -647,6 +656,7 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
         source: None,
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -746,6 +756,7 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: true,
+        slot: None,
     })?;
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
     sync.tick();
@@ -756,6 +767,7 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
         source: None,
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -859,6 +871,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
         source: None,
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
 
@@ -916,6 +929,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
         source: Some(source),
         wire_response: false,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -928,6 +942,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -1013,6 +1028,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 
@@ -1048,6 +1064,7 @@ fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     let peer_height = || {
@@ -1100,12 +1117,14 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![fork_tip],
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert_eq!(
@@ -1130,6 +1149,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
             source: Some(source),
             wire_response: true,
             body_fetch_owned: false,
+            slot: None,
         })?;
     }
     sync.drain_inbound_headers();
@@ -1184,6 +1204,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult 
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip2],
@@ -1191,6 +1212,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult 
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 
@@ -1234,6 +1256,7 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: false,
         body_fetch_owned: true,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 
@@ -1411,6 +1434,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: false,
         body_fetch_owned: true,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -1424,6 +1448,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
         source: Some(current_source(&peers, peer)),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -1466,6 +1491,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.drain_inbound_headers();
@@ -1496,6 +1522,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert!(

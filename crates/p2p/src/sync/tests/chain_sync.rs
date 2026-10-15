@@ -473,12 +473,12 @@ fn frontier_and_eviction_probes_do_not_overwrite_live_requests() -> TestResult {
     assert!(rx.try_recv().is_err());
     assert_eq!(request_snapshot(), Some(frontier_request));
 
-    inbound_headers_tx.send(crate::InboundHeaders {
-        headers: vec![blocks[0].header],
-        source: Some(source),
-        wire_response: true,
-        body_fetch_owned: false,
-    })?;
+    inbound_headers_tx.send(crate::InboundHeaders::new(
+        vec![blocks[0].header],
+        Some(source),
+        true,
+        false,
+    ))?;
     sync.drain_inbound_headers();
     let _ = rx.try_iter().collect::<Vec<_>>();
     assert!(
@@ -583,6 +583,7 @@ fn chain_sync_probe_holds_request_for_its_response_window() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     let _ = rx.try_iter().collect::<Vec<_>>();
@@ -743,6 +744,7 @@ fn empty_chain_sync_probe_keeps_original_five_second_pacing() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
 

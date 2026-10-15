@@ -111,6 +111,7 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.tick();
@@ -198,6 +199,7 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
 
     sync.tick();
@@ -284,6 +286,7 @@ fn losing_fork_credit_survives_winner_disconnect() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert_eq!(
@@ -303,6 +306,7 @@ fn losing_fork_credit_survives_winner_disconnect() -> TestResult {
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.drain_inbound_headers();
     assert_eq!(

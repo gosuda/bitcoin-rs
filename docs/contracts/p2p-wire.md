@@ -343,6 +343,19 @@ covers the delivery-path forward.
   when sync takes the body, so staging, discarding, and rejecting all return
   the slot; ownership and credits are per connection, so a same-address
   replacement inherits neither.
+- **Header ingress**: the shared headers channel has no global bound;
+  `PeerLease::reserve_header_batch` bounds each connection's share of it at
+  `MAX_QUEUED_HEADER_BATCHES` (`crates/p2p/src/connection.rs`). Every wire
+  `headers` message and every compact-block announcement that does not
+  complete its block reserves a slot, and the `HeaderSlot` rides the batch
+  until sync drops it once the whole header drain has finished. A header
+  carried by a delivered block body, including a reconstructed compact block,
+  holds no slot: the block ingress bound above already limits it. A connection
+  at its bound stops reading its socket until one of its own slots is freed,
+  as Core pauses reading a peer whose unprocessed messages exceed
+  `-maxreceivebuffer` (`net.cpp:4059`, `net.cpp:4071`). Only that connection's
+  own batches make it wait; no batch is dropped and no connection disconnected
+  for this bound, and a cancelled connection or session queues nothing.
 - **Permanent consensus failure**: when a staged body's commit settles with
   `WindowCommitDisposition::Permanent` — in the apply pass or inside a
   branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
@@ -369,10 +382,18 @@ Proof: `crates/p2p/src/dispatch.rs` test
 test `announced_near_tip_is_direct_fetched_before_tick`;
 `crates/p2p/src/sync/tests/headers_presync.rs` test
 `owned_header_requests_suppress_competing_frontier_and_chain_sync_requests`;
-`crates/p2p/src/listener.rs` test
-`unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
-tests `permanent_consensus_body_disconnects_delivering_source` and
-`binding_and_operational_failures_do_not_disconnect`; and
+`crates/p2p/src/listener.rs` tests
+`unsolicited_block_flood_is_bounded_per_source`,
+`a_connection_at_its_header_bound_waits_only_on_its_own_batches`,
+`wire_headers_hold_their_connections_slot_until_dropped`,
+`send_block_forwards_the_blocks_header` and
+`compact_reconstruction_requires_an_earning_header`;
+`crates/p2p/src/connection.rs` test
+`header_slots_bound_one_connection_until_dropped_or_cancelled`;
+`crates/p2p/src/sync/tests.rs` tests
+`permanent_consensus_body_disconnects_delivering_source`,
+`binding_and_operational_failures_do_not_disconnect` and
+`draining_a_batch_frees_its_connections_header_slot`; and
 `crates/p2p/src/sync/tests/transitions_6.rs` test
 `reconcile_forgets_window_state_only_when_connection_identity_changes`.
 

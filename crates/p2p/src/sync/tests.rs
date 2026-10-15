@@ -433,6 +433,38 @@ impl SyncChain for RefusingChain {
 }
 
 #[test]
+fn draining_a_batch_frees_its_connections_header_slot() -> TestResult {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9772, 0)?;
+    let _rx = connect_peer(&peers, synthetic_peer(addr, 0));
+    let source = current_source(&peers, addr);
+    let lease = peers.lease(addr).ok_or("connected lease")?;
+    for _ in 0..crate::connection::MAX_QUEUED_HEADER_BATCHES {
+        inbound_headers_tx.send(InboundHeaders {
+            headers: Vec::new(),
+            source: Some(source),
+            wire_response: false,
+            body_fetch_owned: false,
+            slot: Some(lease.reserve_header_batch(|| false).ok_or("free slot")?),
+        })?;
+    }
+    assert_eq!(
+        lease.queued_header_batches(),
+        crate::connection::MAX_QUEUED_HEADER_BATCHES
+    );
+
+    sync.tick();
+
+    assert_eq!(lease.queued_header_batches(), 0);
+    Ok(())
+}
+
+#[test]
 fn body_forwarded_batch_does_not_consume_the_pending_header_gate() -> TestResult {
     for build_fixture in [header_sync_with_genesis, header_sync_with_refusing_chain] {
         let HeaderSyncFixture {
@@ -459,6 +491,7 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate() -> TestResult
             source: Some(a_source),
             wire_response: false,
             body_fetch_owned: false,
+            slot: None,
         })?;
         sync.tick();
 
@@ -939,6 +972,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
     assert_eq!(
@@ -2648,6 +2682,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         source: Some(source),
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
     Ok(PunishmentFixture {

@@ -260,6 +260,7 @@ fn idle_frontier_relearns_stale_peer_credit_after_rejected_body() -> TestResult 
 
         wire_response: true,
         body_fetch_owned: false,
+        slot: None,
     })?;
     sync.tick();
     assert_eq!(
