@@ -148,6 +148,17 @@ pub(crate) fn finish_preview(
             results: vec![prepared[0].fact.clone()],
         };
     }
+    finish_package(txs, requests, prepared, checks, None)
+}
+
+pub(crate) fn finish_package(
+    txs: &[Tx],
+    requests: &[crate::AdmissionRequest],
+    prepared: &mut [crate::gateway::PreparedAdmission],
+    checks: Option<PreviewChecks>,
+    aggregate_error: Option<AcceptanceRejectReason>,
+) -> crate::standardness::PackageAcceptanceFacts {
+    use crate::standardness::PackageAcceptanceFacts;
     let mut facts = PackageAcceptanceFacts {
         package_error: None,
         results: txs.iter().map(unfinished).collect(),
@@ -185,6 +196,10 @@ pub(crate) fn finish_preview(
     if let Some(index) = checks.dust_child {
         facts.results[index].allowed = Some(false);
         facts.results[index].reject_reason = Some(AcceptanceRejectReason::MissingEphemeralSpends);
+        return facts;
+    }
+    if let Some(error) = aggregate_error {
+        facts.package_error = Some(error);
         return facts;
     }
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {

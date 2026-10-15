@@ -1,0 +1,29 @@
+[package]
+name = "bitcoin-rs-ldk-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+description = "Experimental public-Node L1 adapter for a pinned LDK consumer"
+
+# Independent consumer: LDK is not a dependency of the authoritative workspace.
+[workspace]
+
+[dependencies]
+bitcoin-rs-node = { path = "../../crates/node", default-features = false, features = ["fjall"] }
+bitcoin-rs-primitives = { path = "../../crates/primitives" }
+bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = ["std"] }
+lightning = { version = "=0.2.7", default-features = false, features = ["std"] }
+lightning-block-sync = { version = "=0.2.0", default-features = false }
+futures-executor = "=0.3.32"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

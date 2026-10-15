@@ -203,6 +203,29 @@ impl Node {
             .map_err(|error| NodeError::Broadcast(error.to_string()))
     }
 
+    /// Atomically admits a child-with-independent-parents package through the
+    /// shared gateway. Order is arbitrary; no package replacement or eviction.
+    /// Known members are idempotent and do not contribute to the fee aggregate.
+    pub async fn broadcast_package(&self, txs: Vec<Tx>) -> Result<MutationResult, NodeError> {
+        let chainstate = self.state.chainstate();
+        let chain = ChainAdmissionView::new(
+            chainstate.utxo_reader(),
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
+            chainstate.network(),
+        );
+        self.state
+            .mempool_gateway()
+            .submit_local_package(
+                txs,
+                LocalOrigin::Rpc,
+                Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &chain,
+            )
+            .map_err(|error| NodeError::Broadcast(error.to_string()))
+    }
+
     /// Stops owned services, then publishes the clean-shutdown checkpoint.
     pub async fn shutdown(self) -> Result<(), NodeError> {
         self.shutdown_blocking()
@@ -316,6 +339,10 @@ mod tests {
 
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-node scenario proves single and package submissions share ordered gateway publication, including refusal and the direct-insertion control"
+    )]
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
@@ -354,8 +381,9 @@ mod tests {
 
         let broadcast_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5A; 32])), 0);
         let direct_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5B; 32])), 0);
+        let package_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5D; 32])), 0);
         let mut changes = BlockChanges::default();
-        for prevout in [broadcast_prevout, direct_prevout] {
+        for prevout in [broadcast_prevout, direct_prevout, package_prevout] {
             changes.add(UtxoAdd::new(
                 prevout,
                 TxOut {
@@ -427,6 +455,26 @@ mod tests {
             publisher.sequence_events.lock().is_empty(),
             "a refused broadcast publishes nothing"
         );
+
+        // Native CPFP uses the same observer/admission owner, with parents
+        // published before the child even when the input order is reversed.
+        let mut parent = spending(package_prevout);
+        parent.outputs[0].value = Amount::from_sat(100_000);
+        let parent_id = parent.txid();
+        let child = spending(OutPoint::new(parent_id, 0));
+        let child_id = child.txid();
+        let result =
+            block_on(node.broadcast_package(vec![child, parent])).expect("native CPFP accepted");
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            publisher.sequence_events.lock().as_slice(),
+            &[
+                SequenceEvent::Added(parent_id, result.sequence_of(0).expect("parent sequence")),
+                SequenceEvent::Added(child_id, result.sequence_of(1).expect("child sequence")),
+            ]
+        );
+        assert!(mempool.read().contains_txid(&parent_id));
+        assert!(mempool.read().contains_txid(&child_id));
 
         block_on(node.shutdown()).expect("clean shutdown");
     }

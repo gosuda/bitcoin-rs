@@ -33,7 +33,8 @@ impl FeeEstimation {
 pub(crate) enum LimitEnforcement {
     /// Apply all policy limits immediately.
     Full,
-    /// Defer the fee floor and size trim to post-settlement.
+    /// Skip individual fee/size enforcement: the enclosing reorg settlement
+    /// or native package plan enforces the relevant aggregate bounds.
     Deferred,
 }
 

@@ -152,6 +152,18 @@ state (`crates/mempool/src/orphan.rs`).
 - RPC duplicate submission remains an idempotent success, while preview
   reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject
   state. The writer validates every captured token before either transition.
+- Native package submission shares preview's batch input resolution and the
+  gateway's policy/script evaluator. A bounded child-with-independent-parents
+  package is ordered by the owner; duplicates and internal conflicts refuse.
+  Resident members and members positively confirmed by live-coin evidence are
+  excluded; only new members contribute to aggregate modified fees and pressure/relay
+  charges. A captured insertion plan preflights capacity and member inserts;
+  graph/TRUC/ephemeral-spend and script checks finish before the writer. The
+  writer revalidates the same generation, sequence and policy stamp, then
+  installs all members through the ordinary insertion/estimator funnel and
+  publishes one ordered envelope. Refusal changes no membership, sequence,
+  fee overlay, estimator or observer output. Four attempts bound stale facts.
+  It neither implements package RBF nor changes RPC/REST wire behavior.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
@@ -163,7 +175,7 @@ state (`crates/mempool/src/orphan.rs`).
   admission or peer lifecycle results. RPC and node's peer ingress use that
   same view, with no gateway ownership, shadow version, or copied chain-state
   model. A provider may return no snapshot to request a transient retry.
-  Peer duplicate suppression uses positive live-coin evidence from
+  Peer/native package duplicate suppression uses positive live-coin evidence from
   `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation
   status unknown. RPC transaction-body cache membership supplies no such
   evidence.

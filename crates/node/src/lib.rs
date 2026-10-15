@@ -84,6 +84,11 @@ pub use options::{
     P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
+mod chain_feed;
+pub use chain_feed::{
+    BlockHeaderInfo, ChainReplay, ChainSnapshot, ChainStep, ChainSubscription, ChainTarget,
+    ChainUpdate,
+};
 pub use embed::{Node, NodeError};
 
 pub use mining::MiningCoordinator;

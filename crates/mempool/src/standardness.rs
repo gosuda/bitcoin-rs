@@ -185,6 +185,9 @@ pub enum AcceptanceRejectReason {
     /// A parent follows its child in the offered package.
     #[error("package-not-sorted")]
     PackageOrder,
+    /// Native submission requires a child and its independent direct parents.
+    #[error("package-not-child-with-parents")]
+    PackageTopology,
     /// Two package transactions spend the same outpoint.
     #[error("conflict-in-package")]
     PackageConflict,

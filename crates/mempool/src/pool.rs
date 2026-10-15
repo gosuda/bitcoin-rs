@@ -20,6 +20,7 @@ use crate::{
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod fee_policy;
+pub(crate) mod package;
 
 /// Script-index key for funding index range scans.
 #[derive(
