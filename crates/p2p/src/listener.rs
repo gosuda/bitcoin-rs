@@ -146,9 +146,9 @@ pub struct ConnectionShared {
     /// Block announcer for outbound block announcements and peer capability tracking.
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
-    /// the outbound slot counts. The peer table enforces this bound and
-    /// source-diversity limits, replacing only an unproductive peer from a
-    /// more populated group when capacity is full.
+    /// the outbound slot counts. The listener refuses inbound admission at
+    /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
+    /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
     pub max_inbound: usize,
     /// The services this node advertises in every `version`, inbound or
     /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
@@ -619,8 +619,9 @@ fn accept_connections(
                 // Reserve the inbound slot atomically with the capacity
                 // test before any thread exists: a separate count followed
                 // by an unconstrained spawn races concurrent accepts.
-                // The peer table owns source quotas and selective eviction
-                // under the same lock as handshaking-peer slot accounting.
+                // Registration stays identity-checked, so the reservation
+                // itself is the handshaking-peer accounting Core's connman
+                // performs (`net.cpp:1838-1845`, eviction cut to refusal).
                 let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
                 let lease = crate::PeerLease::new_inbound(outbound_tx)
                     .with_no_ban(shared.banned.is_noban(peer_addr.ip()));
@@ -631,7 +632,7 @@ fn accept_connections(
                     &shared.activity,
                 ) else {
                     drop(stream);
-                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: inactive, source limit, or no eviction candidate");
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: inactive or at capacity");
                     continue;
                 };
                 spawn_handshake_thread(stream, peer_addr, shared.clone(), lease, outbound_rx);

@@ -8,10 +8,9 @@
 //! mutate peer sessions only through this type, so the registration,
 //! replacement, and cancellation rules have exactly one implementation.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
@@ -23,58 +22,6 @@ use crate::peer::CompactBlockNegotiation;
 use crate::peer_info::PeerInfo;
 #[cfg(test)]
 use crate::peer_info::PeerRole;
-
-/// An address can open several sockets, but none may claim the entire inbound
-/// pool. These caps apply to handshaking peers as well as established ones.
-const MAX_INBOUND_PER_IP: usize = 8;
-const MAX_INBOUND_PER_NETGROUP: usize = 32;
-
-/// Coarse source grouping for public TCP addresses. The narrower exact-IP cap
-/// handles hosts, while /16 IPv4 and /32 IPv6 grouping limits address rotation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum InboundNetgroup {
-    V4([u8; 2]),
-    V6([u8; 4]),
-}
-
-/// IPv4-mapped IPv6 sockets must not bypass the exact-IP or netgroup cap.
-fn canonical_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(v4) => IpAddr::V4(v4),
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
-    }
-}
-
-impl InboundNetgroup {
-    fn of(ip: IpAddr) -> Self {
-        match canonical_ip(ip) {
-            IpAddr::V4(ip) => {
-                let octets = ip.octets();
-                Self::V4([octets[0], octets[1]])
-            }
-            IpAddr::V6(ip) => {
-                let octets = ip.octets();
-                Self::V6([octets[0], octets[1], octets[2], octets[3]])
-            }
-        }
-    }
-}
-
-/// An eviction candidate must not have supplied a useful, accepted block.
-/// Prefer unfinished handshakes and then the newest connection, preserving
-/// established peers when a different netgroup needs a slot.
-#[derive(Clone, Copy)]
-struct InboundEvictionCandidate {
-    addr: SocketAddr,
-    handshaking: bool,
-    connected_at: Instant,
-}
-
-#[derive(Default)]
-struct InboundGroupPopulation {
-    count: usize,
-    victim: Option<InboundEvictionCandidate>,
-}
 
 /// One live connection joined with its handshake metadata.
 #[derive(Clone, Debug)]
@@ -268,18 +215,22 @@ impl PeerTable {
             .count()
     }
 
-    /// Atomically admit an inbound lease within the global, exact-IP, and
-    /// netgroup limits. At full global capacity, admit a new source group only
-    /// when an unproductive peer in a more populated group can be replaced.
+    /// Reserves an inbound lease if the Core-derived inbound capacity is
+    /// available, registering it as the live connection at `addr`.
     ///
-    /// PRE: lease is inbound; max_inbound is the service's resolved limit.
-    /// POST: refusal leaves all connections untouched. Admission never raises
-    ///   the live inbound count above max_inbound, the exact-IP cap, or the
-    ///   netgroup cap. A current same-address inbound replacement preserves
-    ///   the count and cancels its predecessor.
-    /// INVARIANT: count, source-diversity decision, eviction, and registration
-    ///   hold one table write lock; useful peers and outbound peers are never
-    ///   selected for inbound eviction.
+    /// PRE: `lease.is_inbound()` and `max_inbound` is the resolved
+    ///   automatic-connection remainder.
+    /// POST: inactive admission returns `None` without mutation, even for an
+    ///   already registered lease. Otherwise returns the registered lease when the live inbound count
+    ///   stays below `max_inbound`; otherwise returns `None` and changes no
+    ///   table state. A lease at an address already holding a LIVE inbound
+    ///   connection replaces and cancels it exactly as [`Self::register`]
+    ///   does, which never grows the count; a replacement over an already
+    ///   cancelled predecessor does grow it, because the cancelled lease was
+    ///   never counted, so it faces the same capacity test as a new address.
+    /// INVARIANT: the activity/count tests and reservation are one `PeerTable`
+    ///   write operation; every reserved lease is counted until its
+    ///   identity is removed.
     #[must_use]
     pub(crate) fn try_register_inbound(
         &self,
@@ -298,92 +249,16 @@ impl PeerTable {
                 if current.lease.same_connection(&lease) {
                     return Some(lease);
                 }
+                // A live inbound predecessor is displaced by this insert, so
+                // the net count is unchanged. An outbound predecessor, or an
+                // inbound one already cancelled (and therefore outside the
+                // live count), leaves the new lease as a net addition.
                 !current.lease.is_inbound() || current.lease.is_cancelled()
             }
             None => true,
         };
-        if grows_count {
-            if max_inbound == 0 {
-                return None;
-            }
-            let ip = canonical_ip(addr.ip());
-            let group = InboundNetgroup::of(ip);
-            let mut inbound_count = 0;
-            let mut ip_count = 0;
-            let mut group_count = 0;
-            for (existing_addr, entry) in entries.iter() {
-                if !entry.lease.is_inbound() || entry.lease.is_cancelled() {
-                    continue;
-                }
-                inbound_count += 1;
-                let existing_ip = canonical_ip(existing_addr.ip());
-                if existing_ip == ip {
-                    ip_count += 1;
-                }
-                if InboundNetgroup::of(existing_ip) == group {
-                    group_count += 1;
-                }
-            }
-            if ip_count >= MAX_INBOUND_PER_IP || group_count >= MAX_INBOUND_PER_NETGROUP {
-                return None;
-            }
-            if inbound_count >= max_inbound {
-                // Count each source group and retain its least-established,
-                // non-useful member. Scan only on a full pool; normal
-                // admission needs no temporary allocations.
-                let mut groups: HashMap<InboundNetgroup, InboundGroupPopulation> = HashMap::new();
-                for (existing_addr, entry) in entries.iter() {
-                    if !entry.lease.is_inbound() || entry.lease.is_cancelled() {
-                        continue;
-                    }
-                    let population = groups
-                        .entry(InboundNetgroup::of(existing_addr.ip()))
-                        .or_default();
-                    population.count += 1;
-                    if entry.announcement.useful_block_sequence != 0 {
-                        continue;
-                    }
-                    let candidate = InboundEvictionCandidate {
-                        addr: *existing_addr,
-                        handshaking: entry.info.is_none(),
-                        connected_at: entry.lease.connected_at(),
-                    };
-                    if population.victim.is_none_or(|previous| {
-                        (candidate.handshaking, candidate.connected_at, candidate.addr)
-                            > (previous.handshaking, previous.connected_at, previous.addr)
-                    }) {
-                        population.victim = Some(candidate);
-                    }
-                }
-
-                // A replacement must strictly improve netgroup balance.
-                // Without this rule, fresh sources could churn one-peer
-                // groups indefinitely while contributing no new diversity.
-                let victim = groups
-                    .iter()
-                    .filter(|(candidate_group, population)| {
-                        **candidate_group != group
-                            && population.count >= group_count.saturating_add(2)
-                    })
-                    .filter_map(|(_, population)| {
-                        population.victim.map(|candidate| (population.count, candidate))
-                    })
-                    .max_by_key(|(count, candidate)| {
-                        (
-                            *count,
-                            candidate.handshaking,
-                            candidate.connected_at,
-                            candidate.addr,
-                        )
-                    })
-                    .map(|(_, candidate)| candidate.addr)?;
-
-                let Some(removed) = entries.remove(&victim) else {
-                    unreachable!("inbound eviction target disappeared under the table write lock");
-                };
-                removed.lease.cancel();
-                Self::retain_traffic(&mut entries, &removed);
-            }
+        if grows_count && Self::live_inbound_count_of(&entries) >= max_inbound {
+            return None;
         }
         Self::register_locked(&mut entries, addr, lease.clone());
         Some(lease)
@@ -1202,182 +1077,6 @@ mod tests {
         );
         assert!(!second.is_cancelled(), "a refusal cancels nothing");
         assert_eq!(table.len(), 1);
-    }
-
-    #[test]
-    fn inbound_exact_ip_cap_covers_distinct_ports_and_mapped_ipv4() {
-        let table = PeerTable::new();
-        let ip = [198, 51, 100, 42];
-        let mut first = None;
-        for port in (10_000_u16..).take(MAX_INBOUND_PER_IP) {
-            let lease = inbound_lease();
-            let addr = SocketAddr::from((ip, port));
-            assert!(
-                table
-                    .try_register_inbound(addr, lease.clone(), 190, &active_network())
-                    .is_some()
-            );
-            if first.is_none() {
-                first = Some((addr, lease));
-            }
-        }
-        let extra = SocketAddr::from((ip, 11_000));
-        assert!(
-            table
-                .try_register_inbound(extra, inbound_lease(), 190, &active_network())
-                .is_none()
-        );
-        let mapped = SocketAddr::new(
-            IpAddr::V6(std::net::Ipv4Addr::from(ip).to_ipv6_mapped()),
-            11_001,
-        );
-        assert!(
-            table
-                .try_register_inbound(mapped, inbound_lease(), 190, &active_network())
-                .is_none(),
-            "IPv4-mapped IPv6 must share the exact-IP quota"
-        );
-        assert_eq!(table.live_inbound_count(), MAX_INBOUND_PER_IP);
-        let Some((first_addr, first_lease)) = first else {
-            unreachable!("the first inbound lease was registered");
-        };
-        assert!(table.remove_current(first_addr, &first_lease));
-        assert!(
-            table
-                .try_register_inbound(extra, inbound_lease(), 190, &active_network())
-                .is_some(),
-            "removal releases the exact-IP quota"
-        );
-    }
-
-    #[test]
-    fn inbound_ipv4_netgroup_cap_limits_address_rotation() {
-        let table = PeerTable::new();
-        for third_octet in (0_u8..).take(MAX_INBOUND_PER_NETGROUP) {
-            let addr = SocketAddr::from(([198, 51, third_octet, 1], 12_000));
-            assert!(
-                table
-                    .try_register_inbound(addr, inbound_lease(), 190, &active_network())
-                    .is_some()
-            );
-        }
-        assert!(
-            table
-                .try_register_inbound(
-                    SocketAddr::from(([198, 51, 100, 1], 12_000)),
-                    inbound_lease(),
-                    190,
-                    &active_network(),
-                )
-                .is_none(),
-            "one IPv4 /16 cannot consume more than its netgroup allowance"
-        );
-        assert!(
-            table
-                .try_register_inbound(
-                    SocketAddr::from(([198, 52, 1, 1], 12_000)),
-                    inbound_lease(),
-                    190,
-                    &active_network(),
-                )
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn inbound_ipv6_netgroup_cap_limits_address_rotation() {
-        let table = PeerTable::new();
-        for third_group in (0_u16..).take(MAX_INBOUND_PER_NETGROUP) {
-            let addr = SocketAddr::new(
-                IpAddr::V6(std::net::Ipv6Addr::new(
-                    0x2001, 0x0db8, third_group, 1, 0, 0, 0, 1,
-                )),
-                12_000,
-            );
-            assert!(
-                table
-                    .try_register_inbound(addr, inbound_lease(), 190, &active_network())
-                    .is_some()
-            );
-        }
-        let extra = SocketAddr::new(
-            IpAddr::V6(std::net::Ipv6Addr::new(
-                0x2001, 0x0db8, 100, 1, 0, 0, 0, 1,
-            )),
-            12_000,
-        );
-        assert!(
-            table
-                .try_register_inbound(extra, inbound_lease(), 190, &active_network())
-                .is_none(),
-            "one IPv6 /32 cannot consume more than its netgroup allowance"
-        );
-    }
-
-    #[test]
-    fn full_inbound_pool_evicts_nonuseful_peer_from_crowded_group() {
-        let table = PeerTable::new();
-        let useful_addr = SocketAddr::from(([198, 51, 1, 1], 12_000));
-        let pending_addr = SocketAddr::from(([198, 51, 2, 2], 12_000));
-        let incoming_addr = SocketAddr::from(([203, 0, 1, 1], 12_000));
-        let outbound_addr = SocketAddr::from(([192, 0, 2, 1], 12_000));
-        let useful = inbound_lease();
-        let pending = inbound_lease();
-        let outbound = lease();
-        table.register(outbound_addr, outbound.clone());
-        assert!(
-            table
-                .try_register_inbound(useful_addr, useful.clone(), 2, &active_network())
-                .is_some()
-        );
-        assert!(table.publish_info(useful_addr, &useful, info(useful_addr, 7)));
-        assert!(table.note_useful_block(useful.source(useful_addr)));
-        assert!(
-            table
-                .try_register_inbound(pending_addr, pending.clone(), 2, &active_network())
-                .is_some()
-        );
-        assert!(
-            table
-                .try_register_inbound(incoming_addr, inbound_lease(), 2, &active_network())
-                .is_some(),
-            "a fresh group can displace an unproductive crowded-group member"
-        );
-        assert!(pending.is_cancelled());
-        assert!(!useful.is_cancelled());
-        assert!(!outbound.is_cancelled());
-        assert!(!table.is_connected(pending_addr));
-        assert!(table.is_connected(incoming_addr));
-        assert_eq!(table.live_inbound_count(), 2);
-    }
-
-    #[test]
-    fn full_inbound_pool_rejects_churn_without_diversity_gain() {
-        let table = PeerTable::new();
-        let first_addr = SocketAddr::from(([198, 51, 1, 1], 12_000));
-        let second_addr = SocketAddr::from(([203, 0, 1, 1], 12_000));
-        let first = inbound_lease();
-        let second = inbound_lease();
-        assert!(
-            table
-                .try_register_inbound(first_addr, first.clone(), 2, &active_network())
-                .is_some()
-        );
-        assert!(
-            table
-                .try_register_inbound(second_addr, second.clone(), 2, &active_network())
-                .is_some()
-        );
-        let third_addr = SocketAddr::from(([192, 0, 2, 1], 12_000));
-        assert!(
-            table
-                .try_register_inbound(third_addr, inbound_lease(), 2, &active_network())
-                .is_none(),
-            "already-diverse groups must not be displaced just to rotate peers"
-        );
-        assert!(!first.is_cancelled());
-        assert!(!second.is_cancelled());
-        assert_eq!(table.live_inbound_count(), 2);
     }
 
     #[test]
