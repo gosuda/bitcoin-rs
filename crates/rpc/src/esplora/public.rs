@@ -17,7 +17,6 @@ use bitcoin_rs_primitives::{
     Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
 };
 use serde_json::json;
-use sonic_rs::{JsonValueTrait as _, json as sonic_json};
 
 use super::http::{admission_error, query_error};
 use super::model::{
@@ -39,7 +38,7 @@ const MEMPOOL_PAGE: usize = 50;
 /// its 0.1 BTC/kvB ceiling independently of RPC defaults and parameters.
 const MAX_BROADCAST_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
-pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) -> Response {
+pub(super) fn get(ctx: &Context, path: &str) -> Response {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
         ["blocks", "tip", "height"] => text_response(
@@ -95,7 +94,7 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) ->
                 .collect::<Vec<_>>(),
         ),
         ["mempool", "recent"] => mempool_recent(&ctx),
-        ["fee-estimates"] => fee_estimates(handler),
+        ["fee-estimates"] => fee_estimates(ctx),
         ["scripthash", hash] => summary(&ctx, hash, None),
         ["address", address] => {
             address_hash(&ctx, address).map_or_else(|r| r, |h| summary_for(&ctx, h, Some(address)))
@@ -587,25 +586,21 @@ fn mempool_recent(ctx: &Context) -> Response {
             .collect::<Vec<_>>(),
     )
 }
-fn fee_estimates(handler: &Handler) -> Response {
-    // CONTRACT: docs/contracts/external-api.md#API-26 — one horizon, honest
-    // refusal. A target without enough admitted-and-confirmed history has no
-    // answer: the entry is omitted from the map rather than fabricated as a
-    // 1 sat/vB floor, so a wallet can tell "no data" from "cheap". The
-    // dispatched `estimatesmartfee` feerate is the RPC surface's own
-    // `sat_to_btc` projection of the estimator's sat/kvB rate (see the
-    // util.rs handler); this endpoint is a consumer of that value, so the
-    // unit projection cannot drift between the two surfaces.
+fn fee_estimates(ctx: &Context) -> Response {
+    // CONTRACT: docs/contracts/external-api.md#API-26. Capture every target
+    // from one estimator view, omitting unavailable estimates. Release the
+    // guard before formatting and retain the RPC's BTC/kvB rounding path.
+    let estimates = {
+        let pool = ctx.mempool.gateway.read();
+        (1_u32..=25)
+            .chain([144, 504, 1008])
+            .filter_map(|target| pool.estimate_fee_rate(target).map(|rate| (target, rate)))
+            .collect::<Vec<_>>()
+    };
     let mut values = serde_json::Map::new();
-    for target in (1_u32..=25).chain([144, 504, 1008]) {
-        if let Some(fee) = handler
-            .dispatch("estimatesmartfee", &sonic_json!([target]))
-            .ok()
-            .and_then(|v| v.get("feerate").and_then(sonic_rs::JsonValueTrait::as_f64))
-            .map(fee_rate_sat_per_vbyte)
-        {
-            values.insert(target.to_string(), json!(fee));
-        }
+    for (target, rate) in estimates {
+        let fee = fee_rate_sat_per_vbyte(convert::sat_to_btc(rate.as_sat_per_kvb()));
+        values.insert(target.to_string(), json!(fee));
     }
     json_ok(&values)
 }

@@ -867,6 +867,10 @@ fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
         Err(PeerError::BadChecksum)
     ));
 
+    assert_eq!(
+        MAX_MESSAGE_PAYLOAD, 4_000_000,
+        "Core MAX_PROTOCOL_MESSAGE_LENGTH"
+    );
     let mut oversized = Vec::new();
     oversized.extend_from_slice(&magic.to_bytes());
     oversized.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");

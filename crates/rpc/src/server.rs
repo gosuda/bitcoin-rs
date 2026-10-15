@@ -558,8 +558,8 @@ fn read_request(
         return Err(RequestReadError::RestBodyTooLarge);
     }
     reader.get_mut().reset_deadline(body_timeout);
-    let mut body = vec![0_u8; content_length];
-    reader.read_exact(&mut body)?;
+    let mut body = Vec::new();
+    read_body(reader, content_length, &mut body)?;
     Ok(Some(HttpRequest {
         method: method.to_owned(),
         path: path.to_owned(),
@@ -567,6 +567,37 @@ fn read_request(
         keep_alive,
         body,
     }))
+}
+
+const BODY_READ_CHUNK: usize = 8 * 1_024;
+
+/// Reads exactly `content_length` bytes into the empty `body`, which grows
+/// with the bytes received, as Bitcoin Core's HTTP server does: a declared but
+/// unsent body reserves little, and the buffer never exceeds `content_length`.
+/// A body that ends early is `UnexpectedEof`.
+fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) -> io::Result<()> {
+    let mut chunk = [0_u8; BODY_READ_CHUNK];
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let read = match reader.read(&mut chunk[..remaining.min(BODY_READ_CHUNK)]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "request body ended early",
+                ));
+            }
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        // Doubling capped at `content_length`; `read_to_end` would round a
+        // full body's capacity up to the next power of two.
+        if body.capacity() - body.len() < read {
+            body.try_reserve_exact(remaining.min(body.len().max(BODY_READ_CHUNK)))?;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    Ok(())
 }
 
 struct JsonResponse {
@@ -1202,7 +1233,7 @@ mod tests {
         }
         for (enabled, expected) in [(true, 400), (false, 404)] {
             // Deliberately send no body: receiving an answer proves the cap
-            // was enforced before read_exact or body allocation.
+            // was enforced before the body read.
             let response = rest_wire_request(b"POST /rest/getutxos.hex?cache=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2049\r\nConnection: keep-alive\r\n\r\n", enabled)?;
             assert!(response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()));
             let text = String::from_utf8_lossy(&response);
@@ -1389,6 +1420,112 @@ mod tests {
 
         shutdown.store(true, Ordering::SeqCst);
         drop(handle.join().expect("server thread"));
+        Ok(())
+    }
+
+    /// Runs `read_request` over a loopback socket fed `request` in writes of
+    /// at most `chunk` bytes, after which the client closes its write half.
+    fn read_fed_request(
+        request: Vec<u8>,
+        chunk: usize,
+    ) -> io::Result<Result<Option<HttpRequest>, RequestReadError>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        let (server, _) = listener.accept()?;
+        let writer = thread::spawn(move || -> io::Result<()> {
+            for piece in request.chunks(chunk) {
+                client.write_all(piece)?;
+            }
+            client.shutdown(Shutdown::Write)
+        });
+        let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
+        let result = read_request(&mut reader, Duration::from_secs(3), Duration::from_secs(3));
+        // Close the server end first: after a failed read, a writer blocked on
+        // a full socket buffer would otherwise never return. The writer's
+        // resulting error must not hide the read's.
+        drop(reader);
+        let written = writer.join().expect("writer thread");
+        if result.is_ok() {
+            written?;
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn body_arriving_across_reads_is_received_whole() -> io::Result<()> {
+        let body = b"0123456789abcdef".repeat(4_096);
+        let mut request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        let Ok(Some(received)) = read_fed_request(request, 1_000)? else {
+            panic!("a complete request must decode");
+        };
+        assert_eq!(received.body, body);
+        Ok(())
+    }
+
+    /// A body declared at the size cap but cut short is a framing error, as
+    /// before.
+    #[test]
+    fn declared_but_unsent_body_is_a_framing_error() -> io::Result<()> {
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {MAX_BODY_BYTES}\r\n\r\npartial"
+        );
+        match read_fed_request(request.into_bytes(), usize::MAX)? {
+            Err(RequestReadError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+            }
+            Err(RequestReadError::RestBodyTooLarge) => panic!("unexpected size rejection"),
+            Ok(_) => panic!("a truncated body was accepted"),
+        }
+        Ok(())
+    }
+
+    /// The body buffer tracks the bytes that arrived, not the declared length.
+    #[test]
+    fn declared_but_unsent_body_allocates_only_received_bytes() {
+        let mut body = Vec::new();
+        let result = read_body(
+            &mut std::io::Cursor::new(b"partial"),
+            MAX_BODY_BYTES,
+            &mut body,
+        );
+        assert!(
+            matches!(&result, Err(error) if error.kind() == io::ErrorKind::UnexpectedEof),
+            "{result:?}"
+        );
+        assert_eq!(body, b"partial");
+        assert!(
+            body.capacity() < 64 * 1_024,
+            "a {MAX_BODY_BYTES}-byte declaration reserved {} bytes",
+            body.capacity()
+        );
+    }
+
+    /// A body received in full keeps a buffer no larger than its declared
+    /// length, including at the size cap and at lengths that are not powers
+    /// of two.
+    #[test]
+    fn full_body_capacity_stays_within_the_declared_length() -> io::Result<()> {
+        for content_length in [MAX_BODY_BYTES, 9_000_000] {
+            let mut request = format!(
+                "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {content_length}\r\n\r\n"
+            )
+            .into_bytes();
+            request.resize(request.len() + content_length, b'x');
+            let Ok(Some(received)) = read_fed_request(request, 1_460)? else {
+                panic!("a complete request must decode");
+            };
+            assert_eq!(received.body.len(), content_length);
+            assert!(
+                received.body.capacity() <= content_length,
+                "a {content_length}-byte body kept {} bytes",
+                received.body.capacity()
+            );
+        }
         Ok(())
     }
 
