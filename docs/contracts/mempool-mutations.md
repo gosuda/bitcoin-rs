@@ -166,10 +166,18 @@ state (`crates/mempool/src/orphan.rs`).
   `MinRelayFeeNotMet`, pool failures retain `MempoolError`, and stale insertion
   plans remain retryable rather than becoming replacement-policy refusals. The
   writer revalidates the same generation, sequence and policy stamp, then
-  installs all members through the ordinary insertion/estimator funnel and
-  publishes one ordered envelope. Refusal changes no membership, sequence,
+  installs all members through the ordinary insertion funnel without registering
+  package members as fee-estimation samples, and publishes one ordered envelope.
+  Submission preserves the prepared consensus or policy error class; preview
+  keeps its existing rejection facts. Refusal changes no membership, sequence,
   fee overlay, estimator or observer output. Four attempts bound stale facts.
   It neither implements package RBF nor changes RPC/REST wire behavior.
+- Proof: `package::tests::native_package_aggregates_cpfp_atomically_and_ignores_input_order`
+  in `crates/mempool/src/package/tests.rs` checks successful CPFP admission,
+  ordered publication and unchanged estimator history;
+  `package::tests::native_package_consensus_failures_match_single_submission`
+  checks script and overspend error parity for single and multi-member native
+  packages, unchanged preview facts and refusal without mutation.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,

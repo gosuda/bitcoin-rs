@@ -175,7 +175,7 @@ pub enum AdmitError {
 pub(crate) struct PreparedAdmission {
     pub(crate) fact: crate::standardness::TxAcceptanceFact,
     prevouts: Vec<(OutPoint, TxOut)>,
-    rejection: Option<(AdmitError, RejectScope)>,
+    pub(crate) rejection: Option<(AdmitError, RejectScope)>,
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
     replacement: ReplacementStage,
     /// Engine for this attempt's script checks; set by the gateway that

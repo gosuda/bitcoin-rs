@@ -162,7 +162,18 @@ impl MempoolGateway {
             );
             let verdict = facts
                 .package_error
-                .or_else(|| facts.results.iter().find_map(|row| row.reject_reason));
+                .map(crate::AdmitError::Policy)
+                .or_else(|| {
+                    facts.results.iter().zip(&prepared).find_map(|(row, job)| {
+                        row.reject_reason.map(|reason| {
+                            // Preview facts intentionally collapse consensus
+                            // errors. Submission retains the owner's verdict
+                            // for this row; package-only checks remain policy.
+                            job.rejection
+                                .map_or(crate::AdmitError::Policy(reason), |(error, _)| error)
+                        })
+                    })
+                });
             let result = self.commit(
                 origin,
                 |pool| {
@@ -173,8 +184,8 @@ impl MempoolGateway {
                         AdmissionFence::Stable,
                         Some(stamp),
                     )?;
-                    if let Some(reason) = verdict {
-                        return Err(crate::AdmitError::Policy(reason));
+                    if let Some(error) = verdict {
+                        return Err(error);
                     }
                     let plan = plan.map_err(crate::AdmitError::Policy)?;
                     pool.commit_package(plan).map_err(|error| match error {

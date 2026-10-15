@@ -53,6 +53,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
             )
             .is_err()
     );
+    let history = gateway.read().estimator_history();
     let result = gateway.submit_local_package(
         vec![child.clone(), parent.clone()],
         crate::LocalOrigin::Rpc,
@@ -60,6 +61,10 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         1,
         &chain,
     )?;
+    assert!(
+        gateway.read().estimator_history() == history,
+        "successful CPFP admission must not register fee-estimation samples"
+    );
     assert_eq!(
         result
             .changes
@@ -89,7 +94,6 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
             result
         }]
     );
-    let history = gateway.read().estimator_history();
     assert!(
         gateway
             .submit_local_package(
@@ -103,6 +107,72 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
     );
     assert_eq!(gateway.read().estimator_history(), history);
     assert_eq!(seen.0.lock().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn native_package_consensus_failures_match_single_submission() -> TestResult {
+    for script_failure in [true, false] {
+        let gateway = gateway();
+        let parent = spend(&[coin(810)], &[98_000], false);
+        let mut child = spend(&[OutPoint::new(parent.txid(), 0)], &[96_000], true);
+        if script_failure {
+            child.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
+        } else {
+            child.outputs[0].value = Amount::from_sat(100_000);
+        }
+        let child_chain = Coins(vec![(
+            OutPoint::new(parent.txid(), 0),
+            parent.outputs[0].clone(),
+        )]);
+        let package_chain = Coins(vec![(
+            coin(810),
+            TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )]);
+        let before = (
+            gateway.read().sequence_number(),
+            gateway.read().estimator_history(),
+        );
+        assert_eq!(
+            gateway.submit_local_transaction(
+                Arc::new(child.clone()),
+                crate::LocalOrigin::Rpc,
+                None,
+                0,
+                &child_chain,
+            ),
+            Err(SubmitError::Consensus)
+        );
+        for (txs, chain) in [
+            (vec![child.clone()], &child_chain),
+            (vec![parent, child], &package_chain),
+        ] {
+            let preview = gateway.preview_transactions(&txs, None, chain)?;
+            assert_eq!(preview.package_error, None);
+            let failed = preview.results.last().ok_or("missing preview row")?;
+            assert_eq!(failed.allowed, Some(false));
+            assert_eq!(
+                failed.reject_reason,
+                Some(AcceptanceRejectReason::ScriptVerify)
+            );
+            assert_eq!(
+                gateway.submit_local_package(txs.clone(), crate::LocalOrigin::Rpc, None, 0, chain),
+                Err(SubmitError::Consensus)
+            );
+            assert_eq!(gateway.preview_transactions(&txs, None, chain)?, preview);
+            assert!(gateway.read().is_empty());
+            assert_eq!(
+                (
+                    gateway.read().sequence_number(),
+                    gateway.read().estimator_history(),
+                ),
+                before
+            );
+        }
+    }
     Ok(())
 }
 

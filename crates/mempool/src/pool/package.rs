@@ -77,11 +77,10 @@ impl Mempool {
         }
         let mut changes = Vec::new();
         // All fallible checks finished against the captured stamp. No partial
-        // package is ever visible outside this writer interval.
+        // package is ever visible outside this writer interval. Package fees
+        // pay for the group, so member rates are not fee-estimation samples.
         for entry in prepared.inserts {
-            let txid = entry.entry.txid;
             changes.extend(self.commit_insert(entry).changes);
-            self.record_entry_arrival(txid);
         }
         Ok(self.finish_mutation(changes))
     }
