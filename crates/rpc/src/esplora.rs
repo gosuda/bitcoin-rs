@@ -2650,14 +2650,21 @@ mod tests {
         // An external parent uses its ordinary checked lookup. Merely having
         // non-coinbase inputs must not open a separate readiness snapshot.
         let values = Projection::new(&ctx)
-            .transaction_values([(&child, None)], Some(std::slice::from_ref(&child)))
+            .transaction_values(
+                [(&child, None)],
+                Some(super::projection::ParentSource::Block(
+                    std::slice::from_ref(&child),
+                )),
+            )
             .expect("external parent");
         assert_eq!(values[0].fee, 25);
         assert_eq!(checks.load(Ordering::Relaxed), 0);
         let values = Projection::new(&ctx)
             .transaction_values(
                 [(&child, None), (&child, None)],
-                Some(std::slice::from_ref(&parent)),
+                Some(super::projection::ParentSource::Block(
+                    std::slice::from_ref(&parent),
+                )),
             )
             .expect("in-block parent");
         assert_eq!(values[0].fee, 25);
@@ -2671,9 +2678,165 @@ mod tests {
             synced: false,
         }));
         let error = Projection::new(&ctx)
-            .transaction_values([(&child, None)], Some(std::slice::from_ref(&parent)))
+            .transaction_values(
+                [(&child, None)],
+                Some(super::projection::ParentSource::Block(
+                    std::slice::from_ref(&parent),
+                )),
+            )
             .expect_err("index behind tip");
         assert_eq!(error.status, 503);
+    }
+
+    #[test]
+    fn backend_mempool_get_bounds_prevouts_without_limiting_rows() {
+        let parent = paying_transaction(
+            &[OutPoint::null()],
+            &(0..57)
+                .flat_map(|_| [(125, vec![0x51]), (175, vec![0x52])])
+                .collect::<Vec<_>>(),
+        );
+        let txs = (0_u32..57)
+            .map(|n| {
+                paying_transaction(
+                    &[
+                        OutPoint::new(parent.txid(), 2 * n),
+                        OutPoint::new(parent.txid(), 2 * n + 1),
+                    ],
+                    &[(250, vec![0x51])],
+                )
+            })
+            .collect::<Vec<_>>();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: vec![parent],
+            calls: Arc::clone(&calls),
+        }));
+        for (n, tx) in (0_u64..).zip(&txs) {
+            ctx.mempool
+                .gateway
+                .pool()
+                .write()
+                .insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, n, 0, 0))
+                .expect("fixture entry");
+        }
+        let handler = Handler::new(Arc::new(ctx));
+        let cursor = format!("/internal/mempool/txs/{}", txs[24].txid());
+        for (path, query, start, count, reads) in [
+            ("/internal/mempool/txs", "", 0, 57, 3),
+            ("/internal/mempool/txs", "max_txs=26", 0, 26, 2),
+            (cursor.as_str(), "", 25, 32, 2),
+            (cursor.as_str(), "max_txs=25", 25, 25, 1),
+            ("/internal/mempool/txs", "max_txs=0", 0, 0, 0),
+        ] {
+            calls.store(0, Ordering::Relaxed);
+            let response = backend_route(&handler, path, query);
+            assert_eq!(response.status, 200);
+            let rows: Vec<Value> = serde_json::from_slice(&response.body).expect("rows");
+            assert_eq!(rows.len(), count);
+            for (row, tx) in rows.iter().zip(txs.iter().skip(start)) {
+                assert_eq!(row["txid"], tx.txid().to_string());
+                assert_eq!(row["fee"], 50);
+                assert_eq!(row["vin"][0]["prevout"]["value"], 125);
+                assert_eq!(row["vin"][1]["prevout"]["value"], 175);
+                assert_eq!(row["status"]["confirmed"], false);
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), reads);
+        }
+        let unresolved =
+            paying_transaction(&[OutPoint::new(Txid::default(), 0)], &[(1, vec![0x51])]);
+        handler
+            .context()
+            .mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(
+                Arc::new(unresolved),
+                100,
+                1_000,
+                57,
+                0,
+                0,
+            ))
+            .expect("unavailable parent fixture");
+        // An error after completed batches must never return partial success.
+        assert_eq!(
+            backend_route(&handler, "/internal/mempool/txs", "").status,
+            503
+        );
+        assert_eq!(
+            backend_route(&handler, "/internal/mempool/txs", "max_txs=57").status,
+            200
+        );
+    }
+
+    #[test]
+    fn backend_mempool_get_keeps_captured_parents_across_batches() {
+        struct RemovingIndex {
+            gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
+            captured_parent: Txid,
+            external: Tx,
+            calls: Arc<AtomicUsize>,
+        }
+        impl crate::context::DerivedIndexQuery for RemovingIndex {
+            fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.gateway
+                    .pool()
+                    .write()
+                    .remove_for_reorg(&[self.captured_parent]);
+                Ok((*txid == self.external.txid()).then(|| self.external.clone()))
+            }
+            fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+                Ok(None)
+            }
+            fn transaction_height(&self, _: &Txid) -> Result<Option<u32>, TxQueryError> {
+                Ok(None)
+            }
+            fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+                panic!("captured mempool parents must not require index readiness")
+            }
+        }
+        let parent = paying_transaction(&[OutPoint::null()], &[(300, vec![0x51])]);
+        let external = paying_transaction(&[OutPoint::null()], &[(400, vec![0x52])]);
+        let trigger =
+            paying_transaction(&[OutPoint::new(external.txid(), 0)], &[(350, vec![0x51])]);
+        let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(250, vec![0x51])]);
+        let mut txs = vec![parent.clone(), trigger];
+        txs.extend((2..26).map(|n| paying_transaction(&[OutPoint::null()], &[(n, vec![0x51])])));
+        txs.push(child.clone());
+        let mut ctx = Context::new();
+        for (n, tx) in (0_u64..).zip(&txs) {
+            ctx.mempool
+                .gateway
+                .pool()
+                .write()
+                .insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, n, 0, 0))
+                .expect("fixture entry");
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(RemovingIndex {
+            gateway: ctx.mempool.gateway.clone(),
+            captured_parent: parent.txid(),
+            external,
+            calls: Arc::clone(&calls),
+        }));
+        let ctx = Arc::new(ctx);
+        let handler = Handler::new(Arc::clone(&ctx));
+        let response = backend_route(&handler, "/internal/mempool/txs", "");
+        assert_eq!(response.status, 200);
+        let rows: Vec<Value> = serde_json::from_slice(&response.body).expect("rows");
+        assert_eq!(rows.len(), txs.len());
+        for (row, tx) in rows.iter().zip(&txs) {
+            assert_eq!(row["txid"], tx.txid().to_string());
+        }
+        assert_eq!(rows[26]["vin"][0]["prevout"]["value"], 300);
+        assert_eq!(rows[26]["fee"], 50);
+        assert!(!ctx.mempool.gateway.read().contains_txid(&parent.txid()));
+        assert!(!ctx.mempool.gateway.read().contains_txid(&child.txid()));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

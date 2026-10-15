@@ -11,7 +11,7 @@ use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
-use super::projection::Projection;
+use super::projection::{ParentSource, Projection};
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
 use crate::handlers::Handler;
@@ -20,8 +20,8 @@ use crate::rest::Response;
 use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
 
-// Bound retained transaction bodies without imposing a client-visible limit
-// on backend POST requests. Completed batches keep only their response rows.
+// Bound temporary prevouts on GET and POST, and owned bodies on POST, without
+// imposing a client-visible limit. Completed batches keep only response rows.
 const TRANSACTION_BATCH_SIZE: usize = 25;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
@@ -87,13 +87,27 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         });
         ordered
             .into_iter()
-            .map(|(_, _, transaction)| transaction)
+            .map(|(_, txid, transaction)| (txid, transaction))
             .collect::<Vec<_>>()
     };
     let projection = Projection::new(ctx);
-    projection
-        .transaction_values(transactions.iter().map(|tx| (tx.as_ref(), None)), None)
-        .map_or_else(|r| r, json_ok)
+    // Borrow the captured page, including parents in other batches, rather
+    // than depending on their continued presence in the live pool.
+    let parents = transactions
+        .iter()
+        .map(|(txid, tx)| (*txid, tx.as_ref()))
+        .collect();
+    let mut values = Vec::new();
+    for batch in transactions.chunks(TRANSACTION_BATCH_SIZE) {
+        match projection.transaction_values(
+            batch.iter().map(|(_, tx)| (tx.as_ref(), None)),
+            Some(ParentSource::Selected(&parents)),
+        ) {
+            Ok(batch) => values.extend(batch),
+            Err(response) => return response,
+        }
+    }
+    json_ok(values)
 }
 
 /// Selects the API-09 page without retaining the entire eligible suffix.

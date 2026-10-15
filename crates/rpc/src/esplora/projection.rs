@@ -30,6 +30,14 @@ pub(super) struct Confirmation {
     pub time: u32,
 }
 
+/// Already selected bodies remain borrowed; only one batch's referenced
+/// outputs are copied. Block candidates additionally require index readiness.
+#[derive(Clone, Copy)]
+pub(super) enum ParentSource<'a> {
+    Block(&'a [Tx]),
+    Selected(&'a std::collections::HashMap<Txid, &'a Tx>),
+}
+
 impl From<Confirmation> for TransactionStatus {
     fn from(value: Confirmation) -> Self {
         Self {
@@ -213,11 +221,12 @@ impl<'a> Projection<'a> {
     /// By default the selected transactions are already resolved from the
     /// mempool or verified index queries. Block routes override the parent
     /// candidates with the verified active block, or an empty slice for a
-    /// stale block. Reuse also requires a ready transaction index.
+    /// stale block; block reuse also requires a ready transaction index.
+    /// Backend GET batches may borrow parents from the full captured selection.
     pub(super) fn transaction_values<'t>(
         &self,
         transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
-        block_parents: Option<&'t [Tx]>,
+        parents: Option<ParentSource<'t>>,
     ) -> Result<Vec<TransactionValue>, Response> {
         let transactions = transactions
             .into_iter()
@@ -240,11 +249,11 @@ impl<'a> Projection<'a> {
                 available.insert(txid, tx);
             }
         };
-        if let Some(parents) = block_parents {
+        if let Some(ParentSource::Block(parents)) = parents {
             for tx in parents {
                 retain(tx.txid(), tx);
             }
-        } else {
+        } else if parents.is_none() {
             for (tx, _, txid) in &transactions {
                 retain(*txid, *tx);
             }
@@ -252,7 +261,7 @@ impl<'a> Projection<'a> {
         // Consult the authoritative snapshot once, and only if this batch
         // can actually reuse an in-block parent. Otherwise ordinary parent
         // queries enforce index health and watermarks themselves.
-        if block_parents.is_some()
+        if matches!(parents, Some(ParentSource::Block(_)))
             && !available.is_empty()
             && !self
                 .ctx
@@ -276,7 +285,11 @@ impl<'a> Projection<'a> {
                 }
                 Ok(())
             };
-            if let Some(tx) = available.get(&txid) {
+            let selected = match parents {
+                Some(ParentSource::Selected(selected)) => selected.get(&txid).copied(),
+                _ => None,
+            };
+            if let Some(tx) = selected.or_else(|| available.get(&txid).copied()) {
                 collect(tx)?;
                 continue;
             }

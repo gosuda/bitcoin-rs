@@ -36,8 +36,12 @@ moved chain generation returns the declared unavailable response, never a
 mixed-tip page.
 
 Transaction rendering resolves a distinct parent at most once per response
-or bounded backend POST batch, retaining only referenced outputs until that
-batch finishes. Backend POST transaction requests render at most 25 requested
+or bounded backend batch, retaining only referenced outputs until that
+batch finishes. Backend mempool GETs render at most 25 selected transactions
+at a time without limiting the response count. The ordered selection and its
+borrowed parent lookup retain the captured transaction Arcs across batches;
+only the prevout working set is bounded by the inputs of one batch. Backend
+POST transaction requests render at most 25 requested
 IDs at a time and share duplicate bodies within each batch; completed batches
 retain only response rows. Request size, row ordering, duplicates and omitted
 missing IDs keep their existing semantics. Transactions
@@ -53,6 +57,13 @@ branch bodies do not substitute for authoritative parent history. Missing,
 pruned, unavailable and corrupt required data retain their explicit errors.
 Read-only backend POST batches use the same applied-tip publication fence
 as GET responses.
+
+Proof: `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
+checks multi-batch counts, ordering, cursor/limit behavior, distinct prevout
+values and one external-parent lookup per batch.
+`esplora::tests::backend_mempool_get_keeps_captured_parents_across_batches`
+checks that a selected parent removed during rendering still supplies a later
+batch without an index readiness check or another parent query.
 
 Proof: `crates/rpc/src/esplora.rs` tests
 `history_resolves_shared_parents_once_per_page`,

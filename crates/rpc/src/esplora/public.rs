@@ -24,7 +24,7 @@ use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
-use super::projection::{Confirmation, Projection};
+use super::projection::{Confirmation, ParentSource, Projection};
 use crate::context::Context;
 use crate::convert;
 use crate::handlers::Handler;
@@ -478,11 +478,11 @@ pub(super) fn block_transaction_values(
     // A decoded losing-branch block is not authoritative prevout history.
     projection.transaction_values(
         transactions,
-        Some(if block_status.is_some() {
+        Some(ParentSource::Block(if block_status.is_some() {
             block.txs.as_slice()
         } else {
             &[]
-        }),
+        })),
     )
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
