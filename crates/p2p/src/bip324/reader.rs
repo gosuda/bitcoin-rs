@@ -13,15 +13,12 @@ use super::TransportError;
 use super::cipher::{LENGTH_FIELD_LEN, TAG_LEN};
 use super::packet::{HEADER_LEN, RecvCipher};
 use crate::recv;
-
-/// Largest message payload a v2 peer accepts: Bitcoin Core's
-/// `MAX_PROTOCOL_MESSAGE_LENGTH`.
-pub(crate) const MAX_PAYLOAD_LEN: usize = 4_000_000;
+use crate::wire::MAX_MESSAGE_PAYLOAD;
 
 /// Largest contents length accepted from a peer: a type byte, a 12-byte long
-/// type, and a payload of up to [`MAX_PAYLOAD_LEN`] bytes, as Bitcoin Core
+/// type, and a payload of up to [`MAX_MESSAGE_PAYLOAD`] bytes, as Bitcoin Core
 /// accepts.
-pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_PAYLOAD_LEN;
+pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 
 /// Reads one direction's packets: the receiving ciphers, the AAD owed by the
 /// first packet, and any partially received packet.

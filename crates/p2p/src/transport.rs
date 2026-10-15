@@ -8,8 +8,8 @@ use std::time::Instant;
 use bitcoin::p2p::Magic;
 
 use crate::bip324::{
-    Established, Handshake, MAX_PAYLOAD_LEN, PacketReader, SendCipher, Step, TransportError,
-    is_poll_timeout, msg_type,
+    Established, Handshake, PacketReader, SendCipher, Step, TransportError, is_poll_timeout,
+    msg_type,
 };
 use crate::wire::{
     FramedMessage, Message, PeerError, V1Receiver, decode_payload, encode_frame, message_payload,
@@ -110,17 +110,14 @@ impl RecvTransport {
 }
 
 impl SendTransport {
-    /// Encodes `message`: a v1 frame, or a sealed BIP324 packet. A v2
-    /// payload above [`MAX_PAYLOAD_LEN`] is refused, as a v2 peer would
-    /// refuse to receive it.
+    /// Encodes `message`: a v1 frame, or a sealed BIP324 packet.
+    /// [`message_payload`] refuses a payload above the protocol message bound
+    /// on either transport.
     pub(crate) fn encode(&mut self, message: &Message) -> Result<FramedMessage, PeerError> {
         match self {
             Self::V1(magic) => encode_frame(*magic, message),
             Self::V2(cipher) => {
                 let payload = message_payload(message)?;
-                if payload.len() > MAX_PAYLOAD_LEN {
-                    return Err(PeerError::PayloadTooLarge(payload.len()));
-                }
                 let contents = msg_type::encode(&message.command(), &payload);
                 let packet = cipher
                     .seal(&contents, &[], false)
