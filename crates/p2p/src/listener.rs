@@ -1135,7 +1135,10 @@ fn run_handshake(
     }
 
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    // Eviction cancels the lease from the accept loop; reads then fail even
+    // mid-payload, as Core closes an evicted connection at once.
     let stream = match crate::CountingStream::from_connected(stream, counters)
+        .map(|stream| stream.stop_reading_when(lease.cancellation()))
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,

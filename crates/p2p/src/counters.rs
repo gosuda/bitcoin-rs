@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Bytes and activity times for one peer connection.
 ///
@@ -93,6 +93,8 @@ impl Eq for PeerCounters {}
 pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
+    /// The connection's cancellation flag, when reads must stop with it.
+    cancelled: Option<Arc<AtomicBool>>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -110,6 +112,7 @@ impl<S> CountingStream<S> {
         Self {
             inner,
             counters,
+            cancelled: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -120,6 +123,28 @@ impl<S> CountingStream<S> {
     #[must_use]
     pub const fn counters(&self) -> &Arc<PeerCounters> {
         &self.counters
+    }
+
+    /// Makes every read fail once `cancelled` is set, so a peer trickling a
+    /// payload cannot keep a cancelled connection's thread and socket alive.
+    #[must_use]
+    pub(crate) fn stop_reading_when(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.cancelled = Some(cancelled);
+        self
+    }
+
+    fn check_cancelled(&self) -> IoResult<()> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "connection cancelled",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -215,6 +240,7 @@ impl<S: Read> CountingStream<S> {
 
 impl<S: Read> Read for CountingStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+        self.check_cancelled()?;
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -224,6 +250,7 @@ impl<S: Read> Read for CountingStream<S> {
     }
 
     fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        self.check_cancelled()?;
         let read = self.inner.read_vectored(buffers)?;
         self.counters.record_recv(read);
         Ok(read)
@@ -755,5 +782,42 @@ mod tests {
             counters.bytes_sent(),
             u64::try_from(written).unwrap_or(u64::MAX)
         );
+    }
+
+    #[test]
+    fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+        let (server, _) = listener.accept()?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut stream = CountingStream::new(server, Arc::new(PeerCounters::default()))
+            .stop_reading_when(Arc::clone(&cancelled));
+        // One byte every 5 ms for about a second, then EOF: without the
+        // cancellation check the read below ends in `UnexpectedEof`.
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if client.write_all(&[0]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let canceller = {
+            let cancelled = Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancelled.store(true, Ordering::Release);
+            })
+        };
+        let mut payload = Vec::new();
+        let result = crate::recv::fill_growing(&mut stream, &mut payload, 4_000_000);
+        drop(stream);
+        let _ = trickle.join();
+        let _ = canceller.join();
+        assert_eq!(
+            result.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::ConnectionAborted)
+        );
+        Ok(())
     }
 }

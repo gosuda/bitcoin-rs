@@ -563,6 +563,11 @@ impl PeerLease {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
+
+    /// The flag [`Self::cancel`] sets, for a socket wrapper to observe.
+    pub(crate) fn cancellation(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
 }
 
 #[cfg(test)]

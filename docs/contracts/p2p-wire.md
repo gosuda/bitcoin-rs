@@ -389,9 +389,12 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   eviction are one table write operation. A socket that arrives at
   `max_inbound = max_peer_connections - outbound_full_relay_slots -
   outbound_block_relay_slots` first removes and cancels the inbound connection
-  Core's `SelectNodeToEvict` would choose (Core derives the same remainder at
-  `bitcoin-core/src/net.h:1118` and evicts at `net.cpp:1819-1826`). Outbound
-  and `NoBan` connections are never chosen. When every candidate is protected,
+  chosen by a port of Core's `SelectNodeToEvict` (Core derives the same
+  remainder at `bitcoin-core/src/net.h:1118` and evicts at
+  `net.cpp:1819-1826`). Outbound and `NoBan` connections are never chosen.
+  Every read on an inbound socket fails once its lease is cancelled, so an
+  evicted connection stops even while its peer keeps trickling a payload,
+  as Core closes an evicted socket at once. When every candidate is protected,
   or the address holds a live outbound connection the newcomer would also
   replace, the socket is closed with no lease and no thread. A replacement at
   an address already holding a live inbound connection is admitted without
@@ -443,7 +446,9 @@ admission orders, inactive identity/capacity guards and re-enable behavior.
 `a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` and
 `useful_transactions_and_blocks_protect_inbound_connections` cover eviction at
 the cap, and the `crates/p2p/src/eviction.rs` tests cover each protection step
-and the final netgroup choice.
+and the final netgroup choice. `crates/p2p/src/counters.rs` test
+`a_cancelled_stream_stops_a_payload_that_keeps_arriving` covers the read that
+ends with cancellation mid-payload.
 `crates/p2p/src/service.rs` tests
 `disable_during_outbound_tip_query_refuses_registration_before_handshake`,
 `ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp`,
