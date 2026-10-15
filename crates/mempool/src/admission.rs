@@ -400,7 +400,10 @@ impl MempoolGateway {
                     .collect::<Vec<_>>();
                 let checks = (mode == AdmissionMode::PackageTest
                     && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
-                .then(|| crate::package::capture_preview_checks(&pool, txs, &requests, &prepared));
+                .then(|| {
+                    let entries = crate::package::package_entries(&requests, &prepared);
+                    crate::package::capture_package_checks(&pool, txs, &entries)
+                });
                 (prepared, checks)
             };
             let facts =

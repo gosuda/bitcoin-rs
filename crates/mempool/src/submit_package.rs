@@ -5,10 +5,9 @@ use crate::admission::{
 use crate::gateway::AdmissionMode;
 use crate::standardness::AcceptanceRejectReason;
 use crate::{
-    AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolEntry, MempoolGateway, MutationResult,
-    SubmitError,
+    AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, SubmitError,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 use bitcoin_rs_primitives::Tx;
 
 fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
@@ -146,37 +145,20 @@ impl MempoolGateway {
                         )
                     })
                     .collect();
-                let checks =
-                    crate::package::capture_preview_checks(&pool, &pending, &requests, &prepared);
-                let entries = requests
-                    .iter()
-                    .zip(&prepared)
-                    .map(|(request, job)| {
-                        MempoolEntry::new(
-                            Arc::clone(&request.tx),
-                            job.fact.vsize,
-                            job.fact.base_fee.unwrap_or(0),
-                            time,
-                            request.height,
-                            job.fact.sigop_cost,
-                        )
-                    })
-                    .collect();
+                let entries = crate::package::package_entries(&requests, &prepared);
+                let checks = crate::package::capture_package_checks(&pool, &pending, &entries);
                 (prepared, checks, pool.prepare_package(entries))
             };
             // Unlike a single preview, even one new package member must use
             // aggregate-package policy, including ephemeral-spend checks.
-            let aggregate_error = plan
-                .as_ref()
-                .err()
-                .copied()
-                .map(AcceptanceRejectReason::Replacement);
+            let aggregate_error = plan.as_ref().err().copied();
             let facts = crate::package::finish_package(
                 &pending,
                 &requests,
                 &mut prepared,
                 Some(checks),
                 aggregate_error,
+                AdmissionMode::PackageSubmit,
             );
             let verdict = facts
                 .package_error
@@ -194,11 +176,10 @@ impl MempoolGateway {
                     if let Some(reason) = verdict {
                         return Err(crate::AdmitError::Policy(reason));
                     }
-                    let plan = plan.map_err(|error| {
-                        crate::AdmitError::Policy(AcceptanceRejectReason::Replacement(error))
-                    })?;
-                    pool.commit_package(plan).map_err(|error| {
-                        crate::AdmitError::Policy(AcceptanceRejectReason::Replacement(error))
+                    let plan = plan.map_err(crate::AdmitError::Policy)?;
+                    pool.commit_package(plan).map_err(|error| match error {
+                        crate::MempoolError::StalePolicy => crate::AdmitError::MempoolChanged,
+                        other => crate::AdmitError::Policy(other.into()),
                     })
                 },
                 |result| Some(result),

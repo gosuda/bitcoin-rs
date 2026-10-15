@@ -221,6 +221,9 @@ pub enum AcceptanceRejectReason {
     /// Conflicting replacement fails BIP125.
     #[error(transparent)]
     Replacement(#[from] RbfError),
+    /// Native admission cannot insert into the pool or represent its graph.
+    #[error(transparent)]
+    Mempool(#[from] crate::MempoolError),
     /// Transaction exceeds ancestor or descendant package limits.
     #[error(transparent)]
     PackageLimit(#[from] PolicyError),

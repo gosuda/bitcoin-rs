@@ -215,11 +215,9 @@ fn native_package_failure_keeps_membership_sequence_overlay_and_estimator() -> T
             0,
             &chain
         ),
-        Err(SubmitError::Policy(AcceptanceRejectReason::Replacement(
-            RbfError::Mempool(crate::MempoolError::Policy(
-                crate::PolicyError::BelowMinRelayFee { .. }
-            ))
-        )))
+        Err(SubmitError::Policy(
+            AcceptanceRejectReason::MinRelayFeeNotMet
+        ))
     ));
     assert_eq!(gateway.read().len(), 0);
     assert_eq!(
@@ -321,16 +319,17 @@ fn native_package_capacity_and_topology_refuse_before_mutation() {
             script_pubkey: Script::from_bytes(vec![0x51]),
         },
     )]);
-    assert!(
-        gateway
-            .submit_local_package(
-                vec![parent.clone(), child],
-                crate::LocalOrigin::Rpc,
-                None,
-                0,
-                &chain
-            )
-            .is_err()
+    assert_eq!(
+        gateway.submit_local_package(
+            vec![parent.clone(), child],
+            crate::LocalOrigin::Rpc,
+            None,
+            0,
+            &chain
+        ),
+        Err(SubmitError::Policy(AcceptanceRejectReason::Mempool(
+            crate::MempoolError::Full
+        )))
     );
     let unrelated = spend(&[coin(805)], &[90_000], false);
     assert!(matches!(
@@ -345,6 +344,61 @@ fn native_package_capacity_and_topology_refuse_before_mutation() {
     ));
     assert_eq!(gateway.read().len(), 0);
     assert_eq!(gateway.read().sequence_number(), 0);
+}
+
+#[test]
+fn native_package_combined_cluster_limit_is_checked_before_any_insert() -> TestResult {
+    let gateway = gateway();
+    gateway.pool.write().limits.cluster_count = 1;
+    let parent = spend(&[coin(808)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let chain = Coins(vec![(
+        coin(808),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+    )]);
+    let txs = vec![parent, child];
+    assert_eq!(
+        gateway
+            .preview_transactions(&txs, None, &chain)?
+            .package_error,
+        Some(AcceptanceRejectReason::PackageCluster)
+    );
+    assert_eq!(
+        gateway.submit_local_package(txs, crate::LocalOrigin::Rpc, None, 0, &chain),
+        Err(SubmitError::Policy(AcceptanceRejectReason::PackageCluster))
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), 0);
+    Ok(())
+}
+
+#[test]
+fn native_package_plan_reports_stale_pool_state_without_mutation() -> TestResult {
+    let gateway = gateway();
+    let tx = spend(&[coin(809)], &[98_000], false);
+    let txid = tx.txid();
+    let entry = crate::MempoolEntry::new(
+        Arc::new(tx.clone()),
+        u32::try_from(tx.vsize())?,
+        2_000,
+        0,
+        200,
+        0,
+    );
+    let plan = gateway.read().prepare_package(vec![entry])?;
+    let history = gateway.read().estimator_history();
+    gateway.prioritise(txid, 1)?;
+    assert_eq!(
+        gateway.pool.write().commit_package(plan),
+        Err(crate::MempoolError::StalePolicy)
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), 0);
+    assert_eq!(gateway.read().estimator_history(), history);
+    Ok(())
 }
 
 fn coin(tag: u32) -> OutPoint {

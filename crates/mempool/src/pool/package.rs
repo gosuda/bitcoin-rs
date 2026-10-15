@@ -1,6 +1,7 @@
 //! Prepared, all-or-nothing native package insertion over the existing pool.
 use super::{Mempool, PreparedInsert, fee_policy};
-use crate::rbf::{LimitEnforcement, RbfError};
+use crate::rbf::LimitEnforcement;
+use crate::standardness::AcceptanceRejectReason;
 use crate::{MempoolEntry, MempoolError, MutationResult, PolicyError};
 use alloc::vec::Vec;
 use hashbrown::HashSet;
@@ -14,10 +15,10 @@ impl Mempool {
     pub(crate) fn prepare_package(
         &self,
         entries: Vec<MempoolEntry>,
-    ) -> Result<PreparedPackage, RbfError> {
+    ) -> Result<PreparedPackage, AcceptanceRejectReason> {
         let size = entries.iter().try_fold(self.total_vsize(), |sum, entry| {
             sum.checked_add(u64::from(entry.vsize))
-                .ok_or(RbfError::ArithmeticOverflow)
+                .ok_or(PolicyError::FeeArithmetic)
         })?;
         if self.limits.max_total_bytes != 0 && size > self.limits.max_total_bytes {
             return Err(MempoolError::Full.into());
@@ -43,22 +44,23 @@ impl Mempool {
         let mut vsize = 0_u32;
         for entry in &entries {
             fee = fee
-                .checked_add(self.modified_fee_for(entry.txid, entry.fee)?)
-                .ok_or(RbfError::ArithmeticOverflow)?;
+                .checked_add(
+                    self.modified_fee_for(entry.txid, entry.fee)
+                        .map_err(|_| PolicyError::FeeArithmetic)?,
+                )
+                .ok_or(PolicyError::FeeArithmetic)?;
             vsize = vsize
                 .checked_add(entry.vsize)
-                .ok_or(RbfError::ArithmeticOverflow)?;
+                .ok_or(PolicyError::FeeArithmetic)?;
         }
-        if fee < crate::rbf::required_fee(floor, vsize)? {
-            return Err(PolicyError::BelowMinRelayFee {
-                tx_rate: u64::try_from(fee * 1000 / i128::from(vsize.max(1))).unwrap_or(0),
-                min_rate: floor,
-            }
-            .into());
+        if fee < crate::rbf::required_fee(floor, vsize).map_err(|_| PolicyError::FeeArithmetic)? {
+            return Err(AcceptanceRejectReason::MinRelayFeeNotMet);
         }
         let inserts = entries
             .into_iter()
-            .map(|entry| self.validate_insert(entry, &HashSet::new(), LimitEnforcement::Deferred))
+            // The full package graph is verified once by finish_package.
+            // Batch entry-id allocation was preflighted above.
+            .map(|entry| self.prepare_insert(entry, &HashSet::new(), LimitEnforcement::Deferred))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PreparedPackage {
             stamp: self.policy_stamp(),
@@ -69,9 +71,9 @@ impl Mempool {
     pub(crate) fn commit_package(
         &mut self,
         prepared: PreparedPackage,
-    ) -> Result<MutationResult, RbfError> {
+    ) -> Result<MutationResult, MempoolError> {
         if !prepared.stamp.matches(self) {
-            return Err(RbfError::StalePlan);
+            return Err(MempoolError::StalePolicy);
         }
         let mut changes = Vec::new();
         // All fallible checks finished against the captured stamp. No partial

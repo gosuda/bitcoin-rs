@@ -159,6 +159,12 @@ state (`crates/mempool/src/orphan.rs`).
   excluded; only new members contribute to aggregate modified fees and pressure/relay
   charges. A captured insertion plan preflights capacity and member inserts;
   graph/TRUC/ephemeral-spend and script checks finish before the writer. The
+  single and package paths share structural entry validation and metadata
+  preparation; the native package checks cluster bounds on its combined graph
+  rather than repeating per-entry cluster checks. One captured entry vector feeds
+  both graph checks and the insertion plan. Native fee refusal uses
+  `MinRelayFeeNotMet`, pool failures retain `MempoolError`, and stale insertion
+  plans remain retryable rather than becoming replacement-policy refusals. The
   writer revalidates the same generation, sequence and policy stamp, then
   installs all members through the ordinary insertion/estimator funnel and
   publishes one ordered envelope. Refusal changes no membership, sequence,
