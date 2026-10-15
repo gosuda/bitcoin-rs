@@ -35,6 +35,48 @@ Every read captures the applied-tip publication and answers from one coherent vi
 moved chain generation returns the declared unavailable response, never a
 mixed-tip page.
 
+Transaction rendering resolves a distinct parent at most once per response
+or bounded backend batch, retaining only referenced outputs until that
+batch finishes. Backend mempool GETs render at most 25 selected transactions
+at a time without limiting the response count. The ordered selection and its
+borrowed parent lookup retain the captured transaction Arcs across batches;
+only the prevout working set is bounded by the inputs of one batch. Backend
+POST transaction requests render at most 25 requested
+IDs at a time and share duplicate bodies within each batch; completed batches
+retain only response rows. Request size, row ordering, duplicates and omitted
+missing IDs keep their existing semantics. Transactions
+already selected through the mempool or verified index queries may supply
+those outputs. A decoded block may supply them only when its header identity
+matches the requested record, its transactions pass the existing merkle-root,
+mutation and witness-commitment checks using activation at that block's ancestry,
+it belongs to the applied chain, and the transaction
+index is healthy and caught up. The readiness snapshot is consulted once only
+when the batch can reuse an in-block parent; ordinary parent queries otherwise
+enforce their own readiness checks. Losing
+branch bodies do not substitute for authoritative parent history. Missing,
+pruned, unavailable and corrupt required data retain their explicit errors.
+Read-only backend POST batches use the same applied-tip publication fence
+as GET responses.
+
+Proof: `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
+checks multi-batch counts, ordering, cursor/limit behavior, distinct prevout
+values and one external-parent lookup per batch.
+`esplora::tests::backend_mempool_get_keeps_captured_parents_across_batches`
+checks that a selected parent removed during rendering still supplies a later
+batch without an index readiness check or another parent query.
+
+Proof: `crates/rpc/src/esplora.rs` tests
+`history_resolves_shared_parents_once_per_page`,
+`batch_reuses_selected_transactions_and_mempool_parents`,
+`block_page_reuses_parent_outside_the_selected_page`,
+`block_transactions_reject_corrupt_witness_commitments`,
+`block_witness_binding_observes_activation`,
+`block_parent_reuse_checks_readiness_only_when_needed`,
+`backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`, and
+`parent_query_errors_and_republication_never_yield_a_cached_success`
+exercise parent reuse, response fields/order, explicit data errors and
+the applied-tip fence across GET and read-only POST requests.
+
 - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.
 - Checkpoint hashes: `GET /block-height/{h}` (BDK walks this while
   building its chain).

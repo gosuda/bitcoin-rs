@@ -80,7 +80,13 @@ fn config_from_env() -> Result<Config, String> {
         listen,
         rpc_url: env_or("BITCOINRS_RPC_URL", "http://127.0.0.1:18443"),
         rpc_user: env_or("BITCOINRS_RPC_USER", "bitcoin-rs"),
-        rpc_pass: env_or("BITCOINRS_RPC_PASS", "bitcoin-rs"),
+        // No default: the node refuses the legacy public password.
+        rpc_pass: std::env::var("BITCOINRS_RPC_PASS")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| {
+                "BITCOINRS_RPC_PASS must be set to the node's RPC password".to_owned()
+            })?,
         cert_validity_secs,
         secret_key,
     })

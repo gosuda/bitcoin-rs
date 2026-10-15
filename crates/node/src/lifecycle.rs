@@ -125,7 +125,8 @@ fn bind_rpc(
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
 ) -> Result<(Arc<Context>, RpcServer)> {
-    let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
+    let config = state.config();
+    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
     let context = Context::from_handles(ContextHandles {
         chain: ChainHandles {

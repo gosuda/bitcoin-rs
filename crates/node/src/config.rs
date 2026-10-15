@@ -11,7 +11,7 @@ use core::fmt;
 use crossbeam_channel::Receiver;
 use serde::Deserialize;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -315,6 +315,20 @@ impl NodeConfig {
     /// cannot execute is rejected here — before the data directory opens,
     /// chainstate exists, or any worker starts.
     pub fn validate(&self) -> Result<()> {
+        if let Auth::Basic { user, password } = &self.rpc.auth {
+            anyhow::ensure!(
+                !user.is_empty() && !password.is_empty(),
+                "RPC Basic authentication requires a nonempty username and password"
+            );
+            anyhow::ensure!(
+                password != "bitcoin-rs",
+                "RPC password must not use the publicly known legacy default"
+            );
+        }
+        anyhow::ensure!(
+            self.rpc.bind.ip().is_loopback() || self.rpc.auth != Auth::GeneratedCookie,
+            "non-loopback RPC bind requires explicit credentials (--rpc-password or --rpc-cookie)"
+        );
         anyhow::ensure!(
             self.storage.backend.is_compiled_in(),
             "unsupported storage backend {}",
@@ -393,20 +407,19 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
 ///
 /// PRE: `UserConfig::overlay` kept the group coherent: a cookie path and
 /// basic credentials are never both set.
-/// POST: a cookie path selects cookie auth; otherwise the two basic halves
-/// fall back to the built-in credentials.
+/// POST: an explicit cookie wins; absent credentials select a fresh per-start
+/// cookie; Basic auth never receives a fixed password fallback.
 fn rpc_auth(settings: &UserConfig) -> Auth {
     if let Some(path) = &settings.rpc.cookie {
         return Auth::Cookie { path: path.clone() };
     }
-    Auth::basic(
-        settings.rpc.user.as_deref().unwrap_or(DEFAULT_RPC_USER),
-        settings
-            .rpc
-            .password
-            .as_deref()
-            .unwrap_or(DEFAULT_RPC_PASSWORD),
-    )
+    match (
+        settings.rpc.user.as_deref(),
+        settings.rpc.password.as_deref(),
+    ) {
+        (None, None) => Auth::GeneratedCookie,
+        (user, password) => Auth::basic(user.unwrap_or(DEFAULT_RPC_USER), password.unwrap_or("")),
+    }
 }
 
 /// The P2P bootstrap, RPC bind, and assume-valid values one network
@@ -473,7 +486,6 @@ fn decode_payout_script(network: Network, address: &str) -> Result<Vec<u8>> {
 }
 
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
-const DEFAULT_RPC_PASSWORD: &str = "bitcoin-rs";
 
 /// RPC authentication configuration.
 #[derive(Clone, Eq, PartialEq)]
@@ -487,9 +499,12 @@ pub enum Auth {
     },
     /// Bitcoin Core cookie-auth file.
     Cookie {
-        /// Cookie file path.
+        /// Operator-provided cookie file path.
         path: PathBuf,
     },
+    /// New private cookie at `<data_dir>/.cookie`, written when the RPC
+    /// listener starts so it always follows the final data directory.
+    GeneratedCookie,
 }
 
 impl Auth {
@@ -503,12 +518,14 @@ impl Auth {
     }
 
     /// Converts this configuration into the RPC crate's runtime auth policy.
-    pub(crate) fn to_rpc_auth(&self) -> Result<bitcoin_rs_rpc::Auth> {
+    /// A generated cookie is written into `data_dir`.
+    pub(crate) fn to_rpc_auth(&self, data_dir: &Path) -> Result<bitcoin_rs_rpc::Auth> {
         match self {
             Self::Basic { user, password } => {
                 Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
             }
             Self::Cookie { path } => Ok(bitcoin_rs_rpc::Auth::cookie(path)?),
+            Self::GeneratedCookie => generate_rpc_cookie(&data_dir.join(".cookie")),
         }
     }
 }
@@ -525,8 +542,66 @@ impl fmt::Debug for Auth {
                 .debug_struct("Auth::Cookie")
                 .field("path", &"<redacted>")
                 .finish(),
+            Self::GeneratedCookie => f.write_str("Auth::GeneratedCookie"),
         }
     }
+}
+
+/// Replaces the previous run's cookie with a new 256-bit OS-random secret
+/// before the RPC socket is bound. A same-directory temporary file, named
+/// independently of the secret and created fresh, avoids following a stale
+/// symlink and is atomically renamed on Unix.
+fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
+    use bitcoin::secp256k1::rand::{RngCore as _, rngs::OsRng};
+    use std::fmt::Write as _;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("failed to generate RPC cookie randomness: {error}"))?;
+    let mut password = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut password, "{byte:02x}")?;
+    }
+
+    let temporary = path.with_extension("tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let written = (|| -> std::io::Result<()> {
+        // A temporary file left by an interrupted start is discarded, so
+        // `create_new` never opens an existing file or symlink.
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut file = options.open(&temporary)?;
+        writeln!(file, "__cookie__:{password}")?;
+        file.sync_all()?;
+        // Windows rename cannot replace an existing file. Both operations
+        // occur before binding the listener, while the new secret is private.
+        #[cfg(windows)]
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.map_err(|error| {
+        anyhow::anyhow!("failed to create RPC cookie {}: {error}", path.display())
+    })?;
+    Ok(bitcoin_rs_rpc::Auth::cookie(path)?)
 }
 
 const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";

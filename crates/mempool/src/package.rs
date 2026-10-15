@@ -91,20 +91,18 @@ pub(crate) fn missing_ephemeral_spends(
     None
 }
 
-pub(crate) struct PreviewChecks {
+pub(crate) struct PackageChecks {
     graph: Result<crate::pool::fee_policy::PolicyGraph, crate::RbfError>,
     limits: crate::MempoolLimits,
     truc: Result<(), crate::TrucError>,
     dust_child: Option<usize>,
 }
 
-pub(crate) fn capture_preview_checks(
-    pool: &Mempool,
-    txs: &[Tx],
+pub(crate) fn package_entries(
     requests: &[crate::AdmissionRequest],
     prepared: &[crate::gateway::PreparedAdmission],
-) -> PreviewChecks {
-    let entries: Vec<_> = requests
+) -> Vec<crate::MempoolEntry> {
+    requests
         .iter()
         .zip(prepared)
         .map(|(request, job)| {
@@ -117,10 +115,17 @@ pub(crate) fn capture_preview_checks(
                 job.fact.sigop_cost,
             )
         })
-        .collect();
-    PreviewChecks {
+        .collect()
+}
+
+pub(crate) fn capture_package_checks(
+    pool: &Mempool,
+    txs: &[Tx],
+    entries: &[crate::MempoolEntry],
+) -> PackageChecks {
+    PackageChecks {
         graph: pool
-            .projected_graphs(&entries, &[], false)
+            .projected_graphs(entries, &[], false)
             .map(|(_, after)| after),
         limits: pool.limits,
         truc: pool.check_package_truc(txs, &entries.iter().map(|e| e.vsize).collect::<Vec<_>>()),
@@ -138,7 +143,7 @@ pub(crate) fn finish_preview(
     txs: &[Tx],
     requests: &[crate::AdmissionRequest],
     prepared: &mut [crate::gateway::PreparedAdmission],
-    checks: Option<PreviewChecks>,
+    checks: Option<PackageChecks>,
 ) -> crate::standardness::PackageAcceptanceFacts {
     use crate::standardness::PackageAcceptanceFacts;
     if txs.len() == 1 {
@@ -148,6 +153,25 @@ pub(crate) fn finish_preview(
             results: vec![prepared[0].fact.clone()],
         };
     }
+    finish_package(
+        txs,
+        requests,
+        prepared,
+        checks,
+        None,
+        crate::gateway::AdmissionMode::PackageTest,
+    )
+}
+
+pub(crate) fn finish_package(
+    txs: &[Tx],
+    requests: &[crate::AdmissionRequest],
+    prepared: &mut [crate::gateway::PreparedAdmission],
+    checks: Option<PackageChecks>,
+    aggregate_error: Option<AcceptanceRejectReason>,
+    mode: crate::gateway::AdmissionMode,
+) -> crate::standardness::PackageAcceptanceFacts {
+    use crate::standardness::PackageAcceptanceFacts;
     let mut facts = PackageAcceptanceFacts {
         package_error: None,
         results: txs.iter().map(unfinished).collect(),
@@ -178,13 +202,23 @@ pub(crate) fn finish_preview(
             return facts;
         }
         Err(error) => {
-            facts.package_error = Some(AcceptanceRejectReason::Replacement(error));
+            // Preserve the existing preview error surface. Native submission
+            // reports pool/graph failures without pretending to run replacement.
+            facts.package_error = Some(if mode == crate::gateway::AdmissionMode::PackageSubmit {
+                AcceptanceRejectReason::Mempool(error.into_pool_error())
+            } else {
+                AcceptanceRejectReason::Replacement(error)
+            });
             return facts;
         }
     }
     if let Some(index) = checks.dust_child {
         facts.results[index].allowed = Some(false);
         facts.results[index].reject_reason = Some(AcceptanceRejectReason::MissingEphemeralSpends);
+        return facts;
+    }
+    if let Some(error) = aggregate_error {
+        facts.package_error = Some(error);
         return facts;
     }
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {

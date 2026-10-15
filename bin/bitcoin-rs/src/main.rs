@@ -174,6 +174,7 @@ mod tests {
                 ("BITCOIN_RS_NETWORK", "testnet4"),
                 ("BITCOIN_RS_DATA_DIR", "/tmp/env-node"),
                 ("BITCOIN_RS_RPC_USER", "env-user"),
+                ("BITCOIN_RS_RPC_PASSWORD", "secret-for-testing"),
             ],
         );
 
@@ -183,7 +184,31 @@ mod tests {
             config.rpc.auth,
             Auth::Basic {
                 user: "cli-user".to_owned(),
-                password: "bitcoin-rs".to_owned(),
+                password: "secret-for-testing".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn nonloopback_rpc_requires_explicit_auth_on_cli() {
+        let error = match super::load(
+            ["bitcoin-rs", "--rpc-bind", "0.0.0.0:8332"],
+            std::iter::empty::<(OsString, OsString)>(),
+        ) {
+            Ok(_) => panic!("network-exposed RPC without operator credentials must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("non-loopback RPC bind"));
+
+        let config = resolved(
+            &["bitcoin-rs", "--rpc-bind", "0.0.0.0:8332"],
+            &[("BITCOIN_RS_RPC_PASSWORD", "runtime-only-secret")],
+        );
+        assert_eq!(
+            config.rpc.auth,
+            Auth::Basic {
+                user: "bitcoin-rs".to_owned(),
+                password: "runtime-only-secret".to_owned(),
             }
         );
     }

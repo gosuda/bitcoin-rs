@@ -14,7 +14,7 @@ mod reader;
 
 pub(crate) use handshake::{Established, Handshake, Step};
 pub(crate) use packet::SendCipher;
-pub(crate) use reader::{MAX_PAYLOAD_LEN, PacketReader, is_poll_timeout};
+pub(crate) use reader::{PacketReader, is_poll_timeout};
 
 /// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
 /// retried with all progress kept; every other error ends the connection.

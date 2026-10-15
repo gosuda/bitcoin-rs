@@ -76,11 +76,15 @@ selected cases do not certify their entire surface.
 
 The machine-readable list lives in `crates/rpc/core-compat.toml` under `admission_profile`.
 
-- `submitpackage` and aggregate CPFP/package RBF submission remain unsupported;
+- RPC `submitpackage` and package RBF submission remain unsupported;
   the registry returns -32601 and Esplora `/txs/package` remains 404. Multi-row
   `testmempoolaccept` follows Core's non-aggregating test mode. Under the selected
   positive relay floor a zero-fee ephemeral parent cannot enter alone. The
-  zero-floor owner tests prove dust spending rules, not default CPFP support.
+  zero-floor preview tests prove dust spending rules. Native
+  `MempoolGateway::submit_local_package` supports bounded child-with-independent-
+  parents CPFP with aggregate fees, atomic refusal and no replacement/capacity
+  eviction; `package::tests::native_package_*` owns that evidence. Its policy
+  is not a claim of Core `submitpackage` compatibility.
 - The graph owner computes exact optimal dependency closures. Core uses bounded,
   history-dependent SFL linearization and can temporarily have a non-optimal
   diagram. Those transient work-budget decisions and tie ordering are not

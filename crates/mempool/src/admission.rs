@@ -54,7 +54,8 @@ pub struct ChainAdmissionSnapshot {
     pub locktime_cutoff: u32,
     /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
-    /// Peer duplicate suppression only. RPC cache membership is not admission.
+    /// Positive live-coin evidence used for peer duplicate suppression and
+    /// native package deduplication. RPC cache membership is not admission.
     pub confirmed: bool,
 }
 
@@ -153,7 +154,10 @@ pub(crate) fn has_invalid_mempool_outpoint(pool: &crate::Mempool, tx: &Tx) -> bo
     })
 }
 
-fn resolve_mempool_inputs(pool: &crate::Mempool, tx: &Tx) -> Option<HashMap<OutPoint, TxOut>> {
+pub(crate) fn resolve_mempool_inputs(
+    pool: &crate::Mempool,
+    tx: &Tx,
+) -> Option<HashMap<OutPoint, TxOut>> {
     let mut prevouts = HashMap::new();
     for input in &tx.inputs {
         let outpoint = input.previous_output;
@@ -243,6 +247,61 @@ fn build_admission_request(
     (request, missing_parents)
 }
 
+pub(crate) fn batch_requests(
+    txs: &[Tx],
+    mempool_inputs: Vec<Option<HashMap<OutPoint, TxOut>>>,
+    chain: &dyn AdmissionChain,
+    max_feerate_sat_per_kvb: Option<u64>,
+    time: u64,
+    origin: AdmissionOrigin,
+    (generation, sequence): (u64, u64),
+    mode: crate::gateway::AdmissionMode,
+) -> Option<Vec<AdmissionRequest>> {
+    let mut package_outputs = HashMap::new();
+    let mut requests = Vec::with_capacity(txs.len());
+    for (tx, mempool_inputs) in txs.iter().zip(mempool_inputs) {
+        let snapshot = if mempool_inputs.is_some() {
+            chain.snapshot(tx)?
+        } else {
+            ChainAdmissionSnapshot::default()
+        };
+        if mode == crate::gateway::AdmissionMode::PackageSubmit && snapshot.confirmed {
+            continue;
+        }
+        let mut available = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
+        available.extend(mempool_inputs.unwrap_or_default());
+        available.extend(
+            package_outputs
+                .iter()
+                .map(|(outpoint, output): (&OutPoint, &TxOut)| (*outpoint, output.clone())),
+        );
+        let (prevouts, _) = combine_input_facts(tx, &available, &HashMap::new());
+        let context =
+            crate::accounting::prepared_context(tx, &prevouts, prevouts.len() != tx.inputs.len());
+        requests.push(AdmissionRequest {
+            tx: Arc::new(tx.clone()),
+            context,
+            prevouts,
+            prevout_meta: snapshot.prevout_meta,
+            csv_active: snapshot.csv_active,
+            locktime_cutoff: snapshot.locktime_cutoff,
+            max_feerate_sat_per_kvb,
+            time,
+            height: snapshot.height,
+            origin,
+            expected_generation: generation,
+            expected_sequence: sequence,
+        });
+        let txid = tx.txid();
+        for (vout, output) in tx.outputs.iter().enumerate() {
+            if let Ok(vout) = u32::try_from(vout) {
+                package_outputs.insert(OutPoint::new(txid, vout), output.clone());
+            }
+        }
+    }
+    Some(requests)
+}
+
 impl MempoolGateway {
     /// Evaluates a bounded batch through the submission evaluator without
     /// changing membership, sequence, fee history, orphan state or observers.
@@ -301,51 +360,18 @@ impl MempoolGateway {
                         .collect::<Vec<_>>(),
                 )
             };
-            let mut package_outputs = HashMap::new();
-            let mut requests = Vec::with_capacity(txs.len());
-            for (tx, mempool_inputs) in txs.iter().zip(mempool_inputs) {
-                let snapshot = if mempool_inputs.is_some() {
-                    let Some(snapshot) = chain.snapshot(tx) else {
-                        continue 'attempt;
-                    };
-                    snapshot
-                } else {
-                    ChainAdmissionSnapshot::default()
-                };
-                let mut available = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
-                available.extend(mempool_inputs.unwrap_or_default());
-                available.extend(
-                    package_outputs
-                        .iter()
-                        .map(|(outpoint, output): (&OutPoint, &TxOut)| (*outpoint, output.clone())),
-                );
-                let (prevouts, _) = combine_input_facts(tx, &available, &HashMap::new());
-                let context = crate::accounting::prepared_context(
-                    tx,
-                    &prevouts,
-                    prevouts.len() != tx.inputs.len(),
-                );
-                requests.push(AdmissionRequest {
-                    tx: Arc::new(tx.clone()),
-                    context,
-                    prevouts,
-                    prevout_meta: snapshot.prevout_meta,
-                    csv_active: snapshot.csv_active,
-                    locktime_cutoff: snapshot.locktime_cutoff,
-                    max_feerate_sat_per_kvb,
-                    time: 0,
-                    height: snapshot.height,
-                    origin: AdmissionOrigin::Rpc,
-                    expected_generation: generation,
-                    expected_sequence: sequence,
-                });
-                let txid = tx.txid();
-                for (vout, output) in tx.outputs.iter().enumerate() {
-                    if let Ok(vout) = u32::try_from(vout) {
-                        package_outputs.insert(OutPoint::new(txid, vout), output.clone());
-                    }
-                }
-            }
+            let Some(requests) = batch_requests(
+                txs,
+                mempool_inputs,
+                chain,
+                max_feerate_sat_per_kvb,
+                0,
+                AdmissionOrigin::Rpc,
+                (generation, sequence),
+                mode,
+            ) else {
+                continue 'attempt;
+            };
             let (mut prepared, package_checks) = {
                 let pool = self.pool.read();
                 if self
@@ -374,7 +400,10 @@ impl MempoolGateway {
                     .collect::<Vec<_>>();
                 let checks = (mode == AdmissionMode::PackageTest
                     && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
-                .then(|| crate::package::capture_preview_checks(&pool, txs, &requests, &prepared));
+                .then(|| {
+                    let entries = crate::package::package_entries(&requests, &prepared);
+                    crate::package::capture_package_checks(&pool, txs, &entries)
+                });
                 (prepared, checks)
             };
             let facts =

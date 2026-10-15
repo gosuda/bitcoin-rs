@@ -133,6 +133,16 @@ not handed out through a tuple or reconstructed through a second factory.
 
 ## Readiness
 
+`block_header(hash)` copies header, height and big-endian cumulative work from
+the block-tree owner without requiring a retained body. `broadcast_package`
+routes bounded native child-with-independent-parents CPFP through
+`MempoolGateway::submit_local_package` with the ordinary fee cap; it does not
+enable RPC `submitpackage` or implement package RBF. Settled polling, opaque
+replay targets, positional steps, gap/restart recovery and work bounds are
+owned by `EVT-06` in [chain-events.md](chain-events.md). `snapshot()` retains its
+live applied-tip semantics; callers needing follower settlement use
+`settled_snapshot()` or `pin_chain()`.
+
 `Node::start` returns after storage is open, recovery is done, and every
 service thread is spawned; `snapshot()`/`sync_progress()` at that point
 reflect the resumed applied tip. There is no separate ready flag and no
