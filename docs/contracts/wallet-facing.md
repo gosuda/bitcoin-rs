@@ -67,7 +67,8 @@ mixed-tip page.
   not an Esplora alias here.
 - `/api` does not serve mempool-backend helpers. `/internal/*` and
   `/block-template` live under `/esplora`, the electrs superset
-  `mempool/backend` uses as `ESPLORA_REST_API_URL`.
+  `mempool/backend` uses as `ESPLORA_REST_API_URL`, which answers only
+  internal clients (API-09).
 - Only GET and POST exist on `/api` and `/esplora`. Other methods, and
   GET outside `/rest/`, `/api`, and `/esplora`, 404 at the listener demux
   and never become JSON-RPC.

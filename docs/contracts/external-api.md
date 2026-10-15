@@ -339,6 +339,18 @@ index-server protocol compatibility claim.
   `POST /internal/txs/outspends/by-outpoint`, and address summaries.
   Only declared backend-dialect routes exist; each backend route is marked
   as such.
+- `/esplora` answers only internal clients: loopback, private (`10/8`,
+  `172.16/12`, `192.168/16`), shared (`100.64/10`, as carrier-grade NAT and
+  overlays such as Tailscale use), unique-local (`fc00::/7`) and link-local
+  sources. The connection's source address decides, with an IPv4-mapped
+  address read as IPv4. Any other source gets `403 Forbidden` instead of a
+  route response; `/api` is unaffected. Any proxy that relays public
+  connections to the node, including a reverse proxy on its host and
+  Docker's userland proxy, makes those clients look internal, so
+  `/esplora` must reach the node only from the backend's own network.
+  Proof: `rpc::server::tests`
+  `internal_clients_are_loopback_private_shared_and_link_local_sources` and
+  `backend_esplora_answers_only_internal_clients`.
 - History reads use bounded pages and cursors that preserve public
     Esplora cursor semantics. Cursor values
    are the exact lowercase `txid` display text: malformed, noncanonical

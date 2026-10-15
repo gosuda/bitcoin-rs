@@ -115,7 +115,7 @@ Index-backed queries expose the owner's capability state rather than treating un
 
 ### Esplora
 
-Public Esplora routes live under `/api`. Script/address routes require the applicable script-index capability. `/esplora` is the versioned backend superset; `/api/v1` belongs to the external mempool application, not this node.
+Public Esplora routes live under `/api`. Script/address routes require the applicable script-index capability. `/esplora` is the versioned backend superset for a mempool backend that reaches the node over loopback or a private, link-local or `100.64/10` (for example Tailscale) address; it answers other sources with 403. A proxy that relays public connections makes them look internal, so do not proxy `/esplora` to the public. `/api/v1` belongs to the external mempool application, not this node.
 
 Example regtest startup:
 

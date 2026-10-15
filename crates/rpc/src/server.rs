@@ -148,7 +148,7 @@ impl RpcServer {
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
-                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
+                    serve_connection(stream, peer, &auth, &handler, rest_enabled, idle_timeout)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
@@ -272,6 +272,7 @@ impl Read for RequestDeadlineStream {
 
 fn serve_connection(
     stream: TcpStream,
+    peer: IpAddr,
     auth: &Auth,
     handler: &Handler,
     rest_enabled: bool,
@@ -323,6 +324,7 @@ fn serve_connection(
         let keep_alive = request.keep_alive;
         if dispatch_http_request(
             reader.get_mut().socket_mut(),
+            peer,
             &request,
             auth,
             handler,
@@ -338,6 +340,7 @@ fn serve_connection(
 
 fn dispatch_http_request(
     stream: &mut TcpStream,
+    peer: IpAddr,
     request: &HttpRequest,
     auth: &Auth,
     handler: &Handler,
@@ -345,6 +348,21 @@ fn dispatch_http_request(
 ) -> io::Result<bool> {
     let keep_alive = request.keep_alive;
     match classify(&request.method, &request.path) {
+        HttpRoute::EsploraGet { surface, .. } | HttpRoute::EsploraPost { surface, .. }
+            if surface == HttpSurface::EsploraBackend && !is_internal_client(peer) =>
+        {
+            write_response(
+                stream,
+                &crate::rest::Response {
+                    status: 403,
+                    reason: "Forbidden",
+                    content_type: "text/plain",
+                    body: b"forbidden".to_vec(),
+                },
+                keep_alive,
+                CorsPolicy::Disabled,
+            )?;
+        }
         HttpRoute::Rest { path, query } => {
             let response = crate::rest::route(handler.context(), path, query, rest_enabled);
             write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
@@ -930,6 +948,22 @@ fn esplora_surface(surface: HttpSurface) -> crate::esplora::Surface {
     }
 }
 
+/// Whether `peer` may use the `/esplora` backend surface: loopback, private,
+/// shared (`100.64/10`), unique-local and link-local sources, so its
+/// backend-only routes stay on the operator's own hosts and networks.
+fn is_internal_client(peer: IpAddr) -> bool {
+    match peer.to_canonical() {
+        IpAddr::V4(ip) => {
+            // RFC 6598 shared space: carrier-grade NAT and overlays such as
+            // Tailscale. `Ipv4Addr::is_shared` is not stable.
+            let [first, second, ..] = ip.octets();
+            let shared = first == 100 && second & 0b1100_0000 == 0b0100_0000;
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || shared
+        }
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
+}
+
 fn write_not_found(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
     write_response(
         stream,
@@ -1045,6 +1079,11 @@ mod tests {
     /// Exercises HTTP demux and framing, including refusal before a declared
     /// oversized body is uploaded. No Content-Length-sized allocation is needed.
     fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> {
+        wire_request_from(request, enabled, IpAddr::from(Ipv4Addr::LOCALHOST))
+    }
+
+    /// Serves `request` over loopback as though it came from `peer`.
+    fn wire_request_from(request: &[u8], enabled: bool, peer: IpAddr) -> std::io::Result<Vec<u8>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let mut client = TcpStream::connect(listener.local_addr()?)?;
         client.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -1053,6 +1092,7 @@ mod tests {
             let handler = Handler::new(Arc::new(Context::new()));
             serve_connection(
                 server,
+                peer,
                 &Auth::basic("user", "pass"),
                 &handler,
                 enabled,
@@ -1240,6 +1280,56 @@ mod tests {
             assert!(text.contains("Connection: close"));
             assert!(text.contains("Content-Type: text/plain"));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn internal_clients_are_loopback_private_shared_and_link_local_sources() {
+        for internal in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+            "100.64.0.1",
+            "100.127.255.255",
+        ] {
+            let ip: IpAddr = internal.parse().expect("test address");
+            assert!(is_internal_client(ip), "{internal}");
+        }
+        for external in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "0.0.0.0",
+            "2001:db8::1",
+            "::ffff:8.8.8.8",
+        ] {
+            let ip: IpAddr = external.parse().expect("test address");
+            assert!(!is_internal_client(ip), "{external}");
+        }
+    }
+
+    #[test]
+    fn backend_esplora_answers_only_internal_clients() -> std::io::Result<()> {
+        let external = IpAddr::from(Ipv4Addr::new(203, 0, 113, 7));
+        let docker = IpAddr::from(Ipv4Addr::new(172, 18, 0, 3));
+        let backend_get =
+            b"GET /esplora/internal/mempool/txs HTTP/1.1\r\nHost: node\r\nConnection: close\r\n\r\n";
+        let backend_post = b"POST /esplora/internal/txs HTTP/1.1\r\nHost: node\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]";
+        let public_get =
+            b"GET /api/mempool/txids HTTP/1.1\r\nHost: node\r\nConnection: close\r\n\r\n";
+        for request in [backend_get.as_slice(), backend_post.as_slice()] {
+            assert!(wire_request_from(request, false, external)?.starts_with(b"HTTP/1.1 403 "));
+            assert!(wire_request_from(request, false, docker)?.starts_with(b"HTTP/1.1 200 "));
+        }
+        assert!(wire_request_from(public_get, false, external)?.starts_with(b"HTTP/1.1 200 "));
         Ok(())
     }
 
@@ -1545,6 +1635,7 @@ mod tests {
                 let (stream, _) = listener.accept().expect("accept request");
                 serve_connection(
                     stream,
+                    IpAddr::from(Ipv4Addr::LOCALHOST),
                     &auth,
                     &handler,
                     false,
@@ -1580,6 +1671,7 @@ mod tests {
             let (stream, _) = listener.accept().expect("accept request");
             serve_connection(
                 stream,
+                IpAddr::from(Ipv4Addr::LOCALHOST),
                 &auth,
                 &handler,
                 false,
@@ -1659,6 +1751,7 @@ mod tests {
             let (stream, _) = listener.accept().expect("accept request");
             serve_connection(
                 stream,
+                IpAddr::from(Ipv4Addr::LOCALHOST),
                 &auth,
                 &handler,
                 false,
