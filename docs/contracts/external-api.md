@@ -339,17 +339,6 @@ index-server protocol compatibility claim.
   `POST /internal/txs/outspends/by-outpoint`, and address summaries.
   Only declared backend-dialect routes exist; each backend route is marked
   as such.
-- The full `/esplora` backend directory requires the same HTTP Basic
-  credentials as JSON-RPC, including its internal GET and POST routes. Public
-  explorer callers use unauthenticated `/api` instead. Backend requests share
-  at most four active projection slots, independent of the JSON-RPC worker
-  pool. Backend POST bodies are limited to 16 KiB; bulk POSTs accept at most
-  64 items. Repeated transaction IDs are projected once, while positional
-  outspend replies retain one entry per input and reuse cached lookups.
-- `GET /esplora/internal/mempool/txs` defaults to 25 transactions and caps
-  `max_txs` at 100. Backend arrays serialize incrementally with a 4 MiB
-  response budget; oversized responses return 503 rather than allocating a
-  complete unbounded JSON result. Clients advance with the existing txid cursor.
 - History reads use bounded pages and cursors that preserve public
     Esplora cursor semantics. Cursor values
    are the exact lowercase `txid` display text: malformed, noncanonical

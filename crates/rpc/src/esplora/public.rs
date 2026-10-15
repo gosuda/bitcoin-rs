@@ -447,20 +447,10 @@ pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
 }
 
 pub(super) fn block_transaction_values<'a>(
-    ctx: &'a Context,
+    ctx: &Context,
     record: &bitcoin_rs_index::block_log::BlockRecord,
-    transactions: impl IntoIterator<Item = &'a Tx> + 'a,
+    transactions: impl IntoIterator<Item = &'a Tx>,
 ) -> Result<Vec<TransactionValue>, Response> {
-    block_transaction_rows(ctx, record, transactions).collect()
-}
-
-/// Evaluates block transactions on demand so backend responses can stop work
-/// when their serialized byte budget is exhausted.
-pub(super) fn block_transaction_rows<'a>(
-    ctx: &'a Context,
-    record: &bitcoin_rs_index::block_log::BlockRecord,
-    transactions: impl IntoIterator<Item = &'a Tx> + 'a,
-) -> impl Iterator<Item = Result<TransactionValue, Response>> + 'a {
     // A record fetched by hash can be from a losing branch. Do not reuse the
     // active block at the same height for its transactions' confirmation data.
     let block_status = (ctx.chain.active_hash_at_height(record.height)
@@ -471,13 +461,16 @@ pub(super) fn block_transaction_rows<'a>(
         time: record.time,
     });
     let projection = Projection::new(ctx);
-    transactions.into_iter().map(move |tx| {
-        let state = match block_status {
-            Some(state) => Some(state),
-            None => projection.confirmation(&tx.txid())?,
-        };
-        projection.transaction_value(tx, state)
-    })
+    transactions
+        .into_iter()
+        .map(|tx| {
+            let state = match block_status {
+                Some(state) => Some(state),
+                None => projection.confirmation(&tx.txid())?,
+            };
+            projection.transaction_value(tx, state)
+        })
+        .collect::<Result<Vec<_>, _>>()
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
     let (_, block) = match Projection::new(ctx).required_block(h) {

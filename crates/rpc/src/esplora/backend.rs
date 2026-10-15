@@ -5,10 +5,6 @@
 
 use alloc::sync::Arc;
 use core::str::FromStr as _;
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write as _};
-
-use serde::Serialize;
 
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{OutPoint, Txid};
@@ -16,71 +12,13 @@ use bitcoin_rs_primitives::{OutPoint, Txid};
 use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
 use super::projection::Projection;
-use super::public::{block_transaction_rows, outspend, outspends_for_transaction};
+use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
-use crate::rest::{bad_request, internal_error, json_ok, service_unavailable, text_response};
+use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
-
-const DEFAULT_MEMPOOL_PAGE: usize = 25;
-const MAX_MEMPOOL_PAGE: usize = 100;
-const MAX_BULK_ITEMS: usize = 64;
-const MAX_BACKEND_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
-
-struct LimitedJson(Vec<u8>);
-
-impl io::Write for LimitedJson {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_BACKEND_RESPONSE_BYTES - self.0.len() {
-            return Err(io::Error::other("backend response budget exceeded"));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Serializes a bounded response incrementally, stopping projection as soon as
-/// the byte budget is exhausted rather than collecting every transaction first.
-fn bounded_json_array<T: Serialize>(
-    items: impl IntoIterator<Item = Result<T, Response>>,
-) -> Response {
-    let mut body = LimitedJson(vec![b'[']);
-    for (index, item) in items.into_iter().enumerate() {
-        let value = match item {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
-        if index != 0 && body.write_all(b",").is_err() {
-            return service_unavailable("backend response budget exceeded");
-        }
-        if let Err(error) = serde_json::to_writer(&mut body, &value) {
-            return if error.is_io() {
-                service_unavailable("backend response budget exceeded")
-            } else {
-                internal_error("failed to serialize backend response")
-            };
-        }
-    }
-    if body.write_all(b"]").is_err() {
-        return service_unavailable("backend response budget exceeded");
-    }
-    text_response("application/json", body.0)
-}
-
-fn bulk_strings(body: &[u8], invalid_message: &'static str) -> Result<Vec<String>, Response> {
-    let values = serde_json::from_slice::<Vec<String>>(body)
-        .map_err(|_| bad_request(invalid_message))?;
-    if values.len() > MAX_BULK_ITEMS {
-        return Err(bad_request("backend bulk request exceeds 64 items"));
-    }
-    Ok(values)
-}
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -111,13 +49,11 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    bounded_json_array(block_transaction_rows(ctx, &record, block.txs.iter()))
+    block_transaction_values(ctx, &record, block.txs.iter()).map_or_else(|r| r, json_ok)
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
-    let max_txs = query_limit(query, "max_txs")
-        .unwrap_or(DEFAULT_MEMPOOL_PAGE)
-        .min(MAX_MEMPOOL_PAGE);
+    let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
     if max_txs == 0 {
         return json_ok(Vec::<TransactionValue>::new());
     }
@@ -151,11 +87,11 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             .collect::<Vec<_>>()
     };
     let projection = Projection::new(ctx);
-    bounded_json_array(
-        transactions
-            .into_iter()
-            .map(|transaction| projection.transaction_value(&transaction, None)),
-    )
+    transactions
+        .into_iter()
+        .map(|transaction| projection.transaction_value(&transaction, None))
+        .collect::<Result<Vec<_>, _>>()
+        .map_or_else(|r| r, json_ok)
 }
 
 /// Selects the API-09 page without retaining the entire eligible suffix.
@@ -200,12 +136,8 @@ fn select_mempool_page<'a>(
 }
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
-    let text_ids = match bulk_strings(
-        body,
-        "transaction request body must be a JSON array of txids",
-    ) {
-        Ok(ids) => ids,
-        Err(response) => return response,
+    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
+        return bad_request("transaction request body must be a JSON array of txids");
     };
     let ids = match text_ids
         .into_iter()
@@ -215,66 +147,58 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
         Ok(ids) => ids,
         Err(response) => return response,
     };
-    // Unlike positional outspends, this endpoint returns transaction objects.
-    // Repeated IDs must not repeat expensive projection or inflate the reply.
-    let mut seen = BTreeSet::new();
     let projection = Projection::new(ctx);
-    bounded_json_array(ids.into_iter().filter(|id| seen.insert(*id)).filter_map(|id| {
-        let transaction = if mempool_only {
-            ctx.mempool
-                .gateway
-                .read()
-                .transaction_by_txid(&id)
-                .map(|transaction| ((*transaction).clone(), None))
-        } else {
-            match projection.transaction(&id) {
-                Ok(transaction) => transaction,
-                Err(response) => return Some(Err(response)),
-            }
-        };
-        transaction.map(|(transaction, status)| projection.transaction_value(&transaction, status))
-    }))
+    ids.into_iter()
+        .filter_map(|id| {
+            let transaction = if mempool_only {
+                ctx.mempool
+                    .gateway
+                    .read()
+                    .transaction_by_txid(&id)
+                    .map(|transaction| ((*transaction).clone(), None))
+            } else {
+                match projection.transaction(&id) {
+                    Ok(transaction) => transaction,
+                    Err(response) => return Some(Err(response)),
+                }
+            };
+            transaction
+                .map(|(transaction, status)| projection.transaction_value(&transaction, status))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
-    let text_ids = match bulk_strings(body, "outspend request body must be a JSON array of txids") {
-        Ok(ids) => ids,
-        Err(response) => return response,
+    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
+        return bad_request("outspend request body must be a JSON array of txids");
     };
     let projection = Projection::new(ctx);
-    let mut cached = BTreeMap::<String, Vec<Outspend>>::new();
-    bounded_json_array(text_ids.into_iter().map(|text| {
-        if let Some(value) = cached.get(&text) {
-            return Ok(value.clone());
-        }
-        let value = Txid::from_str(&text).ok().map_or(Ok(Vec::new()), |id| {
-            projection
-                .transaction(&id)?
-                .map_or(Ok(Vec::new()), |(transaction, _)| {
-                    outspends_for_transaction(&projection, &transaction)
-                })
-        })?;
-        cached.insert(text, value.clone());
-        Ok(value)
-    }))
+    text_ids
+        .into_iter()
+        .map(|id| {
+            Txid::from_str(&id).ok().map_or(Ok(Vec::new()), |id| {
+                projection
+                    .transaction(&id)?
+                    .map_or(Ok(Vec::new()), |(transaction, _)| {
+                        outspends_for_transaction(&projection, &transaction)
+                    })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
-    let outpoints =
-        match bulk_strings(body, "outspend request body must be a JSON array of outpoints") {
-            Ok(outpoints) => outpoints,
-            Err(response) => return response,
-        };
+    let Ok(outpoints) = serde_json::from_slice::<Vec<String>>(body) else {
+        return bad_request("outspend request body must be a JSON array of outpoints");
+    };
     let projection = Projection::new(ctx);
-    let mut cached = BTreeMap::<String, Outspend>::new();
-    bounded_json_array(outpoints.into_iter().map(|text| {
-        if let Some(value) = cached.get(&text) {
-            return Ok(value.clone());
-        }
-        let value = internal_outspend(&projection, &text)?;
-        cached.insert(text, value.clone());
-        Ok(value)
-    }))
+    outpoints
+        .into_iter()
+        .map(|outpoint| internal_outspend(&projection, &outpoint))
+        .collect::<Result<Vec<_>, _>>()
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspend(
@@ -321,11 +245,7 @@ mod pagination_tests {
     };
     use serde_json::Value;
 
-    use super::{
-        DEFAULT_MEMPOOL_PAGE, MAX_BACKEND_RESPONSE_BYTES, MAX_BULK_ITEMS, MAX_MEMPOOL_PAGE,
-        bounded_json_array, internal_mempool_txs, internal_outspends_by_outpoint,
-        internal_outspends_by_txid, internal_transactions, select_mempool_page,
-    };
+    use super::{internal_mempool_txs, select_mempool_page};
     use crate::context::Context;
 
     fn fixture(times: &[u64]) -> (Context, Vec<(u64, Txid)>) {
@@ -454,59 +374,6 @@ mod pagination_tests {
         assert_eq!(page(&ctx, None, "max_txs=invalid&max_txs=2"), all[..2]);
         assert_eq!(page(&ctx, None, "max_txs=1&max_txs=2"), all[..1]);
         assert_eq!(page(&ctx, None, "max_txs=0&max_txs=2"), []);
-    }
-
-    #[test]
-    fn mempool_endpoint_defaults_and_hard_caps_page_size() {
-        let times: Vec<_> = (0_u64..120).collect();
-        let (ctx, _) = fixture(&times);
-        assert_eq!(page(&ctx, None, "").len(), DEFAULT_MEMPOOL_PAGE);
-        assert_eq!(page(&ctx, None, "max_txs=invalid").len(), DEFAULT_MEMPOOL_PAGE);
-        assert_eq!(page(&ctx, None, "max_txs=999999").len(), MAX_MEMPOOL_PAGE);
-        assert_eq!(page(&ctx, None, "max_txs=0"), []);
-    }
-
-    #[test]
-    fn bulk_routes_reject_oversized_lists_and_deduplicate_expensive_work() {
-        let (ctx, expected) = fixture(&[1, 2]);
-        let text_id = expected[0].1.to_string();
-        let duplicates = serde_json::to_vec(&vec![text_id.clone(), text_id])
-            .expect("serialize duplicate IDs");
-        let response = internal_transactions(&ctx, &duplicates, true);
-        assert_eq!(response.status, 200);
-        let values: Value = serde_json::from_slice(&response.body).expect("transaction array");
-        assert_eq!(values.as_array().expect("array").len(), 1);
-
-        // Positional outspend replies keep their original cardinality.
-        let response = internal_outspends_by_txid(&ctx, &duplicates);
-        assert_eq!(response.status, 200);
-        let values: Value = serde_json::from_slice(&response.body).expect("outspend array");
-        assert_eq!(values.as_array().expect("array").len(), 2);
-
-        let outpoints = serde_json::to_vec(&vec!["invalid", "invalid"])
-            .expect("serialize outpoints");
-        let response = internal_outspends_by_outpoint(&ctx, &outpoints);
-        assert_eq!(response.status, 200);
-        let values: Value = serde_json::from_slice(&response.body).expect("outpoints array");
-        assert_eq!(values.as_array().expect("array").len(), 2);
-
-        let oversized = serde_json::to_vec(&vec!["invalid"; MAX_BULK_ITEMS + 1])
-            .expect("serialize oversized list");
-        for response in [
-            internal_transactions(&ctx, &oversized, true),
-            internal_outspends_by_txid(&ctx, &oversized),
-            internal_outspends_by_outpoint(&ctx, &oversized),
-        ] {
-            assert_eq!(response.status, 400);
-        }
-    }
-
-    #[test]
-    fn backend_serialization_stops_at_the_response_budget() {
-        let oversized = "x".repeat(MAX_BACKEND_RESPONSE_BYTES);
-        let response = bounded_json_array(std::iter::once(Ok(oversized)));
-        assert_eq!(response.status, 503);
-        assert!(response.body.len() < 128);
     }
 
     #[test]
