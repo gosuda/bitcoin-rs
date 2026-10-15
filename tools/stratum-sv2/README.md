@@ -60,15 +60,22 @@ SV1 miner connects — see [Optional SV1 leg](#optional-sv1-leg-unpinned).
 
 - Docker with Compose v2 (`docker compose version`).
 - ~4 GB disk for images + regtest chainstate (trivial: regtest stays near-empty).
+- `openssl` to generate the RPC password below, or any other source of a
+  random secret.
 
 ## Run
 
 ```console
 $ cd tools/stratum-sv2
+$ export BITCOIN_RS_RPC_PASSWORD="$(openssl rand -hex 32)"
 $ docker compose build            # bitcoin-rs node, bridge, two devices
 $ docker compose up -d
 $ docker compose logs -f template-provider pool device-direct-1
 ```
+
+Compose reads `BITCOIN_RS_RPC_PASSWORD` whenever it loads this project, so
+export it in the shell before every `docker compose` command here, including
+`logs` and `down`.
 
 Bootstrap order is `bitcoin-rs` (healthcheck: JSON-RPC `getblockchaininfo`)
 → `template-provider` → `pool` → devices. With the default example key
@@ -97,7 +104,7 @@ to your machine so a share lands within seconds.
 | Two channels opened                | `curl -s http://127.0.0.1:9090/api/v1/clients` (pool monitoring, one channel per device) or `docker compose logs pool \| grep -i channel`                |
 | Shares accepted                    | `docker compose logs pool \| grep -i share` (accepts / batch acks); device logs show shares sent                                                        |
 | Block accepted                     | `docker compose logs template-provider` logs the solution and the `submitblock` result; bitcoin-rs log shows the accepted block                          |
-| Tip advanced                       | `curl -s -u bitcoin-rs:bitcoin-rs -H 'content-type: text/plain' --data-binary '{"jsonrpc":"1.0","id":1,"method":"getblockchaininfo","params":[]}' http://127.0.0.1:18443/` → `blocks` grows |
+| Tip advanced                       | `curl -s -u "bitcoin-rs:${BITCOIN_RS_RPC_PASSWORD}" -H 'content-type: text/plain' --data-binary '{"jsonrpc":"1.0","id":1,"method":"getblockchaininfo","params":[]}' http://127.0.0.1:18443/` → `blocks` grows |
 | New job after tip change           | template-provider logs a new template id + `SetNewPrevHash` right after the tip advances; pool/devices pick up the new job                                |
 
 ## Payout destination and coinbase ownership
@@ -146,7 +153,7 @@ The bridge is env-configured (regtest defaults shown):
 | `TP_LISTEN`            | `0.0.0.0:8442`               | TDP listener the pool connects to    |
 | `BITCOINRS_RPC_URL`    | `http://127.0.0.1:18443`     | bitcoin-rs JSON-RPC endpoint         |
 | `BITCOINRS_RPC_USER`   | `bitcoin-rs`                 | RPC basic-auth user                  |
-| `BITCOINRS_RPC_PASS`   | `bitcoin-rs`                 | RPC basic-auth password              |
+| `BITCOINRS_RPC_PASS`   | required (Compose passes `BITCOIN_RS_RPC_PASSWORD`) | RPC basic-auth password |
 | `TP_PRIVATE_KEY_HEX`   | fixed example key            | Noise secret key (64 hex chars)      |
 | `TP_CERT_VALIDITY_SECS`| `3600`                       | Noise certificate lifetime           |
 

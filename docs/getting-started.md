@@ -67,7 +67,7 @@ Important defaults:
 | storage backend | `fjall` |
 | RPC bind | `127.0.0.1:8332` on mainnet |
 | REST | off |
-| RPC basic auth | `bitcoin-rs` / `bitcoin-rs` unless cookie auth is configured |
+| RPC authentication | Fresh `.cookie` in the data directory (mode `0600` on Unix) |
 | dbcache | 450 MiB |
 | pruning | off |
 | txindex | off |
@@ -76,7 +76,19 @@ Important defaults:
 | metrics listener | off |
 | mining payout | unset |
 
-Change the default RPC credentials before exposing the port.
+RPC binds to loopback by default. A non-loopback RPC bind requires an
+explicit nonempty password (`--rpc-password` or `BITCOIN_RS_RPC_PASSWORD`)
+or an operator-supplied `--rpc-cookie` file. The generated cookie is
+rotated before each listener starts and cannot be used for a non-loopback
+bind without an explicit cookie-file configuration. The legacy public
+password `bitcoin-rs` is rejected as a Basic-auth password on every bind;
+an operator-supplied cookie file is used as written, so choose its secret
+yourself.
+
+The Docker image also keeps RPC on loopback. To serve RPC outside the
+container, explicitly set `BITCOIN_RS_RPC_BIND=0.0.0.0:8332` together
+with operator-specific credentials. Publish the port only to trusted
+clients; Basic auth is not encrypted without a TLS-terminating proxy.
 
 `--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
 
@@ -85,7 +97,7 @@ Change the default RPC credentials before exposing the port.
 ## Check progress
 
 ```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
+curl -s --user "$(cat .bitcoin-rs/.cookie)" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' \
   http://127.0.0.1:8332/
@@ -180,7 +192,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior: their defaults used to compile **and implicitly select** `kernel`, and now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must both enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI) — or, for a direct `bitcoin-rs-consensus` caller, pass `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
-- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --rpc-bind --p2p-listen` included).
+- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
 - `--validation-mode` / `validation_mode` (Full/AssumeValid/Fast) is the separate script-skip policy and is unchanged.
 
 ## More

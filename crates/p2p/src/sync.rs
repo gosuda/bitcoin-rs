@@ -506,6 +506,83 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
+    /// Whether a compact block with `header` from `source` earns a
+    /// mempool-wide reconstruction scan.
+    ///
+    /// PRE: `header` is the `cmpctblock`'s embedded header.
+    /// POST: `true` only when the header has valid proof of work, the block
+    ///   is not marked invalid, its parent is a known block not marked
+    ///   invalid, the header passes the contextual rules header admission
+    ///   applies against that parent (required nBits, median time past,
+    ///   timewarp, future time, version), and it either carries more work
+    ///   than the applied chain or answers a body fetch `source` owns. This
+    ///   matches Core, which runs its contextual header checks before
+    ///   reconstruction. With the required nBits enforced, forging such a
+    ///   header costs a block at the chain's difficulty, and replaying an
+    ///   old one fails the work test.
+    /// INVARIANT: the tree read is released before the scheduler lock is
+    ///   taken, keeping the `tree -> scheduler` order without nesting.
+    ///
+    /// This is the pre-scan gate on the compact header alone. A
+    /// reconstructed body still faces the staging gate
+    /// (`unrequested_body_admissible`) like any other delivered block.
+    #[must_use]
+    pub(crate) fn compact_reconstruction_admissible(
+        &self,
+        source: PeerSource,
+        header: &bitcoin_rs_primitives::Header,
+    ) -> bool {
+        let hash = Hash256::from(header.compute_hash());
+        let network = self.chain.network();
+        if bitcoin_rs_chain::validate_pow(header, hash, network).is_err() {
+            return false;
+        }
+        let candidate_work = {
+            let tree = self.chain.block_tree();
+            let invalid = |id: NodeId| {
+                tree.node(id)
+                    .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+            };
+            let known = tree.lookup(hash);
+            if known.is_some_and(invalid) {
+                return false;
+            }
+            let Some(parent_id) = tree
+                .lookup(Hash256::from(header.prev_blockhash))
+                .filter(|&id| !invalid(id))
+            else {
+                return false;
+            };
+            // A header that admission would refuse never earns the scan. In
+            // particular its own valid proof of work must meet the target
+            // the chain requires after this parent. As in admission, a header
+            // already in the tree is not rechecked, so a clock that has since
+            // moved backwards cannot refuse it.
+            if known.is_none()
+                && bitcoin_rs_chain::validate_contextual_header(
+                    &tree,
+                    parent_id,
+                    header,
+                    network,
+                    bitcoin_rs_chain::current_unix_seconds(),
+                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let Ok(parent) = tree.node(parent_id) else {
+                return false;
+            };
+            parent.chainwork + bitcoin_rs_chain::block_work(header)
+        };
+        let extends_applied = self
+            .chain
+            .applied_tip()
+            .is_none_or(|tip| candidate_work > tip.chainwork);
+        extends_applied || self.owns_body_fetch(source, hash)
+    }
+
     /// Runs one orchestrator tick as a single canonical frontier
     /// reconciliation: observe, recover what is unowned, then schedule or
     /// name why progress is impossible.

@@ -74,7 +74,7 @@
   under the documented precedence (defaults -> file -> environment -> CLI).
   A CLI override replaces `CMD` wholesale under docker semantics (running
   `bitcoin-rs <args>` instead of the shipped argument list), so it must
-  repeat the full `--config --data-dir --rpc-bind --p2p-listen` set.
+  repeat the full `--config --data-dir --p2p-listen` set.
 - The kernel-free default is the C++-free quickstart. Changing the production
   default engine under `VAL-01` does not add `kernel` to any manifest default.
 

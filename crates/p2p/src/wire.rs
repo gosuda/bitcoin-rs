@@ -269,8 +269,8 @@ pub enum PeerError {
         actual: Magic,
     },
     /// A payload, declared by a peer or about to be sent, exceeds its
-    /// transport's bound: [`MAX_MESSAGE_PAYLOAD`] for a v1 frame, 4,000,000
-    /// bytes for a BIP324 packet.
+    /// transport's bound: [`MAX_MESSAGE_PAYLOAD`] for a v1 frame and 4,000,000
+    /// bytes for a v1 `block` frame or a BIP324 message payload.
     #[error("payload length {0} exceeds the transport's payload bound")]
     PayloadTooLarge(usize),
     /// Payload checksum did not match the header checksum.
@@ -585,7 +585,13 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if payload_len > MAX_MESSAGE_PAYLOAD {
+    // No block serializes above 4,000,000 bytes, and Core refuses any v1
+    // message above that size, so a larger block body is never read. A BIP324
+    // packet's contents are already capped at 1 + 12 + 4,000,000 bytes by its
+    // transport; anything that still fails reaches chainstate's classification.
+    if payload_len > MAX_MESSAGE_PAYLOAD
+        || (command == "block" && payload_len > crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE)
+    {
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
 
@@ -1099,6 +1105,32 @@ mod tests {
                 _ => "expected PayloadTooLarge for oversized payload length",
             })),
         }
+    }
+
+    #[test]
+    fn block_frame_cap_is_checked_at_the_header() -> Result<(), PeerError> {
+        let block_header = |len| -> Result<HeaderOnlyReader, PeerError> {
+            let mut header = header_declaring(len)?;
+            header[4..16].copy_from_slice(b"block\0\0\0\0\0\0\0");
+            Ok(HeaderOnlyReader {
+                header: Cursor::new(header),
+            })
+        };
+
+        let oversize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE + 1;
+        let result = read_message(&mut block_header(oversize)?, Magic::REGTEST);
+        assert!(
+            matches!(result, Err(PeerError::PayloadTooLarge(len)) if len == oversize),
+            "a v1 block above the consensus size is refused before its body is read: {result:?}"
+        );
+
+        let at_cap = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+        let result = read_message(&mut block_header(at_cap)?, Magic::REGTEST);
+        assert!(
+            matches!(result, Err(PeerError::Io(_))),
+            "a v1 block at the consensus size passes the header and reads its body: {result:?}"
+        );
+        Ok(())
     }
 
     #[test]
