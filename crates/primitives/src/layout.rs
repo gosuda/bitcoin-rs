@@ -22,7 +22,7 @@
 //! [`DecodeError::EndOfData`] requirement, following `read_script`'s
 //! convention for lengths beyond `usize`.
 
-use std::{mem::size_of, ops::Range};
+use std::ops::Range;
 
 use sha2::{Digest, Sha256};
 
@@ -52,14 +52,6 @@ const MIN_OUTPUT_LEN: u64 = 9;
 const MIN_WITNESS_ITEM_LEN: u64 = 1;
 /// Fixed serialized input outpoint length: 32-byte txid plus 4-byte vout.
 const OUTPOINT_LEN: u64 = 36;
-
-/// Maximum layout and owned-record overhead for a consensus-sized block.
-/// Of all record types, empty witness items have the greatest ratio of
-/// descriptor bytes to minimum wire bytes (one prefix byte). This ceiling
-/// therefore admits every block within the 4,000,000-byte consensus bound
-/// without making resource accounting an extra consensus validity rule.
-const MAX_DECODED_METADATA_BYTES: usize =
-    4_000_000 * (size_of::<ByteSpan>() + size_of::<Vec<u8>>());
 
 /// A checked byte range within one parsed image.
 ///
@@ -183,45 +175,6 @@ fn impossible(available: usize) -> DecodeError {
 /// Widens a `usize` length into `u64`; slice and vector lengths always fit.
 fn widening(len: usize) -> u64 {
     u64::try_from(len).unwrap_or_else(|_| unreachable!("usize length fits u64"))
-}
-
-/// Shared across all transactions in a parsed block, so splitting a witness
-/// stack across inputs or transactions cannot evade the decoded-memory bound.
-struct DecodeBudget {
-    remaining: usize,
-}
-
-impl Default for DecodeBudget {
-    fn default() -> Self {
-        Self {
-            remaining: MAX_DECODED_METADATA_BYTES,
-        }
-    }
-}
-
-impl DecodeBudget {
-    /// Accounts for both layout entries and their eventual owned descriptors
-    /// before reserving storage or iterating a peer-supplied record count.
-    fn reserve<T>(
-        &mut self,
-        storage: &mut Vec<T>,
-        count: u64,
-        owned_overhead: usize,
-    ) -> Result<(), DecodeError> {
-        let count = usize::try_from(count).map_err(|_| DecodeError::ResourceLimitExceeded)?;
-        let needed = size_of::<T>()
-            .checked_add(owned_overhead)
-            .and_then(|per_record| per_record.checked_mul(count))
-            .ok_or(DecodeError::ResourceLimitExceeded)?;
-        if needed > self.remaining {
-            return Err(DecodeError::ResourceLimitExceeded);
-        }
-        storage
-            .try_reserve(count)
-            .map_err(|_| DecodeError::AllocationFailed)?;
-        self.remaining -= needed;
-        Ok(())
-    }
 }
 
 /// Parse cursor over one immutable byte image: positions are `u64` and every
@@ -375,8 +328,7 @@ impl<'a> ParsedTransaction<'a> {
     pub(crate) fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
-        let mut budget = DecodeBudget::default();
-        let parsed = Self::parse_at(image, &mut cursor, &mut budget)?;
+        let parsed = Self::parse_at(image, &mut cursor)?;
         let consumed = usize::try_from(cursor)
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
         *reader = &image[consumed..];
@@ -387,8 +339,7 @@ impl<'a> ParsedTransaction<'a> {
     /// bytes are a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
         let mut cursor = 0_u64;
-        let mut budget = DecodeBudget::default();
-        let parsed = Self::parse_at(bytes, &mut cursor, &mut budget)?;
+        let parsed = Self::parse_at(bytes, &mut cursor)?;
         let consumed = usize::try_from(cursor)
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
         if consumed != bytes.len() {
@@ -401,11 +352,7 @@ impl<'a> ParsedTransaction<'a> {
 
     /// Parses one transaction starting at `*cursor` inside `image` and
     /// advances `*cursor` past it; spans are absolute offsets into `image`.
-    fn parse_at(
-        image: &'a [u8],
-        cursor: &mut u64,
-        budget: &mut DecodeBudget,
-    ) -> Result<Self, DecodeError> {
+    fn parse_at(image: &'a [u8], cursor: &mut u64) -> Result<Self, DecodeError> {
         let mut cur = ImageCursor {
             image,
             pos: *cursor,
@@ -434,7 +381,6 @@ impl<'a> ParsedTransaction<'a> {
         cur.require_count(input_count_value, MIN_INPUT_LEN)?;
 
         let mut inputs = Vec::new();
-        budget.reserve(&mut inputs, input_count_value, size_of::<TxIn>())?;
         for _ in 0..input_count_value {
             let outpoint = cur.take(OUTPOINT_LEN)?;
             let (script_len, _len_span) = cur.read_compact()?;
@@ -454,7 +400,6 @@ impl<'a> ParsedTransaction<'a> {
         };
         cur.require_count(output_count_value, MIN_OUTPUT_LEN)?;
         let mut outputs = Vec::new();
-        budget.reserve(&mut outputs, output_count_value, size_of::<TxOut>())?;
         for _ in 0..output_count_value {
             let value = cur.take(8)?;
             let (script_len, _len_span) = cur.read_compact()?;
@@ -470,7 +415,6 @@ impl<'a> ParsedTransaction<'a> {
             for input in &mut inputs {
                 let (item_count, _count_span) = cur.read_compact()?;
                 cur.require_count(item_count, MIN_WITNESS_ITEM_LEN)?;
-                budget.reserve(&mut witness_spans, item_count, size_of::<Vec<u8>>())?;
                 let first = widening(witness_spans.len());
                 for _ in 0..item_count {
                     let (item_len, _len_span) = cur.read_compact()?;
@@ -753,21 +697,10 @@ impl<'a> ParsedBlock<'a> {
         let (tx_count_value, tx_count_span) = cur.read_compact()?;
         cur.require_count(tx_count_value, MIN_TX_LEN)?;
 
-        let mut budget = DecodeBudget::default();
         let mut tx_spans = Vec::new();
         let mut txs = Vec::new();
-        budget.reserve(
-            &mut txs,
-            tx_count_value,
-            size_of::<Tx>() + size_of::<ByteSpan>(),
-        )?;
-        let count = usize::try_from(tx_count_value)
-            .map_err(|_| DecodeError::ResourceLimitExceeded)?;
-        tx_spans
-            .try_reserve_exact(count)
-            .map_err(|_| DecodeError::AllocationFailed)?;
         for _ in 0..tx_count_value {
-            let tx = ParsedTransaction::parse_at(image, &mut cur.pos, &mut budget)?;
+            let tx = ParsedTransaction::parse_at(image, &mut cur.pos)?;
             tx_spans.push(tx.span());
             txs.push(tx);
         }

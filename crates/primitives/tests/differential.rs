@@ -294,8 +294,6 @@ fn error_kind(error: &DecodeError) -> String {
         DecodeError::Varint(_) => "varint".to_owned(),
         DecodeError::InvalidSegwitFlag { .. } => "invalid_segwit_flag".to_owned(),
         DecodeError::SuperfluousWitness => "superfluous_witness".to_owned(),
-        DecodeError::ResourceLimitExceeded => "resource_limit".to_owned(),
-        DecodeError::AllocationFailed => "allocation_failed".to_owned(),
         DecodeError::TrailingBytes { .. } => "trailing_bytes".to_owned(),
     }
 }

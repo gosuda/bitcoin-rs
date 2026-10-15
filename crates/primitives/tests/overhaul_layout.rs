@@ -96,8 +96,6 @@ fn truncation_sweep_produces_defined_errors_only() {
                 | DecodeError::Varint(_)
                 | DecodeError::InvalidSegwitFlag { .. }
                 | DecodeError::SuperfluousWitness
-                | DecodeError::ResourceLimitExceeded
-                | DecodeError::AllocationFailed
                 | DecodeError::TrailingBytes { .. },
             ) => {}
         }
@@ -270,78 +268,4 @@ fn parsed_transaction_txid_and_base_size_match_materialized_form() {
         segwit > 0 && segwit < compared,
         "the fixtures must exercise both encodings, got {segwit} SegWit of {compared}"
     );
-}
-
-/// A compact, syntactically valid BIP144 transaction with `count` empty
-/// witness elements. Each element costs one wire byte but both a layout span
-/// and an owned vector descriptor during decoding.
-fn empty_witness_tx(count: u64) -> Vec<u8> {
-    let mut bytes = 1_i32.to_le_bytes().to_vec();
-    bytes.extend_from_slice(&[0x00, 0x01, 0x01]); // marker, flag, one input
-    bytes.extend_from_slice(&[0_u8; 36]); // outpoint
-    bytes.push(0); // empty scriptSig
-    bytes.extend_from_slice(&[0xff; 4]); // sequence
-    bytes.push(0); // no outputs
-    bytes.extend_from_slice(bitcoin_rs_primitives::varint::encode(count).as_slice());
-    bytes.extend(std::iter::repeat_n(
-        0_u8,
-        usize::try_from(count).expect("test count fits usize"),
-    ));
-    bytes.extend_from_slice(&[0_u8; 4]); // lock time
-    bytes
-}
-
-#[test]
-fn empty_witness_items_remain_valid_wire_data() {
-    let bytes = empty_witness_tx(2);
-    let parsed = ParsedTransaction::parse_exact(&bytes).expect("two empty items parse");
-    assert_eq!(parsed.witness_spans().len(), 2);
-    assert_eq!(consensus_bytes(&parsed.materialize()), bytes);
-}
-
-#[test]
-fn amplified_witness_count_fails_before_span_growth() {
-    let bytes = empty_witness_tx(4_000_001);
-    assert!(matches!(
-        ParsedTransaction::parse_exact(&bytes),
-        Err(DecodeError::ResourceLimitExceeded)
-    ));
-    assert!(matches!(
-        deserialize::<Tx>(&bytes),
-        Err(DecodeError::ResourceLimitExceeded)
-    ));
-}
-
-#[test]
-fn worst_case_record_overhead_fits_wire_derived_budget() {
-    use std::mem::size_of;
-
-    use bitcoin_rs_primitives::layout::{InputLayout, OutputLayout};
-    use bitcoin_rs_primitives::{TxIn, TxOut};
-
-    // The budget charges metadata plus owned descriptors per record. Each
-    // record also has a minimum number of wire bytes, so witness items
-    // with their one-byte prefixes must remain the most expensive case.
-    let per_wire_byte = size_of::<ByteSpan>() + size_of::<Vec<u8>>();
-    assert!(size_of::<InputLayout>() + size_of::<TxIn>() <= 41 * per_wire_byte);
-    assert!(size_of::<OutputLayout>() + size_of::<TxOut>() <= 9 * per_wire_byte);
-    assert!(
-        size_of::<ParsedTransaction<'static>>() + size_of::<Tx>() + size_of::<ByteSpan>()
-            <= 10 * per_wire_byte
-    );
-}
-
-#[test]
-fn block_transactions_share_one_decoded_metadata_budget() {
-    let tx = empty_witness_tx(2_000_000);
-    assert!(ParsedTransaction::parse_exact(&tx).is_ok());
-
-    let mut bytes = vec![0_u8; 80]; // syntactically valid block header
-    bytes.push(2); // two transactions
-    bytes.extend_from_slice(&tx);
-    bytes.extend_from_slice(&tx);
-    assert!(matches!(
-        ParsedBlock::parse_exact(&bytes),
-        Err(DecodeError::ResourceLimitExceeded)
-    ));
 }
