@@ -2,7 +2,7 @@
 #
 #   devices -> pool (SRI) -> template-provider bridge (this repo) -> bitcoin-rs (regtest)
 #
-# One bridge network; only read-only debug ports are published to 127.0.0.1.
+# One bridge network; the privileged node RPC is published only to 127.0.0.1.
 name: stratum-sv2-example
 
 services:
@@ -20,26 +20,23 @@ services:
       - --data-dir=/data
       - --rpc-bind=0.0.0.0:18443
       - --rpc-user=bitcoin-rs
-      - --rpc-password=bitcoin-rs
       - --p2p-listen=0.0.0.0:18444
       - --mining-payout-address=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
+    environment:
+      BITCOIN_RS_RPC_PASSWORD: ${BITCOIN_RS_RPC_PASSWORD:?Set BITCOIN_RS_RPC_PASSWORD to a unique secret}
     volumes:
       - bitcoin-rs-data:/data
     ports:
-      # Read-only evidence port: getblockchaininfo / getblockcount from the host.
+      # Privileged JSON-RPC port. Expose only on host loopback.
       - "127.0.0.1:18443:18443"
     healthcheck:
       test:
-        - CMD
-        - curl
-        - -sf
-        - -u
-        - bitcoin-rs:bitcoin-rs
-        - -H
-        - "content-type: text/plain"
-        - --data-binary
-        - '{"jsonrpc":"1.0","id":"hc","method":"getblockchaininfo","params":[]}'
-        - http://127.0.0.1:18443/
+        - CMD-SHELL
+        - >-
+          curl -sf -u "bitcoin-rs:$${BITCOIN_RS_RPC_PASSWORD}"
+          -H 'content-type: text/plain'
+          --data-binary '{"jsonrpc":"1.0","id":"hc","method":"getblockchaininfo","params":[]}'
+          http://127.0.0.1:18443/
       interval: 5s
       timeout: 5s
       retries: 60
@@ -55,7 +52,7 @@ services:
       TP_LISTEN: 0.0.0.0:8442
       BITCOINRS_RPC_URL: http://bitcoin-rs:18443
       BITCOINRS_RPC_USER: bitcoin-rs
-      BITCOINRS_RPC_PASS: bitcoin-rs
+      BITCOINRS_RPC_PASS: ${BITCOIN_RS_RPC_PASSWORD:?Set BITCOIN_RS_RPC_PASSWORD to a unique secret}
       RUST_LOG: info
     depends_on:
       bitcoin-rs:

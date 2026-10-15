@@ -497,7 +497,7 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
                 assert_eq!(user, expected_user);
                 assert_eq!(password, expected_password);
             }
-            Auth::Cookie { .. } => panic!("expected basic auth"),
+            Auth::Cookie { .. } | Auth::GeneratedCookie => panic!("expected basic auth"),
         }
     }
 }

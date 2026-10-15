@@ -320,7 +320,12 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // `rustix::fs::mkfifoat` is not available on Apple platforms, so the
+    // macOS test hosts gate this fixture the same way the epoch-lock FIFO
+    // test in `tests/unit/state/tests/events.rs` does. The code under test
+    // (`open_regular_input`) keeps its platform-independent coverage
+    // elsewhere.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn input_fifo_is_rejected_without_waiting_for_a_writer() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

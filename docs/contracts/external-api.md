@@ -589,9 +589,10 @@ owned by [wallet-facing.md](wallet-facing.md).
 - Projection uses `typed_to_sonic_omitting_nulls`.
 
 
-### `API-26`: `estimatesmartfee` Core `conf_target` and `estimate_mode`
+### `API-26`: `estimatesmartfee` parameters and Esplora fee estimates
 
-- **Owner**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`.
+- **Owners**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`;
+  Esplora `/fee-estimates` in `crates/rpc/src/esplora/public.rs`.
 - `conf_target` must be in `1..=1008` (Core `MAX_CONFIRM_TARGET`). Otherwise
   `-8` `Invalid conf_target, must be between 1 and 1008`.
 - `estimate_mode` is optional, case-insensitive `UNSET` / `ECONOMICAL` /
@@ -604,6 +605,12 @@ owned by [wallet-facing.md](wallet-facing.md).
 - Insufficient data for the requested target omits `fee_rate` and returns an
   `errors` array containing `Insufficient data or no feerate found`.
 - Trailing parameters are refused.
+- Esplora `/fee-estimates` in `crates/rpc/src/esplora/public.rs` captures
+  targets `1..=25`, `144`, `504`, and `1008` from one mempool read view, so
+  concurrent pool updates cannot mix estimator states within a response.
+  The guard is released before response formatting. It uses the same estimator
+  and `sat_to_btc` projection as RPC, then multiplies BTC/kvB by `100_000` for
+  sat/vB; targets with insufficient history are omitted.
 
 
 ### `API-27`: `generateblock` txid and raw-tx parse errors
@@ -816,10 +823,37 @@ evidence does not establish mainnet memory or throughput qualifications.
 - Registry execution metadata classifies the three wait methods and
   `scantxoutset`'s `start` action. Every `Handler::dispatch`, including direct
   callers, batch entries and notifications, acquires its dispatcher's
-  bounded blocking quota. A bound listener permits at most `max_connections - 1`
-  such calls (zero with one worker); the total connection bound is unchanged.
+  bounded blocking quota. A bound listener permits one fewer such call than
+  one source address may hold (`max_connections - max_connections / 4 - 1`,
+  95 of the node's 128; zero with one worker). Blocking calls therefore never
+  take a source's last connection or the whole pool. The total connection
+  bound is unchanged: once the pool is full, every source is refused, as
+  before; reserving ordinary capacity per source is not provided.
   A standalone dispatcher defaults to 16 blocking calls. Admission never
   waits for capacity. Scan status/abort remain ordinary calls.
+- Connection admission: a listener holds at most `max_connections` live
+  connections. One source address holds at most `max_connections -
+  max_connections / 4` of them (96 of the node's 128), so a quarter, rounded
+  down, stays open to other sources. A refused connection gets HTTP 503
+  `busy`. A source is an address, so clients behind loopback, a Docker gateway
+  or a reverse proxy share one. Pools below four workers keep no per-source
+  share.
+  - Once the server starts reading a request, its head must complete within
+    10 s and its body within 60 s, however slowly the bytes arrive.
+  - Waiting for the next keep-alive request keeps the listener's idle timeout
+    (30 s in the node, Core's `-rpcservertimeout` default).
+  - A request body's buffer grows with the bytes received, as in Core's HTTP
+    server: to at most twice those bytes or 8 KiB past them, and never beyond
+    the declared `Content-Length` (at most 16 MiB). A body cut short is a
+    framing error.
+  - Proof: `rpc::server::tests` `connection_admission_reserves_slots_for_other_peers`,
+    `blocking_quota_leaves_the_busiest_source_an_ordinary_slot`,
+    `slow_drip_request_line_headers_and_body_expire`,
+    `keep_alive_wait_is_not_bounded_by_the_head_budget`,
+    `body_arriving_across_reads_is_received_whole`,
+    `declared_but_unsent_body_allocates_only_received_bytes`,
+    `full_body_capacity_stays_within_the_declared_length` and
+    `declared_but_unsent_body_is_a_framing_error`.
 - Admission exhaustion is the intentional `-1` error
   `RPC blocking request limit reached`. HTTP requests containing a classified
   blocking call close keep-alive after their response, including refusals, so
@@ -1078,6 +1112,9 @@ evidence does not establish mainnet memory or throughput qualifications.
     `getmininginfo_projects_control_state`
 
 - `API-26`:
+  - `crates/rpc/tests/esplora_fee_estimates.rs`: RPC projection equality for
+    empty, partial and fully qualified history, plus
+    `fee_estimates_is_coherent_during_concurrent_pool_changes`
   - `crates/rpc/src/handlers/util.rs` tests
     `estimatesmartfee_rejects_conf_target_outside_core_range`,
     `estimatesmartfee_rejects_unknown_estimate_mode`,

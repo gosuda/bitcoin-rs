@@ -23,9 +23,9 @@ use crate::rpc::remaining_time;
 
 const HEADER_BYTES: usize = 24;
 /// The protocol payload limit (`MAX_MESSAGE_PAYLOAD` in
-/// `crates/p2p/src/wire.rs`): a harness cap below it would reject blocks
-/// the node legitimately emits.
-const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+/// `crates/p2p/src/wire.rs`, Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH`):
+/// a harness cap below it would reject blocks the node legitimately emits.
+const MAX_PAYLOAD_BYTES: usize = 4_000_000;
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MESSAGES: usize = 128;
 const TIMEOUT: Duration = Duration::from_secs(10);

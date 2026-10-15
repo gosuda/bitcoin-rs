@@ -99,7 +99,7 @@ cache, indexing, and pruning options.
 Verify the node is responding and syncing:
 
 ```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
+curl -s --user "$(cat .bitcoin-rs/.cookie)" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' \
   http://127.0.0.1:8332/

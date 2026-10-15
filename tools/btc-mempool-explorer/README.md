@@ -34,17 +34,20 @@ MEMPOOL_DATABASE_ROOT_PASSWORD='choose-a-third-long-secret' \
 docker compose up --build
 ```
 
+Compose requires `BITCOIN_RS_RPC_PASSWORD` whenever it loads this project, so
+set it for every `docker compose` command here, including `logs` and `down`.
+
 Open <http://127.0.0.1:8080>. The explorer HTTP port is published on all
 interfaces (`0.0.0.0`). The Bitcoin RPC listener stays host-loopback only at
 <http://127.0.0.1:8332> by default; P2P is published on port `8333`.
 
-The following variables are optional:
+The following variables configure the stack:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BITCOIN_RS_NETWORK` | `mainnet` | Shared node and Mempool network. |
 | `BITCOIN_RS_RPC_USER` | `mempool` | Node RPC user. |
-| `BITCOIN_RS_RPC_PASSWORD` | `change-me` | Node RPC password; set explicitly. |
+| `BITCOIN_RS_RPC_PASSWORD` | required | Node RPC password; Compose refuses to start without it. |
 | `MEMPOOL_DATABASE_PASSWORD` | `change-me` | Mempool database password; set explicitly. |
 | `MEMPOOL_DATABASE_ROOT_PASSWORD` | `change-me` | MariaDB root password; set explicitly. |
 | `BITCOIN_RS_RPC_PORT` | `8332` | Loopback host RPC port. |

@@ -1,19 +1,20 @@
 //! Esplora `/fee-estimates` reflects real admitted-and-confirmed history
 //! only: a target without history is omitted from
 //! the map instead of fabricated as the old 1 sat/vB floor, and the sat/vB
-//! projection consumes the RPC surface's `sat_to_btc` feerate value so the
+//! projection shares the RPC surface's `sat_to_btc` conversion so the
 //! two fee-unit projections cannot drift.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::esplora::{Surface, route};
+use sonic_rs::JsonValueTrait as _;
 
 /// vsize stamped on every seeded entry so the fee rate is deterministic.
 const VSIZE: u32 = 100;
@@ -23,10 +24,6 @@ const HIGH_FEE_SATS: u64 = 10_000;
 const LOW_FEE_SATS: u64 = 5_000;
 /// Admission height used for the low-fee batch.
 const ENTRY_HEIGHT: u32 = 100;
-/// Height of the first connected block: the low batch misses target 1 here.
-const MISS_HEIGHT: u32 = 101;
-/// Height of the block that confirms the high-fee batch.
-const CONFIRM_HEIGHT: u32 = 102;
 
 /// Builds a witness-free, anyone-can-spend transaction paying `output_sats`
 /// with a fee the caller chooses. The prevout varies with the output value,
@@ -95,6 +92,35 @@ fn fee_estimates(ctx: &Arc<Context>) -> BTreeMap<String, f64> {
     parsed
 }
 
+/// Frozen RPC answers are the compatibility oracle for every Esplora target.
+fn rpc_estimates(ctx: &Arc<Context>) -> BTreeMap<String, f64> {
+    let handler = Handler::new(Arc::clone(ctx));
+    (1_u32..=25)
+        .chain([144, 504, 1008])
+        .filter_map(|target| {
+            let value = handler
+                .dispatch("estimatesmartfee", &sonic_rs::json!([target]))
+                .unwrap_or_else(|error| panic!("valid target {target}: {error}"));
+            value
+                .get("feerate")
+                .and_then(sonic_rs::JsonValueTrait::as_f64)
+                .map(|rate| (target.to_string(), rate * 100_000.0))
+        })
+        .collect()
+}
+
+/// Low-fee misses and two confirmations qualify only targets at/above `delay`.
+fn confirmed_history(fee: u64, delay: u32) -> Arc<Context> {
+    let ctx = Arc::new(Context::new());
+    admit_batch(&ctx, fee / 2, ENTRY_HEIGHT);
+    connect_block(&ctx, &[], &[], ENTRY_HEIGHT + delay);
+    let txs = admit_batch(&ctx, fee, ENTRY_HEIGHT + delay);
+    let txids: Vec<_> = txs.iter().map(Tx::txid).collect();
+    let refs: Vec<_> = txs.iter().collect();
+    connect_block(&ctx, &refs, &txids, ENTRY_HEIGHT + 2 * delay);
+    ctx
+}
+
 #[test]
 fn fee_estimates_omits_every_target_without_history() {
     let ctx = Arc::new(Context::new());
@@ -103,23 +129,18 @@ fn fee_estimates_omits_every_target_without_history() {
         parsed.is_empty(),
         "without history no target may appear: {parsed:?}"
     );
+    assert_eq!(parsed, rpc_estimates(&ctx));
 }
 
 #[test]
 fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
-    let ctx = Arc::new(Context::new());
     // Two low-fee entries miss target 1 when an empty block lands, then two
     // high-fee entries confirm with the next block. The estimator answers
     // with its lowest bucket whose cumulative success clears the threshold —
     // the high bucket, because the lows failed target 1 — so the projected
     // number is a real mid-range rate, not the 1 sat/vB floor the old
     // `unwrap_or(1.0)` fabrication emitted.
-    admit_batch(&ctx, LOW_FEE_SATS, ENTRY_HEIGHT);
-    connect_block(&ctx, &[], &[], MISS_HEIGHT);
-    let highs = admit_batch(&ctx, HIGH_FEE_SATS, MISS_HEIGHT);
-    let high_txids: Vec<_> = highs.iter().map(Tx::txid).collect();
-    let high_refs: Vec<&Tx> = highs.iter().collect();
-    connect_block(&ctx, &high_refs, &high_txids, CONFIRM_HEIGHT);
+    let ctx = confirmed_history(HIGH_FEE_SATS, 1);
 
     let parsed = fee_estimates(&ctx);
     assert_eq!(
@@ -153,4 +174,58 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
             "target {target} must be present, not omitted"
         );
     }
+    assert_eq!(parsed, rpc_estimates(&ctx));
+}
+
+#[test]
+fn fee_estimates_preserves_partial_history_and_rpc_rounding() {
+    let ctx = confirmed_history(LOW_FEE_SATS, 6);
+    let parsed = fee_estimates(&ctx);
+    assert_eq!(parsed, rpc_estimates(&ctx));
+    assert_eq!(parsed.len(), 23);
+    for target in 1..6 {
+        assert!(!parsed.contains_key(&target.to_string()));
+    }
+    assert!(parsed.get("6").is_some_and(|rate| *rate > 1.0));
+    for target in ["144", "504", "1008"] {
+        assert_eq!(parsed.get(target), parsed.get("25"));
+    }
+}
+
+/// A response must be wholly from either published estimator state, including
+/// omission of unavailable targets. Atomic fixture swaps emulate block updates.
+#[test]
+fn fee_estimates_is_coherent_during_concurrent_pool_changes() {
+    use std::sync::{Barrier, mpsc};
+
+    let ctx = confirmed_history(HIGH_FEE_SATS, 1);
+    let other = confirmed_history(LOW_FEE_SATS, 6);
+    let first = fee_estimates(&ctx);
+    let second = fee_estimates(&other);
+    assert_ne!(first, second);
+    let mut alternate = Mempool::new(MempoolLimits::default());
+    std::mem::swap(&mut *other.mempool.gateway.pool().write(), &mut alternate);
+    let start = Barrier::new(2);
+    std::thread::scope(|scope| {
+        // Dropping the sender also stops the writer if a reader assertion fails.
+        let (stop, stopped) = mpsc::channel::<()>();
+        let ctx = &ctx;
+        let start = &start;
+        scope.spawn(move || {
+            start.wait();
+            while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                std::mem::swap(&mut *ctx.mempool.gateway.pool().write(), &mut alternate);
+                std::thread::yield_now();
+            }
+        });
+        start.wait();
+        for _ in 0..256 {
+            let response = fee_estimates(ctx);
+            assert!(
+                response == first || response == second,
+                "mixed estimator states: {response:?}"
+            );
+        }
+        drop(stop);
+    });
 }
