@@ -770,6 +770,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        transport: bitcoin_rs_p2p::TransportProtocol::V1,
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = PeerLease::new(tx);

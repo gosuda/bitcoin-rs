@@ -3338,6 +3338,7 @@ fn fanout_eligibility_requires_block_service_flags() {
             addr_bind: addr,
             time_offset: 0,
             counters: std::sync::Arc::new(PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 

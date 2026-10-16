@@ -593,6 +593,7 @@ mod tests {
             addr_bind: addr,
             time_offset: 0,
             counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 

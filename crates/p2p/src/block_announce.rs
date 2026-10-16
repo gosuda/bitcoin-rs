@@ -755,6 +755,7 @@ mod tests {
             addr_bind: addr,
             time_offset: 0,
             counters: Arc::new(crate::counters::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 

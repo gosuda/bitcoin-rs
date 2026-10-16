@@ -167,6 +167,42 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
 }
 
 #[test]
+fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
+    let (listener_shared, listener_table) = shared(true);
+    let (addr, shutdown, handle) = listen(listener_shared)?;
+
+    let (dialer, dialer_table) = shared(true);
+    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+    let deadline = deadline();
+    let (outbound, inbound) = loop {
+        if let (Some(outbound), Some(inbound)) = (
+            dialer_table.infos().into_iter().next(),
+            listener_table.infos().into_iter().next(),
+        ) {
+            break (outbound, inbound);
+        }
+        if Instant::now() >= deadline {
+            return Err("the v2 connection never published both ends".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let TransportProtocol::V2 { session_id } = outbound.transport else {
+        return Err(format!("the dialer published {:?}", outbound.transport).into());
+    };
+    assert_eq!(
+        inbound.transport,
+        TransportProtocol::V2 { session_id },
+        "both ends derive the same session id"
+    );
+
+    dialer_table.cancel_all();
+    let _ = dial.join().map_err(|_| "dialer panicked")?;
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().map_err(|_| "listener panicked")?;
+    Ok(())
+}
+
+#[test]
 fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
     // A v1-only listener reads the v2 key as a v1 header for another network
     // and closes without answering.
@@ -186,6 +222,13 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
         listener_table.len(),
         1,
         "only the v1 retry stayed connected"
+    );
+    assert!(
+        dialer_table
+            .infos()
+            .iter()
+            .all(|info| info.transport == TransportProtocol::V1),
+        "the retry publishes v1"
     );
 
     dialer_table.cancel_all();

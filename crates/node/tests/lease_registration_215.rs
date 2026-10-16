@@ -64,6 +64,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         inbound: true,
+        transport: bitcoin_rs_p2p::TransportProtocol::V1,
     }
 }
 

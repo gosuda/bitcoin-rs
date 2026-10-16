@@ -2406,6 +2406,7 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         addr_bind: addr,
         time_offset: 0,
         counters: std::sync::Arc::new(crate::PeerCounters::default()),
+        transport: crate::TransportProtocol::V1,
     }
 }
 

@@ -1053,6 +1053,7 @@ mod tests {
             addr_bind: addr,
             time_offset: 0,
             counters,
+            transport: crate::TransportProtocol::V1,
         }
     }
 

@@ -2516,6 +2516,7 @@ mod tests {
                 addr_bind: addr,
                 time_offset: 0,
                 counters: Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
             };
             assert!(table.publish_info(addr, &lease, info));
         }

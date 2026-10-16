@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bitcoin::hex::DisplayHex;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
 use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -296,8 +297,18 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
                     bitcoin_rs_p2p::PeerRole::FullRelay => ConnectionType::OutboundFullRelay,
                 }
             }),
-            transport_protocol_type: TransportProtocolType::V1,
-            session_id: String::new(),
+            // Core reports the BIP324 session id as hex in byte order, and an
+            // empty string for v1.
+            transport_protocol_type: match peer.transport {
+                bitcoin_rs_p2p::TransportProtocol::V1 => TransportProtocolType::V1,
+                bitcoin_rs_p2p::TransportProtocol::V2 { .. } => TransportProtocolType::V2,
+            },
+            session_id: match peer.transport {
+                bitcoin_rs_p2p::TransportProtocol::V1 => String::new(),
+                bitcoin_rs_p2p::TransportProtocol::V2 { session_id } => {
+                    session_id.to_lower_hex_string()
+                }
+            },
         })
         .collect::<Vec<_>>();
     typed_to_sonic_omitting_nulls(&v31::GetPeerInfo(rows))
@@ -781,6 +792,7 @@ mod addnode_validation_tests {
             addr_bind: addr,
             time_offset: 0,
             counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         };
         let (tx, _rx) = unbounded();
         let lease = PeerLease::new(tx);
@@ -1125,6 +1137,7 @@ mod peer_counter_tests {
             addr_bind: parse(bind),
             time_offset,
             counters,
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         }
     }
 
@@ -1253,6 +1266,42 @@ mod peer_counter_tests {
                     .get("timeoffset")
                     .and_then(JsonValueTrait::as_i64),
                 Some(offset)
+            );
+        }
+    }
+
+    /// The negotiated transport is reported as Core does: `v2` with the
+    /// BIP324 session id in byte order, or `v1` with an empty id.
+    #[test]
+    fn getpeerinfo_reports_the_negotiated_transport() {
+        let mut session_id = [0_u8; 32];
+        session_id[0] = 0xab;
+        session_id[31] = 0x01;
+        for (transport, kind, id) in [
+            (bitcoin_rs_p2p::TransportProtocol::V1, "v1", String::new()),
+            (
+                bitcoin_rs_p2p::TransportProtocol::V2 { session_id },
+                "v2",
+                format!("ab{}01", "00".repeat(30)),
+            ),
+        ] {
+            let mut info = peer(
+                "127.0.0.1:8333",
+                "127.0.0.1:1234",
+                0,
+                Arc::new(PeerCounters::default()),
+            );
+            info.transport = transport;
+            let ctx = context_with(vec![info]);
+            let row = first_peer(&ctx);
+            assert_eq!(
+                row.get("transport_protocol_type")
+                    .and_then(JsonValueTrait::as_str),
+                Some(kind)
+            );
+            assert_eq!(
+                row.get("session_id").and_then(JsonValueTrait::as_str),
+                Some(id.as_str())
             );
         }
     }
@@ -1502,6 +1551,7 @@ mod getnodeaddresses_tests {
             addr_bind: parsed,
             time_offset: 0,
             counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         }
     }
 

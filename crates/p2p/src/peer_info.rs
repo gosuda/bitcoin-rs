@@ -35,7 +35,7 @@ impl PeerRole {
     }
 }
 
-/// Information collected during a successful Bitcoin v1 handshake.
+/// Information collected during a successful Bitcoin handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
@@ -82,6 +82,8 @@ pub struct PeerInfo {
     pub time_offset: i64,
     /// Live traffic counters for the connection.
     pub counters: Arc<PeerCounters>,
+    /// The transport the connection negotiated before its handshake.
+    pub transport: crate::TransportProtocol,
 }
 
 impl PeerInfo {
@@ -137,6 +139,7 @@ impl PeerInfo {
                 .timestamp
                 .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
             counters,
+            transport: crate::TransportProtocol::V1,
         }
     }
 
