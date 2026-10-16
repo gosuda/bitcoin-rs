@@ -174,18 +174,25 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     let (dialer, dialer_table) = shared(true);
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
-    let (outbound, inbound) = loop {
+    let published = loop {
         if let (Some(outbound), Some(inbound)) = (
             dialer_table.infos().into_iter().next(),
             listener_table.infos().into_iter().next(),
         ) {
-            break (outbound, inbound);
+            break Some((outbound, inbound));
         }
         if Instant::now() >= deadline {
-            return Err("the v2 connection never published both ends".into());
+            break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+
+    dialer_table.cancel_all();
+    let _ = dial.join().map_err(|_| "dialer panicked")?;
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().map_err(|_| "listener panicked")?;
+
+    let (outbound, inbound) = published.ok_or("the v2 connection never published both ends")?;
     let TransportProtocol::V2 { session_id } = outbound.transport else {
         return Err(format!("the dialer published {:?}", outbound.transport).into());
     };
@@ -194,11 +201,6 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
         TransportProtocol::V2 { session_id },
         "both ends derive the same session id"
     );
-
-    dialer_table.cancel_all();
-    let _ = dial.join().map_err(|_| "dialer panicked")?;
-    shutdown.store(true, Ordering::Relaxed);
-    handle.join().map_err(|_| "listener panicked")?;
     Ok(())
 }
 
@@ -212,29 +214,31 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
     let (dialer, dialer_table) = shared(true);
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
-    while dialer_table.infos().is_empty() || listener_table.infos().is_empty() {
+    let dialed = loop {
+        let dialed = dialer_table.infos();
+        if !dialed.is_empty() && !listener_table.infos().is_empty() {
+            break Some(dialed);
+        }
         if Instant::now() >= deadline {
-            return Err("the v1 retry never completed its handshake".into());
+            break None;
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        listener_table.len(),
-        1,
-        "only the v1 retry stayed connected"
-    );
-    assert!(
-        dialer_table
-            .infos()
-            .iter()
-            .all(|info| info.transport == TransportProtocol::V1),
-        "the retry publishes v1"
-    );
+    };
+    let accepted = listener_table.len();
 
     dialer_table.cancel_all();
     let _ = dial.join().map_err(|_| "dialer panicked")?;
     shutdown.store(true, Ordering::Relaxed);
     handle.join().map_err(|_| "listener panicked")?;
+
+    let dialed = dialed.ok_or("the v1 retry never completed its handshake")?;
+    assert_eq!(accepted, 1, "only the v1 retry stayed connected");
+    assert!(
+        dialed
+            .iter()
+            .all(|info| info.transport == TransportProtocol::V1),
+        "the retry publishes v1"
+    );
     Ok(())
 }
 

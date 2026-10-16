@@ -445,6 +445,15 @@ fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
             assert!(evidence_u64(run, key)? > 0, "ibd_cost.{transport}.{key}");
         }
     }
+    // The v2 run is the rs_to_core_v2 dialer, whose tip is checked above.
+    let v1_cost = cost
+        .get("v1")
+        .ok_or_else(|| main_error("ibd_cost missing `v1`"))?;
+    assert_eq!(
+        evidence_str(v1_cost, "bitcoin_rs_tip")?,
+        core_tip,
+        "ibd_cost.v1: the v2-off node synced Core's chain"
+    );
     Ok(())
 }
 

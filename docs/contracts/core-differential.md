@@ -88,7 +88,8 @@ a running pinned binary, not a replay of captured JSON.
 - A third fresh node with `--v2transport=false` dials Core and syncs the same
   chain. The evidence `ibd_cost` records Core's `bytessent` and `bytesrecv`
   for it and for the v2 dialer as each reaches Core's tip: a measurement of
-  v2's bandwidth cost, recorded rather than bounded.
+  v2's bandwidth cost, recorded rather than bounded. The v2-off node's best
+  block hash is recorded with it and must equal Core's.
 - Like CORE-05, this is a main-only qualification lane: the recorded evidence
   artifact, not the lane's presence, is what qualifies BIP324 interop.
 

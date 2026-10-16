@@ -572,10 +572,11 @@ pass pays per page.
   type encoding.
 - **Default**: the node runs with `v2transport` on, as Core's `-v2transport`
   defaults on, and advertises `NODE_P2P_V2`; `P2pServiceConfig::v2_transport`
-  itself defaults off for direct `bitcoin-rs-p2p` users. With it off, every connection is v1 and
-  the node does not advertise `NODE_P2P_V2`. A peer that opens with a v2 key
-  then fails the v1 magic check and is disconnected without discouragement,
-  as Core closes a transport on a wrong message start (`PeerError::inbound`).
+  itself defaults off for direct `bitcoin-rs-p2p` users. With it off, every
+  connection is v1 and the node does not advertise `NODE_P2P_V2`. A peer that
+  opens with a v2 key then fails the v1 magic check and is disconnected
+  without discouragement, as Core closes a transport on a wrong message start
+  (`PeerError::inbound`).
 - **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
   `version` header under this node's magic hands those bytes to the v1
   decoder, a v1 `version` header under another magic is refused, and anything

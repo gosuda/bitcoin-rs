@@ -703,6 +703,7 @@ start_rs "${RS_V1_DATADIR}" "${RS_V1_RPC_PORT}" "${RS_V1_P2P_PORT}" "${RS_V1_LOG
   --v2transport=false
 RS_V1_PID=$!
 poll_until_at "${RS_V1_RPC_PORT}" "sync of the same chain over v1" "${FINAL_CORE_HEIGHT}"
+V1_IBD_TIP=$(rs_result_at "${RS_V1_RPC_PORT}" getbestblockhash | json_string)
 V1_IBD_RS_VIEW=$(rs_result_at "${RS_V1_RPC_PORT}" getpeerinfo | peer_transport addr "127.0.0.1:${CORE_P2P_PORT}")
 V1_IBD_CORE_VIEW=$(core_result getpeerinfo | peer_transport addr "$(printf '%s' "${V1_IBD_RS_VIEW}" | json_field addrbind)")
 
@@ -735,7 +736,7 @@ TRANSPORT_JSON=$(python3 - "${FINAL_CORE_HEIGHT}" "${FINAL_CORE_TIP}" \
   "${V1_CORE_VIEW}" "${V1_RS_VIEW}" "${V1_TIP}" \
   "${RS_TO_CORE_CORE_VIEW}" "${RS_TO_CORE_RS_VIEW}" "${RS_TO_CORE_PING}" "${RS_TO_CORE_TIP}" \
   "${CORE_TO_RS_CORE_VIEW}" "${CORE_TO_RS_RS_VIEW}" "${CORE_TO_RS_PING}" "${CORE_TO_RS_TIP}" \
-  "${CORE_TO_RS_PEER_COUNT}" "${V1_IBD_CORE_VIEW}" <<'PY'
+  "${CORE_TO_RS_PEER_COUNT}" "${V1_IBD_CORE_VIEW}" "${V1_IBD_TIP}" <<'PY'
 import json
 import sys
 
@@ -744,8 +745,8 @@ import sys
     v1_core, v1_rs, v1_tip,
     rs_to_core_core, rs_to_core_rs, rs_to_core_ping, rs_to_core_tip,
     core_to_rs_core, core_to_rs_rs, core_to_rs_ping, core_to_rs_tip,
-    core_to_rs_peers, v1_ibd_core,
-) = sys.argv[1:16]
+    core_to_rs_peers, v1_ibd_core, v1_ibd_tip,
+) = sys.argv[1:17]
 
 
 def leg(core_view, rs_view, tip, **extra):
@@ -758,6 +759,16 @@ def leg(core_view, rs_view, tip, **extra):
         "bitcoin_rs_session_id": rs_view["session_id"],
         "bitcoin_rs_inbound": rs_view["inbound"],
         "bitcoin_rs_tip": tip,
+        **extra,
+    }
+
+
+def cost(core_view, **extra):
+    core_view = json.loads(core_view)
+    return {
+        "transport": core_view["transport_protocol_type"],
+        "bytes_core_to_rs": core_view["bytessent"],
+        "bytes_rs_to_core": core_view["bytesrecv"],
         **extra,
     }
 
@@ -776,14 +787,11 @@ print(json.dumps({
         bitcoin_rs_peers=int(core_to_rs_peers),
     ),
     # Core's byte counters for two fresh nodes that each synced the same chain
-    # by dialing Core, read as soon as each reached Core's tip.
+    # by dialing Core, read as soon as each reached Core's tip. The v2 run is
+    # the rs_to_core_v2 dialer, whose tip that leg records.
     "ibd_cost": {
-        name: {
-            "transport": view["transport_protocol_type"],
-            "bytes_core_to_rs": view["bytessent"],
-            "bytes_rs_to_core": view["bytesrecv"],
-        }
-        for name, view in (("v1", json.loads(v1_ibd_core)), ("v2", json.loads(rs_to_core_core)))
+        "v1": cost(v1_ibd_core, bitcoin_rs_tip=v1_ibd_tip),
+        "v2": cost(rs_to_core_core),
     },
 }))
 PY

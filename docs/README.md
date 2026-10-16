@@ -60,7 +60,8 @@ target design, and this index does not duplicate gate verdicts.
 The default binary is kernel-free; library defaults are governed separately by
 [validation-default.md](contracts/validation-default.md). The optional
 `kernel` lane is not a claim that native-default promotion has passed.
-BIP324 v2 transport is on by default (`--v2transport=false` keeps every
-connection on v1), with live bidirectional Core 31.1 interop recorded
+The node runs BIP324 v2 transport by default (`--v2transport=false` keeps
+every connection on v1; `P2pServiceConfig::default()` leaves it off), with
+live bidirectional Core 31.1 interop recorded
 ([BIP adoption](policies/bip-adoption.md), BIP 324 row in
 [bip-support.md](bip-support.md)).
