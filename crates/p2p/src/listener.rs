@@ -850,9 +850,11 @@ fn dial(
     }
 
     // One deadline covers the transport and the version handshake, as
-    // Core's single `-peertimeout` does.
+    // Core's single `-peertimeout` does. Reads fail once it passes, even
+    // inside one message; `run_connected_session` lifts it.
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut stream = stream;
+    stream.set_read_deadline(Some(handshake_deadline));
     let negotiated = if try_v2 {
         let mut handshake = crate::bip324::Handshake::initiator(
             shared.magic,
@@ -1169,9 +1171,11 @@ fn run_handshake(
     }
 
     // One deadline covers the transport and the version handshake, as
-    // Core's single `-peertimeout` does.
+    // Core's single `-peertimeout` does. Reads fail once it passes, even
+    // inside one message; `run_connected_session` lifts it.
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut stream = stream;
+    stream.set_read_deadline(Some(handshake_deadline));
     let negotiated = match negotiate_inbound(&mut stream, shared, &lease, handshake_deadline) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -1255,6 +1259,9 @@ fn run_connected_session(
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
     mut info: crate::PeerInfo,
 ) -> Result<(), crate::wire::PeerError> {
+    // The handshake deadline ends with the handshake; from here the message
+    // loop's inactivity timeout bounds the connection.
+    peer.stream.set_read_deadline(None);
     // BIP339 announcement preference is the peer's received wtxidrelay,
     // independently of our own advertisement. Publish it atomically with the
     // completed handshake so relay never chooses a type during negotiation.

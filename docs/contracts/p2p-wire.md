@@ -583,8 +583,16 @@ pass pays per page.
   peer closes without sending a byte, the dial retries once over v1; the
   unanswered attempt is neither a failure count nor misbehavior.
 - **One deadline**: the transport and version handshakes share the 60 s
-  handshake deadline, and a peer is never ready before its transport
-  handshake completes.
+  handshake deadline (`HANDSHAKE_TIMEOUT`, Core's `-peertimeout`), and a peer
+  is never ready before its transport handshake completes. On inbound and
+  outbound connections alike, every read fails once the deadline passes, even
+  inside one message or packet, so a peer that keeps trickling bytes cannot
+  hold a handshake open past it. Core's `InactivityCheck` (`net.cpp:2019`,
+  `:2060-2067`) likewise disconnects a peer that has not finished the
+  handshake by the connect timeout, however much it sends. A read already
+  waiting on the socket can still run for up to one 1 s poll interval. The
+  expired handshake ends the connection without discouraging the peer, and
+  the bound is lifted when the session starts.
 - **Split halves**: the connection thread keeps the receive half and the
   writer thread takes the send half when the session starts. Lease budgets
   stay in v1 frame lengths for either transport; `CountingStream` counts the
@@ -608,7 +616,10 @@ Proof: `crates/p2p/src/listener/v2_transport_tests.rs` tests
 `a_silent_responder_ends_at_the_handshake_deadline` cover negotiation over
 loopback sockets in both directions with the remote message loop answering
 over the session, v1 detection on a v2 listener, the single v1 retry against a
-v1-only listener, and the handshake deadline against a silent peer. The
+v1-only listener, and the handshake deadline against a silent peer.
+`crates/p2p/src/counters.rs` test
+`a_read_deadline_stops_a_payload_that_keeps_arriving` covers the read that
+ends at the deadline while a declared payload keeps arriving. The
 `crates/p2p/src/bip324` unit tests pin the BIP vectors, the handshake
 misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
 

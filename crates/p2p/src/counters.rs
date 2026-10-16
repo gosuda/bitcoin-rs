@@ -5,6 +5,7 @@ use bitcoin_rs_primitives::unix_time_secs;
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 /// Bytes and activity times for one peer connection.
 ///
@@ -95,6 +96,8 @@ pub struct CountingStream<S> {
     counters: Arc<PeerCounters>,
     /// The connection's cancellation flag, when reads must stop with it.
     cancelled: Option<Arc<AtomicBool>>,
+    /// The instant from which every read fails, when a deadline applies.
+    read_deadline: Option<Instant>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -113,6 +116,7 @@ impl<S> CountingStream<S> {
             inner,
             counters,
             cancelled: None,
+            read_deadline: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -133,7 +137,14 @@ impl<S> CountingStream<S> {
         self
     }
 
-    fn check_cancelled(&self) -> IoResult<()> {
+    /// Makes every read fail once `deadline` passes, so a peer trickling a
+    /// payload cannot hold the connection past it; `None` lifts the bound.
+    /// The failure is not a poll timeout, so no retrying loop resumes it.
+    pub(crate) const fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+        self.read_deadline = deadline;
+    }
+
+    fn check_readable(&self) -> IoResult<()> {
         if self
             .cancelled
             .as_ref()
@@ -142,6 +153,15 @@ impl<S> CountingStream<S> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "connection cancelled",
+            ));
+        }
+        if self
+            .read_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "read deadline passed",
             ));
         }
         Ok(())
@@ -240,7 +260,7 @@ impl<S: Read> CountingStream<S> {
 
 impl<S: Read> Read for CountingStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-        self.check_cancelled()?;
+        self.check_readable()?;
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -250,7 +270,7 @@ impl<S: Read> Read for CountingStream<S> {
     }
 
     fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
-        self.check_cancelled()?;
+        self.check_readable()?;
         let read = self.inner.read_vectored(buffers)?;
         self.counters.record_recv(read);
         Ok(read)
@@ -817,6 +837,43 @@ mod tests {
         assert_eq!(
             result.map_err(|error| error.kind()),
             Err(std::io::ErrorKind::ConnectionAborted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_read_deadline_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+        let (server, _) = listener.accept()?;
+        let mut stream = CountingStream::new(server, Arc::new(PeerCounters::default()));
+        stream.set_read_deadline(Some(Instant::now() + std::time::Duration::from_millis(50)));
+        // One byte every 5 ms for about a second, then EOF: every read returns
+        // data well inside any poll interval, so without the deadline check
+        // the read below ends in `UnexpectedEof` only when the trickle stops.
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if client.write_all(&[0]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let mut payload = Vec::new();
+        let result = crate::recv::fill_growing(&mut stream, &mut payload, 4_000_000);
+        drop(stream);
+        let _ = trickle.join();
+        let Err(error) = result else {
+            panic!("a trickled payload must not complete");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert!(
+            !crate::recv::is_poll_timeout(&error),
+            "a retrying handshake loop must not resume past the deadline"
+        );
+        assert!(
+            !crate::PeerError::inbound(crate::PeerError::Io(error)).is_misbehavior(),
+            "an expired handshake is not evidence against the peer"
         );
         Ok(())
     }
