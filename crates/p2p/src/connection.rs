@@ -109,18 +109,67 @@ pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
 /// bounds those (`MAX_UNSOLICITED_BLOCK_FORWARDS` and the download window).
 pub(crate) const MAX_QUEUED_HEADER_BATCHES: usize = 8;
 
+/// Connections the service holds beyond `max_peer_connections`: the feeler
+/// and the stale-tip extra outbound, which inbound capacity does not reserve,
+/// and as many manual peers as Core's `MAX_ADDNODE_CONNECTIONS` (8).
+const CONNECTIONS_BEYOND_AUTOMATIC: usize = 1 + 1 + 8;
+
 /// How often a connection at its header bound checks for a free slot.
 const HEADER_SLOT_POLL: Duration = Duration::from_millis(10);
 
+/// Header batches queued for sync across every connection of one start
+/// epoch, including connections that have closed since their batches were
+/// queued.
+///
+/// A closed connection's batches stay in the shared channel until sync drains
+/// them, while its replacement starts with a fresh per-connection share. This
+/// bound keeps reconnecting from growing the channel past what the service's
+/// connections can queue at once: 1,680 batches at the default 200
+/// connections, about 270 MB of full `headers` pages. Live connections alone
+/// fill it only if there are more of them than it was sized for (more than
+/// eight manual peers) and every one holds a full share. Clones share the
+/// count.
+#[derive(Clone, Debug)]
+pub(crate) struct NodeHeaderBudget {
+    queued: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+impl NodeHeaderBudget {
+    /// Room for [`MAX_QUEUED_HEADER_BATCHES`] from each of
+    /// `max_peer_connections` automatic connections and the connections the
+    /// service holds beyond them.
+    #[must_use]
+    pub(crate) fn for_connections(max_peer_connections: usize) -> Self {
+        Self {
+            queued: Arc::new(AtomicUsize::new(0)),
+            limit: max_peer_connections
+                .saturating_add(CONNECTIONS_BEYOND_AUTOMATIC)
+                .saturating_mul(MAX_QUEUED_HEADER_BATCHES),
+        }
+    }
+
+    /// Header slots held across the node.
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
+}
+
 /// One queued header batch's share of its connection's
-/// [`MAX_QUEUED_HEADER_BATCHES`]; dropping it — at the end of the sync drain
-/// that took the batch, or with a discarded batch — frees the slot.
+/// [`MAX_QUEUED_HEADER_BATCHES`] and of the [`NodeHeaderBudget`]; dropping it
+/// — at the end of the sync drain that took the batch, or with a discarded
+/// batch — frees both.
 #[derive(Debug)]
-pub(crate) struct HeaderSlot(Arc<AtomicUsize>);
+pub(crate) struct HeaderSlot {
+    connection: Arc<AtomicUsize>,
+    node: Arc<AtomicUsize>,
+}
 
 impl Drop for HeaderSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.connection.fetch_sub(1, Ordering::AcqRel);
+        self.node.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -527,14 +576,18 @@ impl PeerLease {
 
     /// Reserves this connection a slot for one header batch in the shared
     /// headers channel, waiting while it already holds
-    /// [`MAX_QUEUED_HEADER_BATCHES`]: the reader stops reading the socket, as
-    /// Core pauses a peer over its receive buffer.
+    /// [`MAX_QUEUED_HEADER_BATCHES`] or `node` is full: the reader stops
+    /// reading the socket, as Core pauses a peer over its receive buffer.
     ///
     /// POST: `Some` is the slot, freed when it is dropped; `None` once the
     ///   lease is cancelled or `stop` reports `true`, with no slot held.
     /// INVARIANT: only this connection's own queued batches count against
-    ///   its bound.
-    pub(crate) fn reserve_header_batch(&self, stop: impl Fn() -> bool) -> Option<HeaderSlot> {
+    ///   its bound; `node` counts every connection's, closed ones included.
+    pub(crate) fn reserve_header_batch(
+        &self,
+        node: &NodeHeaderBudget,
+        stop: impl Fn() -> bool,
+    ) -> Option<HeaderSlot> {
         loop {
             if self.is_cancelled() || stop() {
                 return None;
@@ -542,8 +595,19 @@ impl PeerLease {
             // Increment-then-compare, as for block forwards: a concurrent
             // release can never let two reservations cross the bound.
             if self.queued_header_batches.fetch_add(1, Ordering::AcqRel) < MAX_QUEUED_HEADER_BATCHES
+                // Every reader shares the node budget, so it is taken only
+                // below its limit and a refused reader never holds it.
+                && node
+                    .queued
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                        (queued < node.limit).then_some(queued + 1)
+                    })
+                    .is_ok()
             {
-                return Some(HeaderSlot(Arc::clone(&self.queued_header_batches)));
+                return Some(HeaderSlot {
+                    connection: Arc::clone(&self.queued_header_batches),
+                    node: Arc::clone(&node.queued),
+                });
             }
             self.queued_header_batches.fetch_sub(1, Ordering::AcqRel);
             std::thread::sleep(HEADER_SLOT_POLL);
@@ -940,9 +1004,12 @@ mod tests {
 
     /// Reserves with a single attempt: `stop` lets one try through, then
     /// ends any wait.
-    fn try_reserve_header_batch(lease: &PeerLease) -> Option<super::HeaderSlot> {
+    fn try_reserve_header_batch(
+        lease: &PeerLease,
+        node: &super::NodeHeaderBudget,
+    ) -> Option<super::HeaderSlot> {
         let checks = std::cell::Cell::new(0_u8);
-        lease.reserve_header_batch(|| {
+        lease.reserve_header_batch(node, || {
             checks.set(checks.get() + 1);
             checks.get() > 1
         })
@@ -951,22 +1018,24 @@ mod tests {
     #[test]
     fn header_slots_bound_one_connection_until_dropped_or_cancelled()
     -> Result<(), Box<dyn std::error::Error>> {
+        let node = super::NodeHeaderBudget::for_connections(1);
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new_inbound(tx);
         let mut held = (0..super::MAX_QUEUED_HEADER_BATCHES)
-            .map(|_| try_reserve_header_batch(&lease).ok_or("below the bound"))
+            .map(|_| try_reserve_header_batch(&lease, &node).ok_or("below the bound"))
             .collect::<Result<Vec<_>, _>>()?;
         assert!(
-            try_reserve_header_batch(&lease).is_none(),
+            try_reserve_header_batch(&lease, &node).is_none(),
             "the bound holds"
         );
         held.pop();
-        let refilled = try_reserve_header_batch(&lease);
+        let refilled = try_reserve_header_batch(&lease, &node);
         assert!(refilled.is_some(), "a dropped slot is reusable");
 
         let waiter = {
             let lease = lease.clone();
-            std::thread::spawn(move || lease.reserve_header_batch(|| false).is_some())
+            let node = node.clone();
+            std::thread::spawn(move || lease.reserve_header_batch(&node, || false).is_some())
         };
         std::thread::sleep(std::time::Duration::from_millis(50));
         lease.cancel();
@@ -977,6 +1046,46 @@ mod tests {
         drop(refilled);
         drop(held);
         assert_eq!(lease.queued_header_batches(), 0);
+        assert_eq!(node.queued(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_connections_batches_hold_the_node_header_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Room only for the connections beyond the automatic maximum.
+        let node = super::NodeHeaderBudget::for_connections(0);
+        let mut closed = Vec::new();
+        while node.queued() < node.limit {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let lease = PeerLease::new_inbound(tx);
+            for _ in 0..super::MAX_QUEUED_HEADER_BATCHES {
+                closed.push(try_reserve_header_batch(&lease, &node).ok_or("node budget has room")?);
+            }
+            lease.cancel();
+        }
+        assert_eq!(
+            closed.len(),
+            node.queued(),
+            "only closed connections hold it"
+        );
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let reconnected = PeerLease::new_inbound(tx);
+        assert!(
+            try_reserve_header_batch(&reconnected, &node).is_none(),
+            "a fresh connection cannot queue past closed connections' batches"
+        );
+        assert_eq!(
+            reconnected.queued_header_batches(),
+            0,
+            "a refused reservation leaves no connection slot behind"
+        );
+        closed.pop();
+        assert!(
+            try_reserve_header_batch(&reconnected, &node).is_some(),
+            "sync dropping one of them frees room"
+        );
         Ok(())
     }
 

@@ -343,7 +343,7 @@ covers the delivery-path forward.
   when sync takes the body, so staging, discarding, and rejecting all return
   the slot; ownership and credits are per connection, so a same-address
   replacement inherits neither.
-- **Header ingress**: the shared headers channel has no global bound;
+- **Header ingress**: the shared headers channel itself is unbounded;
   `PeerLease::reserve_header_batch` bounds each connection's share of it at
   `MAX_QUEUED_HEADER_BATCHES` (`crates/p2p/src/connection.rs`). Every wire
   `headers` message and every compact-block announcement that does not
@@ -353,9 +353,21 @@ covers the delivery-path forward.
   holds no slot: the block ingress bound above already limits it. A connection
   at its bound stops reading its socket until one of its own slots is freed,
   as Core pauses reading a peer whose unprocessed messages exceed
-  `-maxreceivebuffer` (`net.cpp:4059`, `net.cpp:4071`). Only that connection's
-  own batches make it wait; no batch is dropped and no connection disconnected
-  for this bound, and a cancelled connection or session queues nothing.
+  `-maxreceivebuffer` (`net.cpp:4059`, `net.cpp:4071`). While the node budget
+  below has room, only that connection's own batches make it wait; no batch is
+  dropped and no connection disconnected for this bound, and a cancelled
+  connection or session queues nothing.
+- **Header ingress across connections**: a closed connection's batches stay
+  queued until sync drains them while its replacement starts with a fresh
+  share, so every slot also counts against the start epoch's
+  `NodeHeaderBudget` (`ConnectionShared::header_budget`), sized at
+  `MAX_QUEUED_HEADER_BATCHES` for each of `max_peer_connections` plus the
+  feeler, the stale-tip extra outbound and eight manual peers (Core's
+  `MAX_ADDNODE_CONNECTIONS`): 1,680 batches, about 270 MB of full pages, at
+  the default 200 connections. Reconnecting therefore cannot queue more
+  batches than that many connections hold at once. When the budget is full
+  every reservation waits until sync frees a slot; nothing is dropped and no
+  connection is disconnected.
 - **Permanent consensus failure**: when a staged body's commit settles with
   `WindowCommitDisposition::Permanent` — in the apply pass or inside a
   branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
@@ -388,8 +400,9 @@ test `announced_near_tip_is_direct_fetched_before_tick`;
 `wire_headers_hold_their_connections_slot_until_dropped`,
 `send_block_forwards_the_blocks_header` and
 `compact_reconstruction_requires_an_earning_header`;
-`crates/p2p/src/connection.rs` test
-`header_slots_bound_one_connection_until_dropped_or_cancelled`;
+`crates/p2p/src/connection.rs` tests
+`header_slots_bound_one_connection_until_dropped_or_cancelled` and
+`closed_connections_batches_hold_the_node_header_budget`;
 `crates/p2p/src/sync/tests.rs` tests
 `permanent_consensus_body_disconnects_delivering_source`,
 `binding_and_operational_failures_do_not_disconnect` and

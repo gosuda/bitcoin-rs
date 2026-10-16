@@ -480,6 +480,8 @@ impl P2pService {
             extras,
         );
         shared.max_inbound = self.config.max_inbound();
+        shared.header_budget =
+            crate::connection::NodeHeaderBudget::for_connections(self.config.max_peer_connections);
         shared.local_services = self.config.local_services;
         shared.v2_transport = self.config.v2_transport;
         shared.address_book = Some(Arc::clone(&self.address_book));

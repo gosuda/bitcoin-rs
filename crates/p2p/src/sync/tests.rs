@@ -444,13 +444,18 @@ fn draining_a_batch_frees_its_connections_header_slot() -> TestResult {
     let _rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
     let lease = peers.lease(addr).ok_or("connected lease")?;
+    let node = crate::connection::NodeHeaderBudget::for_connections(1);
     for _ in 0..crate::connection::MAX_QUEUED_HEADER_BATCHES {
         inbound_headers_tx.send(InboundHeaders {
             headers: Vec::new(),
             source: Some(source),
             wire_response: false,
             body_fetch_owned: false,
-            slot: Some(lease.reserve_header_batch(|| false).ok_or("free slot")?),
+            slot: Some(
+                lease
+                    .reserve_header_batch(&node, || false)
+                    .ok_or("free slot")?,
+            ),
         })?;
     }
     assert_eq!(
@@ -461,6 +466,7 @@ fn draining_a_batch_frees_its_connections_header_slot() -> TestResult {
     sync.tick();
 
     assert_eq!(lease.queued_header_batches(), 0);
+    assert_eq!(node.queued(), 0);
     Ok(())
 }
 

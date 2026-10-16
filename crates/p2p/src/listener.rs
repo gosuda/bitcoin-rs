@@ -123,6 +123,9 @@ pub struct ConnectionShared {
     pub magic: Magic,
     /// Sink for `headers` messages and body-carried headers.
     pub headers_tx: Sender<crate::InboundHeaders>,
+    /// Header batches queued in `headers_tx` across every connection of this
+    /// start epoch; shared by every clone.
+    pub(crate) header_budget: crate::connection::NodeHeaderBudget,
     /// Sink for full block bodies.
     pub blocks_tx: Sender<crate::InboundBlock>,
     /// Read-only active-chain view for `getheaders` and `getdata` serving.
@@ -210,6 +213,9 @@ impl ConnectionShared {
             peer_ready,
             magic,
             headers_tx,
+            header_budget: crate::connection::NodeHeaderBudget::for_connections(
+                crate::service::P2pServiceConfig::default().max_peer_connections,
+            ),
             blocks_tx,
             chain_query,
             wake_tx,
@@ -321,10 +327,10 @@ impl ConnectionShared {
     /// Queues a wire or compact-block header batch once `lease` has a header
     /// slot free.
     ///
-    /// The headers channel itself is unbounded; each connection's share of it
-    /// is bounded by [`crate::PeerLease::reserve_header_batch`], whose wait
-    /// pauses only this connection's reader. A cancelled connection or
-    /// session queues nothing.
+    /// The headers channel itself is unbounded; each connection's share of it,
+    /// and every connection's together, is bounded by
+    /// [`crate::PeerLease::reserve_header_batch`], whose wait pauses only this
+    /// connection's reader. A cancelled connection or session queues nothing.
     fn send_peer_headers(
         &self,
         lease: &crate::PeerLease,
@@ -333,7 +339,9 @@ impl ConnectionShared {
         wire_response: bool,
         body_fetch_owned: bool,
     ) {
-        let Some(slot) = lease.reserve_header_batch(|| self.is_session_cancelled()) else {
+        let Some(slot) =
+            lease.reserve_header_batch(&self.header_budget, || self.is_session_cancelled())
+        else {
             return;
         };
         self.send_headers(source, headers, wire_response, body_fetch_owned, Some(slot));
@@ -3037,8 +3045,14 @@ mod writer_shutdown_tests {
         })?;
         assert!(batch.slot.is_some(), "a wire headers message holds a slot");
         assert_eq!(lease.queued_header_batches(), 1);
+        assert_eq!(
+            shared.header_budget.queued(),
+            1,
+            "and its node budget share"
+        );
         drop(batch);
         assert_eq!(lease.queued_header_batches(), 0);
+        assert_eq!(shared.header_budget.queued(), 0);
         Ok(())
     }
 
