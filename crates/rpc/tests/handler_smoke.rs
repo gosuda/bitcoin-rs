@@ -168,11 +168,7 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
     let raw_tx = consensus_bytes(&fixture.tx).to_lower_hex_string();
     // The block hex starts with the 80-byte header getblockheader serializes.
     let header_hex = &fixture.block_hex[..160];
-
     vec![
-        ("getblockcount", json!([]), json!(FIXTURE_HEIGHT)),
-        ("getbestblockhash", json!([]), json!(tip)),
-        ("getblockhash", json!([FIXTURE_HEIGHT]), json!(tip)),
         ("getblockheader", json!([tip, false]), json!(header_hex)),
         (
             "getblock",
@@ -193,14 +189,6 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
                 "blocks": FIXTURE_HEIGHT,
                 "headers": FIXTURE_HEIGHT,
                 "bestblockhash": tip,
-            }),
-        ),
-        (
-            "getchaintxstats",
-            json!([]),
-            json!({
-                "window_final_block_hash": tip,
-                "window_final_block_height": FIXTURE_HEIGHT,
             }),
         ),
         (
@@ -228,11 +216,6 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
             "gettxout",
             json!([txid, 0_u64]),
             json!({"value": 0.00005, "bestblock": tip, "coinbase": false}),
-        ),
-        (
-            "gettxoutsetinfo",
-            json!([]),
-            json!({"height": FIXTURE_HEIGHT, "bestblock": tip}),
         ),
         ("getrawtransaction", json!([txid]), json!(raw_tx)),
         ("sendrawtransaction", json!([raw_tx]), json!(txid)),

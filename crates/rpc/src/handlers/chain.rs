@@ -2109,6 +2109,27 @@ mod tests {
     }
 
     #[test]
+    fn scalar_chain_queries_validate_parameters() {
+        let ctx = context_with_tip(
+            bitcoin_rs_primitives::Network::Regtest,
+            0x207f_ffff,
+            &[1_000],
+        );
+        assert!(matches!(
+            getblockhash(&ctx, &json!([])),
+            Err(RpcError::InvalidParams("height is required"))
+        ));
+        assert!(matches!(
+            getblockcount(&ctx, &json!(["extraneous"])),
+            Err(RpcError::InvalidParams("method does not accept parameters"))
+        ));
+        assert!(matches!(
+            getbestblockhash(&ctx, &json!(["extraneous"])),
+            Err(RpcError::InvalidParams("method does not accept parameters"))
+        ));
+    }
+
+    #[test]
     fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
         use bitcoin_rs_utxo::contract::{BlockSpendsError, HistoryUnavailable};
         let corruption = block_spends_error(BlockSpendsError::Corrupt("fixture"));
