@@ -34,7 +34,7 @@ for arg in "$@"; do
 done
 workdir=$(dirname "${datadir}")
 verdict=clean
-for node in core rs rs-v2 rs-inbound; do
+for node in core rs rs-v2 rs-inbound rs-v1; do
   if [ -n "$(ls -A "${workdir}/${node}" 2>/dev/null)" ]; then
     verdict=stale
   fi
@@ -53,7 +53,7 @@ class RunP2pCoreInteropTest(unittest.TestCase):
             stub = root / "stub-bitcoind"
             stub.write_text(STUB_BITCOIND)
             stub.chmod(0o755)
-            for node_dir in ("core", "rs", "rs-v2", "rs-inbound"):
+            for node_dir in ("core", "rs", "rs-v2", "rs-inbound", "rs-v1"):
                 stale = workdir / node_dir / "stale-epoch-state"
                 stale.parent.mkdir(parents=True)
                 stale.write_text("restored by rust-cache\n")

@@ -107,11 +107,14 @@ CORE_P2P_PORT=$(free_port)
 CORE_RPC_PORT=$(free_port)
 RS_P2P_PORT=$(free_port)
 RS_RPC_PORT=$(free_port)
-# The fresh nodes of the BIP324 legs: one dials Core, one Core dials.
+# The fresh nodes of the BIP324 legs: one dials Core, one Core dials, and one
+# with v2 off syncs the same chain as the v2 dialer for the byte comparison.
 RS_V2_P2P_PORT=$(free_port)
 RS_V2_RPC_PORT=$(free_port)
 RS_INBOUND_P2P_PORT=$(free_port)
 RS_INBOUND_RPC_PORT=$(free_port)
+RS_V1_P2P_PORT=$(free_port)
+RS_V1_RPC_PORT=$(free_port)
 
 if [[ -z "${WORKDIR}" ]]; then
   WORKDIR=$(mktemp -d /tmp/p2p-core-interop.XXXXXX)
@@ -127,6 +130,8 @@ RS_V2_DATADIR="${WORKDIR}/rs-v2"
 RS_V2_LOG="${WORKDIR}/bitcoin-rs-v2.log"
 RS_INBOUND_DATADIR="${WORKDIR}/rs-inbound"
 RS_INBOUND_LOG="${WORKDIR}/bitcoin-rs-inbound.log"
+RS_V1_DATADIR="${WORKDIR}/rs-v1"
+RS_V1_LOG="${WORKDIR}/bitcoin-rs-v1.log"
 CORE_LOG="${WORKDIR}/bitcoind.log"
 RS_RPC_USER="interop"
 RS_RPC_PASSWORD="interop"
@@ -138,6 +143,7 @@ EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v4"
 BITCOIN_RS_PID=""
 RS_V2_PID=""
 RS_INBOUND_PID=""
+RS_V1_PID=""
 CORE_COOKIE_FILE="${CORE_DATADIR}/regtest/.cookie"
 CORE_STOPPED=0
 
@@ -255,8 +261,8 @@ start_rs() {
 }
 
 # Prints {transport_protocol_type, session_id, inbound, addr, addrbind,
-# pingtime} for the one peer of a getpeerinfo result (stdin) whose field <key>
-# equals <value>.
+# pingtime, bytessent, bytesrecv} for the one peer of a getpeerinfo result
+# (stdin) whose field <key> equals <value>.
 peer_transport() {
   python3 -c '
 import json, sys
@@ -273,6 +279,8 @@ print(json.dumps({
     "addr": peer["addr"],
     "addrbind": peer.get("addrbind", ""),
     "pingtime": peer.get("pingtime"),
+    "bytessent": peer["bytessent"],
+    "bytesrecv": peer["bytesrecv"],
 }))
 ' "$1" "$2"
 }
@@ -341,7 +349,7 @@ print(utxo["txid"], utxo["vout"], utxo["amount"])
 cleanup() {
   local status=$?
   local pid
-  for pid in "${BITCOIN_RS_PID}" "${RS_V2_PID}" "${RS_INBOUND_PID}"; do
+  for pid in "${BITCOIN_RS_PID}" "${RS_V2_PID}" "${RS_INBOUND_PID}" "${RS_V1_PID}"; do
     if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
       kill "${pid}" 2>/dev/null || true
     fi
@@ -361,15 +369,16 @@ trap cleanup EXIT
 
 echo "==> workdir: ${WORKDIR}"
 echo "==> core p2p: ${CORE_P2P_PORT} rpc: ${CORE_RPC_PORT}; bitcoin-rs p2p: ${RS_P2P_PORT} rpc: ${RS_RPC_PORT}"
-echo "==> v2 dialer p2p: ${RS_V2_P2P_PORT} rpc: ${RS_V2_RPC_PORT}; Core-dialed p2p: ${RS_INBOUND_P2P_PORT} rpc: ${RS_INBOUND_RPC_PORT}"
+echo "==> v2 dialer p2p: ${RS_V2_P2P_PORT} rpc: ${RS_V2_RPC_PORT}; Core-dialed p2p: ${RS_INBOUND_P2P_PORT} rpc: ${RS_INBOUND_RPC_PORT}; v1 dialer p2p: ${RS_V1_P2P_PORT} rpc: ${RS_V1_RPC_PORT}"
 
 # The workdir is kept across runs (--workdir implies KEEP=1) and CI caches it
 # under target/, so a restored datadir can carry an obsolete schema epoch that
 # bitcoin-rs correctly refuses to open. Node state is per-run: always start
 # from empty datadirs so bitcoin-rs writes a fresh CURRENT_SCHEMA marker.
 rm -rf -- "${CORE_DATADIR:?core datadir unset}" "${RS_DATADIR:?rs datadir unset}" \
-  "${RS_V2_DATADIR:?v2 rs datadir unset}" "${RS_INBOUND_DATADIR:?inbound rs datadir unset}"
-mkdir -p "${CORE_DATADIR}" "${RS_DATADIR}" "${RS_V2_DATADIR}" "${RS_INBOUND_DATADIR}"
+  "${RS_V2_DATADIR:?v2 rs datadir unset}" "${RS_INBOUND_DATADIR:?inbound rs datadir unset}" \
+  "${RS_V1_DATADIR:?v1 rs datadir unset}"
+mkdir -p "${CORE_DATADIR}" "${RS_DATADIR}" "${RS_V2_DATADIR}" "${RS_INBOUND_DATADIR}" "${RS_V1_DATADIR}"
 
 echo "==> starting bitcoind"
 # shellcheck disable=SC2086 # the command may carry its own arguments
@@ -688,6 +697,15 @@ RS_TO_CORE_ADDR=$(printf '%s' "${RS_TO_CORE_RS_VIEW}" | json_field addrbind)
 RS_TO_CORE_CORE_VIEW=$(core_result getpeerinfo | peer_transport addr "${RS_TO_CORE_ADDR}")
 RS_TO_CORE_PING=$(core_ping_answered "${RS_TO_CORE_ADDR}")
 
+echo "==> resource cost: a fresh bitcoin-rs node with v2 off syncs the same chain"
+start_rs "${RS_V1_DATADIR}" "${RS_V1_RPC_PORT}" "${RS_V1_P2P_PORT}" "${RS_V1_LOG}" \
+  --connect "127.0.0.1:${CORE_P2P_PORT}" \
+  --v2transport=false
+RS_V1_PID=$!
+poll_until_at "${RS_V1_RPC_PORT}" "sync of the same chain over v1" "${FINAL_CORE_HEIGHT}"
+V1_IBD_RS_VIEW=$(rs_result_at "${RS_V1_RPC_PORT}" getpeerinfo | peer_transport addr "127.0.0.1:${CORE_P2P_PORT}")
+V1_IBD_CORE_VIEW=$(core_result getpeerinfo | peer_transport addr "$(printf '%s' "${V1_IBD_RS_VIEW}" | json_field addrbind)")
+
 echo "==> transport leg core->rs (v2): Core dials a fresh bitcoin-rs node"
 start_rs "${RS_INBOUND_DATADIR}" "${RS_INBOUND_RPC_PORT}" "${RS_INBOUND_P2P_PORT}" "${RS_INBOUND_LOG}" \
   --v2transport=true
@@ -717,7 +735,7 @@ TRANSPORT_JSON=$(python3 - "${FINAL_CORE_HEIGHT}" "${FINAL_CORE_TIP}" \
   "${V1_CORE_VIEW}" "${V1_RS_VIEW}" "${V1_TIP}" \
   "${RS_TO_CORE_CORE_VIEW}" "${RS_TO_CORE_RS_VIEW}" "${RS_TO_CORE_PING}" "${RS_TO_CORE_TIP}" \
   "${CORE_TO_RS_CORE_VIEW}" "${CORE_TO_RS_RS_VIEW}" "${CORE_TO_RS_PING}" "${CORE_TO_RS_TIP}" \
-  "${CORE_TO_RS_PEER_COUNT}" <<'PY'
+  "${CORE_TO_RS_PEER_COUNT}" "${V1_IBD_CORE_VIEW}" <<'PY'
 import json
 import sys
 
@@ -726,8 +744,8 @@ import sys
     v1_core, v1_rs, v1_tip,
     rs_to_core_core, rs_to_core_rs, rs_to_core_ping, rs_to_core_tip,
     core_to_rs_core, core_to_rs_rs, core_to_rs_ping, core_to_rs_tip,
-    core_to_rs_peers,
-) = sys.argv[1:15]
+    core_to_rs_peers, v1_ibd_core,
+) = sys.argv[1:16]
 
 
 def leg(core_view, rs_view, tip, **extra):
@@ -757,6 +775,16 @@ print(json.dumps({
         ping_answered=core_to_rs_ping == "true",
         bitcoin_rs_peers=int(core_to_rs_peers),
     ),
+    # Core's byte counters for two fresh nodes that each synced the same chain
+    # by dialing Core, read as soon as each reached Core's tip.
+    "ibd_cost": {
+        name: {
+            "transport": view["transport_protocol_type"],
+            "bytes_core_to_rs": view["bytessent"],
+            "bytes_rs_to_core": view["bytesrecv"],
+        }
+        for name, view in (("v1", json.loads(v1_ibd_core)), ("v2", json.loads(rs_to_core_core)))
+    },
 }))
 PY
 )

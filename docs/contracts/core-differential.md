@@ -85,6 +85,10 @@ a running pinned binary, not a replay of captured JSON.
   `transport_protocol_type`, `session_id` and direction. Both v2 legs must
   report `v2` on both ends with the same 32-byte session id, and each must
   answer a `ping` Core sends after the sync with a `pong`.
+- A third fresh node with `--v2transport=false` dials Core and syncs the same
+  chain. The evidence `ibd_cost` records Core's `bytessent` and `bytesrecv`
+  for it and for the v2 dialer as each reaches Core's tip: a measurement of
+  v2's bandwidth cost, recorded rather than bounded.
 - Like CORE-05, this is a main-only qualification lane: the recorded evidence
   artifact, not the lane's presence, is what qualifies BIP324 interop.
 

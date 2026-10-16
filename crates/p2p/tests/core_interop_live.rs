@@ -426,6 +426,25 @@ fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
             "{name}: the node syncs Core's chain over that connection"
         );
     }
+
+    // The byte counts are a recorded measurement, not a bound: only their
+    // presence and transports are checked.
+    let cost = transports
+        .get("ibd_cost")
+        .ok_or_else(|| main_error("transports missing `ibd_cost`"))?;
+    for transport in ["v1", "v2"] {
+        let run = cost
+            .get(transport)
+            .ok_or_else(|| main_error(format!("ibd_cost missing `{transport}`")))?;
+        assert_eq!(
+            evidence_str(run, "transport")?,
+            transport,
+            "ibd_cost.{transport}"
+        );
+        for key in ["bytes_core_to_rs", "bytes_rs_to_core"] {
+            assert!(evidence_u64(run, key)? > 0, "ibd_cost.{transport}.{key}");
+        }
+    }
     Ok(())
 }
 
