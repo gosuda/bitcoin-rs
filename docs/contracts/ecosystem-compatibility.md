@@ -166,8 +166,8 @@ tests or benchmark/diagnostic tooling.
   current row is honestly downgraded to `implemented` or weaker wherever only
   in-tree proof exists.
 - `scripts/run-p2p-core-interop.sh` with `crates/p2p/tests/core_interop_live.rs`
-  (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`): the one
-  real-consumer lane today — an unmodified Bitcoin Core 31.1 peer.
+  (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`, `CORE-06`): the
+  one real-consumer lane today — an unmodified Bitcoin Core 31.1 peer.
 - Acceptance items that need real external validation runs (a representative
   real-world consumer per verified surface, an upstreamed or out-of-repo
   integration, thin CI separation of ecosystem lanes) are tracked in issue

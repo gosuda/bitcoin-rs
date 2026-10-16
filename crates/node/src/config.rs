@@ -150,8 +150,8 @@ pub struct P2pConfig {
     /// Whether fast sync (shallow, early fan-out over a larger outbound set) is enabled.
     pub fast_sync: bool,
     /// Whether BIP324 v2 encrypted connections are attempted and accepted, and
-    /// `NODE_P2P_V2` is advertised. Off by default until v2 interoperability
-    /// with Bitcoin Core is recorded (#1503).
+    /// `NODE_P2P_V2` is advertised. On by default, as Core's `-v2transport` is;
+    /// off keeps every connection on v1.
     pub v2_transport: bool,
 }
 
@@ -266,7 +266,7 @@ impl NodeConfig {
                 noban_subnets: settings.p2p.noban_subnets.clone().unwrap_or_default(),
                 connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
                 fast_sync: settings.p2p.fast_sync.unwrap_or(false),
-                v2_transport: settings.p2p.v2_transport.unwrap_or(false),
+                v2_transport: settings.p2p.v2_transport.unwrap_or(true),
             },
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),

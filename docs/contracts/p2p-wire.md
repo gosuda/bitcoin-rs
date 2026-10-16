@@ -570,12 +570,12 @@ pass pays per page.
   transport halves; `crates/p2p/src/bip324.rs` owns the key schedule, the
   ciphers, the handshake state machine, the packet reader, and the message
   type encoding.
-- **Off by default.** With `v2transport` off
-  (`P2pServiceConfig::v2_transport`), every connection is v1 and the node does
-  not advertise `NODE_P2P_V2`. A peer that opens with a v2 key then fails the
-  v1 magic check and is disconnected without discouragement, as Core closes a
-  transport on a wrong message start (`PeerError::inbound`). With it on, the
-  node advertises `NODE_P2P_V2`.
+- **Default**: the node runs with `v2transport` on, as Core's `-v2transport`
+  defaults on, and advertises `NODE_P2P_V2`; `P2pServiceConfig::v2_transport`
+  itself defaults off for direct `bitcoin-rs-p2p` users. With it off, every connection is v1 and
+  the node does not advertise `NODE_P2P_V2`. A peer that opens with a v2 key
+  then fails the v1 magic check and is disconnected without discouragement,
+  as Core closes a transport on a wrong message start (`PeerError::inbound`).
 - **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
   `version` header under this node's magic hands those bytes to the v1
   decoder, a v1 `version` header under another magic is refused, and anything
@@ -624,12 +624,12 @@ deadline against a silent peer. `crates/rpc/src/handlers/network.rs` test
 undiscouraged wrong magic. The
 `crates/p2p/src/bip324` unit tests pin the BIP vectors, the handshake
 misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
+`bin/bitcoin-rs/src/main.rs` test
+`v2_transport_defaults_on_and_disables_from_every_surface` pins the node
+default, and `docs/contracts/core-differential.md` CORE-06 owns the live Core
+31.1 run in both directions.
 
 ## Live gaps
-
-- **BIP324 default and interoperability**: `v2transport` stays off until a
-  live Bitcoin Core 31.1 run records v2 in both directions (#1503), and
-  `docs/policies/p2p-compatibility.md` still lists BIP324 as experimental.
 
 - **Peer lifecycle boundary**: Header-request planning and getdata fan-out
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided

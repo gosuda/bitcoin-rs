@@ -59,9 +59,9 @@ evidence = "deterministic block-announcement tests cover headers, inv fallback, 
 [[row]]
 surface = "BIP324 / P2P v2 transport"
 core_reference = "BIP324"
-status = "experimental"
-representative_consumer = "qualification target: unmodified Bitcoin Core 31.1 in both connection directions (issue #1503)"
-evidence = "default-off v2transport implementation with key exchange, packet framing and v1 fallback (crates/p2p/src/transport.rs, bip324.rs). Reference vectors and listener/v2_transport_tests.rs are in-tree evidence only. No recorded live bidirectional Core v2 qualification; v1 remains the default (docs/policies/p2p-compatibility.md sections 2/3/7)."
+status = "externally verified"
+representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind in both connection directions (scripts/run-p2p-core-interop.sh, docs/contracts/core-differential.md CORE-06)"
+evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/p2p/tests/core_interop_live.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and listener/v2_transport_tests.rs."
 
 [[row]]
 surface = "Compact block relay (BIP152)"

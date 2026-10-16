@@ -243,23 +243,29 @@ mod tests {
     }
 
     #[test]
-    fn v2_transport_defaults_off_and_enables_from_every_surface() {
+    fn v2_transport_defaults_on_and_disables_from_every_surface() {
         let config = resolved(&["bitcoin-rs"], &[]);
+        assert!(config.p2p.v2_transport);
+
+        let config = resolved(&["bitcoin-rs", "--v2transport=false"], &[]);
         assert!(!config.p2p.v2_transport);
 
-        let config = resolved(&["bitcoin-rs", "--v2transport"], &[]);
-        assert!(config.p2p.v2_transport);
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_V2_TRANSPORT", "false")]);
+        assert!(!config.p2p.v2_transport);
 
-        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_V2_TRANSPORT", "true")]);
-        assert!(config.p2p.v2_transport);
+        let config = resolved(
+            &["bitcoin-rs", "--v2transport"],
+            &[("BITCOIN_RS_V2_TRANSPORT", "false")],
+        );
+        assert!(config.p2p.v2_transport, "the flag outranks the environment");
 
         for (flag, text) in [
-            ("--config", "v2_transport = true\n"),
-            ("--bitcoin-conf", "v2transport=1\n"),
+            ("--config", "v2_transport = false\n"),
+            ("--bitcoin-conf", "v2transport=0\n"),
         ] {
             let config = load_file(flag, text, &[], std::iter::empty())
                 .unwrap_or_else(|error| panic!("valid {flag} configuration: {error}"));
-            assert!(config.p2p.v2_transport, "{flag}");
+            assert!(!config.p2p.v2_transport, "{flag}");
         }
     }
 
