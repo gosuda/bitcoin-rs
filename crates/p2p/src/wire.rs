@@ -839,10 +839,14 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
     let mut headers = Vec::with_capacity(capacity);
     for _ in 0..count {
         headers.push(<Header as ConsensusDecode>::consensus_decode(&mut reader)?);
+        // Core reads each entry's transaction count and ignores it
+        // (`net_processing.cpp:4835`).
         let (tx_count, consumed) = bitcoin_rs_primitives::varint::decode(reader)?;
         reader = &reader[consumed..];
-        if tx_count != 0 {
-            return Err(PeerError::Misbehavior("headers entry carried transactions"));
+        if tx_count > bitcoin_rs_primitives::varint::MAX_SIZE {
+            return Err(PeerError::Misbehavior(
+                "headers entry transaction count out of range",
+            ));
         }
     }
     if !reader.is_empty() {

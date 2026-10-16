@@ -1,6 +1,10 @@
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
+/// Core's `MAX_SIZE` (`serialize.h:32`): the default range check of its
+/// `ReadCompactSize` refuses a larger value.
+pub const MAX_SIZE: u64 = 0x0200_0000;
+
 /// Errors returned by Bitcoin compact-size integer decoding.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum VarintError {

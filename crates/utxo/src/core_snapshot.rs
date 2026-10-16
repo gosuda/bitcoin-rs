@@ -20,8 +20,6 @@ const MAGIC: [u8; 5] = *b"utxo\xff";
 const VERSION: u16 = 2;
 const HEADER_BYTES: u64 = 51;
 const MAX_SCRIPT_BYTES: u64 = 10_000;
-// Core ReadCompactSize's default range check.
-const MAX_COMPACT_SIZE: u64 = 0x0200_0000;
 
 /// Parsed header fields; parsing these fields does not authenticate the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,7 +359,7 @@ impl<'a, R: Read> Decoder<'a, R> {
         self.read_into(&mut bytes[1..size])?;
         let (value, _) =
             varint::decode(&bytes[..size]).map_err(|_| SnapshotError::NonCanonicalCompactSize)?;
-        if value > MAX_COMPACT_SIZE {
+        if value > varint::MAX_SIZE {
             return Err(SnapshotError::CompactSizeTooLarge { value });
         }
         Ok(value)

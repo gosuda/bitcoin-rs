@@ -142,6 +142,25 @@ fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), Peer
 }
 
 #[test]
+fn headers_entries_ignore_their_transaction_count_up_to_core_max_size() -> Result<(), PeerError> {
+    const CORE_MAX_SIZE: u64 = 0x0200_0000;
+    let frame = headers_frame_with_tx_counts(&[1, CORE_MAX_SIZE])?;
+    match read_message(&mut Cursor::new(frame), Magic::BITCOIN)?.0 {
+        Message::Headers(headers) => assert_eq!(headers.len(), 2, "both entries decode"),
+        other => panic!("headers frame decoded as {}", other.command()),
+    }
+
+    let frame = headers_frame_with_tx_counts(&[CORE_MAX_SIZE + 1])?;
+    match read_message(&mut Cursor::new(frame), Magic::BITCOIN) {
+        Err(PeerError::Misbehavior(message)) => {
+            assert_eq!(message, "headers entry transaction count out of range");
+        }
+        other => panic!("a count Core cannot parse must be refused, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn round_trips_compact_block_messages() -> Result<(), PeerError> {
     let block_hash = BlockHash::from_byte_array([3u8; 32]);
     let transaction = compact_block_transaction();
@@ -310,17 +329,25 @@ fn locator_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
 }
 
 fn headers_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    headers_frame_with_tx_counts(&vec![0; count])
+}
+
+/// A `headers` frame with one entry per transaction count.
+fn headers_frame_with_tx_counts(tx_counts: &[u64]) -> Result<Vec<u8>, PeerError> {
+    let count = tx_counts.len();
     let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
     let mut payload = Vec::new();
     VarInt(count_u64)
         .consensus_encode(&mut payload)
         .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
     let header = compact_block_header();
-    for _ in 0..count {
+    for &tx_count in tx_counts {
         header
             .consensus_encode(&mut payload)
             .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
-        payload.push(0);
+        VarInt(tx_count)
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
     }
 
     message_frame(b"headers", &payload)
