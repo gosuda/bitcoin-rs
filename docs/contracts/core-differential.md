@@ -25,7 +25,7 @@ a running pinned binary, not a replay of captured JSON.
 - **Owner**: `scripts/run-p2p-core-interop.sh`.
 - After bitcoin-rs catches up to Core on regtest, `getblockcount`,
   `getbestblockhash`, and `getblockchaininfo.{chain,blocks}` agree.
-- Evidence schema `bitcoin-rs-core-differential-v3` is verified by
+- Evidence schema `bitcoin-rs-core-differential-v4` is verified by
   `crates/p2p/tests/core_interop_live.rs`.
 - This complements `kernel_block_parity` / `kernel_vector_parity`: those
   tests the C++ engine in-process; this tests a running Core node.
@@ -69,6 +69,24 @@ a running pinned binary, not a replay of captured JSON.
   do not by themselves constitute recorded external evidence; the ecosystem
   matrix may upgrade CORE-05 only after the main workflow retains a successful
   evidence artifact for the merged implementation.
+
+### `CORE-06`: BIP324 v2 transport against live Core
+
+- **Owner**: `scripts/run-p2p-core-interop.sh`, with Core started as
+  `-v2transport=1`; verified by `assert_transports` in
+  `crates/p2p/tests/core_interop_live.rs`.
+- The main bitcoin-rs node keeps `--v2transport=false`, so CORE-02, CORE-03
+  and its connection to Core stay v1 evidence; its leg must report `v1` with
+  empty session ids on both ends.
+- A fresh bitcoin-rs node with `--v2transport=true` dials Core, and Core dials
+  (`addnode … onetry true`) another fresh node with `--v2transport=true` and
+  no other peer. Each syncs Core's whole chain over that v2 connection.
+- For each connection the evidence records both ends' `getpeerinfo`
+  `transport_protocol_type`, `session_id` and direction. Both v2 legs must
+  report `v2` on both ends with the same 32-byte session id, and each must
+  answer a `ping` Core sends after the sync with a `pong`.
+- Like CORE-05, this is a main-only qualification lane: the recorded evidence
+  artifact, not the lane's presence, is what qualifies BIP324 interop.
 
 ### `CORE-04`: Curated live block and transaction acceptance
 

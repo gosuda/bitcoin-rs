@@ -45,7 +45,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 ## 1. Live Bitcoin Core P2P and chain-identity differential
 
 - **Tier**: Real external-consumer evidence.
-- **Contract & clauses**: [`docs/contracts/core-differential.md`](contracts/core-differential.md) (`CORE-01`, `CORE-02`, `CORE-03`, `CORE-05`).
+- **Contract & clauses**: [`docs/contracts/core-differential.md`](contracts/core-differential.md) (`CORE-01`, `CORE-02`, `CORE-03`, `CORE-05`, `CORE-06`).
 - **Owner scripts & suites**:
   - Pinned installer: `scripts/install-bitcoind.sh` (POSIX) / `scripts/install-bitcoind.ps1` (Windows).
   - Test runner: `scripts/run-p2p-core-interop.sh`.
@@ -57,6 +57,9 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     disconnect handling, tip agreement (`getblockcount`, `getbestblockhash`,
     `getblockchaininfo.{chain,blocks}`), and direct wire comparison of proactive
     `inv`, `headers`, and high-bandwidth `cmpctblock` announcements across a reorg.
+  - BIP324 v2 sync in both directions: one fresh node dials Core and Core dials
+    another, each reporting `v2` with the same session id on both ends and
+    answering Core's ping. The main node stays on v1.
   - Compact-block relay counts are diagnostic log-derived counters per `ECO-09`.
 - **Reproduce**:
   ```sh
@@ -304,7 +307,8 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
   - **Partially compatible**: Peer lifecycle and address management (recorded deviations in P2P policy).
   - **Implemented**: JSON-RPC, REST, ZMQ notifications, Esplora-compatible API, GetBlockTemplate,
     block submission, USDT tracepoints.
-  - **Intentionally unsupported**: BIP324 (v2 transport), BIP157/BIP158 (block filters), Stratum V2 / Core IPC adapters.
+  - **Experimental**: BIP324 (v2 transport, off by default).
+  - **Intentionally unsupported**: BIP157/BIP158 (block filters), Stratum V2 / Core IPC adapters.
 - **Reproduction & audit**:
   - Audit status strings against the canonical matrix:
     ```sh
