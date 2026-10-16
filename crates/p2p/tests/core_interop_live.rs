@@ -375,8 +375,11 @@ fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
         );
         let session_id = evidence_str(leg, "core_session_id")?;
         assert!(
-            session_id.len() == 64 && session_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{name}: Core reports a 32-byte session id, got {session_id:?}"
+            session_id.len() == 64
+                && session_id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "{name}: Core reports a 32-byte session id in lowercase hex, got {session_id:?}"
         );
         assert_eq!(
             evidence_str(leg, "bitcoin_rs_session_id")?,
