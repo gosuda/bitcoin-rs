@@ -359,15 +359,16 @@ covers the delivery-path forward.
   connection or session queues nothing.
 - **Header ingress across connections**: a closed connection's batches stay
   queued until sync drains them while its replacement starts with a fresh
-  share, so every slot also counts against the start epoch's
-  `NodeHeaderBudget` (`ConnectionShared::header_budget`), sized at
-  `MAX_QUEUED_HEADER_BATCHES` for each of `max_peer_connections` plus the
-  feeler, the stale-tip extra outbound and eight manual peers (Core's
-  `MAX_ADDNODE_CONNECTIONS`): 1,680 batches, about 270 MB of full pages, at
-  the default 200 connections. Reconnecting therefore cannot queue more
-  batches than that many connections hold at once. When the budget is full
-  every reservation waits until sync frees a slot; nothing is dropped and no
-  connection is disconnected.
+  share, so every slot also counts against a `NodeHeaderBudget` that
+  `P2pService` creates with the headers channel and hands to every start
+  (`ConnectionShared::header_budget`); batches an earlier start left queued
+  therefore still count. It is sized at `MAX_QUEUED_HEADER_BATCHES` for each
+  of `max_peer_connections` plus the feeler, the stale-tip extra outbound and
+  eight manual peers (Core's `MAX_ADDNODE_CONNECTIONS`): 1,680 batches, about
+  270 MB of full pages, at the default 200 connections. Reconnecting therefore
+  cannot queue more batches than that many connections hold at once. When the
+  budget is full every reservation waits until sync frees a slot; nothing is
+  dropped and no connection is disconnected.
 - **Permanent consensus failure**: when a staged body's commit settles with
   `WindowCommitDisposition::Permanent` — in the apply pass or inside a
   branch switch (`BranchSwitchError::ConnectFailed`, attributed through the

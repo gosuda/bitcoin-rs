@@ -123,8 +123,8 @@ pub struct ConnectionShared {
     pub magic: Magic,
     /// Sink for `headers` messages and body-carried headers.
     pub headers_tx: Sender<crate::InboundHeaders>,
-    /// Header batches queued in `headers_tx` across every connection of this
-    /// start epoch; shared by every clone.
+    /// The node-wide budget of `headers_tx`, shared by every clone and owned
+    /// with the channel by the service.
     pub(crate) header_budget: crate::connection::NodeHeaderBudget,
     /// Sink for full block bodies.
     pub blocks_tx: Sender<crate::InboundBlock>,

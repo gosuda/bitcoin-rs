@@ -378,6 +378,9 @@ pub struct P2pService {
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
     inbound_headers_rx: Mutex<Option<Receiver<crate::InboundHeaders>>>,
+    /// The headers channel's node-wide budget. It lives as long as the
+    /// channel, so batches an earlier start left queued still count.
+    header_budget: crate::connection::NodeHeaderBudget,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
@@ -405,6 +408,8 @@ impl P2pService {
     ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let header_budget =
+            crate::connection::NodeHeaderBudget::for_connections(config.max_peer_connections);
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         let address_book = crate::addrman::AddressBook::open(
@@ -431,6 +436,7 @@ impl P2pService {
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             inbound_headers_tx,
             inbound_headers_rx: Mutex::new(Some(inbound_headers_rx)),
+            header_budget,
             inbound_blocks_tx,
             inbound_blocks_rx: Mutex::new(Some(inbound_blocks_rx)),
             workers: Mutex::new(None),
@@ -480,8 +486,7 @@ impl P2pService {
             extras,
         );
         shared.max_inbound = self.config.max_inbound();
-        shared.header_budget =
-            crate::connection::NodeHeaderBudget::for_connections(self.config.max_peer_connections);
+        shared.header_budget = self.header_budget.clone();
         shared.local_services = self.config.local_services;
         shared.v2_transport = self.config.v2_transport;
         shared.address_book = Some(Arc::clone(&self.address_book));

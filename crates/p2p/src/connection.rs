@@ -117,9 +117,9 @@ const CONNECTIONS_BEYOND_AUTOMATIC: usize = 1 + 1 + 8;
 /// How often a connection at its header bound checks for a free slot.
 const HEADER_SLOT_POLL: Duration = Duration::from_millis(10);
 
-/// Header batches queued for sync across every connection of one start
-/// epoch, including connections that have closed since their batches were
-/// queued.
+/// Header batches queued for sync across every connection that feeds one
+/// headers channel, including connections that have closed since their
+/// batches were queued.
 ///
 /// A closed connection's batches stay in the shared channel until sync drains
 /// them, while its replacement starts with a fresh per-connection share. This
