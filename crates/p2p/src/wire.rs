@@ -299,9 +299,13 @@ pub enum PeerError {
 }
 
 impl PeerError {
+    /// Attributes a receive failure to the remote, except I/O, transport
+    /// failures and a frame under another network's magic. Core closes a
+    /// transport on a wrong message start without `Misbehaving`, and a BIP324
+    /// key read by a node with v2 off arrives exactly this way.
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) => error,
+            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }

@@ -572,7 +572,10 @@ pass pays per page.
   type encoding.
 - **Off by default.** With `v2transport` off
   (`P2pServiceConfig::v2_transport`), every connection is v1 and the node does
-  not advertise `NODE_P2P_V2`. With it on, the node advertises `NODE_P2P_V2`.
+  not advertise `NODE_P2P_V2`. A peer that opens with a v2 key then fails the
+  v1 magic check and is disconnected without discouragement, as Core closes a
+  transport on a wrong message start (`PeerError::inbound`). With it on, the
+  node advertises `NODE_P2P_V2`.
 - **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
   `version` header under this node's magic hands those bytes to the v1
   decoder, a v1 `version` header under another magic is refused, and anything
@@ -615,7 +618,10 @@ loopback sockets in both directions with the remote message loop answering
 over the session, the session id both ends publish, v1 detection on a v2
 listener, the single v1 retry against a v1-only listener, and the handshake
 deadline against a silent peer. `crates/rpc/src/handlers/network.rs` test
-`getpeerinfo_reports_the_negotiated_transport` covers the RPC fields. The
+`getpeerinfo_reports_the_negotiated_transport` covers the RPC fields, and
+`crates/p2p/src/listener.rs` test
+`only_current_remote_protocol_faults_change_automatic_avoidance` covers the
+undiscouraged wrong magic. The
 `crates/p2p/src/bip324` unit tests pin the BIP vectors, the handshake
 misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
 
@@ -623,9 +629,7 @@ misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
 
 - **BIP324 default and interoperability**: `v2transport` stays off until a
   live Bitcoin Core 31.1 run records v2 in both directions (#1503), and
-  `docs/policies/p2p-compatibility.md` still lists BIP324 as unsupported.
-  With v2 off, a peer that opens with a v2 key is read as a v1 header for
-  another network and treated as misbehavior, where Core only disconnects.
+  `docs/policies/p2p-compatibility.md` still lists BIP324 as experimental.
 
 - **Peer lifecycle boundary**: Header-request planning and getdata fan-out
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided

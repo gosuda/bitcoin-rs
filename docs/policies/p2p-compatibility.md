@@ -150,7 +150,8 @@ transport I/O/timeouts, and local encoding failures never discourage an IP.
 | Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
 | Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
 | Checksum failure | disconnect and temporarily avoid the IP | Core v1 rejects the message and resets its decoder; this remains a stricter bitcoin-rs policy |
-| Invalid command bytes, wrong magic, or length above 4,000,000 bytes | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection, with the same 4,000,000-byte cap, is separate from `Misbehaving` |
+| Wrong magic (including a BIP324 key read with v2 off) | close the unread transport, without discouragement | Core closes the transport on a wrong message start without `Misbehaving` |
+| Invalid command bytes or length above 4,000,000 bytes | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection, with the same 4,000,000-byte cap, is separate from `Misbehaving` |
 | `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000 | disconnect and temporarily avoid the IP | the relevant Core handlers mark for discouragement |
 | Locator above 101 or `notfound` above 50,000 | disconnect and temporarily avoid the IP | Core directly disconnects oversized locators; oversized `notfound` is ignored by request handling, without generic punishment |
 | `getblocktxn` indexes beyond the body on the `blocktxn` serving path | disconnect and temporarily avoid the IP | Core marks these body-relative bounds violations for discouragement (`net_processing.cpp:2600-2608`), separately from differential decoding |

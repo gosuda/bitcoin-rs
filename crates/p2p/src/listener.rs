@@ -4748,6 +4748,11 @@ mod discouragement_tests {
             PeerError::Protocol("outbound peer lacks desirable services"),
             PeerError::PayloadTooLarge(usize::MAX),
             PeerError::Io(io::Error::from(io::ErrorKind::TimedOut)),
+            // A v2 key read with v2 off; Core only disconnects.
+            PeerError::inbound(PeerError::WrongNetwork {
+                expected: Magic::BITCOIN,
+                actual: Magic::from_bytes([0x2f, 0x1a, 0x7c, 0x05]),
+            }),
         ] {
             shared.note_misbehavior(address, &current, &error);
         }
@@ -4854,12 +4859,10 @@ mod discouragement_tests {
             assert!(!shared.banned.is_discouraged(address.ip()), "{ip}");
             assert_eq!(lease.ignores_protocol_error(&error), manual || noban);
             assert!(
-                !lease.ignores_protocol_error(&PeerError::Incoming(Box::new(
-                    PeerError::WrongNetwork {
-                        expected: Magic::BITCOIN,
-                        actual: Magic::REGTEST
-                    }
-                ))),
+                !lease.ignores_protocol_error(&PeerError::inbound(PeerError::WrongNetwork {
+                    expected: Magic::BITCOIN,
+                    actual: Magic::REGTEST
+                })),
                 "unread framing cannot be safely resumed"
             );
         }
