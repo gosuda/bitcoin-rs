@@ -150,8 +150,8 @@ in each issue:
   directions ([api/ecosystem-compat.toml](../api/ecosystem-compat.toml),
   CORE-06). Measured cost, recorded with that run in
   https://github.com/gosuda/bitcoin-rs/pull/1612: a fresh node syncing the same
-  250-block regtest chain received 119,691 bytes over v2 against 119,121 over
-  v1, and sent 13,688 against 9,626 (the runner's `ibd_cost`); BIP324 allows up
+  250-block regtest chain received 119,945 bytes over v2 against 119,120 over
+  v1, and sent 11,166 against 9,626 (the runner's `ibd_cost`); BIP324 allows up
   to 4,095 bytes of handshake garbage in each direction once per connection. An
   ad hoc measurement, not reproducible from the tree, timed sealing and opening
   one packet at 3.5-4 µs for 32-250 byte messages and 510-550 MB/s for 1-4 MB
