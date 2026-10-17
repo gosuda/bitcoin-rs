@@ -25,7 +25,9 @@ use crate::IndexCapability;
 use bitcoin_rs_primitives::Hash256;
 
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
-use bitcoin_rs_storage::{FjallStore, StorageError, block_body::BlockBodyStore};
+use bitcoin_rs_storage::{
+    FjallStore, InMemoryUndoStore, StorageError, UndoStore as _, block_body::BlockBodyStore,
+};
 
 use hashbrown::HashMap;
 
@@ -39,6 +41,7 @@ type BodyMap = HashMap<(u32, [u8; 32]), Vec<u8>>;
 
 struct MapBodyStore {
     bodies: Mutex<BodyMap>,
+    undo: InMemoryUndoStore,
 }
 
 impl BlockBodyStore for MapBodyStore {
@@ -62,9 +65,83 @@ impl BlockBodyStore for MapBodyStore {
             .cloned())
     }
 
+    fn undo_record(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        self.undo.load_undo(height, hash)
+    }
+
     fn sync(&self) -> Result<(), StorageError> {
         Ok(())
     }
+}
+
+fn coinbase_undo(bodies: &BodyMap) -> InMemoryUndoStore {
+    struct FixtureCoins {
+        coins: hashbrown::HashMap<(bitcoin_rs_primitives::Txid, u32), bitcoin_rs_utxo::UtxoCoin>,
+    }
+    impl bitcoin_rs_utxo::contract::SpentOutputLookup for FixtureCoins {
+        fn entry(
+            &self,
+            outpoint: &bitcoin_rs_primitives::OutPoint,
+        ) -> Option<&bitcoin_rs_utxo::UtxoCoin> {
+            self.coins.get(&(outpoint.txid, outpoint.vout))
+        }
+    }
+
+    // Every non-genesis fixture block spends its parent coinbase output, so the
+    // spent-coin source resolves against the outputs the fixtures create.
+    let mut coins = hashbrown::HashMap::new();
+    for ((height, _), body) in bodies {
+        let block: bitcoin_rs_primitives::Block =
+            bitcoin_rs_primitives::deserialize(body).expect("fixture body");
+        for tx in &block.txs {
+            let txid = tx.txid();
+            let coinbase = tx.is_coinbase();
+            for (vout, txout) in tx.outputs.iter().enumerate() {
+                let vout = u32::try_from(vout).expect("fixture vout fits u32");
+                coins.insert(
+                    (txid, vout),
+                    bitcoin_rs_utxo::UtxoCoin {
+                        outpoint: bitcoin_rs_primitives::OutPoint { txid, vout },
+                        txout: txout.clone(),
+                        coinbase,
+                        height: *height,
+                    },
+                );
+            }
+        }
+    }
+    let lookup = FixtureCoins { coins };
+
+    let store = InMemoryUndoStore::default();
+    for ((height, hash), body) in bodies {
+        let block: bitcoin_rs_primitives::Block =
+            bitcoin_rs_primitives::deserialize(body).expect("fixture body");
+        let txids = block
+            .txs
+            .iter()
+            .map(bitcoin_rs_primitives::Tx::txid)
+            .collect::<Vec<_>>();
+        let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
+            &block,
+            *height,
+            &txids,
+            None,
+            1,
+            0,
+            &lookup,
+            None,
+            crate::MAX_LIVE_SCRIPT_SIZE,
+        )
+        .expect("fixture changes");
+        bitcoin_rs_utxo::contract::persist_block_undo(
+            &store,
+            *height,
+            Hash256::from_le_bytes(hash),
+            &undo,
+        )
+        .expect("fixture undo");
+    }
+    store
 }
 
 fn coinbase_tx(height: u32, extra: i64) -> Transaction {
@@ -156,6 +233,7 @@ impl ForkFixture {
         Self {
             tree: Arc::new(RwLock::new(tree)),
             bodies: Arc::new(MapBodyStore {
+                undo: coinbase_undo(&bodies),
                 bodies: Mutex::new(bodies),
             }),
             a,
@@ -194,8 +272,17 @@ fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
         let harness = Harness::with_enabled(
             &fixture,
             u32::MAX,
-            IndexCapabilities::HISTORICAL.with_compact_filters(true),
+            IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
         );
+        // Filter preparation needs spent-script undo for every block; remove
+        // the a-branch records so the capability reports unavailable.
+        for (i, entry) in fixture.a.iter().enumerate() {
+            let height = u32::try_from(i).expect("fixture height fits u32") + 1;
+            fixture
+                .bodies
+                .undo
+                .remove_archived(height, fixture.tip(*entry).hash);
+        }
         harness.set_tip(&fixture.tip(fixture.a[1]));
         if pruned {
             harness.retention.reserve(1).commit(1);
@@ -303,10 +390,12 @@ impl Harness {
         });
         let watermarks = self.watermarks();
         assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
-        assert_eq!(
-            watermarks.script_history, expected,
-            "script_history watermark"
-        );
+        if self.worker.enabled.contains(IndexCapability::ScriptHistory) {
+            assert_eq!(
+                watermarks.script_history, expected,
+                "script_history watermark"
+            );
+        }
         assert_eq!(self.runtime.phase(), ReconcilePhase::FORWARD);
     }
 
@@ -336,11 +425,12 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     let h = Harness::with_enabled(
         &f,
         u32::MAX,
-        IndexCapabilities::HISTORICAL.with_compact_filters(true),
+        IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
     );
     let a2 = f.tip(f.a[1]);
     // Publish valid filter rows from the fixture's known spent script. The
     // history store has bodies but no undo when the worker later rolls back.
+    f.bodies.undo.remove_archived(2, a2.hash);
     let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
     let mut batch = PreparedBatch::new(DEFAULT_BATCH_LIMITS);
     for identity in identities {
@@ -519,4 +609,107 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
         }),
         "the consumer keeps its derived rows while it waits"
     );
+}
+
+/// A broken rollback must fail this test instead of looping indefinitely.
+struct OneUndoRead {
+    bodies: Arc<MapBodyStore>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl BlockBodyStore for OneUndoRead {
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.bodies.persist_block_body(height, hash, body)
+    }
+
+    fn load_block_body(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        self.bodies.load_block_body(height, hash)
+    }
+
+    fn undo_record(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) != 0 {
+            return Err(StorageError::Backend(
+                "rollback repeated an unavailable undo read".into(),
+            ));
+        }
+        self.bodies.undo_record(height, hash)
+    }
+
+    fn sync(&self) -> Result<(), StorageError> {
+        self.bodies.sync()
+    }
+}
+
+#[test]
+fn history_rollback_missing_or_corrupt_undo_fails_once_without_resetting_rows() {
+    for enabled in [IndexCapabilities::HISTORICAL, IndexCapabilities::ALL] {
+        for corrupt in [false, true] {
+            let f = ForkFixture::new(2);
+            let mut h = Harness::with_enabled(&f, u32::MAX, enabled);
+            let mut pending = None;
+            let a2 = f.tip(f.a[1]);
+            h.set_tip(&a2);
+            h.settle(&mut pending);
+            let before = h.writer.fenced_watermarks().expect("fence");
+            if corrupt {
+                f.bodies
+                    .undo
+                    .persist_undo(2, a2.hash, b"bad undo")
+                    .expect("corrupt row");
+            } else {
+                f.bodies.undo.remove_archived(2, a2.hash);
+            }
+            let reads = Arc::new(OneUndoRead {
+                bodies: Arc::clone(&f.bodies),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            });
+            h.worker.body_store = Some(reads.clone());
+            h.set_tip(&f.tip(f.a[0]));
+            let result = h.worker.reconcile_once(&mut pending);
+            assert!(matches!(
+                result,
+                Err(DerivedIndexWorkerError::UndoUnavailable { height: 2, hash }) if hash == a2.hash
+            ));
+            assert_eq!(reads.reads.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                h.writer.fenced_watermarks().expect("unchanged fence"),
+                before,
+                "no durable reset, cursor change or watermark advance on unavailable History undo"
+            );
+        }
+    }
+}
+
+#[test]
+fn live_only_rollback_without_undo_still_reseeds_from_utxo() {
+    let f = ForkFixture::new(2);
+    let mut h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::SCRIPT_LIVE);
+    let mut pending = None;
+    let a2 = f.tip(f.a[1]);
+    h.set_tip(&a2);
+    h.settle(&mut pending);
+    f.bodies.undo.remove_archived(2, a2.hash);
+    let reads = Arc::new(OneUndoRead {
+        bodies: Arc::clone(&f.bodies),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    h.worker.body_store = Some(reads.clone());
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    h.settle(&mut pending);
+    assert_eq!(reads.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(IndexWatermark {
+            height: a1.height,
+            hash: a1.hash.to_le_bytes()
+        })
+    );
+    assert_eq!(h.watermarks().script_history, None);
+    assert_eq!(h.runtime.phase(), ReconcilePhase::FORWARD);
 }

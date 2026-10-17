@@ -20,6 +20,14 @@
 
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
 
+struct NoSpentScripts;
+
+impl bitcoin_rs_index::SpentCoinScripts for NoSpentScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        None
+    }
+}
+
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
     consensus_bytes, deserialize,
@@ -29,7 +37,7 @@ use bitcoin_rs_storage::{BlockFilePosition, FlatFileBlockStore, RocksDbStore};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use std::{hint::black_box, sync::Arc};
 
@@ -118,16 +126,11 @@ fn witness_script(seed: u64) -> Vec<u8> {
 }
 
 fn filler_tx(seed: u64) -> Tx {
-    let mut txid_bytes = [0_u8; 32];
-    fill_bytes(seed, &mut txid_bytes);
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
-                vout: u32::try_from(seed & 0x3).unwrap_or(0),
-            },
+            previous_output: OutPoint::null(),
             script_sig: Vec::new().into(),
             sequence: Sequence::MAX,
             witness: Vec::new().into(),
@@ -148,19 +151,12 @@ fn filler_tx(seed: u64) -> Tx {
 /// The transaction the resolvers are asked to find. Pays `target_script` so it
 /// is reachable through a funding row.
 fn target_tx(height: u32, target_script: &[u8]) -> Tx {
-    let mut txid_bytes = [0_u8; 32];
-    fill_bytes(
-        u64::from(height).wrapping_mul(0x9e37_79b9_7f4a_7c15),
-        &mut txid_bytes,
-    );
     Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        // Distinct wire identities per height without changing scripts or size.
+        lock_time: LockTime::from_consensus(height),
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
-                vout: 0,
-            },
+            previous_output: OutPoint::null(),
             script_sig: Vec::new().into(),
             sequence: Sequence::MAX,
             witness: Vec::new().into(),
@@ -190,6 +186,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
 
     let mut positions = HashMap::new();
     let mut last_target = None;
+    let mut target_txids = HashSet::new();
     let midpoint = txs_per_block / 2;
     let mut prev_blockhash = BlockHash::default();
 
@@ -197,6 +194,10 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         let height = BASE_HEIGHT + index;
         let planted = target_tx(height, &target_script);
         let planted_txid = planted.txid();
+        assert!(
+            target_txids.insert(planted_txid),
+            "target txids must be unique per height"
+        );
 
         let mut txdata = Vec::with_capacity(txs_per_block + 1);
         for slot in 0..txs_per_block {
@@ -222,7 +223,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         };
         let bytes = consensus_bytes(&block);
         writer
-            .commit_block(height, &bytes)
+            .commit_block(height, &bytes, &NoSpentScripts)
             .expect("commit fixture block");
         prev_blockhash = block.block_hash();
         let hash = *block.block_hash().as_bytes();
@@ -249,6 +250,16 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         usize::try_from(heights).unwrap_or(0),
         "fixture must plant exactly one target transaction per height"
     );
+    let target_entries = planted
+        .iter()
+        .filter(|entry| entry.txid == target_txid)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        target_entries.len(),
+        1,
+        "last target must have exactly one occurrence"
+    );
+    assert_eq!(target_entries[0].height, BASE_HEIGHT + heights - 1);
     assert!(
         indexer
             .resolve_transaction(target_txid, &source)

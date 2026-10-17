@@ -679,22 +679,17 @@ pub(super) fn history(
         Vec::new()
     };
 
-    let records = match projection.confirmed_history(h) {
+    let cursor = last.and_then(|text| {
+        Txid::from_str(text)
+            .ok()
+            .filter(|txid| txid.to_string() == text)
+    });
+    let records = match projection.confirmed_history_page(h, cursor, CHAIN_PAGE) {
         Ok(records) => records,
         Err(response) => return response,
     };
-    // API-09: only an exact known lowercase txid advances the page. Unknown
-    // or noncanonical cursors restart, including links made stale by a reorg.
-    let start = last.and_then(|x| {
-        records
-            .iter()
-            .position(|entry| entry.txid.to_string() == x)
-            .map(|n| n + 1)
-    });
     let chain = match records
         .into_iter()
-        .skip(start.unwrap_or(0))
-        .take(CHAIN_PAGE)
         .map(|record| {
             let confirmation = projection
                 .confirmation_at_height(record.height)

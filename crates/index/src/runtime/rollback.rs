@@ -146,7 +146,8 @@ impl Worker {
             Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
         };
         let body = self.load_body(watermark.height, watermark_hash, &lease)?;
-        let anchor = (capabilities.contains(IndexCapability::ScriptLive)
+        let anchor = (capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters))
         .then(|| self.live_anchor(watermark.height, watermark.hash))
         .transpose()?;

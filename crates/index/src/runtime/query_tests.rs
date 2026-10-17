@@ -26,6 +26,7 @@ struct QuerySnapshot {
     watermark: IndexWatermark,
     scans: Vec<ScanResponse>,
     chain_transition: bitcoin_rs_chain::StableRead,
+    funding_scans: Arc<AtomicUsize>,
 }
 
 impl QuerySnapshot {
@@ -92,10 +93,42 @@ impl TxIndexSnapshot for QuerySnapshot {
         scripthash: ScriptHash,
         _limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
+        self.funding_scans.fetch_add(1, Ordering::Relaxed);
         self.typed_scan(
             ColumnFamily::Funding,
             &ScriptHashRow::scan_prefix(scripthash),
         )
+    }
+
+    fn funding_rows_from(
+        &self,
+        scripthash: ScriptHash,
+        start_height: u32,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let scan = self.funding_rows(scripthash, limit)?;
+        let mut candidates = scan.rows;
+        candidates.retain(|row| row.row.height() <= start_height);
+        candidates.sort_unstable_by_key(|row| core::cmp::Reverse(row.row.height()));
+        let mut rows = Vec::new();
+        let mut encoded_bytes = 0_usize;
+        let mut complete = scan.complete;
+        for row in candidates {
+            let next_bytes = encoded_bytes
+                .saturating_add(12)
+                .saturating_add(row.value.len());
+            if rows.len() >= limit.max_rows || (!rows.is_empty() && next_bytes > limit.max_bytes) {
+                complete = false;
+                break;
+            }
+            encoded_bytes = next_bytes;
+            rows.push(row);
+        }
+        Ok(TxIndexScan {
+            rows,
+            encoded_bytes,
+            complete,
+        })
     }
 
     fn spending_rows(
@@ -164,6 +197,7 @@ struct QueryFixture {
     engine: DerivedIndexQueryEngine,
     runtime: Arc<DerivedIndexRuntime>,
     body: Option<Arc<SingleBlockBody>>,
+    funding_scans: Arc<AtomicUsize>,
 }
 
 pub(super) struct SingleBlockBody {
@@ -221,11 +255,13 @@ impl QueryFixture {
             height: tip.height,
             hash: *tip.hash.as_byte_array(),
         });
+        let funding_scans = Arc::new(AtomicUsize::new(0));
         let reader = Arc::new(QueryReader {
             snapshot: QuerySnapshot {
                 watermark,
                 scans: config.scans,
                 chain_transition: chain_transition.clone(),
+                funding_scans: Arc::clone(&funding_scans),
             },
         });
         let records = if config.retain_body {
@@ -265,6 +301,7 @@ impl QueryFixture {
             engine,
             runtime,
             body,
+            funding_scans,
         })
     }
 
@@ -529,5 +566,52 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
         Some(spend_txid)
     );
     assert_eq!(fixture.full_reads()?, 1);
+    Ok(())
+}
+
+#[test]
+fn complete_history_and_funding_share_one_durable_scan() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let transaction = &block.txs[0];
+    let txid = transaction.txid();
+    let script = crate::ScriptHash::new(&transaction.outputs[0].script_pubkey);
+    let value = transaction.outputs[0].value.to_sat();
+    let position = position_of_transaction(&block, 0)?;
+    let row = HashPrefixRow::new(script.prefix(), 0);
+    let occurrence = crate::types::ScriptHistoryOccurrence {
+        scripthash: script,
+        txid: *txid.as_bytes(),
+        position,
+        flags: crate::types::ScriptHistoryOccurrence::FUNDING,
+    };
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: vec![scan_response(
+            ColumnFamily::Funding,
+            ScriptHashRow::scan_prefix(script),
+            vec![(
+                zerocopy::IntoBytes::as_bytes(&row).to_vec(),
+                crate::types::ScriptHistoryOccurrence::encode_all(&[occurrence]),
+            )],
+            true,
+        )],
+        watermark: None,
+    })?;
+    let snapshot = fixture.engine.history_snapshot(script)?;
+    assert_eq!(
+        snapshot.history,
+        vec![crate::ScriptHistoryRecord { txid, height: 0 }]
+    );
+    assert_eq!(
+        snapshot.funding,
+        vec![crate::ScriptIndexRecord {
+            txid,
+            height: 0,
+            value,
+            vout: 0
+        }]
+    );
+    assert_eq!(fixture.funding_scans.load(Ordering::Relaxed), 1);
     Ok(())
 }

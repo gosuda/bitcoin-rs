@@ -2,7 +2,7 @@
 #[path = "support/common.rs"]
 mod common;
 
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 use std::{
     path::PathBuf,
     sync::{
@@ -17,7 +17,6 @@ use bitcoin_rs_primitives::{
 };
 use parking_lot::{Mutex, RwLock};
 
-#[cfg(feature = "redb")]
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, TX_POSITION_SIZE, TxPosition, TxPositionValue,
@@ -41,12 +40,13 @@ fn commit_rollback_one_for<S: KvStore>(
     body: &[u8],
 ) -> Result<(), IndexError> {
     let (fence, _) = writer.fenced_watermarks()?;
-    writer.commit_rollback_one_for_with_cursor(
+    writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
         fence,
         capabilities,
         prev,
         body,
         ConsumerCursorUpdate::Clear,
+        &NoSpentScripts,
     )
 }
 
@@ -360,41 +360,20 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
 /// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
-    let cases = [
-        (
-            0_u32,
-            IndexRowCounts {
-                txids: 1,
-                funding: 1,
-                spending: 0,
-                headers: 1,
-                live: 0,
-                filters: 0,
-            },
-        ),
-        (
-            170_u32,
-            IndexRowCounts {
-                txids: 2,
-                funding: 3,
-                spending: 1,
-                headers: 1,
-                live: 0,
-                filters: 0,
-            },
-        ),
-        (
-            481_824_u32,
-            IndexRowCounts {
-                txids: 1_866,
-                funding: 3_740,
-                spending: 5_192,
-                headers: 1,
-                live: 0,
-                filters: 0,
-            },
-        ),
-    ];
+    // Standalone non-genesis fixtures do not carry the authoritative spent
+    // scripts required by format 6. Their production path supplies undo;
+    // this genesis-only test therefore supplies an explicitly empty source.
+    let cases = [(
+        0_u32,
+        IndexRowCounts {
+            txids: 1,
+            funding: 1,
+            spending: 0,
+            headers: 1,
+            live: 0,
+            filters: 0,
+        },
+    )];
 
     for (height, expected) in cases {
         let store = std::sync::Arc::new(MemoryStore::default());
@@ -404,7 +383,7 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
         // Watermark contiguity starts at height 0. Commit the same body at
         // genesis so store occupancy is checked through the sole mutation
         // owner; row cardinality does not depend on the height suffix.
-        writer.commit_block(0, &block)?;
+        writer.commit_block(0, &block, &NoSpentScripts)?;
         assert_eq!(
             store.count(ColumnFamily::TxConfirmed),
             expected.txids,
@@ -463,7 +442,7 @@ fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), Box<dyn
     ));
 
     let store = Arc::new(MemoryStore::default());
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[5, 0, 0, 0])?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[6, 0, 0, 0])?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'T'], &[0_u8; 2])?;
     assert!(matches!(
         IndexWriter::open(store, 1)?.watermark(),
@@ -563,7 +542,7 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
 
-    let block = writer.prepare_block(0, hash, &body)?;
+    let block = writer.prepare_block(0, hash, &body, &NoSpentScripts)?;
     assert_eq!(block.height, 0);
     assert_eq!(block.hash, hash);
     assert_eq!(block.parent_hash, [0u8; 32]);
@@ -571,12 +550,12 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     // Header row plus one positioned txid and one positioned funding row.
     assert_eq!(
         block.encoded_bytes,
-        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+        HEADER_ROW_SIZE + HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE + HASH_PREFIX_ROW_SIZE + 71
     );
 
     let wrong_hash = [0x42u8; 32];
     assert!(matches!(
-        writer.prepare_block(0, wrong_hash, &body),
+        writer.prepare_block(0, wrong_hash, &body, &NoSpentScripts),
         Err(IndexError::BlockIdentityMismatch {
             height: 0,
             expected,
@@ -638,7 +617,13 @@ fn prepare_block_for_rejects_malformed_bodies() -> Result<(), Box<dyn std::error
         };
 
         let error = writer
-            .prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)
+            .prepare_block_with_spent_scripts(
+                IndexCapabilities::HISTORICAL,
+                0,
+                hash,
+                &body,
+                &NoSpentScripts,
+            )
             .err()
             .ok_or_else(|| format!("{label}: expected a parse rejection"))?;
         assert!(check(&error), "{label}: unexpected error {error:?}");
@@ -660,8 +645,8 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
-    let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
-    let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
+    let block0 = writer.prepare_block(0, block_hash(&body0), &body0, &NoSpentScripts)?;
+    let block1 = writer.prepare_block(1, block_hash(&body1), &body1, &NoSpentScripts)?;
     let block0_watermark = block0.watermark();
     let block1_watermark = block1.watermark();
     assert_eq!(block1.parent_hash, block0.hash);
@@ -737,7 +722,7 @@ fn snapshot_scan_preserves_position_values() -> Result<(), Box<dyn std::error::E
     let body = read_fixture(0)?;
     let block = deserialize::<Block>(&body)?;
     let txid = block.txs[0].txid();
-    let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
+    let prepared = writer.prepare_block(0, block_hash(&body), &body, &NoSpentScripts)?;
     let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
@@ -791,7 +776,7 @@ fn spending_rows_carry_transaction_positions() -> Result<(), Box<dyn std::error:
 
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
+    let prepared = writer.prepare_block(0, block_hash(&body), &body, &NoSpentScripts)?;
     let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
@@ -826,7 +811,7 @@ fn commit_forward_uses_one_durable_write() -> Result<(), Box<dyn std::error::Err
     let store = Arc::new(CallTrackingStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
-    let block = writer.prepare_block(0, block_hash(&body), &body)?;
+    let block = writer.prepare_block(0, block_hash(&body), &body, &NoSpentScripts)?;
     let batch = common::single_block_batch(block);
 
     writer.commit_forward(batch)?;
@@ -870,8 +855,13 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), Box<dyn
     assert_eq!(store.count(ColumnFamily::Spending), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
 
-    let script_index_block =
-        writer.prepare_block_for(IndexCapabilities::SCRIPT_HISTORY, 0, hash, &body)?;
+    let script_index_block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::SCRIPT_HISTORY,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     assert_eq!(
         script_index_block.row_count, 2,
         "funding row plus shared block identity"
@@ -902,7 +892,13 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), Box<dyn std::err
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
-    let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     let batch = common::single_block_batch(block);
 
     writer.commit_forward(batch)?;
@@ -928,7 +924,13 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity()
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
-    let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     let batch = common::single_block_batch(block);
     writer.commit_forward(batch)?;
 
@@ -958,10 +960,20 @@ fn rollback_preserves_shared_ancestors_for_a_disabled_capability()
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
-    let block0 =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body0), &body0)?;
-    let block1 =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 1, block_hash(&body1), &body1)?;
+    let block0 = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body0),
+        &body0,
+        &NoSpentScripts,
+    )?;
+    let block1 = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        1,
+        block_hash(&body1),
+        &body1,
+        &NoSpentScripts,
+    )?;
     let watermark0 = block0.watermark();
     let mut batch = common::batch_with_limits(
         block0,
@@ -1016,7 +1028,13 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), Box<dyn std::error:
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
-    let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     drop(writer);
@@ -1046,7 +1064,13 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
     let mut writer = IndexWriter::open(Arc::clone(&store), 7)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
-    let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -1178,7 +1202,7 @@ fn rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Err
     let store = Arc::new(MemoryStore::default());
     let body = read_fixture(0)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    writer.commit_block(0, &body)?;
+    writer.commit_block(0, &body, &NoSpentScripts)?;
     let rows_before = store.rows(ColumnFamily::TxConfirmed);
     let mut claim = store.new_batch();
     claim.put(
@@ -1270,8 +1294,13 @@ fn seed_populated_store(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = IndexWriter::open(Arc::clone(store), generation)?;
     let body = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body),
+        &body,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     Ok(())
@@ -1367,7 +1396,7 @@ const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
 
-const FORMAT_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1667,7 +1696,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(5u32.to_le_bytes().as_slice()),
+        Some(6u32.to_le_bytes().as_slice()),
         "the row-format gate survives reset and rebuild"
     );
     assert!(
@@ -1688,8 +1717,8 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     let body1 = read_fixture(1)?;
 
     // Exact boundary: one block of three rows fits, a second does not.
-    let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
-    let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
+    let block0 = writer.prepare_block(0, block_hash(&body0), &body0, &NoSpentScripts)?;
+    let block1 = writer.prepare_block(1, block_hash(&body1), &body1, &NoSpentScripts)?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
         max_rows: 3,
         max_bytes: usize::MAX,
@@ -1708,8 +1737,8 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     );
 
     // Oversized first block: empty batch accepts it, then refuses another.
-    let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
-    let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
+    let block0 = writer.prepare_block(0, block_hash(&body0), &body0, &NoSpentScripts)?;
+    let block1 = writer.prepare_block(1, block_hash(&body1), &body1, &NoSpentScripts)?;
     let mut batch = common::batch_with_limits(
         block0,
         PreparedBatchLimits {
@@ -1722,7 +1751,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     // Header row plus one positioned txid and one positioned funding row.
     assert_eq!(
         batch.encoded_bytes(),
-        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+        HEADER_ROW_SIZE + HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE + HASH_PREFIX_ROW_SIZE + 71
     );
     assert!(batch.is_full());
     assert_eq!(
@@ -1746,7 +1775,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1782,7 +1811,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1808,7 +1837,7 @@ fn rollback_rejects_prev_at_genesis() -> Result<(), Box<dyn std::error::Error>> 
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
-    let block = writer.prepare_block(0, block_hash(&body), &body)?;
+    let block = writer.prepare_block(0, block_hash(&body), &body, &NoSpentScripts)?;
     let batch = common::single_block_batch(block);
     writer.commit_forward(batch)?;
 
@@ -1829,7 +1858,8 @@ fn rollback_rejects_prev_at_genesis() -> Result<(), Box<dyn std::error::Error>> 
 
 #[cfg(feature = "redb")]
 #[test]
-fn redb_snapshot_preserves_position_values() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_snapshot_preserves_history_occurrences_and_tx_positions()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::TempDir::new()?;
     let store = Arc::new(bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?);
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
@@ -1837,7 +1867,7 @@ fn redb_snapshot_preserves_position_values() -> Result<(), Box<dyn std::error::E
     let block = deserialize::<Block>(&body)?;
     let txid = block.txs[0].txid();
     let scripthash = ScriptHash::new(&block.txs[0].outputs[0].script_pubkey);
-    let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
+    let prepared = writer.prepare_block(0, block_hash(&body), &body, &NoSpentScripts)?;
     let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
@@ -1851,11 +1881,16 @@ fn redb_snapshot_preserves_position_values() -> Result<(), Box<dyn std::error::E
 
     assert_eq!(transaction_rows.rows.len(), 1);
     assert_eq!(funding_rows.rows.len(), 1);
-    assert_eq!(transaction_rows.rows[0].value, funding_rows.rows[0].value);
-    assert_eq!(
-        TxPositionValue::decode(&transaction_rows.rows[0].value).map(<[TxPosition]>::len),
-        Some(1)
-    );
+    let positions = TxPositionValue::decode(&transaction_rows.rows[0].value)
+        .ok_or("invalid transaction positions")?;
+    assert_eq!(positions.len(), 1);
+    let occurrence = &funding_rows.rows[0].value;
+    // Format v6 stores exact identities around the same six-byte position.
+    assert_eq!(occurrence.len(), 71);
+    assert_eq!(&occurrence[..32], &scripthash.to_byte_array());
+    assert_eq!(&occurrence[32..64], txid.as_bytes());
+    assert_eq!(&occurrence[64..70], &transaction_rows.rows[0].value);
+    assert_eq!(occurrence[70], 1, "funding occurrence");
     Ok(())
 }
 
@@ -1983,8 +2018,13 @@ fn intermediate_rollback_deletes_cursor_and_survives_reopen()
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
     let body0 = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body0), &body0)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body0),
+        &body0,
+        &NoSpentScripts,
+    )?;
     let mut prepared = PreparedBatch::new(PreparedBatchLimits {
         max_rows: 100,
         max_bytes: 1_000_000,
@@ -2173,8 +2213,13 @@ fn populated_idle_tracking_store() -> Result<Arc<CallTrackingStore>, Box<dyn std
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
     let body = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body),
+        &body,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_eq!(stored_idle_version(&store)?, 1);
@@ -2339,8 +2384,13 @@ fn fenced_watermarks_captures_every_capability_in_one_coherent_snapshot()
     let (fence, watermarks) = writer.fenced_watermarks()?;
     assert_eq!(watermarks, IndexWatermarks::default());
     let body = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body),
+        &body,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep)?;
     assert_eq!(writer.watermark()?.map(|mark| mark.height), Some(0));
@@ -2428,8 +2478,13 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
 
     // 1. forward
     let body0 = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body0), &body0)?;
+    let block = writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        block_hash(&body0),
+        &body0,
+        &NoSpentScripts,
+    )?;
     let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(1))?;
@@ -2851,5 +2906,170 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), Box<dyn std::e
             );
         }
     }
+    Ok(())
+}
+
+/// The input spends a real prior output; this index fixture does not claim
+/// consensus-valid genesis spending.
+fn external_spend_fixture() -> (Block, Block) {
+    let funding = Network::Regtest.genesis_block();
+    let funding_tx = &funding.txs[0];
+    let mut spending = funding.clone();
+    spending.header.prev_blockhash = funding.block_hash();
+    spending.txs = vec![Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(funding_tx.txid(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: funding_tx.outputs[0].value,
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+    }];
+    (funding, spending)
+}
+
+#[test]
+fn historical_conveniences_use_explicit_external_spent_scripts()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct PriorCoin(OutPoint, Script);
+    impl bitcoin_rs_index::SpentCoinScripts for PriorCoin {
+        fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
+            (self.0
+                == OutPoint::new(
+                    bitcoin_rs_primitives::Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                        txid,
+                    )),
+                    vout,
+                ))
+            .then_some(self.1.as_bytes())
+        }
+    }
+    struct NoBodyReads;
+    impl bitcoin_rs_index::BlockSource for NoBodyReads {
+        fn block_at_height(&self, _height: u32) -> Option<Block> {
+            None
+        }
+    }
+
+    let (funding, spending) = external_spend_fixture();
+    let funding_tx = &funding.txs[0];
+    let coin = PriorCoin(
+        OutPoint::new(funding_tx.txid(), 0),
+        funding_tx.outputs[0].script_pubkey.clone(),
+    );
+    let target = ScriptHash::from_script_bytes(&coin.1);
+    let funding_body = consensus_bytes(&funding);
+    let spending_body = consensus_bytes(&spending);
+    let expected_funding = bitcoin_rs_index::ScriptHistoryEntry::confirmed(funding_tx.txid(), 0);
+    let expected_spending =
+        bitcoin_rs_index::ScriptHistoryEntry::confirmed(spending.txs[0].txid(), 1);
+    for direct_commit in [false, true] {
+        let store = Arc::new(MemoryStore::default());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        let previous = writer.commit_block(0, &funding_body, &NoSpentScripts)?;
+        let before = writer.fenced_watermarks()?;
+        let missing = if direct_commit {
+            writer
+                .commit_block(1, &spending_body, &NoSpentScripts)
+                .err()
+        } else {
+            writer
+                .prepare_block(
+                    1,
+                    block_hash(&spending_body),
+                    &spending_body,
+                    &NoSpentScripts,
+                )
+                .err()
+        };
+        assert!(matches!(
+            missing,
+            Some(IndexError::MissingSpentCoin {
+                height: 1,
+                vout: 0,
+                ..
+            })
+        ));
+        assert_eq!(writer.fenced_watermarks()?, before);
+        if direct_commit {
+            writer.commit_block(1, &spending_body, &coin)?;
+        } else {
+            let prepared =
+                writer.prepare_block(1, block_hash(&spending_body), &spending_body, &coin)?;
+            writer.commit_forward(common::single_block_batch(prepared))?;
+        }
+        assert_eq!(
+            writer
+                .indexer()
+                .resolve_script_history(target, &NoBodyReads)?,
+            vec![expected_funding, expected_spending]
+        );
+        let (fence, _) = writer.fenced_watermarks()?;
+        writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            IndexCapabilities::HISTORICAL,
+            Some(previous),
+            &spending_body,
+            ConsumerCursorUpdate::Keep,
+            &coin,
+        )?;
+        assert_eq!(
+            writer
+                .indexer()
+                .resolve_script_history(target, &NoBodyReads)?,
+            vec![expected_funding]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn anchorless_paths_refuse_script_capabilities_but_preserve_transaction_lookup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = read_fixture(0)?;
+    let hash = block_hash(&body);
+    let store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let (fence, before) = writer.fenced_watermarks()?;
+    for capabilities in [
+        IndexCapabilities::SCRIPT_HISTORY,
+        IndexCapabilities::HISTORICAL,
+        IndexCapabilities::SCRIPT_LIVE,
+        IndexCapabilities::ALL,
+    ] {
+        assert!(matches!(
+            writer.prepare_block_for(capabilities, 0, hash, &body),
+            Err(IndexError::MissingSpentScripts)
+        ));
+        assert!(matches!(
+            writer.commit_rollback_one_for_with_cursor(
+                fence,
+                capabilities,
+                None,
+                &body,
+                ConsumerCursorUpdate::Keep,
+            ),
+            Err(IndexError::MissingSpentScripts)
+        ));
+        assert_eq!(writer.fenced_watermarks()?, (fence, before));
+    }
+    let prepared = writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, hash, &body)?;
+    writer.commit_forward(common::single_block_batch(prepared))?;
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
+    assert_eq!(store.count(ColumnFamily::Funding), 0);
+    let (fence, _) = writer.fenced_watermarks()?;
+    writer.commit_rollback_one_for_with_cursor(
+        fence,
+        IndexCapabilities::TX_LOOKUP,
+        None,
+        &body,
+        ConsumerCursorUpdate::Keep,
+    )?;
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
     Ok(())
 }

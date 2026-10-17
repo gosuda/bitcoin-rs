@@ -55,9 +55,10 @@ only scheduling mechanics.
   value positions.
 - CLI `--scriptindex` / `--script-index` (env `BITCOIN_RS_SCRIPTINDEX`,
   configuration `scriptindex=1`) selects `full` and enables the
-  `ScriptHistory` capability. This builds generic scripthash funding rows
-  (`ScriptHashRow`), spending rows (`SpendingPrefixRow`), and outpoint spender
-  records.
+  `ScriptHistory` capability. This builds unified funding/spending occurrences
+  in `Funding`, keyed by an eight-byte script prefix and inverted height, plus
+  `SpendingPrefixRow` locators for outpoint-spender queries. Occurrence values
+  retain full script and transaction identities; see the format-6 layout below.
 - `scriptindex=utxo` enables only the compact `ScriptLive` view for script
   activity; `scriptindex=full` enables both `ScriptLive` and `ScriptHistory`.
   The historical boolean spellings (`true`, `1`, `yes`) continue to mean
@@ -107,16 +108,19 @@ Readers resolve each locator against the authoritative UTXO set and exact-check
 the full script. Deletes are exact point deletes, so a prefix collision cannot
 remove another script's output.
 
-`ScriptHistory` persists funding rows (`ScriptHashRow`) keyed by
-`(script_hash_prefix, height)` and spending rows (`SpendingPrefixRow`) keyed by
-`(outpoint_prefix, height)`. Because spending rows index the spent outpoint rather
-than the original script hash, spend discovery for a script requires first
-discovering all funding outpoints for that script. As a result, confirmed history
-queries (`confirmed_history`) must discover all funding outputs across the script's
-history before resolving spends; reverse-chronological scanning directly at the
-storage level cannot be bounded to an initial page without omitting spends of
-older funding outputs. However, `confirmed_history` avoids allocating or retaining
-unneeded funding record lists when callers only require history records.
+`ScriptHistory` format 6 persists both funding and spending occurrences in the
+`Funding` family, keyed by `(script_hash_prefix, inverted_height_be)`. Each value
+retains the full script hash, full transaction id, transaction byte position,
+and funding/spending flags. Values are ordered by transaction position; a
+transaction that both spends and funds the script is one occurrence with both
+flags. Full identities filter compact-prefix collisions without a block read.
+`Spending` remains the minimal outpoint-to-spender locator for outspend queries.
+A newest-first page starts at an engine seek key and does not issue an outpoint
+scan per funded output.
+
+The writer derives an input's script from an output created earlier in the same
+block or from authoritative UTXO undo. Missing spent-script evidence fails the
+history transition closed; no secondary coin set is introduced.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -165,8 +169,8 @@ unneeded funding record lists when callers only require history records.
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
   `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts the current
-  durability marker only (row-format 5: big-endian heights, 43-byte live rows,
-  6-byte positions — format owned by
+  durability marker only (row-format 6: newest-first unified ScriptHistory,
+  43-byte live rows, and 6-byte positions — format owned by
   `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
   and `open_writer` in `crates/index/src/runtime/startup.rs` full-resets
   the derived store for rebuild. No in-place upgrade path
@@ -184,8 +188,14 @@ unneeded funding record lists when callers only require history records.
 
 ### `IDX-10`: Atomic commit durability and recovery
 
-- `IndexWriter` is the sole owner of index mutations. `commit_block` prepares
-  all rows and commits them together with the capability watermark in one
+- `IndexWriter` is the sole owner of index mutations. Historical `prepare_block`
+  and `commit_block` require an explicit `SpentCoinScripts` source for external
+  inputs; the block itself supplies earlier same-block outputs. Anchorless
+  `prepare_block_for` and rollback calls support TxLookup only and refuse
+  ScriptHistory, ScriptLive and CompactFilters with `MissingSpentScripts`. An
+  unresolved input in
+  an explicit source returns `MissingSpentCoin` before any rows are committed.
+  `commit_block` prepares all historical rows and commits them with the watermark in one
   store batch; its successful return is the commit point and implies the rows
   and watermark are durable according to the store's atomic-write guarantee.
 - A failed commit must be treated as ambiguous by callers: callers must not
@@ -243,13 +253,16 @@ unneeded funding record lists when callers only require history records.
   branch block pruned before rollback completed), the worker resets the
   affected capability watermark and initiates a fresh rebuild from the active
   chain.
-- A missing or unreadable undo record affects `ScriptLive` and `CompactFilters`.
-  The worker resets `ScriptLive` and reseeds from the authoritative UTXO view;
-  `TxLookup` and `ScriptHistory` use body-only rollback. `CompactFilters` instead
-  becomes unavailable for this run: a current UTXO snapshot cannot recreate spent
-  scripts for historical filters. Its durable rows and watermark are preserved,
-  its queries refuse and its status is unsynced; sibling indexes and validation
-  continue. Restore the required history and restart to retry filter reconciliation.
+- A missing or unreadable undo record is fatal for `ScriptHistory`, because a
+  block body does not contain the script of a spent previous output; the worker
+  fails closed instead of publishing incomplete history. `CompactFilters`
+  instead becomes unavailable for this run: a current UTXO snapshot cannot
+  recreate spent scripts for historical filters. Its durable rows and watermark
+  are preserved, its queries refuse and its status is unsynced; sibling indexes
+  and validation continue. Restore the required history and restart to retry
+  filter reconciliation. For `ScriptLive` alone, the worker resets that
+  capability and reseeds from the authoritative UTXO view; `TxLookup` uses
+  body-only rollback.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
   rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
   and the watermark stamp are ordinary fenced writes (reset, revision, and

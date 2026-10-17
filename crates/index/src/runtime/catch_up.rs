@@ -204,9 +204,9 @@ impl Worker {
     /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
-        reason = "Keep bounded preparation, capability failure and batch admission in one owner"
+        reason = "one admission path owns lease, capability failure and batch state"
     )]
     pub(super) fn prepare_and_admit_chunk(
         &self,
@@ -247,13 +247,20 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let anchors = if capabilities.contains(IndexCapability::ScriptLive)
-            || capabilities.contains(IndexCapability::CompactFilters)
-        {
+        let needs_spent_scripts = capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters);
+        let anchors = if needs_spent_scripts {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
                     Ok(anchor) => anchors.push(anchor),
+                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. })
+                        if capabilities.contains(IndexCapability::ScriptHistory) =>
+                    {
+                        tracing::error!(error = %error, "ScriptHistory requires retained spent-script undo");
+                        return Err(error);
+                    }
                     Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                         if capabilities.contains(IndexCapability::CompactFilters) {
                             *pending = None;

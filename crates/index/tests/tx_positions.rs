@@ -16,12 +16,12 @@ use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24
 use bitcoin_rs_index::{IndexWriter, ScriptHash};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
+    Tx, TxIn, TxOut, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
 
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 
 fn header() -> Header {
     Header {
@@ -40,15 +40,12 @@ fn script(tag: u8) -> Vec<u8> {
     bytes
 }
 
-fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
+fn tx(_seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[seed; 32])),
-                vout: u32::from(seed),
-            },
+            previous_output: OutPoint::null(),
             script_sig: Script::new(),
             sequence: Sequence::MAX,
             // A segwit transaction serializes with a marker, a flag and a
@@ -111,7 +108,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let store = Arc::new(MemoryStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
-        .commit_block(0, &bytes)
+        .commit_block(0, &bytes, &NoSpentScripts)
         .expect("commit");
 
     // Script 0x11 is funded by transaction 0 and again by transaction 1, which
@@ -124,10 +121,19 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .find(|(key, _)| key.starts_with(&target.prefix()))
         .expect("funding row for the target script");
 
-    let positions = TxPositionValue::decode(value).expect("row value decodes");
-    assert_eq!(positions.len(), 2, "two transactions funded this script");
+    assert_eq!(value.len(), 2 * 71, "two exact history occurrences");
+    let positions: Vec<_> = value
+        .as_chunks::<71>()
+        .0
+        .iter()
+        .map(|entry| {
+            assert_eq!(&entry[..32], &target.to_byte_array());
+            assert_eq!(entry[70], 1, "funding flag");
+            TxPositionValue::decode(&entry[64..70]).expect("position decodes")[0]
+        })
+        .collect();
 
-    for position in positions {
+    for position in &positions {
         let start = usize::try_from(position.offset()).expect("offset fits usize");
         let end = usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
         let decoded: Tx =
@@ -150,7 +156,7 @@ fn txid_positions_address_their_own_transaction() {
     let store = Arc::new(MemoryStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
-        .commit_block(0, &bytes)
+        .commit_block(0, &bytes, &NoSpentScripts)
         .expect("commit");
 
     let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);

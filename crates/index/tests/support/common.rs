@@ -8,9 +8,9 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::types::TxPosition;
 use bitcoin_rs_index::{
-    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
+    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, SpendingPrefixRow,
 };
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
@@ -18,6 +18,15 @@ use bitcoin_rs_storage::{
     WriteCondition,
 };
 use parking_lot::RwLock;
+
+/// Source used only by fixtures with no external inputs (coinbases or same-block spends).
+pub(crate) struct NoSpentScripts;
+
+impl bitcoin_rs_index::SpentCoinScripts for NoSpentScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        None
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct MemoryStore {
@@ -156,46 +165,45 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
-/// Writes one funding-row key at `height` with an empty value.
+/// Writes one format-6 funding occurrence with a synthetic byte position.
 ///
-/// Empty values take the scan-fallback resolver path. Tests that pin
-/// little-endian key order, not watermark contiguity, use this instead of
-/// [`bitcoin_rs_index::IndexWriter::commit_block`].
+/// This direct row fixture supplies full script/transaction identities for
+/// key-order reads; it does not exercise transaction body resolution.
 pub(crate) fn put_funding_row(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
+    txid: bitcoin_rs_primitives::Txid,
 ) -> Result<(), StorageError> {
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
-    )
+    put_funding_row_positions(store, scripthash, height, &[(txid, TxPosition::new(1, 1))])
 }
 
-/// Writes one funding-row key at `height` carrying `positions`.
+/// Writes a format-6 funding row with the supplied transaction occurrences.
 ///
-/// Real positions take the resolver's positioned-read path; tests that pin
-/// `TxPosition`-backed resolution use this instead of the empty-value
-/// [`put_funding_row`].
+/// Each tuple supplies a txid and byte position; every value item also carries
+/// the full script identity and the funding flag.
 pub(crate) fn put_funding_row_positions(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
-    positions: &[TxPosition],
+    occurrences: &[(bitcoin_rs_primitives::Txid, TxPosition)],
 ) -> Result<(), StorageError> {
-    // An empty slice encodes an empty value — indistinguishable from
-    // `put_funding_row`'s scan-path marker, so the positioned read would
-    // silently not be exercised.
+    // A row must contain at least one complete occurrence; an empty value
+    // is malformed under format 6 rather than a scan-fallback marker.
     assert!(
-        !positions.is_empty(),
+        !occurrences.is_empty(),
         "a funding row exists only because at least one transaction produced it"
     );
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &TxPositionValue::encode(positions),
-    )
+    let mut key = Vec::from(scripthash.prefix());
+    key.extend_from_slice(&(!height).to_be_bytes());
+    let mut value = Vec::with_capacity(occurrences.len() * 71);
+    for (txid, position) in occurrences {
+        value.extend_from_slice(&scripthash.to_byte_array());
+        value.extend_from_slice(txid.as_bytes());
+        value.extend_from_slice(zerocopy::IntoBytes::as_bytes(position));
+        value.push(1);
+    }
+    store.put(ColumnFamily::Funding, &key, &value)
 }
 
 /// Writes one spending-row key at `height` with an empty value.

@@ -46,8 +46,16 @@ pub enum IndexError {
         expected: Option<IndexWatermark>,
         actual: Option<IndexWatermark>,
     },
-    #[error("ScriptLive and CompactFilters preparation requires a spent-coin script source")]
+    /// `ScriptHistory`, `ScriptLive`, or `CompactFilters` was requested without
+    /// a spent-coin source. An external input's script is absent from the block
+    /// body and must be supplied for history occurrences, live-output deletes,
+    /// and filter construction.
+    #[error(
+        "ScriptHistory, ScriptLive and CompactFilters preparation requires a spent-coin script source"
+    )]
     MissingSpentScripts,
+    /// The spent-coin source could not resolve an external input's script.
+    /// Missing evidence must not omit a history spend or retain a spent live output.
     #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
     MissingSpentCoin {
         /// Spent transaction id (little-endian bytes).

@@ -98,6 +98,16 @@ pub struct ScriptHistoryRecord {
     pub height: u32,
 }
 
+/// One bounded newest-first confirmed-history page.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScriptHistoryPage {
+    /// At most the caller-requested number of unique transaction ids.
+    pub records: Vec<ScriptHistoryRecord>,
+    /// Whether the supplied cursor was an exact active-history occurrence.
+    /// A false value preserves API-09 by returning the first page.
+    pub cursor_found: bool,
+}
+
 /// One confirmed transaction spending an indexed outpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpendingRecord {
@@ -158,6 +168,99 @@ pub trait ScriptIndexQuery: Send + Sync {
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         Ok(self.history_snapshot(script_hash)?.history)
     }
+    /// Returns a bounded newest-first page after `cursor`.
+    fn confirmed_history_page(
+        &self,
+        script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let mut history = self.confirmed_history(script_hash)?;
+        history.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.txid.cmp(&left.txid))
+        });
+        let start = cursor.and_then(|txid| history.iter().position(|record| record.txid == txid));
+        let mut emitted = std::collections::HashSet::new();
+        Ok(ScriptHistoryPage {
+            records: history
+                .into_iter()
+                .skip(start.map_or(0, |index| index + 1))
+                .filter(|record| emitted.insert(record.txid))
+                .take(limit)
+                .collect(),
+            cursor_found: cursor.is_none() || start.is_some(),
+        })
+    }
     /// Returns the confirmed transaction spending `outpoint`, if any.
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_primitives::Hash256;
+
+    struct History(Vec<ScriptHistoryRecord>);
+
+    impl ScriptIndexQuery for History {
+        fn unspent_outputs(
+            &self,
+            _script: ScriptHash,
+        ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+            Err(TxQueryError::Unavailable("unexpected live query".into()))
+        }
+
+        fn history_snapshot(
+            &self,
+            _script: ScriptHash,
+        ) -> Result<ScriptIndexSnapshot, TxQueryError> {
+            Ok(ScriptIndexSnapshot {
+                history: self.0.clone(),
+                funding: Vec::new(),
+            })
+        }
+
+        fn spender(&self, _outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
+            Err(TxQueryError::Unavailable("unexpected spender query".into()))
+        }
+    }
+
+    #[test]
+    fn default_history_pages_deduplicate_only_the_selected_page() -> Result<(), TxQueryError> {
+        let record = |id: u8, height| ScriptHistoryRecord {
+            txid: Txid(Hash256::from_le_bytes(&[id; 32])),
+            height,
+        };
+        let source = History(vec![
+            record(1, 7),
+            record(2, 6),
+            record(1, 5),
+            record(3, 4),
+            record(1, 3),
+            record(3, 2),
+            record(4, 1),
+        ]);
+        let script = ScriptHash::from_byte_array([0; 32]);
+        let first = source.confirmed_history_page(script, None, 3)?;
+        assert!(first.cursor_found);
+        assert_eq!(
+            first.records,
+            vec![record(1, 7), record(2, 6), record(3, 4)]
+        );
+        let next = source.confirmed_history_page(script, Some(record(2, 6).txid), 3)?;
+        assert!(next.cursor_found);
+        // An occurrence preceding the cursor must not seed this page's set.
+        // This is page-local uniqueness, not cross-page occurrence tracking.
+        assert_eq!(next.records, vec![record(1, 5), record(3, 4), record(4, 1)]);
+        let unknown = source.confirmed_history_page(script, Some(record(9, 0).txid), 3)?;
+        assert!(!unknown.cursor_found);
+        assert_eq!(unknown.records, first.records);
+        let empty = source.confirmed_history_page(script, Some(record(2, 6).txid), 0)?;
+        assert!(empty.cursor_found);
+        assert_eq!(empty.records, []);
+        Ok(())
+    }
 }

@@ -696,6 +696,16 @@ impl KvSnapshot for RedbSnapshot {
     ) -> Result<crate::PrefixScan, StorageError> {
         scan_prefix(&self.read_txn, table_for(cf), prefix, limit)
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        scan_prefix_from(&self.read_txn, table_for(cf), prefix, start, limit)
+    }
 }
 
 struct RedbTxIndexSnapshot {
@@ -744,6 +754,96 @@ impl KvSnapshot for RedbTxIndexSnapshot {
     ) -> Result<crate::PrefixScan, StorageError> {
         scan_txindex_prefix(&self.read_txn, cf, prefix, limit)
     }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        match cf {
+            ColumnFamily::TxConfirmed => fixed_value_prefix_scan(
+                &self.read_txn,
+                TXINDEX_TX_CONFIRMED,
+                TXINDEX_TX_CONFIRMED_VALUES,
+                prefix,
+                Some(start),
+                limit,
+            ),
+            ColumnFamily::Funding => fixed_value_prefix_scan(
+                &self.read_txn,
+                TXINDEX_FUNDING,
+                TXINDEX_FUNDING_VALUES,
+                prefix,
+                Some(start),
+                limit,
+            ),
+            ColumnFamily::Spending => fixed_value_prefix_scan(
+                &self.read_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                prefix,
+                Some(start),
+                limit,
+            ),
+            ColumnFamily::UtxoMeta => {
+                scan_prefix_from(&self.read_txn, TXINDEX_META, prefix, start, limit)
+            }
+            ColumnFamily::BlockHeaders => fixed_prefix_scan::<80>(
+                &self.read_txn,
+                TXINDEX_BLOCK_HEADERS,
+                prefix,
+                Some(start),
+                limit,
+            ),
+            ColumnFamily::ScriptLive => fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(
+                &self.read_txn,
+                TXINDEX_SCRIPT_LIVE,
+                prefix,
+                Some(start),
+                limit,
+            ),
+            _ => Err(invalid_txindex_cf()),
+        }
+    }
+}
+
+fn scan_prefix_from(
+    read_txn: &redb::ReadTransaction,
+    table_def: ByteTable,
+    prefix: &[u8],
+    start: &[u8],
+    limit: crate::PrefixScanLimit,
+) -> Result<crate::PrefixScan, StorageError> {
+    let start = core::cmp::max(start, prefix);
+    let table = read_txn
+        .open_table(table_def)
+        .map_err(StorageError::backend)?;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for item in table.range(start..).map_err(StorageError::backend)? {
+        let (key, value) = item.map_err(StorageError::backend)?;
+        if !key.value().starts_with(prefix) {
+            break;
+        }
+        if !crate::trait_::push_bounded_row(
+            &mut rows,
+            &mut bytes,
+            key.value(),
+            value.value(),
+            limit,
+        ) {
+            return Ok(crate::PrefixScan {
+                rows,
+                complete: false,
+            });
+        }
+    }
+    Ok(crate::PrefixScan {
+        rows,
+        complete: true,
+    })
 }
 
 fn scan_prefix(
@@ -960,9 +1060,18 @@ fn fixed_prefix_scan<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
     prefix: &[u8],
+    start: Option<&[u8]>,
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<N>(prefix)?;
+    let start = start.map(fixed_key::<N>).transpose()?;
+    let (prefix_start, end) = fixed_prefix_bounds::<N>(prefix)?;
+    let start = start.map_or(prefix_start, |start| start.max(prefix_start));
+    if start > end {
+        return Ok(crate::PrefixScan {
+            rows: Vec::new(),
+            complete: true,
+        });
+    }
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
@@ -991,9 +1100,18 @@ fn fixed_value_prefix_scan(
     main_def: FixedTable<12>,
     value_def: TxIndexValueTable,
     prefix: &[u8],
+    start: Option<&[u8]>,
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<12>(prefix)?;
+    let start = start.map(fixed_key::<12>).transpose()?;
+    let (prefix_start, end) = fixed_prefix_bounds::<12>(prefix)?;
+    let start = start.map_or(prefix_start, |start| start.max(prefix_start));
+    if start > end {
+        return Ok(crate::PrefixScan {
+            rows: Vec::new(),
+            complete: true,
+        });
+    }
     let main = read_txn
         .open_table(main_def)
         .map_err(StorageError::backend)?;
@@ -1037,6 +1155,7 @@ fn scan_txindex_prefix(
             TXINDEX_TX_CONFIRMED,
             TXINDEX_TX_CONFIRMED_VALUES,
             prefix,
+            None,
             limit,
         ),
         ColumnFamily::Funding => fixed_value_prefix_scan(
@@ -1044,6 +1163,7 @@ fn scan_txindex_prefix(
             TXINDEX_FUNDING,
             TXINDEX_FUNDING_VALUES,
             prefix,
+            None,
             limit,
         ),
         ColumnFamily::Spending => fixed_value_prefix_scan(
@@ -1051,14 +1171,19 @@ fn scan_txindex_prefix(
             TXINDEX_SPENDING,
             TXINDEX_SPENDING_VALUES,
             prefix,
+            None,
             limit,
         ),
         ColumnFamily::BlockHeaders => {
-            fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
+            fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, None, limit)
         }
-        ColumnFamily::ScriptLive => {
-            fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, limit)
-        }
+        ColumnFamily::ScriptLive => fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(
+            read_txn,
+            TXINDEX_SCRIPT_LIVE,
+            prefix,
+            None,
+            limit,
+        ),
         ColumnFamily::UtxoMeta => scan_prefix(read_txn, TXINDEX_META, prefix, limit),
         _ => Err(invalid_txindex_cf()),
     }

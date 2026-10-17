@@ -1,13 +1,13 @@
 # Generic index on-disk format
 
-This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump the durability marker and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and it covers key layout and row-value widths alike. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as baseline evidence. Index-only layout changes bump the durability marker and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 6) is the hard open gate with full-reset recovery. Format 6 repurposes `Funding` as unified exact ScriptHistory occurrences: its 12-byte key is `script-prefix(8) || !height_be(4)`, and each 71-byte value item is `full-script-hash(32) || full-txid(32) || TxPosition(6) || flags(1)`. There is no translator or legacy reader; an unknown marker refuses start and recovery resets the derived namespace for rebuild from retained chainstate. Authoritative data is untouched.
 
 ## Row families
 
 | Family | Key | Value | Purpose |
 |---|---|---|---|
 | Transaction occurrence | `txid + block identity + position` | body locator and transaction byte range | pre-BIP34 duplicate txids and side branches never overwrite evidence |
-| Script history | `script digest + chronological position + event identity` | funding or spending locator | ordering-preserving integer encoding, byte order explicitly tested; retains provably unspendable outputs |
+| Script history (`Funding`, format 6) | `script_hash_prefix(8) + !height_be(4)` (12 bytes) | `n × (full_script_hash(32) + txid(32) + TxPosition(6) + flags(1))` (71 bytes per occurrence) | newest-first funding/spending history with exact full-script filtering; 12 + 71n logical bytes per row |
 | Live script locator | `script prefix + full outpoint` | minimal locator | truncated prefix accelerates lookup only with exact script verification; value and script resolve against coherent coins |
 | Spender relation | `origin occurrence + vout` | spending occurrence and input index | outspend queries |
 | Capability watermark | `capability` | height, hash, schema version, revision | readiness by hash, never height alone |
@@ -45,7 +45,7 @@ The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.
 
 ## Prior candidate evidence (frozen audit 2026-09-02)
 
-Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
+The layout and byte-count tables below are the pre-format-6 baseline. Later versioning notes are annotations, not new measurements. The current ScriptHistory layout is specified above; nothing in this historical audit establishes its current performance.
 
 Froze 2026-09-02 at branch `overhaul/one-session` commit `a24d23b`.
 This document is a **frozen** audit: the methodology and verdicts below are
@@ -137,7 +137,7 @@ as a benchmark corpus or a data file.
 
 ### Logical bytes
 
-#### Logical byte layout (from `crates/index/src/types.rs`)
+#### Pre-format-6 logical byte layout (historical baseline)
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
@@ -214,7 +214,7 @@ entries sorted by numeric height. The raw `iter_funding_rows`,
 `iter_spending_rows`, and `iter_txid_rows_with_values` functions return rows in store
 order, so callers get chronological order without sorting.
 
-#### Q4: Per-CF logical cost
+#### Q4: Historical per-CF logical cost
 
 **Verdict: retain only the exact serialized row sizes. No current physical
 amplification claim is supported by matched evidence.**
@@ -276,9 +276,9 @@ The index tracks two independently versioned capabilities via
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
 **Per-capability format version.** The single durable format marker is the
-durability key `[0x00, b'V']` in `UtxoMeta`, currently row-format 5. The marker
-covers the key layout and the row-value widths alike (format 5: 6-byte u24
-positions). A marker other than the current value refuses start
+durability key `[0x00, b'V']` in `UtxoMeta`, currently row-format 6. The marker
+covers the key layout and row-value widths, including 6-byte u24 positions and
+71-byte exact ScriptHistory occurrences. A marker other than the current value refuses start
 (`UnsupportedTxIndexFormatVersion`) and recovery full-resets the store for
 rebuild, so a foreign-format index is rebuilt rather than read in place.
 
@@ -289,9 +289,9 @@ requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
 prevents ABA across repeated resets.
 
-Every durability marker (`[0x00, b'V']`) older than the current row-format 5
+Every durability marker (`[0x00, b'V']`) older than the current row-format 6
 refuses start (`UnsupportedTxIndexFormatVersion`) and recovery full-resets
-the store for rebuild: format 5 changed every row family, so no in-place
+the store for rebuild: format 6 changed ScriptHistory, so no in-place
 upgrade path exists.
 
 **Adding ScriptLive later must not force a History reindex.** ScriptLive

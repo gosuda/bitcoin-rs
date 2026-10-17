@@ -53,17 +53,16 @@ impl<S: KvStore> Indexer<S> {
     /// Iterates confirmed funding rows for `scripthash`.
     ///
     /// Returns every `HashPrefixRow` in `ColumnFamily::Funding` whose 8-byte
-    /// prefix matches, in store iteration order. The 4-byte height suffix is
-    /// big-endian (format 5), so that order is chronological within a prefix.
-    /// The prefix is lossy: callers MUST resolve heights back to full
-    /// transactions via block storage to confirm scripthash identity.
+    /// prefix matches, in newest-first store order. Format 6 stores an inverted
+    /// big-endian height suffix and decodes it before returning. The prefix is
+    /// lossy; row values retain the exact full script identity.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
     ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = ScriptHashRow::scan_prefix(scripthash);
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
-        collect_prefix_rows(iter)
+        collect_history_rows(iter)
     }
 
     /// Iterates live-output rows for `scripthash`.
@@ -103,15 +102,19 @@ impl<S: KvStore> Indexer<S> {
 
     /// Iterates confirmed funding rows for `scripthash` with their row values.
     ///
-    /// The value carries the transaction byte positions that let a resolver read
-    /// only the matching transactions; see [`crate::types::TxPositionValue`].
+    /// Values carry exact unified funding/spending occurrences.
     pub(super) fn iter_funding_rows_with_values(
         &self,
         scripthash: crate::ScriptHash,
     ) -> Result<Vec<(crate::HashPrefixRow, Vec<u8>)>, IndexError> {
         let prefix = ScriptHashRow::scan_prefix(scripthash);
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
-        collect_prefix_rows_with_values(iter)
+        let mut rows = collect_prefix_rows_with_values(iter)?;
+        for (row, _) in &mut rows {
+            row.height =
+                crate::types::encode_height(crate::types::decode_history_height(row.height));
+        }
+        Ok(rows)
     }
 
     /// Iterates confirmed transaction-id rows for `txid` with their row values.
@@ -130,9 +133,8 @@ impl<S: KvStore> Indexer<S> {
     /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
     /// prefix is lossy as above.
     ///
-    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
-    /// height suffix is big-endian (format 5), so prefix-range scans arrive
-    /// in chronological order.
+    /// **Height ordering:** spending locators retain ordinary big-endian
+    /// chronological height order; only unified `ScriptHistory` is newest-first.
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,
@@ -172,6 +174,16 @@ fn collect_prefix_rows(
                     .map_err(|_| IndexError::InvalidHeaderLength { len: key.len() })?,
             );
         }
+    }
+    Ok(rows)
+}
+
+fn collect_history_rows(
+    iter: bitcoin_rs_storage::KvIter<'_>,
+) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
+    let mut rows = collect_prefix_rows(iter)?;
+    for row in &mut rows {
+        row.height = crate::types::encode_height(crate::types::decode_history_height(row.height));
     }
     Ok(rows)
 }

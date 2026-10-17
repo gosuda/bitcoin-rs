@@ -21,7 +21,8 @@ pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, S
 /// Prepare and rollback have one owner each: spent-script-aware
 /// [`Self::prepare_block_with_spent_scripts`] and
 /// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
-/// Callers that are not rebuilding `ScriptLive` pass [`crate::NoSpentScripts`].
+/// `TxLookup`-only callers pass [`crate::NoSpentScripts`]; `ScriptHistory` and
+/// `ScriptLive` callers supply the exact scripts of external spent coins.
 /// Durability, crash visibility, and failure classification for rollback are
 /// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
 /// (`IDX-06` / `IDX-07`).

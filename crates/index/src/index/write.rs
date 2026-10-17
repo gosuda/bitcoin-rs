@@ -269,18 +269,23 @@ impl<S: KvStore> IndexWriter<S> {
     /// commit uncertain; the supervised worker owns retry from the last confirmed
     /// watermark, or reset and rebuild.
     ///
-    /// Selects [`IndexCapabilities::HISTORICAL`]. Callers maintaining
-    /// `ScriptLive` must use [`Self::prepare_block_with_spent_scripts`] with a
-    /// spent-script source, then [`Self::commit_forward`]. See `IDX-06` /
-    /// `IDX-07` in `docs/contracts/indexing.md`.
-    pub fn commit_block(&mut self, height: u32, body: &[u8]) -> Result<IndexWatermark, IndexError> {
+    /// Selects [`IndexCapabilities::HISTORICAL`] and requires the exact script
+    /// of every external input. Callers maintaining `ScriptLive` must use
+    /// [`Self::prepare_block_with_spent_scripts`] and [`Self::commit_forward`].
+    /// See `IDX-06` / `IDX-07` in `docs/contracts/indexing.md`.
+    pub fn commit_block(
+        &mut self,
+        height: u32,
+        body: &[u8],
+        spent_scripts: &dyn SpentCoinScripts,
+    ) -> Result<IndexWatermark, IndexError> {
         let header = body.get(..crate::types::HEADER_ROW_SIZE).ok_or_else(|| {
             IndexError::InvalidHeaderLength {
                 len: body.len().min(crate::types::HEADER_ROW_SIZE),
             }
         })?;
         let hash = encode::double_sha256(header).to_le_bytes();
-        let prepared = self.prepare_block(height, hash, body)?;
+        let prepared = self.prepare_block(height, hash, body, spent_scripts)?;
         let mut batch = PreparedBatch::new(PreparedBatchLimits {
             max_rows: usize::MAX,
             max_bytes: usize::MAX,
@@ -403,8 +408,9 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(final_watermark)
     }
 
-    /// Atomically rolls back one block and applies one explicit consumer
-    /// cursor disposition guarded by the captured reset-state fence.
+    /// Atomically rolls back anchorless `TxLookup` rows and the consumer cursor.
+    /// `ScriptHistory` and `ScriptLive` require
+    /// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
     pub fn commit_rollback_one_for_with_cursor(
         &mut self,
         fence: IndexWriteFence,
@@ -413,7 +419,8 @@ impl<S: KvStore> IndexWriter<S> {
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<(), IndexError> {
-        if capabilities.contains(IndexCapability::ScriptLive)
+        if capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters)
         {
             return Err(IndexError::MissingSpentScripts);
@@ -429,7 +436,8 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Atomically rolls back one block with the exact scripts of its spent
-    /// coins. Required when `ScriptLive` or `CompactFilters` is selected.
+    /// coins, required when `ScriptHistory`, `ScriptLive`, or `CompactFilters`
+    /// is selected.
     ///
     /// The commit point is the successful return from the durable conditional
     /// write, so recovery sees either the prior state or the complete rollback.

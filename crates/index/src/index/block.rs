@@ -6,12 +6,13 @@ use super::{
     prepared::PreparedBlock,
     rows::LiveOp,
     rows::PendingRows,
-    rows::PositionedRow,
+    rows::{PositionedHistory, PositionedRow},
     write::IndexWriter,
 };
 use crate::{
-    types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::SpendingPrefixRow,
-    types::TxidRow, types::U24_MAX, types::encode_height,
+    types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::ScriptHistoryOccurrence,
+    types::SpendingPrefixRow, types::TxidRow, types::U24_MAX, types::encode_height,
+    types::encode_history_height,
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
 use bitcoin_rs_storage::KvStore;
@@ -20,9 +21,8 @@ use bitcoin_rs_storage::KvStore;
 ///
 /// A block body carries only each input's previous outpoint; the spent coin's
 /// `script_pubkey` lives in authoritative UTXO state, and on disconnect in the
-/// block's undo record. Live deletes are anchored to that authoritative
-/// script, so preparation of a `ScriptLive` transition takes one of these
-/// instead of guessing from the parse.
+/// block's undo record. `ScriptHistory` spending occurrences and `ScriptLive`
+/// deletes require this authoritative script instead of guessing from the parse.
 pub trait SpentCoinScripts {
     /// The exact `script_pubkey` bytes of the coin `txid:vout`, if known.
     ///
@@ -32,8 +32,8 @@ pub trait SpentCoinScripts {
 
 /// The anchorless source: answers nothing.
 ///
-/// Used by the legacy prepare path, which refuses `ScriptLive` outright rather
-/// than producing a Live transition with unanchored deletes.
+/// Used by the anchorless `TxLookup` path. `ScriptHistory` and `ScriptLive` require
+/// an explicit spent-script source, even when a particular block has no spends.
 pub(crate) struct NoSpentScripts;
 
 impl SpentCoinScripts for NoSpentScripts {
@@ -60,6 +60,10 @@ pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
 /// row the capabilities select, and the returned header is the body's exact
 /// 80-byte prefix.
 /// INVARIANT: A rejected parse contributes no rows.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one parse pass owns every correlated block row"
+)]
 fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
@@ -79,6 +83,8 @@ fn pending_rows_for_block_with_header(
     rows.header_rows.push(header_row);
     let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
     let mut live_spent: Vec<([u8; 32], u32)> = Vec::new();
+    let mut block_outputs: hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>> =
+        hashbrown::HashMap::new();
 
     for tx in parsed.transactions() {
         let span = tx.span();
@@ -88,6 +94,8 @@ fn pending_rows_for_block_with_header(
             });
         }
         let position = crate::types::TxPosition::new(span.start(), span.len());
+        let txid = tx.txid();
+        let txid_bytes = *txid.as_bytes();
 
         // A live output's row needs the transaction id, and that id is only
         // computed when something needs it, so the outputs of one transaction
@@ -112,6 +120,35 @@ fn pending_rows_for_block_with_header(
                     row: SpendingPrefixRow::row_parts(prevout_txid, vout, height_bytes),
                     position,
                 });
+                let mut previous_txid = [0_u8; 32];
+                previous_txid.copy_from_slice(prevout_txid);
+                let scripthash = match block_outputs.get(&(previous_txid, vout)).copied() {
+                    Some(scripthash) => scripthash,
+                    None => Some(
+                        spent_scripts
+                            .script_bytes(&previous_txid, vout)
+                            .map(ScriptHash::from_script_bytes)
+                            .ok_or(IndexError::MissingSpentCoin {
+                                txid: previous_txid,
+                                vout,
+                                height,
+                            })?,
+                    ),
+                };
+                if let Some(scripthash) = scripthash {
+                    rows.funding_rows.push(PositionedHistory {
+                        row: HashPrefixRow {
+                            prefix: scripthash.prefix(),
+                            height: encode_history_height(height),
+                        },
+                        occurrence: ScriptHistoryOccurrence {
+                            scripthash,
+                            txid: txid_bytes,
+                            position,
+                            flags: ScriptHistoryOccurrence::SPENDING,
+                        },
+                    });
+                }
             }
             if capabilities.contains(IndexCapability::ScriptLive) {
                 let mut txid = [0_u8; 32];
@@ -124,14 +161,28 @@ fn pending_rows_for_block_with_header(
             let script = tx
                 .span_bytes(output.script_pubkey())
                 .unwrap_or_else(|| unreachable!("output span belongs to the parsed image"));
+            if capabilities.contains(IndexCapability::ScriptHistory)
+                && let Ok(vout) = u32::try_from(index)
+            {
+                block_outputs.insert(
+                    (txid_bytes, vout),
+                    (!is_op_return_script(script)).then(|| ScriptHash::from_script_bytes(script)),
+                );
+            }
             if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script)
             {
-                rows.funding_rows.push(PositionedRow {
+                let scripthash = ScriptHash::from_script_bytes(script);
+                rows.funding_rows.push(PositionedHistory {
                     row: HashPrefixRow {
-                        prefix: ScriptHash::from_script_bytes(script).prefix(),
-                        height: height_bytes,
+                        prefix: scripthash.prefix(),
+                        height: encode_history_height(height),
                     },
-                    position,
+                    occurrence: ScriptHistoryOccurrence {
+                        scripthash,
+                        txid: txid_bytes,
+                        position,
+                        flags: ScriptHistoryOccurrence::FUNDING,
+                    },
                 });
             }
             // Genesis is exempt: its coinbase output never entered the UTXO
@@ -145,7 +196,6 @@ fn pending_rows_for_block_with_header(
         }
 
         if capabilities.contains(IndexCapability::TxLookup) || !pending_live.is_empty() {
-            let txid = tx.txid();
             for (vout, scripthash) in pending_live {
                 live_created.push((*txid.as_bytes(), vout, scripthash));
             }
@@ -258,17 +308,27 @@ fn live_admission(script: &[u8]) -> Option<ScriptHash> {
 }
 
 impl<S: KvStore> IndexWriter<S> {
-    /// Derives a `PreparedBlock` from a serialized body without allocating a decoded block.
+    /// Prepares historical rows with the exact scripts of external spent coins.
+    /// Same-block input scripts are resolved from the earlier body transactions.
     pub fn prepare_block(
         &self,
         height: u32,
         hash: [u8; 32],
         body: &[u8],
+        spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<PreparedBlock, IndexError> {
-        self.prepare_block_for(IndexCapabilities::HISTORICAL, height, hash, body)
+        self.prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            height,
+            hash,
+            body,
+            spent_scripts,
+        )
     }
 
-    /// Derives capability-selected row mutations from one serialized block scan.
+    /// Prepares anchorless `TxLookup` rows from one serialized block scan.
+    /// `ScriptHistory` and `ScriptLive` return [`IndexError::MissingSpentScripts`];
+    /// use [`Self::prepare_block_with_spent_scripts`] for either capability.
     pub fn prepare_block_for(
         &self,
         capabilities: IndexCapabilities,
@@ -276,7 +336,8 @@ impl<S: KvStore> IndexWriter<S> {
         hash: [u8; 32],
         body: &[u8],
     ) -> Result<PreparedBlock, IndexError> {
-        if capabilities.contains(IndexCapability::ScriptLive)
+        if capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters)
         {
             return Err(IndexError::MissingSpentScripts);
@@ -284,8 +345,9 @@ impl<S: KvStore> IndexWriter<S> {
         self.prepare_block_with_spent_scripts(capabilities, height, hash, body, &NoSpentScripts)
     }
 
-    /// [`Self::prepare_block_for`] with the spent-coin script source
-    /// `ScriptLive` and `CompactFilters` preparation require.
+    /// Prepares capability-selected rows with the exact external spent scripts
+    /// required by `ScriptHistory` occurrences, `ScriptLive` deletes, and
+    /// `CompactFilters` construction.
     pub fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,

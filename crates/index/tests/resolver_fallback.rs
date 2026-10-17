@@ -6,17 +6,15 @@ mod common;
 
 use std::sync::Arc;
 
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
-use bitcoin_rs_index::{
-    BlockSource, IndexWriter, Indexer, ScriptHash, ScriptHashRow, ScriptHistoryEntry,
-};
+use bitcoin_rs_index::types::TxPosition;
+use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash, ScriptHistoryEntry};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
+    Tx, TxIn, TxOut, Witness, consensus_bytes, varint,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
 
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 
 const HEIGHT: u32 = 0;
 
@@ -49,15 +47,12 @@ fn header() -> Header {
     }
 }
 
-fn tx(seed: u8, script_pubkey: Vec<u8>, value: u64) -> Tx {
+fn tx(_seed: u8, script_pubkey: Vec<u8>, value: u64) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[seed; 32])),
-                vout: u32::from(seed),
-            },
+            previous_output: OutPoint::null(),
             script_sig: Script::new(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -74,8 +69,7 @@ fn script(tag: u8) -> Vec<u8> {
 }
 
 #[test]
-fn eight_byte_prefix_collision_resolves_full_script_identity()
--> Result<(), Box<dyn std::error::Error>> {
+fn synthetic_history_row_filters_full_script_identity() -> Result<(), Box<dyn std::error::Error>> {
     let target_script = script(0x51);
     let decoy_script = script(0x52);
     let block = Block {
@@ -95,28 +89,32 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
     );
 
     let target = ScriptHash::from_script_bytes(&target_script);
-    let row = ScriptHashRow::row(target, HEIGHT).to_db_row();
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes)?;
+    IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes, &NoSpentScripts)?;
     let indexer = Indexer::new(Arc::clone(&store));
 
-    // A real eight-byte collision makes the writer merge both valid positions
-    // under one row key. Model that persisted result directly; unlike the
-    // removed fallback tests, every position is an exact range in this
-    // canonical block and no row value is blank, stale, or malformed.
-    let stored = store
-        .get(ColumnFamily::Funding, &row)?
-        .expect("target funding row");
-    assert_eq!(
-        TxPositionValue::decode(&stored),
-        Some(core::slice::from_ref(&target_position))
-    );
+    // Inject two full-script identities into one row to isolate read-side
+    // exact-hash filtering. These scripts do not share an eight-byte prefix;
+    // this is not evidence of a real hash collision or writer grouping.
+    // Both positions still name exact transaction ranges in the fixture body.
+    let row = store
+        .rows(ColumnFamily::Funding)
+        .into_iter()
+        .find(|(key, _)| key.starts_with(&target.prefix()))
+        .expect("target funding row")
+        .0;
+    let mut collision_value = Vec::new();
+    for (script, tx, position) in [
+        (&target_script, &block.txs[0], target_position),
+        (&script(0x52), &block.txs[1], decoy_position),
+    ] {
+        collision_value.extend_from_slice(&ScriptHash::from_script_bytes(script).to_byte_array());
+        collision_value.extend_from_slice(tx.txid().as_bytes());
+        collision_value.extend_from_slice(zerocopy::IntoBytes::as_bytes(&position));
+        collision_value.push(1);
+    }
     let mut batch = store.new_batch();
-    batch.put(
-        ColumnFamily::Funding,
-        &row,
-        &TxPositionValue::encode(&[target_position, decoy_position]),
-    );
+    batch.put(ColumnFamily::Funding, &row, &collision_value);
     store.write(batch)?;
 
     let source = FixtureSource {

@@ -13,7 +13,7 @@ mod common;
 
 #[cfg(any(feature = "redb", feature = "fjall"))]
 use bitcoin_rs_index::IndexReader;
-use common::MemoryStore;
+use common::{MemoryStore, NoSpentScripts};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -752,9 +752,13 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), Box<dyn std
 fn live_and_history_watermarks_advance_independently() -> Result<(), Box<dyn std::error::Error>> {
     let mut chain = Chain::new()?;
     let (body, hash) = block_bytes(chain.tip, vec![coinbase(0)]);
-    let prepared = chain
-        .writer
-        .prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let prepared = chain.writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpentScripts,
+    )?;
     let batch = common::batch_with_limits(
         prepared,
         PreparedBatchLimits {
