@@ -1388,7 +1388,7 @@ fn stage_body(sync: &BlockSync, block: &Block) {
 }
 
 fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
-    sync.expected_apply_cache.lock().clone()
+    sync.scheduler.lock().expected_apply_cache.clone()
 }
 
 /// Commit a delivered fixture through the ordinary binding and apply path.

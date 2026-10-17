@@ -205,7 +205,6 @@ pub struct BlockSync {
     /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained by
     /// the next tick's header drain.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
-    expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
     /// no chain transition: the failed settlement left the implementation's
@@ -259,9 +258,17 @@ struct SchedulerState {
     headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
     /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
+    expected_apply_cache: Option<ExpectedApplyCache>,
 }
 
 impl SchedulerState {
+    fn populate_expected_apply_cache(&mut self, cache: ExpectedApplyCache) {
+        if cache.hashes.is_empty() {
+            return;
+        }
+        self.expected_apply_cache = Some(cache);
+    }
+
     fn header_request(&self) -> Option<HeaderRequest> {
         self.header_request_owner
             .and_then(|source| self.headers_sync.get(&source)?.request)
@@ -375,16 +382,6 @@ struct ExpectedApplyCache {
     hashes: ExpectedBlockHashes,
 }
 
-/// A contiguous run of expected apply hashes together with the chain/applied
-/// tip snapshot it was computed against.
-#[derive(Clone, Debug)]
-struct ExpectedRun {
-    chain_tip_hash: Hash256,
-    applied_tip_hash: Hash256,
-    applied_tip_height: u32,
-    hashes: ExpectedBlockHashes,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct GetdataRequestOutcome {
     sent: bool,
@@ -424,10 +421,10 @@ impl BlockSync {
                 chain_sync: hashbrown::HashMap::new(),
                 headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
+                expected_apply_cache: None,
             }),
             refused_rerequest_at: Mutex::new(None),
             block_announcements: Mutex::new(hashbrown::HashMap::new()),
-            expected_apply_cache: Arc::new(Mutex::new(None)),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -445,6 +442,7 @@ impl BlockSync {
             chain_sync: hashbrown::HashMap::new(),
             headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
+            expected_apply_cache: None,
         };
     }
 
@@ -605,12 +603,15 @@ impl BlockSync {
         // Convicted connections must release their work before selection so
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
-        let frontier = self.observe_frontier(chain.clone(), now);
-        self.sweep_chain_sync(&frontier, now);
+        let mut frontier = self.observe_frontier(chain.clone(), now);
+        let evicted = self.sweep_chain_sync(&frontier, now);
         self.follow_tip_progress(&frontier, now);
-        // The sweep can disconnect a peer; re-observe so selection and body
-        // planning never address a lease the sweep just removed.
-        let frontier = self.observe_frontier(chain, now);
+        // The sweep can disconnect a peer; re-observe only when an eviction
+        // occurred so selection and body planning never address a lease the
+        // sweep just removed.
+        if evicted {
+            frontier = self.observe_frontier(chain, now);
+        }
         let plan = frontier.plan();
 
         if !frontier.usable_peers.is_empty() {
@@ -740,25 +741,28 @@ impl BlockSync {
         }
     }
 
+    /// The canonical next-required body on the active branch: the applied tip's
+    /// successor during an extension, or the first connect node above the
+    /// common ancestor during a reorg.
+    pub(super) fn next_required_body(&self) -> Option<RequiredBody> {
+        let chain_tip = self.chain.chain_tip()?;
+        let applied_tip = self.chain.applied_tip()?;
+        let tree = self.chain.block_tree();
+        let height = Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)?;
+        let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
+        let node = tree.node(node_id).ok()?;
+        Some(frontier::RequiredBody {
+            height: node.height,
+            hash: node.hash,
+        })
+    }
+
     /// The chain-side frontier: both tips and the canonical next-required
     /// body, resolved in one consistent tree read.
     pub(super) fn observe_chain_frontier(&self) -> ChainFrontier {
         let applied_tip = self.chain.applied_tip();
         let chain_tip = self.chain.chain_tip();
-        let next_required = match (&applied_tip, &chain_tip) {
-            (Some(applied), Some(chain)) => {
-                let tree = self.chain.block_tree();
-                Self::first_connect_height(&tree, applied.hash, chain.tip_id)
-                    .and_then(|height| tree.node_at_height_from(chain.tip_id, height))
-                    .and_then(|node_id| {
-                        tree.node(node_id).ok().map(|node| RequiredBody {
-                            height: node.height,
-                            hash: node.hash,
-                        })
-                    })
-            }
-            _ => None,
-        };
+        let next_required = self.next_required_body();
         ChainFrontier {
             applied_tip,
             chain_tip,

@@ -1,8 +1,6 @@
 //! Budgeted body requests, prefix probes, and cold-front hedges.
 
 use super::BlockSync;
-use super::ExpectedApplyCache;
-use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
 use super::SchedulerState;
 use super::frontier::ChainFrontier;
@@ -81,38 +79,21 @@ impl BlockSync {
         );
     }
 
-    /// Builds one getdata inventory entry per planned block in the chosen
-    /// flavor and collects the hashes of the request's contiguous leading
-    /// run starting at `applied_height + 1` for the fast-apply cache.
+    /// Builds one getdata inventory entry per planned block in the chosen flavor.
     fn build_inventory(
         request: &crate::download_window::PeerRequest,
         compact_fetch: bool,
-        applied_height: u32,
-    ) -> (Vec<Inventory>, ExpectedBlockHashes, bool) {
+    ) -> Vec<Inventory> {
         let mut inventory = Vec::with_capacity(request.len());
-        let mut expected_hashes = ExpectedBlockHashes::with_capacity(request.len());
-        let mut expected_height = applied_height.saturating_add(1);
-        let mut is_contiguous = true;
-        for (height, hash) in request.entries() {
+        for (_, hash) in request.entries() {
             let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
             inventory.push(if compact_fetch {
                 Inventory::CompactBlock(block_hash)
             } else {
                 Inventory::WitnessBlock(block_hash)
             });
-            if is_contiguous && height == expected_height {
-                expected_hashes.push(hash);
-                expected_height = if let Some(next) = expected_height.checked_add(1) {
-                    next
-                } else {
-                    is_contiguous = false;
-                    expected_height
-                };
-            } else {
-                is_contiguous = false;
-            }
         }
-        (inventory, expected_hashes, is_contiguous)
+        inventory
     }
 
     /// Compact flavor is worth its reconstruction round trip only when the
@@ -190,8 +171,7 @@ impl BlockSync {
         };
 
         let compact_fetch = self.compact_fetch_eligible(&request, frontier);
-        let (inventory, expected_hashes, is_contiguous) =
-            Self::build_inventory(&request, compact_fetch, applied_tip.height);
+        let inventory = Self::build_inventory(&request, compact_fetch);
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
@@ -213,16 +193,6 @@ impl BlockSync {
                 "block sync: outbound channel disconnected (getdata)"
             );
             return GetdataRequestOutcome::default();
-        }
-
-        if is_contiguous {
-            *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
-                chain_tip_hash: chain_tip.hash,
-                applied_tip_hash: applied_tip.hash,
-                applied_tip_height: applied_tip.height,
-                offset: 0,
-                hashes: expected_hashes,
-            });
         }
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         if compact_fetch {

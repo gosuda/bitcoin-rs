@@ -331,17 +331,7 @@ impl BlockSync {
         {
             return GetdataRequestOutcome::default();
         }
-        let outcome = self.send_getdata_for_pending_blocks(source, false, height, chain);
-        // The request path primes the expected-apply cache with exactly this
-        // batch. A direct fetch runs before this round's apply pass, where
-        // more bodies may already be staged, so drop the primed cache and let
-        // the apply path walk the tree and repopulate it with the full run —
-        // but only when a request actually went out; a refused outcome left
-        // the cache untouched.
-        if outcome.sent {
-            *self.expected_apply_cache.lock() = None;
-        }
-        outcome
+        self.send_getdata_for_pending_blocks(source, false, height, chain)
     }
 
     /// Height of `hash` when it lies on the branch that ends at `tip`, and

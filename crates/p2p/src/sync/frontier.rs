@@ -231,13 +231,23 @@ impl SyncFrontier {
     /// discover capability) or produces an explicit reason.
     pub(super) fn plan(&self) -> FrontierPlan {
         let peers_exist = !self.usable_peers.is_empty();
-        let body_owned_or_missing =
-            matches!(self.body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;
+        let body_state = match self.body_state {
+            // A pending whose owner fell out of the usable set is unowned
+            // work; reconcile released it, and it must be re-requested.
+            Some(BodyState::InFlight(owner))
+                if !self.usable_peers.iter().any(|peer| peer.source == owner) =>
+            {
+                Some(BodyState::Unowned)
+            }
+            state => state,
+        };
+        let body_unowned =
+            matches!(body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;
         let header_action = if self.header_request_live {
             HeaderAction::AwaitPending
         } else if !peers_exist {
             HeaderAction::Idle
-        } else if body_owned_or_missing {
+        } else if body_unowned {
             self.probe_pick()
                 .map_or(HeaderAction::Extend, HeaderAction::Probe)
         } else {
@@ -272,16 +282,6 @@ impl SyncFrontier {
         }
 
         plan.schedule_bodies = true;
-        let body_state = match self.body_state {
-            // A pending whose owner fell out of the usable set is unowned
-            // work; reconcile released it, and it must be re-requested.
-            Some(BodyState::InFlight(owner))
-                if !self.usable_peers.iter().any(|peer| peer.source == owner) =>
-            {
-                Some(BodyState::Unowned)
-            }
-            state => state,
-        };
         match body_state {
             Some(BodyState::Unowned) => {
                 if !self

@@ -608,9 +608,9 @@ impl BlockSync {
     ///   scheduler lock, and a probe that never left the node restores the
     ///   record it was about to change, so the rule retries instead of
     ///   condemning a connection it never asked.
-    pub(super) fn sweep_chain_sync(&self, frontier: &SyncFrontier, now: Instant) {
+    pub(super) fn sweep_chain_sync(&self, frontier: &SyncFrontier, now: Instant) -> bool {
         let Some(tip_height) = frontier.chain.chain_tip.as_ref().map(|tip| tip.height) else {
-            return;
+            return false;
         };
         let outcomes = {
             let mut scheduler = self.scheduler.lock();
@@ -640,15 +640,20 @@ impl BlockSync {
             outcomes
         };
 
+        let mut evicted = false;
         for (source, prior, action) in outcomes {
             match action {
                 Some(ChainSyncAction::Probe) if !self.probe_chain_sync(source, frontier) => {
                     self.scheduler.lock().restore_chain_sync(source, prior);
                 }
-                Some(ChainSyncAction::Evict) => self.retire_chain_sync_peer(source),
+                Some(ChainSyncAction::Evict) => {
+                    self.retire_chain_sync_peer(source);
+                    evicted = true;
+                }
                 Some(ChainSyncAction::Probe) | None => {}
             }
         }
+        evicted
     }
 
     /// Retires a connection the chain-sync rule condemned.
