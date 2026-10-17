@@ -702,6 +702,7 @@ mod tests {
             &[&*confirmed],
             &[confirmed.txid()],
             1,
+            1,
         );
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -824,6 +825,7 @@ mod tests {
             pool,
             Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
+            None,
         ));
         let (queue, rx) = TxRelayQueue::new(8);
         let observer = Arc::new(LocalTxRelayObserver::new(queue, Arc::downgrade(&gateway)));
@@ -977,6 +979,7 @@ mod tests {
             ))),
             Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
+            None,
         ))
     }
 

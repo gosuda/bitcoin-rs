@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message};
 use bitcoin_rs_primitives::{Network, unix_time_secs};
 use crossbeam_channel::{SendTimeoutError, Sender};
 use thiserror::Error;
@@ -1428,7 +1429,9 @@ enum KeepaliveAction {
 ///   folds in via [`Keepalive::observe_send`].
 /// POST: [`Keepalive::next_action`] orders a `ping` once [`PING_INTERVAL`]
 ///   of quiet has passed since the previous probe, and an `Expired` end
-///   once either direction has been silent past [`TIMEOUT_INTERVAL`].
+///   once either direction has been silent past [`TIMEOUT_INTERVAL`]; while
+///   the loop has a `getdata` parked it reads nothing, so only the send
+///   direction can expire.
 /// INVARIANT: the decision is a pure function of the recorded instants and
 ///   the caller's `now`, and one ledger belongs to one connection thread,
 ///   so a peer is never judged on another connection's traffic. Durations
@@ -1492,9 +1495,26 @@ impl Keepalive {
     /// minute, so this branch only covers a peer that takes our writes and
     /// never answers them.
     fn next_action(&self, now: Instant) -> KeepaliveAction {
-        if now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL
-            || now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL
-        {
+        self.decide(now, true)
+    }
+
+    /// [`Keepalive::next_action`] for a loop that holds an unserved `getdata`
+    /// and so reads nothing: the peer's silence is then the loop's own doing,
+    /// and receive silence does not expire the connection. Send silence
+    /// still does, and the parked tail has its own lifetime bound in the
+    /// loop.
+    fn next_action_while_parked(&self, now: Instant) -> KeepaliveAction {
+        self.decide(now, false)
+    }
+
+    /// The one decision behind both entry points. `receive_silence_expires`
+    /// is false only for [`Keepalive::next_action_while_parked`]; the probe
+    /// rule does not depend on it.
+    fn decide(&self, now: Instant, receive_silence_expires: bool) -> KeepaliveAction {
+        let receive_expired = receive_silence_expires
+            && now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL;
+        let send_expired = now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL;
+        if receive_expired || send_expired {
             return KeepaliveAction::Expired;
         }
         let idle = now.saturating_duration_since(self.last_recv) >= PING_INTERVAL
@@ -1566,6 +1586,44 @@ mod keepalive_tests {
         );
     }
 
+    /// A loop that stopped reading to hold a `getdata` tail cannot hear the
+    /// peer, so the peer's silence is not its fault.
+    #[test]
+    fn parked_loop_does_not_expire_on_receive_silence() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        let now = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        assert_eq!(keepalive.next_action(now), KeepaliveAction::Expired);
+        assert_ne!(
+            keepalive.next_action_while_parked(now),
+            KeepaliveAction::Expired,
+            "the same ledger, parked, is not judged on receive silence"
+        );
+    }
+
+    #[test]
+    fn parked_loop_still_expires_on_send_silence() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_recv(t0 + TIMEOUT_INTERVAL);
+        assert_eq!(
+            keepalive.next_action_while_parked(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            KeepaliveAction::Expired
+        );
+    }
+
+    #[test]
+    fn parked_loop_orders_the_same_probe_as_an_unparked_one() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_send(t0);
+        assert_eq!(
+            keepalive.next_action_while_parked(t0 + PING_INTERVAL),
+            keepalive.next_action(t0 + PING_INTERVAL)
+        );
+    }
+
     #[test]
     fn fresh_activity_defers_the_timeout() {
         let t0 = Instant::now();
@@ -1618,6 +1676,8 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 
     let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
+    // When the current `getdata` tail first parked; `None` while nothing is.
+    let mut parked_since: Option<Instant> = None;
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
     let mut address_budget = 32_u64;
     let mut last_address_refill = crate::addrman::now();
@@ -1642,7 +1702,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
 
         keepalive.observe_send(lease.last_send());
-        match keepalive.next_action(Instant::now()) {
+        let action = if peer.has_parked_getdata() || parked_since.is_some() {
+            keepalive.next_action_while_parked(Instant::now())
+        } else {
+            keepalive.next_action(Instant::now())
+        };
+        match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
                 // A probe queued behind a saturated outbound queue would
@@ -1696,13 +1761,31 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
+        // A parked `getdata` is answered before the peer is heard again: the
+        // loop reads nothing until the tail is served, so a peer cannot queue
+        // more work behind one it is not draining.
+        match step_parked_getdata(peer, shared, lease, &mut keepalive, &mut parked_since)? {
+            ParkedStep::NotParked => {}
+            ParkedStep::StillParked => continue,
+            ParkedStep::Ended => {
+                tracing::debug!(
+                    peer_addr = %peer_addr,
+                    "p2p parked getdata cannot be served; closing"
+                );
+                return Ok(());
+            }
+        }
+
         let read_result = peer.read_message();
         if lease.is_cancelled() {
             tracing::debug!(peer_addr = %peer_addr, "p2p peer lease revoked during read; closing");
             return Ok(());
         }
         match read_result {
-            Ok((message, raw)) => {
+            // A v2 decoy or an undefined short id is not receive activity: no
+            // recv credit, no trace, and the idle checks below still run.
+            Ok(None) => continue,
+            Ok(Some((message, raw))) => {
                 keepalive.record_recv(Instant::now());
                 let Some(message) = enforce_relay_role(lease.role(), message)? else {
                     continue;
@@ -1749,6 +1832,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         continue;
                     }
                     return Err(error);
+                }
+                // A `getdata` that filled the queue to its last slot leaves
+                // no room for the reply to the next request. Hold reads until
+                // the queue can take one message.
+                if matches!(message, crate::Message::GetData(_)) && !budget.has_send_capacity() {
+                    parked_since.get_or_insert_with(Instant::now);
                 }
                 match &message {
                     crate::Message::FeeFilter(rate) => shared
@@ -1824,8 +1913,17 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     {
                         answered_getaddr = true;
                         if let Some(book) = &shared.address_book {
-                            let _ = lease
-                                .send(crate::Message::Addr(book.gossip(crate::addrman::now())));
+                            let rows = book.gossip(crate::addrman::now());
+                            // BIP155: a peer that negotiated `sendaddrv2`
+                            // answers in `addrv2`. The rows are socket
+                            // addresses, so every entry is IPv4/IPv6 either
+                            // way and both replies carry the same entries.
+                            let reply = if peer.capabilities.addr_v2 {
+                                crate::Message::AddrV2(addr_v2_rows(&rows))
+                            } else {
+                                crate::Message::Addr(rows)
+                            };
+                            let _ = lease.send(reply);
                         }
                     }
                     crate::Message::Headers(headers) => {
@@ -1894,6 +1992,208 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// What one pass over a parked `getdata` left for the session loop to do.
+#[derive(Debug, PartialEq, Eq)]
+enum ParkedStep {
+    /// Nothing is parked or held: the loop reads the peer.
+    NotParked,
+    /// A tail is still parked, or reads are held until the queue can take
+    /// the reply to the peer's next request: the loop repeats its checks
+    /// without reading.
+    StillParked,
+    /// The session ends: the tail outlived [`TIMEOUT_INTERVAL`], the writer
+    /// has returned, or the lease was cancelled while serving.
+    Ended,
+}
+
+/// Advances a parked `getdata` by one pass without blocking longer than
+/// [`STREAM_POLL_INTERVAL`].
+///
+/// PRE: `lease` is the connection `peer` wraps and `parked_since` is the
+/// loop's own marker: set while a `getdata` is parked and after one that
+/// answered into a queue with no send capacity left.
+/// POST: With nothing parked and no marker, returns `NotParked`. Otherwise
+/// the marker records when the pause began, and an old pause (past
+/// [`TIMEOUT_INTERVAL`]) or a dead writer ends the session. With a tail or
+/// parked misses, the pass is one [`advance_parked_getdata`]. With neither,
+/// the answer is complete but the queue may still be full of it, and the
+/// pass holds reads until the queue can admit one message: the reply to the
+/// peer's next request (`pong`, `headers`) is sent without a gate, so reading
+/// it first would turn a reader that is draining normally into a refused
+/// send. Once the queue has capacity the marker clears and the loop reads.
+/// INVARIANT: this reads nothing from the peer and holds no pool, table, or
+/// socket lock while it waits; the wait is bounded, so lease cancellation,
+/// the keepalive's send check, and the pause's age are rechecked at least
+/// once per [`STREAM_POLL_INTERVAL`]. Every send is gated on the queue's
+/// capacity, so the pause itself never cancels the lease; a send that still
+/// loses a race for the last budget slot cancels it as `PeerLease::send`
+/// always does. Only a `getdata` establishes the hold; a connection that
+/// never sent one keeps the plain saturation policy.
+fn step_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    parked_since: &mut Option<Instant>,
+) -> Result<ParkedStep, crate::wire::PeerError> {
+    let parked = peer.has_parked_getdata();
+    if !parked && parked_since.is_none() {
+        return Ok(ParkedStep::NotParked);
+    }
+    let since = *parked_since.get_or_insert_with(Instant::now);
+    let budget = lease.budget_handle();
+    if parked_tail_expired(since, Instant::now()) || budget.writer_dead() {
+        return Ok(ParkedStep::Ended);
+    }
+    if !parked {
+        if budget.has_send_capacity() {
+            *parked_since = None;
+            return Ok(ParkedStep::NotParked);
+        }
+        budget.wait_for_release(STREAM_POLL_INTERVAL);
+        return Ok(ParkedStep::StillParked);
+    }
+    match advance_parked_getdata(peer, shared, lease, keepalive, &budget) {
+        Err(_) if lease.is_cancelled() => Ok(ParkedStep::Ended),
+        advanced => advanced.map(|()| ParkedStep::StillParked),
+    }
+}
+
+/// One pass over a parked `getdata` that neither reads nor sleeps past
+/// [`STREAM_POLL_INTERVAL`].
+///
+/// PRE: something is parked on `peer`, and `budget` is `lease`'s.
+/// POST: the misses found before the halt are sent in one `notfound` on the
+/// first pass that finds the queue able to admit a message (below the item
+/// cap and the byte cap, whether or not it can still take a worst-case
+/// block); a full queue keeps them. The tail resumes only once the misses are
+/// out and the queue has production headroom (a free slot and room for a
+/// worst-case block); until then the pass waits on the budget for the
+/// headroom or the writer's death. Passes recur on every wake and at least
+/// once per [`STREAM_POLL_INTERVAL`], so capacity that returns before
+/// headroom is noticed within one interval. The peer hears the misses before
+/// any later item of its request.
+/// INVARIANT: nothing is sent into a queue that cannot admit it: the miss
+/// report is gated on send capacity and the tail on production headroom, so
+/// the pause is never a disconnect of this connection for its own queue
+/// state. A send that loses the last slot concurrently cancels the lease
+/// inside `PeerLease::send`; the error propagates and
+/// [`step_parked_getdata`] maps it to a plain session end.
+fn advance_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &crate::connection::OutboundBudget,
+) -> Result<(), crate::wire::PeerError> {
+    report_parked_misses(peer, lease, keepalive, budget)?;
+    if !peer.pending_notfound.is_empty() || !budget.has_block_production_headroom() {
+        budget.wait_for_release(STREAM_POLL_INTERVAL);
+        return Ok(());
+    }
+    resume_parked_getdata(peer, shared, lease, keepalive, budget)
+}
+
+/// Sends the misses parked with a tail as one `notfound`.
+///
+/// PRE: nothing; the capacity check happens here, under the budget's own
+/// accounting, so a wake cannot be lost between the caller's check and the
+/// send.
+/// POST: with capacity the misses went out in one `notfound` and
+/// `peer.pending_notfound` is empty; without, nothing was sent and they stay
+/// parked for the next pass. A send failure (the slot was won concurrently,
+/// or the receiver is gone) cancels the lease inside `PeerLease::send` and is
+/// propagated; the caller maps a cancelled lease to a plain session end.
+fn report_parked_misses<S>(
+    peer: &mut Peer<S>,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &crate::connection::OutboundBudget,
+) -> Result<(), crate::wire::PeerError> {
+    if peer.pending_notfound.is_empty() || !budget.has_send_capacity() {
+        return Ok(());
+    }
+    let misses = std::mem::take(&mut peer.pending_notfound);
+    lease
+        .send(crate::Message::NotFound(misses))
+        .map(|()| keepalive.record_send(Instant::now()))
+        .map_err(|_| crate::wire::PeerError::Protocol("outbound queue closed or saturated"))
+}
+
+/// Whether a tail parked at `since` has outlived [`TIMEOUT_INTERVAL`], the
+/// longest a connection may owe the peer answers it cannot queue.
+fn parked_tail_expired(since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(since) > TIMEOUT_INTERVAL
+}
+
+/// Serves the parked tail from its first item. The new tail and the misses
+/// that follow are stored back on `peer`.
+///
+/// PRE: the queue has production headroom, `peer` has a parked tail, and the
+/// misses parked before the halt have been sent.
+/// POST: everything the gate does not stop again is answered in request
+/// order; whatever the gate stops is the stored tail and misses.
+/// INVARIANT: every send here is gated by the caller's headroom check or the
+/// chain's per-load check. When a send is refused anyway — another sender
+/// won the last slot — `serve_getdata` returns the refused item as the head
+/// of the tail, and this connection does not end over its own queue state:
+/// `step_parked_getdata` maps a cancelled lease to a plain end, and the
+/// ordinary teardown closes the writer. The session's other sends (pong,
+/// compact filters) keep the existing behavior: their refusal cancels the
+/// lease as it always did.
+fn resume_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &crate::connection::OutboundBudget,
+) -> Result<(), crate::wire::PeerError> {
+    let mut send = |response: crate::Message| {
+        lease
+            .send(response)
+            .map(|()| keepalive.record_send(Instant::now()))
+            .map_err(|_| crate::wire::PeerError::Protocol("outbound queue closed or saturated"))
+    };
+    let compact_version = peer.compact_blocks.servable_version();
+    let mut not_found = Vec::new();
+    let tail = crate::dispatch::serve_getdata(
+        shared.chain_query.as_deref(),
+        shared.tx_inventory.as_deref(),
+        compact_version,
+        &peer.pending_getdata,
+        &mut not_found,
+        &|| budget.has_block_production_headroom(),
+        &mut send,
+    )?;
+    peer.pending_getdata = tail;
+    peer.pending_notfound = not_found;
+    Ok(())
+}
+
+/// Renders one gossip round as BIP155 `addrv2` rows.
+///
+/// Only IPv4 and IPv6 addresses exist in the book: every row comes from a
+/// real socket address (`Address::socket_addr`), so the conversion is total
+/// over what `gossip` returns. Tor and I2P networks are never served, and the
+/// 32-entry cap is the book's own (`MAX_GOSSIP`), unchanged by the encoding.
+fn addr_v2_rows(rows: &[(u32, bitcoin::p2p::address::Address)]) -> Vec<AddrV2Message> {
+    rows.iter()
+        .filter_map(|(time, address)| {
+            let socket = address.socket_addr().ok()?;
+            let (addr, port) = match socket.ip() {
+                std::net::IpAddr::V4(ip) => (AddrV2::Ipv4(ip), socket.port()),
+                std::net::IpAddr::V6(ip) => (AddrV2::Ipv6(ip), socket.port()),
+            };
+            Some(AddrV2Message {
+                time: *time,
+                services: address.services,
+                addr,
+                port,
+            })
+        })
+        .collect()
 }
 
 /// Consume a bounded, replenishing per-connection gossip allowance before
@@ -2098,6 +2398,10 @@ fn spawn_connection_writer(
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
+            // A session parked on this queue waits for releases that can no
+            // longer come; the guard tells it however the writer ends,
+            // including a panic.
+            let _exit = WriterExit(Arc::clone(&budget));
             run_writer_loop(
                 &outbound_rx,
                 close_rx,
@@ -2108,6 +2412,16 @@ fn spawn_connection_writer(
             );
             let _ = stream.shutdown(std::net::Shutdown::Both);
         })
+}
+
+/// Marks the budget's writer dead when dropped, so a parked session wakes
+/// whether the writer returned or unwound.
+struct WriterExit(Arc<crate::connection::OutboundBudget>);
+
+impl Drop for WriterExit {
+    fn drop(&mut self) {
+        self.0.mark_writer_dead();
+    }
 }
 
 /// Drains ready control messages behind `first` into one writev burst.
@@ -3670,6 +3984,7 @@ mod writer_shutdown_tests {
                 ))),
                 None,
                 bitcoin_rs_consensus::ValidationEngine::Native,
+                None,
             ));
             let tx = Arc::new(bitcoin_rs_primitives::Tx::default());
             let sequence = gateway
@@ -4318,6 +4633,51 @@ mod address_tests {
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].1.socket_addr().expect("socket"), candidate);
     }
+
+    #[test]
+    fn negotiated_sendaddrv2_answers_getaddr_with_addrv2_once() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        shared.address_book = Some(Arc::clone(&book));
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let candidate = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let lease = crate::PeerLease::new_inbound(sender);
+        table.register(source, lease.clone());
+        let timestamp = u32::try_from(crate::addrman::now()).expect("timestamp");
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let mut input = Vec::new();
+        for message in [
+            Message::Addr(vec![(timestamp, Address::new(&candidate, services))]),
+            Message::SendAddrV2,
+            Message::GetAddr,
+            Message::GetAddr,
+        ] {
+            crate::wire::write_message(&mut input, shared.magic, &message).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        let replies: Vec<_> = receiver.try_iter().collect();
+        let [Message::AddrV2(rows)] = replies.as_slice() else {
+            panic!("expected exactly one addrv2 response: {replies:?}");
+        };
+        assert_eq!(
+            rows.as_slice(),
+            &[AddrV2Message {
+                // The book stores the advertised time minus its 2 h
+                // re-learn penalty for a non-self source.
+                time: timestamp - 2 * 60 * 60,
+                services,
+                addr: AddrV2::Ipv4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                port: 8333,
+            }],
+            "the reply renders the same learned row in BIP155 form"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4382,10 +4742,11 @@ mod feeler_tests {
                     .set_write_timeout(Some(Duration::from_secs(3)))
                     .expect("timeout");
                 let mut peer = Peer::new(stream, magic);
-                assert!(matches!(
-                    peer.read_message().expect("initial version").0,
-                    crate::Message::Version(_)
-                ));
+                let (initial, _) = peer
+                    .read_message()
+                    .expect("initial version")
+                    .expect("a v1 frame");
+                assert!(matches!(initial, crate::Message::Version(_)));
                 assert!(
                     remote_table
                         .sessions()
@@ -4408,7 +4769,7 @@ mod feeler_tests {
                     sent.expect("VERSION only");
                 }
                 // No VERACK is sent; a feeler closes after native VERSION acceptance.
-                while let Ok((message, _)) = peer.read_message() {
+                while let Ok(Some((message, _))) = peer.read_message() {
                     assert!(
                         !matches!(message, crate::Message::GetAddr | crate::Message::Verack),
                         "no ready/post-verack publication: {message:?}"
@@ -4910,3 +5271,6 @@ mod discouragement_tests {
 
 #[cfg(test)]
 mod v2_transport_tests;
+
+#[cfg(test)]
+mod getdata_pause_tests;

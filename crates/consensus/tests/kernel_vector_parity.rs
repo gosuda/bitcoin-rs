@@ -31,6 +31,7 @@ fn kernel_verdict(
         prevouts,
         flags,
         bitcoin_rs_consensus::ValidationEngine::Kernel,
+        None,
     ) {
         Ok(()) => Ok(Verdict::Accept),
         Err(ConsensusError::Script { .. }) => Ok(Verdict::Reject),
@@ -207,7 +208,7 @@ fn is_policy_only_tx(row: &VectorRow) -> bool {
         return false;
     };
     for input_idx in 0..row.tx.inputs.len() {
-        let result = prepared.verify_input(input_idx, mand_flags);
+        let result = prepared.verify_input(input_idx, mand_flags, None);
         if !matches!(result, Ok(true)) {
             return false;
         }

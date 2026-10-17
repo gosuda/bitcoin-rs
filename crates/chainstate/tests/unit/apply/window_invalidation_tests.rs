@@ -1,16 +1,21 @@
 //! Window invalidation must keep the published header tip and the
 //! assume-valid gate in sync with the mutated tree, exactly as reorg
-//! invalidation does.
+//! invalidation does. A body that only mutates the delivered bytes must leave
+//! its valid header alone.
 
 use std::sync::Arc;
 
 use bitcoin_rs_chain::NodeStatus;
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
+use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, CompactTarget, Hash256, Header, Network, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_utxo::UtxoSet;
+use parking_lot::Mutex;
 
-use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition};
+use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition, WindowApplyError};
 use crate::test_fixtures::{handles, seed_genesis};
 
 /// A solved, empty block: the commit refuses its body with `EmptyBlock`, a
@@ -30,6 +35,141 @@ fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static
     bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut block.header)
         .map_err(|_| "test nonce exhausted")?;
     Ok(block)
+}
+
+/// A solved child of `prev_blockhash` whose whole body is one transaction that
+/// is not a coinbase, and whose header commits to that body. Its
+/// witness-stripped size is `60 + script_len` bytes.
+fn coinbase_less_child(
+    prev_blockhash: BlockHash,
+    script_len: usize,
+) -> Result<Block, Box<dyn std::error::Error>> {
+    let tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::from_bytes(vec![0x51; script_len]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    assert_eq!(tx.base_size(), 60 + script_len);
+    let txs = vec![tx];
+    let merkle_root =
+        bitcoin_rs_chain::regtest_fixture::merkle_root(&txs).ok_or("test body has no root")?;
+    let mut header = Header {
+        version: 1,
+        prev_blockhash,
+        merkle_root,
+        time: 1_296_688_603,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    };
+    bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut header)
+        .map_err(|_| "test nonce exhausted")?;
+    Ok(Block { header, txs })
+}
+
+/// Delivers a coinbase-less body of `60 + script_len` bytes as a one-block
+/// window for its already-known header, to a fresh regtest chainstate.
+/// Returns the window failure, the header's tree status right after insert
+/// (the preexisting status a body failure must preserve) and after delivery,
+/// and the published applied tip after delivery.
+fn deliver_coinbase_less_body(
+    script_len: usize,
+) -> Result<(WindowApplyError, NodeStatus, NodeStatus, Hash256), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chainstate).map_err(|error: ApplyError| error.to_string())?;
+    let block = coinbase_less_child(genesis.block_hash(), script_len)?;
+    let hash = Hash256::from(block.block_hash());
+    chainstate
+        .block_tree
+        .write()
+        .insert_header(block.header, NodeStatus::HeaderValid)?;
+    // Inserting a best-work header publishes it as the header tip, so the
+    // preexisting status is whatever the tree assigned, not the requested one.
+    let before = {
+        let tree = chainstate.block_tree.read();
+        tree.lookup(hash)
+            .and_then(|id| tree.node(id).ok())
+            .map(|node| node.status)
+            .ok_or("the header must be in the tree after insert")?
+    };
+
+    let error = chainstate
+        .apply_window(&[&block], &[bytes::Bytes::from(consensus_bytes(&block))])
+        .err()
+        .ok_or("a coinbase-less body must not commit")?;
+    let tree = chainstate.block_tree.read();
+    let after = tree
+        .lookup(hash)
+        .and_then(|id| tree.node(id).ok())
+        .map(|node| node.status)
+        .ok_or("the header must stay in the tree")?;
+    let applied = chainstate
+        .applied_tip()
+        .load_full()
+        .map(|tip| tip.hash)
+        .ok_or("an applied tip must be published")?;
+    Ok((error, before, after, applied))
+}
+
+#[test]
+fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (error, before, after, applied) = deliver_coinbase_less_body(4)?;
+    assert!(
+        matches!(
+            error.source,
+            ApplyError::Consensus(ConsensusError::SixtyFourByteMutation)
+        ),
+        "got {:?}",
+        error.source
+    );
+    assert_eq!(error.disposition, WindowApplyDisposition::BodyMutated);
+    assert!(
+        error.invalidated.is_empty(),
+        "a mutated body must not invalidate its header subtree"
+    );
+    assert_eq!(
+        after, before,
+        "a mutated body must preserve its header's preexisting status"
+    );
+    assert_ne!(
+        after,
+        NodeStatus::Invalid,
+        "a mutated body must not prove its header invalid"
+    );
+    assert_eq!(
+        applied,
+        Hash256::from(Network::Regtest.genesis_block().block_hash()),
+        "a rejected body must not move the applied tip"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_coinbase_less_body_of_another_size_still_poisons_its_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (error, _, status, _) = deliver_coinbase_less_body(0)?;
+    assert!(
+        matches!(
+            error.source,
+            ApplyError::Consensus(ConsensusError::MissingCoinbase)
+        ),
+        "got {:?}",
+        error.source
+    );
+    assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
+    assert_eq!(error.invalidated.len(), 1);
+    assert_eq!(status, NodeStatus::Invalid);
+    Ok(())
 }
 
 #[test]
@@ -72,5 +212,148 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
         .load_full()
         .ok_or("window invalidation must republish the best valid tip")?;
     assert_eq!(tip.hash, Hash256::from(genesis.block_hash()));
+    Ok(())
+}
+
+/// What the staged-tip hook observed on a failing window: the staged tip it
+/// was handed, the borrowed block's identity, and the published tip still in
+/// the cell. Only hashes and heights cross the hook boundary.
+struct StagedFire {
+    staged_hash: Hash256,
+    staged_height: u32,
+    block_hash: Hash256,
+    published: Option<(Hash256, u32)>,
+}
+
+fn staging_recorder(
+    chain: &Chainstate,
+    fires: &Arc<Mutex<Vec<StagedFire>>>,
+) -> crate::TipStagedHook {
+    let fires = Arc::clone(fires);
+    let chain = chain.clone();
+    Arc::new(move |staged, block| {
+        // `applied_tip_snapshot` is a lock-free read; the hook takes no
+        // domain write lock and never reenters chainstate mutation.
+        let published = chain
+            .applied_tip_snapshot()
+            .map(|tip| (tip.hash, tip.height));
+        fires.lock().push(StagedFire {
+            staged_hash: staged.hash,
+            staged_height: staged.height,
+            block_hash: Hash256::from(block.block_hash()),
+            published,
+        });
+    })
+}
+
+/// When a later block in a window fails permanently, the failure-prefix flush
+/// hands the hook the last successfully staged block — never the failed one —
+/// and still publishes the committed prefix. The hook fires before the
+/// flush's durable sync, so the published tip inside the hook is the
+/// pre-window tip. A hook wired to the failing block, or a flush that
+/// published the staged tip early, fails this test.
+#[test]
+fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dyn std::error::Error>>
+{
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chainstate).map_err(|error: ApplyError| error.to_string())?;
+    // The prefix flush below commits a durable batch, so the window's
+    // lineage fence needs the genesis head seeded first.
+    chainstate.durable_head.commit(
+        None,
+        &bitcoin_rs_storage::DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: genesis_hash,
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+        &bitcoin_rs_storage::CommitRecords::default(),
+    )?;
+
+    let first = mined_child(genesis.block_hash(), 1)?;
+    let second = mined_child(first.block_hash(), 2)?;
+    let second_hash = Hash256::from(second.block_hash());
+    // An empty body is refused with `EmptyBlock`, a permanent failure: the
+    // header branch is poisoned, but the two committed blocks stay staged.
+    let bad = empty_child(second.block_hash(), 3)?;
+    let bad_hash = Hash256::from(bad.block_hash());
+    {
+        let mut tree = chainstate.block_tree.write();
+        bitcoin_rs_chain::accept_headers(
+            &mut tree,
+            &[first.header, second.header, bad.header],
+            Network::Regtest,
+            bitcoin_rs_chain::current_unix_seconds(),
+            bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+        )?;
+    }
+    let blocks = [&first, &second, &bad];
+    let serialized: Vec<bytes::Bytes> = blocks
+        .iter()
+        .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
+        .collect();
+
+    let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
+    chainstate
+        .set_tip_staged(staging_recorder(&chainstate, &fires))
+        .map_err(|_| "the staged-tip hook installs once")?;
+
+    let error = chainstate
+        .apply_window(&blocks, &serialized)
+        .err()
+        .ok_or("an empty trailing body must not commit")?;
+    assert!(
+        matches!(
+            error.source,
+            ApplyError::Consensus(ConsensusError::EmptyBlock)
+        ),
+        "got {:?}",
+        error.source
+    );
+    assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
+    assert_eq!(error.applied, 2, "two blocks committed before the failure");
+    assert_eq!(error.committed.len(), 2);
+    assert_eq!(
+        error.committed[1].hash, second_hash,
+        "the committed prefix ends at the last successful block"
+    );
+
+    let fires = fires.lock();
+    assert_eq!(
+        fires.len(),
+        1,
+        "the failure-prefix flush hands off exactly one staged tip"
+    );
+    assert_eq!(
+        fires[0].staged_hash, second_hash,
+        "the handoff names the last successful block, not the failed one"
+    );
+    assert_eq!(fires[0].staged_height, 2);
+    assert_eq!(
+        fires[0].block_hash, second_hash,
+        "the borrowed body is the last success, never the failed block"
+    );
+    assert!(
+        fires[0].block_hash != bad_hash,
+        "the failed block must never reach the hook"
+    );
+    assert_eq!(
+        fires[0].published,
+        Some((genesis_hash, 0)),
+        "the applied tip is still the pre-window tip at fire time"
+    );
+
+    let applied = chainstate
+        .applied_tip_snapshot()
+        .ok_or("the committed prefix must publish an applied tip")?;
+    assert_eq!(
+        applied.hash, second_hash,
+        "the failure-prefix flush publishes the last success, not the failure"
+    );
     Ok(())
 }

@@ -39,6 +39,9 @@ pub(crate) enum Step {
     /// The responder's peer speaks v1; these are the first bytes of its
     /// `version` message.
     V1([u8; V1_PREFIX_LEN]),
+    /// A decoy packet was consumed while reading the version; the caller may
+    /// recheck its lease and deadline before the next advance.
+    Yield,
     /// The encrypted session is ready.
     Established(Box<Established>),
 }
@@ -155,7 +158,8 @@ impl Handshake {
     }
 
     /// Reads toward the next step. A poll-timeout I/O error keeps all
-    /// progress; any other error ends the handshake.
+    /// progress; any other error ends the handshake. [`Step::Yield`] hands
+    /// control back after one decoy packet, leaving the handshake to resume.
     pub(crate) fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
         loop {
             if !self.outbound.is_empty() {
@@ -169,6 +173,9 @@ impl Handshake {
             let stepped = self.step(&mut counting);
             self.received_any |= received;
             match stepped {
+                // A decoy leaves the handshake running: only `Established` and
+                // the v1 handoff end it, so `advance` may resume after a yield.
+                Ok(Some(Step::Yield)) => return Ok(Step::Yield),
                 Ok(Some(step)) => {
                     self.state = State::Finished;
                     return Ok(step);
@@ -242,8 +249,12 @@ impl Handshake {
                 };
             }
             State::ReadVersion { recv, .. } => {
-                // The version packet's contents are reserved; receivers ignore them.
-                recv.read_contents(reader)?;
+                // The version packet's contents are reserved; receivers ignore
+                // them. A decoy yields control one packet at a time so the
+                // driver rechecks its lease and deadline between packets.
+                if recv.read_contents(reader)?.is_none() {
+                    return Ok(Some(Step::Yield));
+                }
                 let State::ReadVersion {
                     send,
                     recv,

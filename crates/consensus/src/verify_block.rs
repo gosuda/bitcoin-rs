@@ -11,6 +11,10 @@ use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 /// `commitment_header`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
+/// Shortest script that can carry a BIP141 commitment: the prefix and the
+/// 32-byte hash (Core `MINIMUM_WITNESS_COMMITMENT`).
+const MINIMUM_WITNESS_COMMITMENT: usize = 38;
+
 /// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
 /// the batch kernel can issue work.
 const AVX2_MERKLE_MIN_LEAVES: usize = sha256d64::LANES * 2;
@@ -20,6 +24,28 @@ pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 
 /// Consensus maximum serialized block size.
 pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
+
+/// Serialized size of two concatenated Merkle child hashes: a transaction of
+/// exactly this many witness-stripped bytes can pose as an inner tree node.
+const MERKLE_NODE_SERIALIZED_SIZE: usize = 64;
+
+/// Whether `txs` is a body whose first transaction is not a coinbase and any
+/// transaction is exactly 64 witness-stripped bytes: Core `IsBlockMutated`
+/// (`validation.cpp:4035-4061`, CVE-2017-12842).
+///
+/// Such a body can hash to a valid header's Merkle root with fabricated
+/// "transactions" standing in for inner nodes, so the header is not at fault
+/// and the delivered body is the mutation. A coinbase-less body of any other
+/// shape does prove its header invalid, and stays [`ConsensusError::MissingCoinbase`].
+/// A body that starts with a coinbase is never reported, as in Core: forging a
+/// 64-byte coinbase needs at least 224 bits of work.
+#[must_use]
+pub fn is_sixty_four_byte_mutation(txs: &[Tx]) -> bool {
+    txs.first().is_some_and(|first| !first.is_coinbase())
+        && txs
+            .iter()
+            .any(|tx| tx.base_size() == MERKLE_NODE_SERIALIZED_SIZE)
+}
 
 /// Computes contextual script verification flags for a block.
 #[must_use]
@@ -142,7 +168,11 @@ fn verify_block_structure(block: &Block, facts: &BlockFacts) -> Result<(), Conse
         return Err(ConsensusError::MerkleRoot);
     }
     if !txdata[0].is_coinbase() {
-        return Err(ConsensusError::MissingCoinbase);
+        return Err(if is_sixty_four_byte_mutation(txdata) {
+            ConsensusError::SixtyFourByteMutation
+        } else {
+            ConsensusError::MissingCoinbase
+        });
     }
     for (tx_index, tx) in txdata.iter().enumerate().skip(1) {
         if tx.is_coinbase() {
@@ -330,19 +360,27 @@ fn hash_avx2_parent_batches<T: Copy>(
     idx
 }
 
-/// The last coinbase output carrying the BIP141 commitment prefix.
+/// Output index of the last coinbase output carrying the BIP141 commitment
+/// prefix: Core `GetWitnessCommitmentIndex` (`src/consensus/validation.h`).
+/// The output script is at least [`MINIMUM_WITNESS_COMMITMENT`] bytes; the
+/// bytes after the commitment hash are free, which BIP325 uses for the signet
+/// solution.
+pub(crate) fn witness_commitment_index(coinbase: &Tx) -> Option<usize> {
+    coinbase.outputs.iter().rposition(|output| {
+        output.script_pubkey.len() >= MINIMUM_WITNESS_COMMITMENT
+            && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX
+    })
+}
+
+/// The 32-byte commitment hash of the block's last BIP141 commitment output.
 fn witness_commitment(block: &Block) -> Option<&[u8]> {
-    block
-        .txs
-        .first()?
+    let coinbase = block.txs.first()?;
+    let index = witness_commitment_index(coinbase)?;
+    coinbase
         .outputs
-        .iter()
-        .rev()
-        .find(|output| {
-            output.script_pubkey.len() >= 38
-                && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX
-        })
-        .map(|output| &output.script_pubkey[6..38])
+        .get(index)?
+        .script_pubkey
+        .get(6..MINIMUM_WITNESS_COMMITMENT)
 }
 
 /// Verifies witness commitment and rejects malleated witness trees.
@@ -380,6 +418,9 @@ pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool
 pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     verify_merkle_root_with_txids(block, &txids)?;
+    if is_sixty_four_byte_mutation(&block.txs) {
+        return Err(ConsensusError::SixtyFourByteMutation);
+    }
 
     let commitment = witness_commitment(block);
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
@@ -451,9 +492,10 @@ mod tests {
 
     use super::{
         BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_merkle_root_matches_txids,
-        compute_merkle_root, merkle_root_and_mutation, merkle_root_and_mutation_borrowed,
-        merkle_root_spine, verify_block_non_contextual, verify_block_rules,
-        verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
+        check_block_body_binding, compute_merkle_root, is_sixty_four_byte_mutation,
+        merkle_root_and_mutation, merkle_root_and_mutation_borrowed, merkle_root_spine,
+        verify_block_non_contextual, verify_block_rules, verify_block_rules_precomputed,
+        verify_flags, verify_merkle_root_with_txids,
     };
     use crate::ConsensusError;
     use crate::bip9::SoftforkState;
@@ -490,6 +532,30 @@ mod tests {
 
     fn witness_spend_tx() -> Tx {
         spend_tx(2, vec![vec![1; 32]])
+    }
+
+    /// A non-coinbase transaction whose fixed fields take 60 stripped bytes, so
+    /// a `script_len`-byte output script makes it `60 + script_len` bytes.
+    fn sized_spend_tx(seed: u8, script_len: usize, witness: Vec<Vec<u8>>) -> Tx {
+        let mut tx = spend_tx(seed, witness);
+        tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x51; script_len]);
+        tx
+    }
+
+    /// A non-coinbase transaction that serializes, witness stripped, to the
+    /// size of two Merkle child hashes.
+    fn sixty_four_byte_tx(seed: u8, witness: Vec<Vec<u8>>) -> Tx {
+        let tx = sized_spend_tx(seed, 4, witness);
+        assert_eq!(tx.base_size(), 64, "fixture must be a Merkle node's size");
+        tx
+    }
+
+    /// A coinbase whose stripped serialization is exactly 64 bytes.
+    fn sixty_four_byte_coinbase() -> Tx {
+        let mut tx = coinbase_tx();
+        tx.inputs[0].script_sig = Script::from_bytes(vec![1; 4]);
+        assert_eq!(tx.base_size(), 64, "fixture must be a Merkle node's size");
+        tx
     }
 
     fn block_with_transactions(txs: Vec<Tx>) -> Block {
@@ -824,6 +890,149 @@ mod tests {
                 ),
                 "segwit_active {segwit_active}"
             );
+        }
+    }
+
+    #[test]
+    fn mutation_fixture_sizes_count_only_stripped_bytes() {
+        assert_eq!(spend_tx(1, Vec::new()).base_size(), 60);
+        assert_eq!(sized_spend_tx(1, 3, Vec::new()).base_size(), 63);
+        assert_eq!(sized_spend_tx(1, 4, Vec::new()).base_size(), 64);
+        assert_eq!(sized_spend_tx(1, 5, Vec::new()).base_size(), 65);
+        let witnessed = sized_spend_tx(1, 4, vec![vec![1; 32]]);
+        assert_eq!(witnessed.base_size(), 64);
+        assert!(
+            witnessed.total_size() > 64,
+            "witness bytes must not count toward the 64-byte test"
+        );
+    }
+
+    #[test]
+    fn mutation_predicate_needs_a_missing_coinbase_and_an_exact_64_byte_tx() {
+        let node = || sixty_four_byte_tx(1, Vec::new());
+        let sixty = || spend_tx(2, Vec::new());
+        let cases: [(Vec<Tx>, bool); 11] = [
+            (Vec::new(), false),
+            (vec![node()], true),
+            (vec![sixty_four_byte_tx(1, vec![vec![1; 32]])], true),
+            (vec![sixty(), node()], true),
+            (vec![node(), sixty()], true),
+            (vec![sixty()], false),
+            (vec![sized_spend_tx(3, 3, Vec::new())], false),
+            (vec![sized_spend_tx(3, 5, Vec::new())], false),
+            (vec![coinbase_tx(), node()], false),
+            (vec![sixty_four_byte_coinbase()], false),
+            (vec![sixty_four_byte_coinbase(), node()], false),
+        ];
+        for (txs, expected) in cases {
+            assert_eq!(
+                is_sixty_four_byte_mutation(&txs),
+                expected,
+                "{} transactions, sizes {:?}",
+                txs.len(),
+                txs.iter().map(Tx::base_size).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Both entry points report the 64-byte mutation for `txs`, whose header
+    /// commits to them, with segwit on and off.
+    fn assert_sixty_four_byte_mutation(txs: Vec<Tx>, label: &str) {
+        let block = block_with_transactions(txs);
+        for segwit_active in [false, true] {
+            assert_eq!(
+                check_block_rules(&block, BlockRuleContext { segwit_active }),
+                Err(ConsensusError::SixtyFourByteMutation),
+                "rules, {label}, segwit_active {segwit_active}"
+            );
+            // Without the early mutation return, a witness here would surface
+            // as UnexpectedWitness.
+            assert_eq!(
+                check_block_body_binding(&block, segwit_active),
+                Err(ConsensusError::SixtyFourByteMutation),
+                "binding, {label}, segwit_active {segwit_active}"
+            );
+        }
+        assert_eq!(
+            verify_block_rules(&block),
+            Err(ConsensusError::SixtyFourByteMutation),
+            "the public entry derives the same facts, {label}"
+        );
+    }
+
+    #[test]
+    fn sixty_four_byte_body_without_coinbase_is_a_mutation_at_both_entry_points() {
+        let witnessed = || vec![vec![1; 32]];
+        assert_sixty_four_byte_mutation(vec![sixty_four_byte_tx(1, Vec::new())], "alone");
+        assert_sixty_four_byte_mutation(
+            vec![sixty_four_byte_tx(1, witnessed())],
+            "alone with witness",
+        );
+        assert_sixty_four_byte_mutation(
+            vec![spend_tx(2, Vec::new()), sixty_four_byte_tx(3, Vec::new())],
+            "after a 60-byte transaction",
+        );
+        assert_sixty_four_byte_mutation(
+            vec![spend_tx(2, Vec::new()), sixty_four_byte_tx(3, witnessed())],
+            "after a 60-byte transaction with witness",
+        );
+    }
+
+    #[test]
+    fn binding_reports_a_wrong_root_before_the_sixty_four_byte_mutation() {
+        let mut block = block_with_transactions(vec![sixty_four_byte_tx(1, Vec::new())]);
+        block.header.merkle_root = Hash256::from_le_bytes(&[0xff; 32]);
+        for segwit_active in [false, true] {
+            assert_eq!(
+                check_block_body_binding(&block, segwit_active),
+                Err(ConsensusError::MerkleRoot),
+                "segwit_active {segwit_active}"
+            );
+        }
+    }
+
+    #[test]
+    fn sixty_byte_body_without_coinbase_stays_missing_coinbase_and_binds() {
+        let tx = spend_tx(1, Vec::new());
+        assert_eq!(tx.base_size(), 60);
+        let block = block_with_transactions(vec![tx]);
+        for segwit_active in [false, true] {
+            assert_eq!(
+                check_block_rules(&block, BlockRuleContext { segwit_active }),
+                Err(ConsensusError::MissingCoinbase),
+                "segwit_active {segwit_active}"
+            );
+            assert_eq!(
+                check_block_body_binding(&block, segwit_active),
+                Ok(()),
+                "a coinbase-less body of another size is bound to its header"
+            );
+        }
+        assert_eq!(
+            verify_block_rules(&block),
+            Err(ConsensusError::MissingCoinbase)
+        );
+    }
+
+    #[test]
+    fn a_body_with_a_coinbase_is_never_a_sixty_four_byte_mutation() {
+        for txs in [
+            vec![coinbase_tx(), sixty_four_byte_tx(1, Vec::new())],
+            vec![sixty_four_byte_coinbase()],
+        ] {
+            let block = block_with_transactions(txs);
+            for segwit_active in [false, true] {
+                assert_eq!(
+                    check_block_rules(&block, BlockRuleContext { segwit_active }),
+                    Ok(()),
+                    "segwit_active {segwit_active}"
+                );
+                assert_eq!(
+                    check_block_body_binding(&block, segwit_active),
+                    Ok(()),
+                    "segwit_active {segwit_active}"
+                );
+            }
         }
     }
 

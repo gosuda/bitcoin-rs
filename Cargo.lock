@@ -305,6 +305,7 @@ dependencies = [
  "bitcoinkernel",
  "criterion",
  "hashbrown 0.17.1",
+ "parking_lot",
  "rayon",
  "secp256k1",
  "serde",
@@ -370,7 +371,9 @@ dependencies = [
  "hashbrown 0.17.1",
  "metrics",
  "parking_lot",
+ "proptest",
  "sha2",
+ "smallvec",
  "tempfile",
  "thiserror",
  "tracing",
@@ -393,6 +396,7 @@ dependencies = [
  "proptest",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -416,6 +420,7 @@ dependencies = [
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
  "bytes",
+ "cap-fs-ext",
  "cap-std",
  "compact_str",
  "criterion",
@@ -532,6 +537,7 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin_hashes",
+ "criterion",
  "proptest",
  "secp256k1",
  "serde_json",

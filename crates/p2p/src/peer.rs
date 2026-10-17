@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 
@@ -140,6 +141,16 @@ pub struct Peer<S> {
     pub wtxid_relay: WtxidRelayState,
     /// One BIP157 request waiting for asynchronous index publication.
     pub(crate) pending_filter_request: Option<(Message, std::time::Instant)>,
+    /// The unserved remainder of one `getdata` that stopped at the outbound
+    /// production gate, in request order; empty when nothing is parked.
+    /// Always a suffix of one decoded request, so it never exceeds
+    /// [`crate::inv::MAX_INV_PER_MSG`] items. The session loop reads nothing
+    /// from the peer while it is non-empty.
+    pub(crate) pending_getdata: Vec<Inventory>,
+    /// Items of the parked `getdata` already found unservable. They are
+    /// reported in one `notfound` ahead of the tail's own answers once the
+    /// queue can take the message.
+    pub(crate) pending_notfound: Vec<Inventory>,
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
@@ -175,6 +186,8 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             pending_filter_request: None,
+            pending_getdata: Vec::new(),
+            pending_notfound: Vec::new(),
             net_trace: None,
             recv: negotiated.recv,
             send: Some(negotiated.send),
@@ -191,6 +204,13 @@ impl<S> Peer<S> {
     /// through this peer fail.
     pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
         self.send.take()
+    }
+
+    /// Whether a `getdata` is parked, tail or deferred `notfound`: the
+    /// session owes the peer answers and must not read further requests.
+    #[must_use]
+    pub(crate) fn has_parked_getdata(&self) -> bool {
+        !self.pending_getdata.is_empty() || !self.pending_notfound.is_empty()
     }
 
     /// Attaches the `net:*` probe context captured at the connection root.
@@ -226,11 +246,14 @@ impl<S: Read + Write> Peer<S> {
 }
 
 impl<S: Read> Peer<S> {
-    /// Read one message through the connection's transport.
+    /// Read at most one message through the connection's transport.
     ///
-    /// A poll timeout part-way through a frame or packet keeps the bytes
-    /// already read, so retrying after `TimedOut` or `WouldBlock` continues it.
-    pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
+    /// `Ok(None)` only from a v2 session: the packet was a BIP324 decoy or a
+    /// message of an empty or undefined type, both dropped. A v1 frame always
+    /// yields `Some`. A poll timeout part-way through a frame or packet keeps
+    /// the bytes already read, so retrying after `TimedOut` or `WouldBlock`
+    /// continues it.
+    pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
         self.recv
             .read_message(&mut self.stream, self.magic, |command, payload| {
@@ -397,7 +420,9 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
 
-        let (message, payload) = peer.read_message()?;
+        let (message, payload) = peer
+            .read_message()?
+            .ok_or_else(|| std::io::Error::other("a v1 frame is a message"))?;
 
         assert_eq!(message, Message::Pong(2));
         assert!(!payload.is_empty());
@@ -429,7 +454,8 @@ mod tests {
         let mut stalls = 0_usize;
         let message = loop {
             match peer.read_message() {
-                Ok((message, _)) => break message,
+                Ok(Some((message, _))) => break message,
+                Ok(None) => continue,
                 Err(PeerError::Io(error))
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
                         && Instant::now() < deadline =>

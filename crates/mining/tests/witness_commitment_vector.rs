@@ -14,7 +14,7 @@ use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin::opcodes::all::{OP_PUSHBYTES_36, OP_RETURN};
 use bitcoin::{block, pow};
-use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolMiningSnapshot};
+use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::{
     CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, witness_commitment_script,
 };
@@ -43,9 +43,9 @@ const VECTOR_COMMITMENT: [u8; 32] = [
 fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<(), Box<dyn Error>> {
     let parent = witnessed_tx(1, 50_000, None);
     let child = witnessed_tx(2, 40_000, Some(parent.txid()));
-    let snapshot = snapshot_with(&[parent.clone(), child.clone()], &[2_000, 3_000])?;
+    let pool = pool_with(&[parent.clone(), child.clone()], &[2_000, 3_000])?;
 
-    let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
+    let candidate = assemble_candidate(&context(), &pool, PAYOUT)?;
     let commitment = candidate
         .witness_commitment
         .ok_or("segwit-active candidate must carry a commitment")?;
@@ -113,12 +113,13 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     );
 
     // Legacy fallback: no commitment anywhere when segwit is inactive.
+    let legacy_pool = pool_with(&[witnessed_tx(1, 50_000, None)], &[2_000])?;
     let legacy = assemble_candidate(
         &CandidateContext {
             segwit_active: false,
             ..context()
         },
-        &snapshot_with(&[witnessed_tx(1, 50_000, None)], &[2_000])?,
+        &legacy_pool,
         PAYOUT,
     )?;
     assert!(legacy.witness_commitment.is_none());
@@ -133,13 +134,13 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     Ok(())
 }
 
-fn snapshot_with(txs: &[Tx], fees: &[u64]) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
+fn pool_with(txs: &[Tx], fees: &[u64]) -> Result<Mempool, Box<dyn Error>> {
     assert_eq!(txs.len(), fees.len());
     let mut pool = Mempool::new(MempoolLimits::default());
     for (tx, &fee) in txs.iter().zip(fees) {
         insert(&mut pool, tx.clone(), u32::try_from(tx.vsize())?, fee, 0, 0)?;
     }
-    Ok(pool.mining_snapshot())
+    Ok(pool)
 }
 
 /// `OP_RETURN OP_PUSHBYTES_36 aa21a9ed <32-byte commitment>`.

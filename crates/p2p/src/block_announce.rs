@@ -26,11 +26,12 @@ use std::time::Duration;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use crate::PeerTable;
+use crate::chain_query::{RecentBlockSlot, cmpct_message_from_native};
 #[cfg(test)]
 use crate::connection::PeerLease;
 use crate::connection::PeerSource;
@@ -115,6 +116,10 @@ struct AnnounceState {
     high_bandwidth_requested_peers: Vec<PeerSource>,
     /// Observation cursor only; chainstate remains the authoritative tip owner.
     last_processed_tip: Option<Hash256>,
+    /// Greatest height announced early. Monotonic: a second block at the
+    /// same height (reorg race, duplicate connect) or a stale side branch
+    /// never re-announces.
+    highest_fast_announce: u32,
 }
 
 #[derive(Clone)]
@@ -134,6 +139,7 @@ pub struct BlockAnnouncer {
         bitcoin_rs_primitives::Network,
     )>,
     state: Mutex<AnnounceState>,
+    recent: RecentBlockSlot,
 }
 
 impl BlockAnnouncer {
@@ -150,7 +156,17 @@ impl BlockAnnouncer {
             config,
             ibd: None,
             state: Mutex::new(AnnounceState::default()),
+            recent: RecentBlockSlot::default(),
         }
+    }
+
+    /// Attaches the early-announce body rendezvous shared with the chain
+    /// query, so compact `getdata` and `getblocktxn` for the most recently
+    /// announced hash answer from the held body before the store carries it.
+    #[must_use]
+    pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
+        self.recent = recent;
+        self
     }
 
     /// Configures the IBD gate to suppress proactive block announcements during initial block download.
@@ -368,6 +384,128 @@ impl BlockAnnouncer {
         }
     }
 
+    /// One ready session's announcement anchor: its source, its recorded
+    /// compact preference, and its best demonstrated-or-announced position on
+    /// the active chain. Shared by post-commit planning and the pre-commit
+    /// early send so both read the same eligibility.
+    fn peer_anchor(
+        &self,
+        session: &crate::PeerSession,
+    ) -> (
+        PeerSource,
+        crate::peer_table::PeerAnnouncementState,
+        Option<(Hash256, u32)>,
+    ) {
+        let source = session.lease.source(session.addr);
+        let peer_state = self.peers.announcement_state(source).unwrap_or_default();
+        let known_position = peer_state
+            .last_announced_block
+            .into_iter()
+            .chain(session.demonstrated_tips.iter().copied())
+            .filter_map(|hash| {
+                self.chain_query
+                    .active_height(BlockHash::from(hash))
+                    .map(|height| (hash, height))
+            })
+            .max_by_key(|(_, height)| *height);
+        (source, peer_state, known_position)
+    }
+
+    /// High-bandwidth compact-push candidacy for one ready session: the peer
+    /// asked for high-bandwidth compact blocks, is not blocksonly-gated,
+    /// knows the tip's parent, and was not already sent this header. The
+    /// compact body builds lazily through `build`, so ineligible peers cost
+    /// no store load and the pre-commit path builds its hand-held body once
+    /// for all peers. One rule, two callers.
+    fn plan_compact_push(
+        &self,
+        session: &crate::PeerSession,
+        peer_state: crate::peer_table::PeerAnnouncementState,
+        known_position: Option<(Hash256, u32)>,
+        tip_height: u32,
+        build: impl FnOnce() -> Option<Message>,
+    ) -> Option<PlannedAnnouncement> {
+        if known_position.is_some_and(|(_, height)| height >= tip_height) {
+            return None;
+        }
+        // Peer must have explicitly requested high-bandwidth compact blocks
+        // from us.
+        if peer_state.compact_high_bandwidth != Some(true)
+            || peer_state.compact_version != Some(COMPACT_BLOCK_VERSION)
+            || self.config.blocksonly
+            || !session.lease.role().relays_transactions()
+        {
+            return None;
+        }
+        let knows_prev =
+            known_position.is_some_and(|(_, height)| height >= tip_height.saturating_sub(1));
+        if !knows_prev {
+            return None;
+        }
+        build().map(|message| PlannedAnnouncement {
+            source: session.lease.source(session.addr),
+            message,
+            confirms_tip: true,
+        })
+    }
+
+    /// Early compact-block announce for a PoW-valid tip child: relays the
+    /// block to eligible high-bandwidth peers before connect finishes, and
+    /// holds the body so compact `getdata` and `getblocktxn` answer before
+    /// the store carries it. Never publishes a tip and never advances the
+    /// mining generation; miners switch on the post-commit path. Skipped in
+    /// initial block download and for a height at or below the greatest
+    /// already announced early, so reorg races and duplicate connects send
+    /// nothing more. A later connect failure is not retracted — the send
+    /// stands, and the failure sends nothing further.
+    pub fn announce_pow_valid(
+        &self,
+        block: &Block,
+        hash: Hash256,
+        height: u32,
+    ) -> Vec<(SocketAddr, Message)> {
+        if self.in_ibd() {
+            return Vec::new();
+        }
+        let Some(prebuilt) = cmpct_message_from_native(block, COMPACT_BLOCK_VERSION) else {
+            return Vec::new();
+        };
+        {
+            let mut state = self.state.lock();
+            if height <= state.highest_fast_announce {
+                return Vec::new();
+            }
+            state.highest_fast_announce = height;
+            // The one held body: `block` is borrowed from the connect call,
+            // so retaining it past this call needs exactly one copy.
+            self.recent.store(hash, Arc::new(block.clone()));
+        }
+        let mut sent = Vec::new();
+        for session in self.ready_sessions() {
+            let (_, peer_state, known_position) = self.peer_anchor(&session);
+            let Some(announcement) =
+                self.plan_compact_push(&session, peer_state, known_position, height, || {
+                    Some(prebuilt.clone())
+                })
+            else {
+                continue;
+            };
+            if self
+                .peers
+                .send(announcement.source, announcement.message.clone())
+                .is_err()
+            {
+                continue;
+            }
+            // Record the per-peer announcement: the post-commit `process_tip`
+            // reads it as the peer's known position and sends no second
+            // `cmpctblock` for this hash.
+            self.peers.note_announced_block(announcement.source, hash);
+            sent.push((announcement.source.addr, announcement.message));
+        }
+        sent
+    }
+
     fn planned_announcements(&self, tip: CommittedTip) -> Vec<PlannedAnnouncement> {
         let tip_hash = Hash256::from(tip.hash);
         let live_sessions = self.ready_sessions();
@@ -376,53 +514,28 @@ impl BlockAnnouncer {
 
         for session in &live_sessions {
             let addr = session.addr;
-            let source = session.lease.source(addr);
-
-            let peer_state = self.peers.announcement_state(source).unwrap_or_default();
-            let known_position = peer_state
-                .last_announced_block
-                .into_iter()
-                .chain(session.demonstrated_tips.iter().copied())
-                .filter_map(|hash| {
-                    self.chain_query
-                        .active_height(BlockHash::from(hash))
-                        .map(|height| (hash, height))
-                })
-                .max_by_key(|(_, height)| *height);
+            let (source, peer_state, known_position) = self.peer_anchor(session);
 
             if known_position.is_some_and(|(_, height)| height >= tip.height) {
                 continue;
             }
 
             // Option A: High-Bandwidth BIP152 Compact Block
-            // Peer must have explicitly requested high-bandwidth compact blocks from us.
-            if peer_state.compact_high_bandwidth == Some(true)
-                && peer_state.compact_version == Some(COMPACT_BLOCK_VERSION)
-                && !self.config.blocksonly
-                && session.lease.role().relays_transactions()
+            if let Some(announcement) =
+                self.plan_compact_push(session, peer_state, known_position, tip.height, || {
+                    self.chain_query
+                        .compact_block_for(tip.height, tip.hash, Some(COMPACT_BLOCK_VERSION))
+                        .filter(|msg| matches!(msg, Message::CmpctBlock(_)))
+                })
             {
-                let knows_prev = known_position
-                    .is_some_and(|(_, height)| height >= tip.height.saturating_sub(1));
-                if knows_prev {
-                    if let Some(msg @ Message::CmpctBlock(_)) = self.chain_query.compact_block_for(
-                        tip.height,
-                        tip.hash,
-                        Some(COMPACT_BLOCK_VERSION),
-                    ) {
-                        planned.push(PlannedAnnouncement {
-                            source,
-                            message: msg,
-                            confirms_tip: true,
-                        });
-                        tracing::debug!(
-                            peer = %addr,
-                            tip_height = tip.height,
-                            mode = "compact",
-                            "block announcement planned"
-                        );
-                        continue;
-                    }
-                }
+                tracing::debug!(
+                    peer = %addr,
+                    tip_height = tip.height,
+                    mode = "compact",
+                    "block announcement planned"
+                );
+                planned.push(announcement);
+                continue;
             }
 
             // Option B: Headers-First Announcement (BIP130)
@@ -584,7 +697,10 @@ mod tests {
     use bitcoin_rs_chain::{
         BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader,
     };
-    use bitcoin_rs_primitives::{CompactTarget, Header, Network};
+    use bitcoin_rs_primitives::{
+        Amount, Block, CompactTarget, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,
+        TxIn, TxOut, Witness,
+    };
     use parking_lot::RwLock;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1624,5 +1740,165 @@ mod tests {
             other => panic!("expected Inv fallback when distance > 8, got {other:?}"),
         }
         assert!(rx_b.try_recv().is_ok());
+    }
+
+    /// One-coinbase native tip child for early-send tests. The encoder never
+    /// validates, so the merkle root stays default; only the header linkage
+    /// matters for anchor resolution.
+    fn tip_child_block(prev: BlockHash, time: u32) -> Block {
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: prev,
+                merkle_root: Hash256::default(),
+                time,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
+                nonce: 0,
+            },
+            txs: vec![Tx {
+                version: 2,
+                lock_time: LockTime::ZERO,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: Script::from_bytes(vec![0x51]),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                outputs: vec![TxOut {
+                    value: Amount::from_sat(0),
+                    script_pubkey: Script::from_bytes(vec![]),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn early_announce_sends_one_cmpctblock_to_parent_known_hb_peer() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        // A high-bandwidth peer that demonstrated the tip (the parent).
+        let addr = test_addr(1301);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
+        note_compact_preference(&table, addr, true, 2);
+        mark_known(&table, &announcer, addr, chain.hash_at(1));
+        // A second peer without compact relay must stay silent.
+        let quiet = test_addr(1302);
+        let (_quiet_lease, quiet_rx) = setup_peer(&table, &announcer, quiet, false);
+        // The second setup reconciles high-bandwidth slots and may promote
+        // the first peer (`SendCmpct`); drain it so the assertions below see
+        // only the early send.
+        while rx.try_recv().is_ok() {}
+
+        let block = tip_child_block(chain.block_hash_at(1), 1200);
+        let hash = Hash256::from(block.block_hash());
+        let sent = announcer.announce_pow_valid(&block, hash, 2);
+
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, addr);
+        assert!(
+            matches!(sent[0].1, Message::CmpctBlock(_)),
+            "expected one cmpctblock, got {:?}",
+            sent[0].1
+        );
+        assert!(
+            quiet_rx.try_recv().is_err(),
+            "a non-compact peer must receive nothing early"
+        );
+        let received = rx.try_recv().expect("peer received the early send");
+        assert!(matches!(received, Message::CmpctBlock(_)));
+        assert_eq!(announcer.peer_known_block(addr), Some(hash));
+    }
+
+    #[test]
+    fn early_announce_same_height_sends_nothing() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+        let addr = test_addr(1311);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
+        note_compact_preference(&table, addr, true, 2);
+        mark_known(&table, &announcer, addr, chain.hash_at(1));
+
+        let block = tip_child_block(chain.block_hash_at(1), 1200);
+        let hash = Hash256::from(block.block_hash());
+        assert_eq!(announcer.announce_pow_valid(&block, hash, 2).len(), 1);
+        while rx.try_recv().is_ok() {}
+
+        // Same height again — duplicate or reorg sibling — sends nothing.
+        assert_eq!(announcer.announce_pow_valid(&block, hash, 2), []);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn early_announce_without_parent_knowledge_sends_nothing() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+        // High-bandwidth preference recorded, but the parent never
+        // demonstrated: the peer cannot anchor the tip child.
+        let addr = test_addr(1321);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
+        note_compact_preference(&table, addr, true, 2);
+
+        let block = tip_child_block(chain.block_hash_at(1), 1200);
+        let hash = Hash256::from(block.block_hash());
+        assert_eq!(announcer.announce_pow_valid(&block, hash, 2), []);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn post_commit_process_tip_sends_no_second_cmpctblock() {
+        let mut chain = MockAnnounceChain::new(2);
+        let mut early = tip_child_block(chain.block_hash_at(1), 1200);
+        early.header.nonce = 7;
+        chain.headers.push(early.header);
+        chain.active_len = 3;
+        chain.set_committed_height(1);
+        let chain = Arc::new(chain);
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+        let addr = test_addr(1331);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
+        note_compact_preference(&table, addr, true, 2);
+        mark_known(&table, &announcer, addr, chain.hash_at(1));
+
+        let hash = Hash256::from(early.block_hash());
+        assert_eq!(announcer.announce_pow_valid(&early, hash, 2).len(), 1);
+        while rx.try_recv().is_ok() {}
+        chain.set_committed_height(2);
+
+        let sent = announcer.process_tip();
+        assert!(
+            !sent
+                .iter()
+                .any(|(peer, message)| *peer == addr && matches!(message, Message::CmpctBlock(_))),
+            "post-commit must not resend cmpctblock to the early peer: {sent:?}"
+        );
+        // Reconciliation inside `process_tip` may promote the peer with
+        // `SendCmpct`; the wire must carry no second `cmpctblock`.
+        while let Ok(message) = rx.try_recv() {
+            assert!(
+                !matches!(message, Message::CmpctBlock(_)),
+                "post-commit must not resend cmpctblock to the early peer"
+            );
+        }
     }
 }

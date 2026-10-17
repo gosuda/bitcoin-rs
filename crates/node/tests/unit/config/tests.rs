@@ -45,7 +45,11 @@ fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
     let first = std::fs::read_to_string(&path)?;
     assert!(!dir.path().join(".cookie.tmp").exists());
     assert!(first.starts_with("__cookie__:"));
-    assert_eq!(first.trim_end().len(), "__cookie__:".len() + 64);
+    assert_eq!(first.len(), "__cookie__:".len() + 64);
+    assert!(
+        !first.ends_with('\n'),
+        "the generated cookie carries no trailing newline"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

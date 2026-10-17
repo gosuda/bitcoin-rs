@@ -8,7 +8,7 @@ use crate::{
     AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, SubmitError,
 };
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_primitives::{Tx, unix_time_secs};
 
 fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     if txs.is_empty() || txs.len() > crate::standardness::MAX_PACKAGE_COUNT {
@@ -147,7 +147,11 @@ impl MempoolGateway {
                     .collect();
                 let entries = crate::package::package_entries(&requests, &prepared);
                 let checks = crate::package::capture_package_checks(&pool, &pending, &entries);
-                (prepared, checks, pool.prepare_package(entries))
+                (
+                    prepared,
+                    checks,
+                    pool.prepare_package(entries, unix_time_secs()),
+                )
             };
             // Unlike a single preview, even one new package member must use
             // aggregate-package policy, including ephemeral-spend checks.
@@ -159,6 +163,7 @@ impl MempoolGateway {
                 Some(checks),
                 aggregate_error,
                 AdmissionMode::PackageSubmit,
+                self.script_cache(),
             );
             let verdict = facts
                 .package_error
@@ -174,6 +179,13 @@ impl MempoolGateway {
                         })
                     })
                 });
+            // Validated keys are carried out before the writer runs; the
+            // atomic commit below decides whether any of them is inserted,
+            // all or nothing, outside the pool write lock.
+            let cache_keys: Vec<_> = prepared
+                .iter()
+                .filter_map(|job| job.script_cache_key)
+                .collect();
             let result = self.commit(
                 origin,
                 |pool| {
@@ -196,7 +208,16 @@ impl MempoolGateway {
                 |result| Some(result),
             );
             match result {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    if let Some(cache) = self.script_cache() {
+                        for (wtxid, flags) in cache_keys {
+                            cache.insert(wtxid, flags);
+                        }
+                    }
+                    let admitted: Vec<_> = txs.iter().map(Tx::txid).collect();
+                    self.expire_after_admission(origin, AdmissionFence::Stable, &admitted)?;
+                    return Ok(result);
+                }
                 Err(crate::AdmitError::GenerationChanged | crate::AdmitError::MempoolChanged) => {
                     continue 'attempt;
                 }

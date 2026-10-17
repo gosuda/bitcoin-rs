@@ -1003,7 +1003,7 @@ mod tests {
             .first()
             .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
             .clone();
-        coinbase.version = -1;
+        coinbase.version = u32::MAX;
         let txid = coinbase.txid();
         {
             let mut pool = ctx.mempool.gateway.pool().write();
@@ -1190,7 +1190,7 @@ mod tests {
         }
 
         let mut genesis = fixture_genesis();
-        genesis.txs[0].version = i32::MIN;
+        genesis.txs[0].version = 1_u32 << 31;
         genesis.header.merkle_root = genesis.txs[0].txid().0;
         let Some(coinbase) = genesis.txs.first().cloned() else {
             panic!("genesis has no transactions");
@@ -2115,7 +2115,14 @@ mod tests {
             .gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1, 0),
+                MempoolEntry::new(
+                    Arc::new(parent),
+                    parent_vsize,
+                    10_000,
+                    bitcoin_rs_primitives::unix_time_secs(),
+                    1,
+                    0,
+                ),
             )
             .expect("parent admitted to the mempool");
 

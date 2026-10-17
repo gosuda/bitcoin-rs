@@ -24,6 +24,16 @@ the transaction lifecycle ownership boundary, see
 `FeeEstimator` is fed by `tx_entered`, `tx_left`, and `block_connected`, and its
 `estimate` answers a confirmation-target query with a `FeeRate` in sat/kvB, refusing
 rather than fabricating when history is thin.
+Script-execution cache: the node shares one native-only, ephemeral
+`ScriptExecutionCache` between the mempool gateway and block connect, keyed by
+the exact `(wtxid, script-flag bits)` pair with take-once semantics. Admission
+re-verifies a transaction under the next block's flags outside the pool write
+lock; only a committed (accepted) mutation inserts the key, so rejected
+admissions and failed packages never fill — peer, local, and package
+submissions share this rule, and block connect consults it. A hit skips script
+re-execution only; finality, amounts, BIP68 locks, and sigop limits always run,
+and any flag divergence is a miss that re-verifies. No throughput claim is made
+here; consult the step-4 measurement record.
 ## Contract ownership
 
 Mempool behavioral contracts are defined in `docs/contracts/`:

@@ -8,6 +8,7 @@ use bitcoin_rs_chain::{
     BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
     TransitionAuthority, TransitionAuthorityGuard,
 };
+use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{Block, Network, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_primitives::{Hash256, Header};
@@ -56,6 +57,7 @@ mod journal;
 mod maintenance;
 pub mod recovery;
 pub mod reorg;
+pub mod verify;
 
 /// Historical script-verification policy owned by authoritative chainstate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,6 +410,41 @@ pub enum HeaderAdmissionError {
     Rejected(ChainError),
 }
 
+/// Early-announce hook for a commit-intent child of the published tip.
+///
+/// The hook runs after block rules pass, on the connecting thread.
+/// The transition lock is held, so the hook must not reenter
+/// chainstate mutation: it only reads the published tip and hands the block
+/// to P2P, which announces without publishing a tip or advancing mining.
+pub type PowValidBlockHook = Arc<dyn Fn(&Block, Hash256, u32) + Send + Sync>;
+
+/// Staged-tip hook for speculative template preparation.
+///
+/// The hook fires after a block's in-memory staging (UTXO commit and
+/// bookkeeping) and before its durable sync, on the connecting thread with the
+/// chain-transition reservation held. No domain write lock (block tree, UTXO
+/// set, journal) is held across the call; the hook must not take one either,
+/// and must never reenter chainstate mutation.
+///
+/// The staged tip is speculative, never the published tip: a later sync or
+/// durable-head failure abandons it without publication, so the callback must
+/// treat the tip as uncertified (reconstructed chain-transaction count,
+/// commit id 0) and must never publish or certify it, advance the mining
+/// generation, install a candidate, or alter error propagation or durability
+/// order. Replay of an already-committed gap never fires this hook.
+///
+/// The callback must enqueue only: gate out ineligible work (initial block
+/// download), clone the block into an owned handle for the preparation worker
+/// (a bounded slot where a newer tip replaces an unstarted older one), and
+/// return at once. The block is borrowed from the caller's apply batch and is
+/// valid only for the call, so chainstate itself never clones it — ownership
+/// crosses threads only for eligible work, inside the callback. The callback
+/// must not wait for preparation, join the worker, or block on pool locks —
+/// stalling the connecting thread stalls publication of the very tip being
+/// prepared, and a delayed worker that starts after removal must observe the
+/// install receipt rather than hold the commit path.
+pub type TipStagedHook = Arc<dyn Fn(&TipSnapshot, &Block) + Send + Sync>;
+
 /// In-process facade for authoritative applied-chain mutation.
 #[derive(Clone)]
 pub struct Chainstate {
@@ -436,6 +473,20 @@ pub struct Chainstate {
     /// configuration (`validation.engine`); this handle passes it to the
     /// engine-specific seams of the shared block/tx validation pipeline.
     pub(crate) validation_engine: bitcoin_rs_consensus::ValidationEngine,
+    /// Node-owned script-execution cache consulted on commit connects.
+    /// `Some` only when the validation engine is native; `None` under the
+    /// kernel engine, so the kernel oracle stays authoritative.
+    pub(crate) script_cache: Option<Arc<ScriptExecutionCache>>,
+    /// Early compact-block announce hook, installed once by node composition
+    /// after the block announcer exists. `OnceLock` because connect reads it
+    /// on every commit while only the node installer ever writes, a single
+    /// time. Unset preserves the pre-early-announce behavior.
+    pub(crate) pow_valid_block: std::sync::OnceLock<PowValidBlockHook>,
+    /// Speculative template-preparation hook, installed once by node
+    /// composition after the mining coordinator exists. `OnceLock` because
+    /// connect reads it on every commit while only the node installer ever
+    /// writes, a single time. Unset preserves the pre-staging behavior.
+    pub(crate) tip_staged: std::sync::OnceLock<TipStagedHook>,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
     pub(crate) journal:
         Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
@@ -486,6 +537,9 @@ pub struct ChainstateParts {
     pub validation_mode: ValidationMode,
     /// The one resolved script-verification engine selection.
     pub validation_engine: bitcoin_rs_consensus::ValidationEngine,
+    /// Node-owned script-execution cache consulted on commit connects.
+    /// `Some` only when the validation engine is native.
+    pub script_cache: Option<Arc<ScriptExecutionCache>>,
     /// Chainstate journal writer, when journal recovery is enabled.
     pub journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
     /// Whether connects retain raw transaction bytes for node-owned consumers.
@@ -626,6 +680,9 @@ impl Chainstate {
             assume_valid_gate,
             validation_mode: parts.validation_mode,
             validation_engine: parts.validation_engine,
+            script_cache: parts.script_cache,
+            pow_valid_block: std::sync::OnceLock::new(),
+            tip_staged: std::sync::OnceLock::new(),
             journal: Arc::new(RwLock::new(parts.journal)),
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
@@ -839,6 +896,9 @@ impl Chainstate {
             assume_valid_gate,
             validation_mode: ValidationMode::Full,
             validation_engine: self.validation_engine,
+            script_cache: self.script_cache.clone(),
+            pow_valid_block: std::sync::OnceLock::new(),
+            tip_staged: std::sync::OnceLock::new(),
             journal: Arc::new(RwLock::new(None)),
             checkpoint_publisher: None,
             capture_rawtx: false,
@@ -930,6 +990,21 @@ impl Chainstate {
     #[must_use]
     pub fn applied_tip_snapshot(&self) -> Option<Arc<TipSnapshot>> {
         self.applied_tip.load_full()
+    }
+
+    /// Installs the early compact-block announce hook. Node composition calls
+    /// this once, after the block announcer exists; a second install is
+    /// refused so two owners can never race for the hook.
+    pub fn set_pow_valid_block(&self, hook: PowValidBlockHook) -> Result<(), PowValidBlockHook> {
+        self.pow_valid_block.set(hook)
+    }
+
+    /// Installs the staged-tip preparation hook. Node composition calls this
+    /// once, after the mining coordinator exists; a second install is refused
+    /// so two owners can never race for the hook. The hook must enqueue only
+    /// and return at once; see [`TipStagedHook`].
+    pub fn set_tip_staged(&self, hook: TipStagedHook) -> Result<(), TipStagedHook> {
+        self.tip_staged.set(hook)
     }
 
     /// Returns a cloneable read-only block-tree capability.
@@ -1193,6 +1268,9 @@ impl Chainstate {
             assume_valid_gate,
             validation_mode: ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
+            script_cache: None,
+            pow_valid_block: std::sync::OnceLock::new(),
+            tip_staged: std::sync::OnceLock::new(),
             journal: Arc::new(RwLock::new(None)),
             checkpoint_publisher: None,
             capture_rawtx: false,
@@ -1756,6 +1834,10 @@ mod chain_tx_count_tests;
 #[cfg(test)]
 #[path = "../tests/unit/apply/persistence_tests.rs"]
 mod persistence_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/apply/pow_valid_hook_tests.rs"]
+mod pow_valid_hook_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/apply/observability_tests.rs"]

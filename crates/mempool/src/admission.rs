@@ -5,7 +5,7 @@
 //! commit or a peer orphan/reject transition.
 
 use alloc::{sync::Arc, vec::Vec};
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid, unix_time_secs};
 use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
@@ -54,6 +54,10 @@ pub struct ChainAdmissionSnapshot {
     pub locktime_cutoff: u32,
     /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
+    /// Script flags the next block will verify under, derived from the tip's
+    /// softfork state. The gateway re-verifies an admitted transaction under
+    /// these flags to fill the script-execution cache.
+    pub next_block_script_flags: bitcoin_rs_script::VerifyFlags,
     /// Positive live-coin evidence used for peer duplicate suppression and
     /// native package deduplication. RPC cache membership is not admission.
     pub confirmed: bool,
@@ -133,11 +137,16 @@ pub struct OrphanRetry {
 }
 
 pub(crate) fn can_hold_orphan(pool: &crate::Mempool, tx: &Tx, policy: &StandardnessPolicy) -> bool {
-    let null_input = tx
-        .inputs
+    !has_unspendable_input(pool, tx) && is_standard_tx(tx, policy).is_ok()
+}
+
+/// A null input or an output index no known parent can ever supply: no
+/// parent arrival can repair it, so no block can carry the transaction.
+pub(crate) fn has_unspendable_input(pool: &crate::Mempool, tx: &Tx) -> bool {
+    tx.inputs
         .iter()
-        .any(|input| input.previous_output.is_null());
-    !(null_input || has_invalid_mempool_outpoint(pool, tx)) && is_standard_tx(tx, policy).is_ok()
+        .any(|input| input.previous_output.is_null())
+        || has_invalid_mempool_outpoint(pool, tx)
 }
 
 /// A known parent cannot later acquire an output without changing its txid.
@@ -214,18 +223,29 @@ fn build_admission_request(
     generation: u64,
     sequence: u64,
 ) -> (AdmissionRequest, Vec<Txid>) {
-    let (confirmed, height, locktime_cutoff, prevout_meta, csv_active) = snapshot.map_or_else(
-        || (HashMap::new(), 0, 0, HashMap::new(), false),
-        |snapshot| {
-            (
-                snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
-                snapshot.height,
-                snapshot.locktime_cutoff,
-                snapshot.prevout_meta,
-                snapshot.csv_active,
-            )
-        },
-    );
+    let (confirmed, height, locktime_cutoff, prevout_meta, csv_active, next_block_script_flags) =
+        snapshot.map_or_else(
+            || {
+                (
+                    HashMap::new(),
+                    0,
+                    0,
+                    HashMap::new(),
+                    false,
+                    bitcoin_rs_script::VerifyFlags::NONE,
+                )
+            },
+            |snapshot| {
+                (
+                    snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
+                    snapshot.height,
+                    snapshot.locktime_cutoff,
+                    snapshot.prevout_meta,
+                    snapshot.csv_active,
+                    snapshot.next_block_script_flags,
+                )
+            },
+        );
     let mempool_prevouts = mempool_prevouts.unwrap_or_default();
     let (prevouts, missing_parents) = combine_input_facts(&tx, &mempool_prevouts, &confirmed);
     let missing_inputs = prevouts.len() != tx.inputs.len();
@@ -236,6 +256,7 @@ fn build_admission_request(
         prevouts,
         prevout_meta,
         csv_active,
+        next_block_script_flags,
         locktime_cutoff,
         max_feerate_sat_per_kvb,
         time,
@@ -284,6 +305,7 @@ pub(crate) fn batch_requests(
             prevouts,
             prevout_meta: snapshot.prevout_meta,
             csv_active: snapshot.csv_active,
+            next_block_script_flags: snapshot.next_block_script_flags,
             locktime_cutoff: snapshot.locktime_cutoff,
             max_feerate_sat_per_kvb,
             time,
@@ -633,7 +655,10 @@ impl MempoolGateway {
                 sequence,
             );
             match self.admit_transaction_claimed(&request, claim, fence) {
-                Ok(AdmitOutcome::Committed(result)) => return Ok(SubmitOutcome::Committed(result)),
+                Ok(AdmitOutcome::Committed(result)) => {
+                    self.expire_after_admission(origin, fence, &[txid])?;
+                    return Ok(SubmitOutcome::Committed(result));
+                }
                 Ok(AdmitOutcome::AlreadyKnown) => return Ok(SubmitOutcome::AlreadyKnown),
                 Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => {
                     tx = request.tx;
@@ -646,6 +671,43 @@ impl MempoolGateway {
             }
         }
         Err(SubmitError::RetryExhausted)
+    }
+
+    /// Core's expiry after an accepted submission: removes every entry older
+    /// than the mempool expiry window, with its descendants, against the
+    /// wall clock rather than any timestamp the submission carried.
+    ///
+    /// Runs after the admission commit released the pool guard and queued its
+    /// observer batch, so the accepted change is always published before any
+    /// expiry removal. Re-admission after a disconnect (`Reorg` origin or the
+    /// chain-change fence) never expires. When an admitted transaction is no
+    /// longer resident after the expiry pass, the submission fails with the
+    /// pool's ordinary mempool-full refusal, as Core's post-accept check
+    /// does; the commit and its publication stand. Residency rather than the
+    /// expiry removal set is authoritative, so a concurrent non-expiry
+    /// removal racing the check is also reported. The `None` fast path keeps
+    /// no extra read: it means the pool held zero stale entries under the
+    /// expire read, so the pass removed nothing and could not have touched
+    /// the admitted set.
+    pub(crate) fn expire_after_admission(
+        &self,
+        origin: AdmissionOrigin,
+        fence: AdmissionFence,
+        admitted: &[Txid],
+    ) -> Result<(), SubmitError> {
+        let readmission = matches!(origin, AdmissionOrigin::Reorg)
+            || matches!(fence, AdmissionFence::ChainChange(_));
+        if readmission {
+            return Ok(());
+        }
+        let Some(_) = self.expire(origin, unix_time_secs()) else {
+            return Ok(());
+        };
+        let pool = self.pool.read();
+        if admitted.iter().any(|txid| !pool.contains_txid(txid)) {
+            return Err(SubmitError::Policy(crate::MempoolError::Full.into()));
+        }
+        Ok(())
     }
 
     /// Processes the current bounded ready set once. Work remains resident
@@ -768,14 +830,6 @@ impl MempoolGateway {
             .map(|held| (*held.tx).clone())
     }
 
-    /// Invokes `f` for every resident pool transaction as `(txid, wtxid)`.
-    pub fn for_each_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
-        let pool = self.pool.read();
-        for entry in pool.iter_entries() {
-            f(entry.txid, entry.wtxid);
-        }
-    }
-
     /// Number of resident orphan transaction bodies.
     ///
     /// Test seam: peer-eviction assertions in this crate's and the node's
@@ -826,6 +880,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
                 confirmed: false,
             })
         }
@@ -843,6 +898,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         ))
     }
 
@@ -887,7 +943,7 @@ mod tests {
     fn insert_parent(gateway: &MempoolGateway, parent: Tx, origin: AdmissionOrigin) {
         let inserted = gateway.insert_entry(
             origin,
-            MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1, 0),
+            MempoolEntry::new(Arc::new(parent), 100, 1_000, unix_time_secs(), 1, 0),
         );
         assert!(inserted.is_ok());
     }
@@ -924,7 +980,7 @@ mod tests {
                 Some((*child).clone())
             );
             insert_parent(&gateway, parent, origin);
-            let retried = gateway.retry_orphans(&Coins(vec![]), 2);
+            let retried = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());
             assert_eq!(retried.len(), 1);
             assert_eq!(retried[0].source, source());
             assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
@@ -960,7 +1016,7 @@ mod tests {
                 Arc::clone(&child),
                 origin,
                 None,
-                1,
+                unix_time_secs(),
                 &Coins(vec![]),
             );
             assert_eq!(committed.map(|result| result.len()), Ok(1));
@@ -997,6 +1053,313 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every identity the reconstruction walk offers, in visit order.
+    fn reconstruction_identities(gateway: &MempoolGateway) -> Vec<(Txid, Wtxid)> {
+        let mut seen = Vec::new();
+        gateway.for_each_reconstruction_identity(|txid, wtxid| seen.push((txid, wtxid)));
+        seen
+    }
+
+    /// A standard-shaped spend of `outpoint` whose output script is
+    /// nonstandard and whose consensus serialization is exactly `size` bytes.
+    /// `size` must exceed 65 535 so the script length prefix is five bytes.
+    fn padded_nonstandard(outpoint: OutPoint, marker: u8, size: usize) -> Tx {
+        const PROBE: usize = 70_000;
+        let mut tx = standard_spend(outpoint, marker);
+        tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a; PROBE]);
+        let overhead = tx.total_size() - PROBE;
+        tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a; size - overhead]);
+        assert_eq!(tx.total_size(), size);
+        tx
+    }
+
+    fn funded_coin() -> (OutPoint, Coins) {
+        let coin = OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0);
+        let chain = Coins(vec![(
+            coin,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )]);
+        (coin, chain)
+    }
+
+    // BIP152 extras: a held orphan stays reconstructable after the orphan
+    // pool releases it, and never becomes inventory or a served body.
+    #[test]
+    fn held_orphan_is_retained_for_reconstruction_only() {
+        let gateway = gateway();
+        let (_, child) = parent_and_child();
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&child),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        assert_eq!(
+            reconstruction_identities(&gateway),
+            vec![(child.txid(), child.wtxid())]
+        );
+
+        gateway.maintain_orphans(1, []);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.get_tx_by_wtxid(child.wtxid()), None);
+        assert_eq!(gateway.get_tx(child.txid()), None);
+        assert!(!gateway.have_tx(Hash256::from(child.wtxid()), true));
+        assert_eq!(
+            gateway.reconstruction_tx_by_wtxid(child.wtxid()),
+            Some((*child).clone())
+        );
+        assert_eq!(
+            gateway.reconstruction_tx_by_txid(child.txid()),
+            Some((*child).clone())
+        );
+    }
+
+    // BIP152 extras: a promoted orphan is offered once, as a pool entry.
+    #[test]
+    fn promoted_orphan_is_offered_once_and_served_from_the_pool() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&child),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        let parent_wtxid = parent.wtxid();
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let retried = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());
+        assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
+        assert!(gateway.read().contains_wtxid(&child.wtxid()));
+
+        let identities = reconstruction_identities(&gateway);
+        assert_eq!(identities.len(), 2, "pool entries are not repeated");
+        assert!(identities.contains(&(child.txid(), child.wtxid())));
+        assert!(identities.iter().any(|(_, wtxid)| *wtxid == parent_wtxid));
+        assert_eq!(
+            gateway.reconstruction_tx_by_wtxid(child.wtxid()),
+            Some((*child).clone())
+        );
+    }
+
+    // BIP152 extras: two witness variants of one txid are two identities.
+    #[test]
+    fn witness_variants_of_one_txid_are_retained_distinctly() {
+        let gateway = gateway();
+        let (_, plain) = parent_and_child();
+        let mut variant = (*plain).clone();
+        variant.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+        let variant = Arc::new(variant);
+        assert_eq!(plain.txid(), variant.txid());
+        assert_ne!(plain.wtxid(), variant.wtxid());
+        let second_source = PeerToken {
+            connection_id: source().connection_id + 1,
+            ..source()
+        };
+        for (body, announcer) in [(&plain, source()), (&variant, second_source)] {
+            assert!(matches!(
+                gateway.submit_transaction(
+                    Arc::clone(body),
+                    AdmissionOrigin::Peer(announcer),
+                    None,
+                    1,
+                    &Coins(vec![])
+                ),
+                Ok(SubmitOutcome::Held { .. })
+            ));
+        }
+        assert_eq!(
+            reconstruction_identities(&gateway),
+            vec![
+                (plain.txid(), plain.wtxid()),
+                (variant.txid(), variant.wtxid())
+            ]
+        );
+        assert_eq!(
+            gateway.reconstruction_tx_by_wtxid(variant.wtxid()),
+            Some((*variant).clone())
+        );
+        assert_eq!(
+            gateway.reconstruction_tx_by_wtxid(plain.wtxid()),
+            Some((*plain).clone())
+        );
+    }
+
+    // BIP152 extras: the ring holds 100 bodies and drops the oldest first.
+    #[test]
+    fn peer_orphans_beyond_the_ring_capacity_drop_the_oldest_first() {
+        let gateway = gateway();
+        let bodies: Vec<Arc<Tx>> = (1_u8..=101)
+            .map(|marker| {
+                Arc::new(standard_spend(
+                    OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+                    marker,
+                ))
+            })
+            .collect();
+        for body in &bodies {
+            assert!(matches!(
+                gateway.submit_transaction(
+                    Arc::clone(body),
+                    AdmissionOrigin::Peer(source()),
+                    None,
+                    1,
+                    &Coins(vec![])
+                ),
+                Ok(SubmitOutcome::Held { .. })
+            ));
+        }
+        assert_eq!(gateway.reconstruction_tx_by_wtxid(bodies[0].wtxid()), None);
+        assert_eq!(
+            reconstruction_identities(&gateway),
+            bodies[1..]
+                .iter()
+                .map(|body| (body.txid(), body.wtxid()))
+                .collect::<Vec<_>>(),
+            "the newest 100 remain, oldest first"
+        );
+    }
+
+    // BIP152 extras: a body offered by the walk can be evicted before its
+    // lookup; the lookup then answers `None` and never another body.
+    #[test]
+    fn ring_body_evicted_between_walk_and_lookup_is_absent() {
+        let gateway = gateway();
+        let hold = |marker: u8| {
+            let body = Arc::new(standard_spend(
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+                marker,
+            ));
+            assert!(matches!(
+                gateway.submit_transaction(
+                    Arc::clone(&body),
+                    AdmissionOrigin::Peer(source()),
+                    None,
+                    1,
+                    &Coins(vec![])
+                ),
+                Ok(SubmitOutcome::Held { .. })
+            ));
+            body
+        };
+        let offered = hold(1);
+        assert_eq!(
+            reconstruction_identities(&gateway),
+            vec![(offered.txid(), offered.wtxid())]
+        );
+        for marker in 2_u8..=101 {
+            hold(marker);
+        }
+        assert_eq!(gateway.reconstruction_tx_by_wtxid(offered.wtxid()), None);
+        assert_eq!(gateway.reconstruction_tx_by_txid(offered.txid()), None);
+    }
+
+    // BIP152 extras: only the typed policy class below the size gate is kept.
+    #[test]
+    fn peer_policy_refusal_is_retained_only_below_the_size_gate() {
+        let (coin, chain) = funded_coin();
+        for (size, retained) in [(99_999, true), (100_000, false)] {
+            let gateway = gateway();
+            let tx = Arc::new(padded_nonstandard(coin, 3, size));
+            let result = gateway.submit_transaction(
+                Arc::clone(&tx),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &chain,
+            );
+            assert!(
+                matches!(result, Err(SubmitError::Policy(_))),
+                "size {size}: {result:?}"
+            );
+            assert!(gateway.is_rejected(Hash256::from(tx.wtxid())));
+            assert_eq!(
+                gateway.reconstruction_tx_by_wtxid(tx.wtxid()).is_some(),
+                retained,
+                "size {size}"
+            );
+            assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), None);
+        }
+    }
+
+    // BIP152 extras: refusals made for local callers are never retained.
+    #[test]
+    fn local_origin_policy_refusal_is_not_retained() {
+        let (coin, chain) = funded_coin();
+        for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Esplora] {
+            let gateway = gateway();
+            let tx = Arc::new(padded_nonstandard(coin, 3, 99_999));
+            let result = gateway.submit_transaction(Arc::clone(&tx), origin, None, 1, &chain);
+            assert!(
+                matches!(result, Err(SubmitError::Policy(_))),
+                "{origin:?}: {result:?}"
+            );
+            assert_eq!(gateway.reconstruction_tx_by_wtxid(tx.wtxid()), None);
+            assert_eq!(reconstruction_identities(&gateway), vec![]);
+        }
+    }
+
+    // BIP152 extras: a consensus failure is invalid data, not a policy refusal.
+    #[test]
+    fn consensus_refusal_is_not_retained_for_reconstruction() {
+        let gateway = gateway();
+        let (parent, valid) = parent_and_child();
+        let chain = Coins(vec![(
+            valid.inputs[0].previous_output,
+            parent.outputs[0].clone(),
+        )]);
+        let mut invalid = (*valid).clone();
+        invalid.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+        let invalid = Arc::new(invalid);
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &chain
+            ),
+            Err(SubmitError::Consensus)
+        );
+        assert!(gateway.is_rejected(Hash256::from(invalid.wtxid())));
+        assert_eq!(gateway.reconstruction_tx_by_wtxid(invalid.wtxid()), None);
+        assert_eq!(reconstruction_identities(&gateway), vec![]);
+    }
+
+    // BIP152 extras: a spend of an output no resident parent has can never be
+    // in a block, so its refusal is not retained.
+    #[test]
+    fn unspendable_pool_outpoint_refusal_is_not_retained_for_reconstruction() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let mut invalid = (*child).clone();
+        invalid.inputs[0].previous_output.vout = 1;
+        let invalid = Arc::new(invalid);
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Unavailable
+            ),
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert!(gateway.is_rejected(Hash256::from(invalid.wtxid())));
+        assert_eq!(gateway.reconstruction_tx_by_wtxid(invalid.wtxid()), None);
     }
 
     // MPL-04: changed pool facts must rebuild a normal chain lookup.
@@ -1274,8 +1637,9 @@ mod tests {
         assert!(gateway.have_tx(Hash256::from(invalid.wtxid()), true));
         assert!(!gateway.have_tx(Hash256::from(valid.wtxid()), true));
         assert!(!gateway.have_tx(Hash256::from(valid.txid()), false));
+        let now = unix_time_secs();
         assert!(matches!(
-            gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+            gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, now, &chain),
             Ok(SubmitOutcome::Committed(_))
         ));
     }
@@ -1317,7 +1681,7 @@ mod tests {
                 Arc::clone(&valid),
                 AdmissionOrigin::Peer(source()),
                 None,
-                2,
+                unix_time_secs(),
                 &chain
             ),
             Ok(SubmitOutcome::Committed(_))
@@ -1336,8 +1700,9 @@ mod tests {
                 child.inputs[0].previous_output,
                 parent.outputs[0].clone(),
             )]);
+            let now = unix_time_secs();
             assert!(matches!(
-                gateway.submit_transaction(Arc::clone(&child), origin, None, 7, &chain),
+                gateway.submit_transaction(Arc::clone(&child), origin, None, now, &chain),
                 Ok(SubmitOutcome::Committed(_))
             ));
             let pool = gateway.read();
@@ -1348,7 +1713,7 @@ mod tests {
             assert_eq!(u64::from(entry.bip141_vsize), child.vsize());
             // The sole legacy CHECKSIG in the output costs four BIP141 units.
             assert_eq!(entry.sigop_cost, 4);
-            assert_eq!(entry.time, 7);
+            assert_eq!(entry.time, now);
             assert_eq!(entry.height, 1);
         }
     }
@@ -1397,7 +1762,7 @@ mod tests {
         assert_eq!(gateway.retry_orphans(&chain, 2), []);
         assert_eq!(gateway.orphan_count(), 1);
         assert!(reservation.finish().is_ok());
-        let retried = gateway.retry_orphans(&chain, 2);
+        let retried = gateway.retry_orphans(&chain, unix_time_secs());
         assert_eq!(retried.len(), 1);
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
     }
@@ -1428,7 +1793,7 @@ mod tests {
             child.inputs[0].previous_output,
             parent.outputs[0].clone(),
         )]);
-        let retried = gateway.retry_orphans(&chain, 3);
+        let retried = gateway.retry_orphans(&chain, unix_time_secs());
         assert_eq!(retried.len(), 1);
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
         assert_eq!(gateway.retry_orphans(&chain, 4), []);
@@ -1469,7 +1834,7 @@ mod tests {
             Arc::clone(&child),
             AdmissionOrigin::Peer(source()),
             None,
-            1,
+            unix_time_secs(),
             &chain,
         );
         assert!(matches!(result, Ok(SubmitOutcome::Committed(_))));
@@ -1503,6 +1868,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
                 confirmed: false,
             })
         }
@@ -1518,8 +1884,9 @@ mod tests {
             coin: (child.inputs[0].previous_output, parent.outputs[0].clone()),
             reads: AtomicUsize::new(0),
         };
+        let now = unix_time_secs();
         assert!(matches!(
-            gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, 1, &chain),
+            gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, now, &chain),
             Ok(SubmitOutcome::Committed(_))
         ));
         assert_eq!(chain.reads.load(Ordering::Relaxed), 2);
@@ -1555,8 +1922,9 @@ mod tests {
             Ok(SubmitOutcome::AlreadyConfirmed)
         );
         assert_eq!(gateway.read().sequence_number(), 0);
+        let now = unix_time_secs();
         assert!(matches!(
-            gateway.submit_transaction(child, AdmissionOrigin::Rpc, None, 1, &chain),
+            gateway.submit_transaction(child, AdmissionOrigin::Rpc, None, now, &chain),
             Ok(SubmitOutcome::Committed(_))
         ));
     }
@@ -1621,6 +1989,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
                 confirmed: false,
             })
         }
@@ -1929,6 +2298,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             Some(observer.clone()),
             ValidationEngine::Native,
+            None,
         ));
         let (valid, chain) = witness_spend();
         let mut invalid = (*valid).clone();
@@ -1959,8 +2329,9 @@ mod tests {
             assert_eq!(facts.results[0].allowed, Some(allowed));
             assert_eq!(facts.results[0].reject_reason, reason);
             let fresh = gateway();
+            let now = unix_time_secs();
             let submitted =
-                fresh.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, 1, &chain);
+                fresh.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, now, &chain);
             if allowed {
                 assert!(matches!(submitted, Ok(SubmitOutcome::Committed(_))));
             } else {
@@ -1978,12 +2349,20 @@ mod tests {
             &[valid.as_ref(), &second],
             &[valid.txid(), second.txid()],
             2,
+            0,
         );
         assert_eq!(preview_gateway.read().estimate_fee_rate(2), None);
         assert_eq!(observer.0.load(Ordering::SeqCst), 0);
         let submitted = gateway();
+        let now = unix_time_secs();
         assert!(matches!(
-            submitted.submit_transaction(Arc::clone(&valid), AdmissionOrigin::Rpc, None, 1, &chain),
+            submitted.submit_transaction(
+                Arc::clone(&valid),
+                AdmissionOrigin::Rpc,
+                None,
+                now,
+                &chain
+            ),
             Ok(SubmitOutcome::Committed(_))
         ));
         for tx in [(*valid).clone(), invalid] {
@@ -2140,8 +2519,15 @@ mod tests {
                 ),
                 Ok(SubmitOutcome::AlreadyKnown)
             );
+            let now = unix_time_secs();
             assert!(matches!(
-                gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+                gateway.submit_transaction(
+                    valid,
+                    AdmissionOrigin::Peer(source()),
+                    None,
+                    now,
+                    &chain
+                ),
                 Ok(SubmitOutcome::Committed(_))
             ));
         }
@@ -2188,7 +2574,7 @@ mod tests {
                 .is_some_and(|held| held.announcers.contains(&source()))
         );
         insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
-        let results = gateway.retry_orphans(&Coins(vec![]), 3);
+        let results = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].result, Ok(SubmitOutcome::Committed(_))));
         assert_eq!(results[0].source, source());
@@ -2281,7 +2667,7 @@ mod tests {
         );
 
         insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
-        let results = gateway.retry_orphans(&Coins(vec![]), 2);
+        let results = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].txid, first.txid());
         assert!(matches!(results[0].result, Ok(SubmitOutcome::Committed(_))));
@@ -2324,7 +2710,7 @@ mod tests {
                 script_pubkey: Script::from_bytes(vec![0x51]),
             },
         )]);
-        let retried = gateway.retry_orphans(&coins, 2);
+        let retried = gateway.retry_orphans(&coins, unix_time_secs());
         assert_eq!(retried.len(), 1);
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
         assert!(gateway.read().contains_txid(&tx.txid()));
@@ -2514,6 +2900,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             Some(leg),
             ValidationEngine::Native,
+            None,
         ))
     }
 
@@ -2525,6 +2912,62 @@ mod tests {
                 script_pubkey: Script::from_bytes(vec![0x51]),
             },
         )])
+    }
+
+    /// Seeds a live rolling floor with a real capacity eviction, then clears
+    /// the filler as mined removals so the witness family below starts from
+    /// an empty pool while the stamped floor holds inside the ten-second
+    /// decay grace at `now`. Either a committed trim or a valid Full refusal
+    /// raises the floor through the production `TrimToSize` bump path gated
+    /// by validity and max-fee; occupancy alone never does.
+    fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: u64) {
+        let markers = [100u8, 101, 102, 103, 104];
+        let funded = Coins(
+            markers
+                .iter()
+                .map(|&marker| {
+                    (
+                        OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+                        TxOut {
+                            value: Amount::from_sat(50_000),
+                            script_pubkey: Script::from_bytes(vec![0x51]),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        for &marker in &markers {
+            let tx = Arc::new(standard_spend(
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+                marker,
+            ));
+            let _ = gateway.submit_transaction(tx, AdmissionOrigin::Rpc, None, now, &funded);
+        }
+        let floor = gateway.read().min_fee_sat_per_kvb(now);
+        let min_relay = gateway.read().min_relay_fee_sat_per_kvb();
+        assert!(
+            floor > min_relay,
+            "a capacity eviction must raise the rolling floor above min relay, got floor {floor} min_relay {min_relay}"
+        );
+        let residents: Vec<Arc<Tx>> = gateway
+            .read()
+            .iter_entries()
+            .map(|entry| Arc::clone(&entry.tx))
+            .collect();
+        if !residents.is_empty() {
+            let refs: Vec<&Tx> = residents.iter().map(AsRef::as_ref).collect();
+            let ids: Vec<Txid> = residents.iter().map(|tx| tx.txid()).collect();
+            gateway.remove_for_block(AdmissionOrigin::Rpc, &refs, &ids, 2, now);
+        }
+        assert!(
+            gateway.read().is_empty(),
+            "block settlement must leave an empty pool for the floor probe"
+        );
+        let floor_after = gateway.read().min_fee_sat_per_kvb(now);
+        assert!(
+            floor_after > min_relay,
+            "the rolling floor must survive block settlement within the decay grace, got {floor_after}"
+        );
     }
 
     /// MPL-04: the guard's odd fence re-admits a dependency-ordered batch
@@ -2621,12 +3064,13 @@ mod tests {
         let (parent, child) = witness_parent_and_child();
         let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
         let before = gateway.read().estimator_history();
+        let now = unix_time_secs();
         let change = gateway.begin_chain_change().expect("fence");
 
         let committed = gateway.reconsider_disconnected(
             &change,
             &chain,
-            1,
+            now,
             [Arc::new(parent), Arc::clone(&child)],
         );
         change.finish().expect("finish");
@@ -2648,7 +3092,7 @@ mod tests {
                 Arc::new(control),
                 AdmissionOrigin::Rpc,
                 None,
-                1,
+                now,
                 &control_chain
             ),
             Ok(SubmitOutcome::Committed(_))
@@ -2656,7 +3100,7 @@ mod tests {
         assert_ne!(gateway.read().estimator_history(), before);
     }
 
-    /// A disconnected family re-enters whole below the pressure floor, and the
+    /// A disconnected family re-enters whole below the rolling floor, and the
     /// pool is trimmed once only after the walk and the resident sweep.
     #[test]
     #[expect(clippy::expect_used)]
@@ -2672,18 +3116,46 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(limits))),
             Some(leg),
             ValidationEngine::Native,
+            None,
         ));
+        let now = unix_time_secs();
+        seed_rolling_floor_via_capacity_eviction(&gateway, now);
+        log.0.lock().clear();
         let (parent, child) = witness_parent_and_child();
         let parent_txid = parent.txid();
         let child_txid = child.txid();
         let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
+        let floor_before = gateway.read().min_fee_sat_per_kvb(now);
+        assert!(
+            floor_before > gateway.read().min_relay_fee_sat_per_kvb(),
+            "the walk must start above a live rolling floor, got {floor_before}"
+        );
+        let parent_arc = Arc::new(parent);
+        let probe = gateway.submit_transaction(
+            Arc::clone(&parent_arc),
+            AdmissionOrigin::Rpc,
+            None,
+            now,
+            &chain,
+        );
+        assert_eq!(
+            probe,
+            Err(SubmitError::Policy(
+                AcceptanceRejectReason::MinRelayFeeNotMet
+            )),
+            "fresh relay below the rolling floor must be refused"
+        );
+        assert!(
+            !gateway.read().contains_txid(&parent_txid),
+            "a floor refusal must not admit"
+        );
 
         let change = gateway.begin_chain_change().expect("fence");
         let committed = gateway.reconsider_disconnected(
             &change,
             &chain,
-            1,
-            [Arc::new(parent), Arc::clone(&child)],
+            now,
+            [Arc::clone(&parent_arc), Arc::clone(&child)],
         );
         assert_eq!(committed.len(), 2, "the whole family must re-enter");
         assert!(gateway.read().contains_txid(&parent_txid));
@@ -2776,9 +3248,9 @@ mod tests {
         );
     }
 
-    /// The deferral is scoped to the reorg origin: with the same resident
-    /// parent lifting the pressure floor, the same child offered as fresh
-    /// relay is refused, so the gates are live and only the reorg origin
+    /// The deferral is scoped to the reorg origin: with a live rolling floor
+    /// from a real capacity eviction, the same child offered as fresh relay
+    /// is refused, so the gates are live and only the fenced reorg origin
     /// defers them.
     #[test]
     #[expect(clippy::expect_used)]
@@ -2786,25 +3258,46 @@ mod tests {
         const CEILING: u64 = 150;
         let limits = crate::MempoolLimits {
             max_total_bytes: CEILING,
-            cluster_count: 1,
             ..crate::MempoolLimits::default()
         };
         let control = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(limits))),
             None,
             ValidationEngine::Native,
+            None,
         ));
+        let now = unix_time_secs();
+        seed_rolling_floor_via_capacity_eviction(&control, now);
+        let floor = control.read().min_fee_sat_per_kvb(now);
+        assert!(
+            floor > control.read().min_relay_fee_sat_per_kvb(),
+            "fresh relay must face a live rolling floor, got {floor}"
+        );
         let (control_parent, control_child) = witness_parent_and_child();
+        let control_parent_txid = control_parent.txid();
         let control_chain = funded_chain(control_parent.inputs[0].previous_output, 20_000);
         let change = control.begin_chain_change().expect("control fence");
-        let _ =
-            control.reconsider_disconnected(&change, &control_chain, 1, [Arc::new(control_parent)]);
+        let admitted = control.reconsider_disconnected(
+            &change,
+            &control_chain,
+            now,
+            [Arc::new(control_parent)],
+        );
+        assert_eq!(
+            admitted.len(),
+            1,
+            "the fenced parent must bypass the rolling floor"
+        );
+        assert!(
+            control.read().contains_txid(&control_parent_txid),
+            "bypassed parent must be resident"
+        );
         change.finish().expect("control finish");
         let relay = control.submit_transaction(
             control_child,
             AdmissionOrigin::Rpc,
             None,
-            1,
+            now,
             &Coins(vec![]),
         );
         assert_eq!(
@@ -2812,7 +3305,7 @@ mod tests {
             Err(SubmitError::Policy(
                 AcceptanceRejectReason::MinRelayFeeNotMet
             )),
-            "fresh relay must meet the pressure floor"
+            "fresh relay must meet the rolling floor"
         );
     }
 
@@ -2927,6 +3420,7 @@ mod tests {
             prevouts: vec![],
             prevout_meta: HashMap::new(),
             csv_active: false,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -2998,5 +3492,178 @@ mod tests {
         );
         assert!(gateway_a.read().iter_entries().next().is_none());
         guard_b.finish().expect("finish b");
+    }
+
+    /// A gateway whose observer keeps every committed batch.
+    fn batch_logged_gateway() -> (Arc<ReorgBatchLog>, Arc<MempoolGateway>) {
+        let log = Arc::new(ReorgBatchLog::default());
+        let leg: Arc<dyn crate::MempoolObserver> = log.clone();
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
+            Some(leg),
+            ValidationEngine::Native,
+            None,
+        ));
+        (log, gateway)
+    }
+
+    /// A funded standard spend that is admissible as fresh relay.
+    fn independent_spend(marker: u8) -> (Arc<Tx>, Coins) {
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0);
+        let tx = standard_spend(outpoint, marker);
+        (Arc::new(tx), funded_chain(outpoint, 20_000))
+    }
+
+    /// Residents stamped with time zero are older than the mempool lifetime
+    /// against any wall clock, without sleeping.
+    fn insert_stale(gateway: &MempoolGateway, tx: Arc<Tx>) {
+        let inserted = gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(tx, 100, 1_000, 0, 1, 0),
+        );
+        assert!(inserted.is_ok());
+    }
+
+    fn expired(txid: Txid) -> (Txid, crate::MutationOutcome) {
+        (
+            txid,
+            crate::MutationOutcome::Removed(crate::RemovalReason::Expiry),
+        )
+    }
+
+    // Core `LimitMempoolSize` expiry: an accepted admission removes entries
+    // older than the mempool lifetime, and only after its own batch published.
+    #[test]
+    fn committed_admission_expires_an_unrelated_stale_entry_after_its_own_batch() {
+        let (log, gateway) = batch_logged_gateway();
+        let (stale, _) = independent_spend(70);
+        let stale_txid = stale.txid();
+        insert_stale(&gateway, stale);
+        let (fresh, chain) = independent_spend(71);
+        let fresh_txid = fresh.txid();
+
+        let now = unix_time_secs();
+
+        let outcome = gateway.submit_transaction(fresh, AdmissionOrigin::Rpc, None, now, &chain);
+
+        assert!(matches!(outcome, Ok(SubmitOutcome::Committed(_))));
+        assert!(!gateway.read().contains_txid(&stale_txid));
+        assert!(gateway.read().contains_txid(&fresh_txid));
+        assert_eq!(
+            *log.0.lock(),
+            vec![
+                (
+                    AdmissionOrigin::Rpc,
+                    vec![(stale_txid, crate::MutationOutcome::Accepted)]
+                ),
+                (
+                    AdmissionOrigin::Rpc,
+                    vec![(fresh_txid, crate::MutationOutcome::Accepted)]
+                ),
+                (AdmissionOrigin::Rpc, vec![expired(stale_txid)]),
+            ],
+            "the accepted batch publishes before the expiry batch"
+        );
+    }
+
+    // Expiry removes descendants with an expired ancestor: the child accepted
+    // above a stale parent is gone before the caller sees success, so the
+    // submission is refused as full while its commit stays published.
+    #[test]
+    fn child_of_a_stale_parent_expires_with_it_and_is_refused_as_full() {
+        let (log, gateway) = batch_logged_gateway();
+        let (parent, child) = parent_and_child();
+        let (parent_txid, child_txid) = (parent.txid(), child.txid());
+        insert_stale(&gateway, Arc::new(parent));
+        let peer = AdmissionOrigin::Peer(source());
+
+        let now = unix_time_secs();
+
+        let outcome = gateway.submit_transaction(child, peer, None, now, &Coins(vec![]));
+
+        assert_eq!(
+            outcome,
+            Err(SubmitError::Policy(AcceptanceRejectReason::Mempool(
+                crate::MempoolError::Full
+            )))
+        );
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(!gateway.is_rejected(Hash256::from(child_txid)));
+        let batches = log.0.lock();
+        assert_eq!(batches.len(), 3, "stale insert, child commit, expiry");
+        assert_eq!(
+            batches[1],
+            (peer, vec![(child_txid, crate::MutationOutcome::Accepted)]),
+            "the refused child's commit stays published"
+        );
+        let (origin, removed) = &batches[2];
+        assert_eq!(*origin, peer);
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&expired(parent_txid)));
+        assert!(removed.contains(&expired(child_txid)));
+    }
+
+    // Re-admission after a disconnect never expires: neither the reorg origin
+    // nor the chain-change fence reaches the expiry pass.
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn reorg_origin_and_chain_change_fence_never_expire() {
+        let (log, gateway) = batch_logged_gateway();
+        let (stale, _) = independent_spend(72);
+        let stale_txid = stale.txid();
+        insert_stale(&gateway, stale);
+
+        let now = unix_time_secs();
+        let (origin_tx, origin_chain) = independent_spend(73);
+        let outcome =
+            gateway.submit_transaction(origin_tx, AdmissionOrigin::Reorg, None, now, &origin_chain);
+        assert!(matches!(outcome, Ok(SubmitOutcome::Committed(_))));
+
+        let (fenced_tx, fenced_chain) = independent_spend(74);
+        let change = gateway.begin_chain_change().expect("fence");
+        let committed = gateway.reconsider_disconnected(&change, &fenced_chain, now, [fenced_tx]);
+        change.finish().expect("finish");
+
+        assert_eq!(committed.len(), 1);
+        assert!(gateway.read().contains_txid(&stale_txid));
+        assert!(
+            log.0
+                .lock()
+                .iter()
+                .all(|(_, changes)| !changes.contains(&expired(stale_txid))),
+            "no re-admission publishes an expiry"
+        );
+    }
+
+    // The chain-change fence alone skips expiry even for a non-reorg origin:
+    // without this arm, dropping it would expire the stale entry here.
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn chain_change_fence_skips_expiry_for_a_non_reorg_origin() {
+        let gateway = gateway();
+        let (stale, _) = independent_spend(75);
+        let stale_txid = stale.txid();
+        insert_stale(&gateway, stale);
+        let (fresh, chain) = independent_spend(76);
+        let fresh_txid = fresh.txid();
+        let now = unix_time_secs();
+
+        let change = gateway.begin_chain_change().expect("fence");
+        let outcome = gateway.submit_transaction_claimed(
+            fresh,
+            AdmissionOrigin::Rpc,
+            None,
+            now,
+            &chain,
+            None,
+            AdmissionFence::ChainChange(change.odd_generation()),
+        );
+        change.finish().expect("finish");
+
+        assert!(matches!(outcome, Ok(SubmitOutcome::Committed(_))));
+        assert!(gateway.read().contains_txid(&stale_txid));
+        assert!(gateway.read().contains_txid(&fresh_txid));
     }
 }

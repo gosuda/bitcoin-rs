@@ -166,6 +166,89 @@ impl RbfError {
     }
 }
 
+/// Core `TrimToSize`'s rolling-floor bump for one evicted chunk, in sat/kvB:
+/// the chunk's modified rate plus the incremental relay fee.
+///
+/// The rate is Core's `ToFeePerVSize` read through `CFeeRate`: modified fee
+/// over `ceil(charged_weight / 4)` virtual bytes, scaled to a kilobyte and
+/// rounded down (`EvaluateFeeDown`, a floor, also for a negative modified
+/// fee). The incremental fee is then added to the signed rate, so a chunk a
+/// negative prioritisation pulled under the incremental fee still reaches a
+/// positive bump. Core's `trackPackageRemoved` only raises the floor above
+/// its stored rate, which is never negative; a bump of zero or less therefore
+/// changes nothing, and `None` stands for it. A bump past `u64::MAX`
+/// saturates; the intermediate products saturate in `i128`, so an untrusted
+/// fee cannot overflow the arithmetic.
+pub(crate) fn trim_bump(
+    modified_fee: i128,
+    charged_weight: u64,
+    incremental_relay_fee: u64,
+) -> Option<u64> {
+    let vsize = i128::from(charged_weight.div_ceil(4));
+    let rate = if vsize == 0 {
+        0
+    } else {
+        modified_fee.saturating_mul(1_000).div_euclid(vsize)
+    };
+    let bump = rate.saturating_add(i128::from(incremental_relay_fee));
+    if bump <= 0 {
+        return None;
+    }
+    Some(u64::try_from(bump).unwrap_or(u64::MAX))
+}
+
+/// A rolling-floor bump computed against one pool state: it may be applied
+/// only while the pool still matches `stamp`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TrimBump {
+    stamp: crate::pool::fee_policy::PolicyStamp,
+    rate: u64,
+}
+
+/// A refused [`ReplacementInputs::verify`]: either an ordinary typed
+/// rejection, or a full-pool refusal carrying the floor bump the refused size
+/// trim earned, if any.
+///
+/// The candidate is refused before the pool changes
+/// ([`MempoolError::Full`]), but Core's `TrimToSize` has already bumped the
+/// rolling floor for the chunk it removes by the time it reports the same
+/// refusal. The bump rides in the `Full` variant, with the stamp it was
+/// computed at, so only a writer that still sees that state applies it
+/// ([`Mempool::track_refused_trim`]). A `Full` refusal always reports the
+/// [`MempoolError::Full`] rejection, unchanged; the two variants never store
+/// both an error and a bump together.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum Refusal {
+    /// Any rejection other than a refused size trim.
+    #[error(transparent)]
+    Reject(RbfError),
+    /// The size trim would have removed the candidate's own chunk: the
+    /// admission is refused as [`MempoolError::Full`], and the option is the
+    /// floor bump the trim earned up to and including that chunk (`None`
+    /// when every bump was nonpositive).
+    #[error("mempool full")]
+    Full(Option<TrimBump>),
+}
+
+impl From<RbfError> for Refusal {
+    fn from(error: RbfError) -> Self {
+        Self::Reject(error)
+    }
+}
+
+impl Refusal {
+    /// Splits the refusal into the rejection the caller reports and the
+    /// refused-trim floor bump the writer may apply. A `Full` refusal always
+    /// reports [`MempoolError::Full`]; any other refusal reports its typed
+    /// error and carries no bump.
+    pub(crate) fn into_parts(self) -> (RbfError, Option<TrimBump>) {
+        match self {
+            Self::Reject(error) => (error, None),
+            Self::Full(bump) => (MempoolError::Full.into(), bump),
+        }
+    }
+}
+
 /// Core `CFeeRate::GetFee`: truncate the product, but charge at least one
 /// satoshi for nonempty relay at a positive rate. No saturated fee can pass.
 pub fn required_fee(rate: u64, vsize: u32) -> Result<i128, RbfError> {
@@ -193,6 +276,9 @@ pub(crate) struct ReplacementInputs {
     projected_vsize: u64,
     max_vsize: u64,
     limits: crate::MempoolLimits,
+    /// Incremental relay fee in sat/kvB at capture: the margin a trim adds
+    /// to the rate of every chunk it removes.
+    incremental_relay_fee: u64,
     fee_estimation: FeeEstimation,
     enforcement: LimitEnforcement,
 }
@@ -204,12 +290,39 @@ pub(crate) struct PreparedPoolChange {
     pub(crate) removals: Vec<(EntryId, RemovalReason)>,
     pub(crate) entry: Option<crate::pool::PreparedInsert>,
     pub(crate) fee_estimation: FeeEstimation,
+    /// Highest [`trim_bump`] over the chunks this change evicts for size,
+    /// in sat/kvB; `None` when it evicts none or every bump is nonpositive.
+    /// Committing the change raises the rolling floor to it once, and only
+    /// at the stamp it was computed at.
+    pub(crate) rolling_fee_bump: Option<u64>,
+}
+
+impl PreparedPoolChange {
+    /// The pooled entries this change removes as replaced: each direct
+    /// conflict and every descendant evicted with it, Core's
+    /// `m_replaced_transactions`. Size-limit trims are not replacements.
+    pub(crate) fn replaced_entries<'a>(
+        &'a self,
+        pool: &'a Mempool,
+    ) -> impl Iterator<Item = &'a MempoolEntry> + 'a {
+        self.removals
+            .iter()
+            .filter(|(_, reason)| {
+                matches!(reason, RemovalReason::Replaced | RemovalReason::Descendant)
+            })
+            .filter_map(move |(id, _)| pool.entry(*id))
+    }
 }
 
 impl ReplacementInputs {
     /// The potentially expensive graph solver runs over owned facts, with no
     /// pool guard held. The returned plan can only commit at its stamp.
-    pub(crate) fn verify(self) -> Result<PreparedPoolChange, RbfError> {
+    ///
+    /// A size trim that would remove the candidate's own chunk refuses the
+    /// admission ([`MempoolError::Full`]) and returns the floor bump that
+    /// trim earned in the [`Refusal`]; a trim that spares the candidate
+    /// returns its highest chunk bump in the plan.
+    pub(crate) fn verify(self) -> Result<PreparedPoolChange, Refusal> {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
                 stamp: self.stamp,
@@ -218,6 +331,7 @@ impl ReplacementInputs {
                 removals: Vec::new(),
                 entry: Some(self.entry),
                 fee_estimation: self.fee_estimation,
+                rolling_fee_bump: None,
             });
         };
         after_graph.check_limits(self.limits)?;
@@ -233,25 +347,37 @@ impl ReplacementInputs {
             let before_chunks = before_graph.chunks()?;
             let before = before_graph.affected_diagram(&before_chunks);
             let after = after_graph.affected_diagram(&after_chunks);
-            if crate::fee_diagram::compare(&after, &before)? != Some(core::cmp::Ordering::Greater) {
-                return Err(RbfError::InsufficientFeerateDiagram);
+            if crate::fee_diagram::compare(&after, &before).map_err(RbfError::from)?
+                != Some(core::cmp::Ordering::Greater)
+            {
+                return Err(RbfError::InsufficientFeerateDiagram.into());
             }
         }
         let mut removed = self.evicted.clone();
         let mut removal_priority: Vec<_> = self.evicted.iter().copied().collect();
         removal_priority.sort_unstable();
         let mut size = self.projected_vsize;
+        let mut bump = None;
         if needs_trim {
             for chunk in after_chunks.iter().rev() {
                 if size <= self.max_vsize {
                     break;
                 }
+                // Core's `TrimToSize` bumps the floor for every worst chunk it
+                // removes before it removes it, the candidate's own chunk
+                // included. The chunks come worst first, so the running
+                // maximum ends at the last chunk visited.
+                bump = bump.max(trim_bump(
+                    chunk.total.fee,
+                    u64::from(chunk.total.weight),
+                    self.incremental_relay_fee,
+                ));
                 if chunk
                     .members
                     .iter()
                     .any(|&member| after_graph.nodes[member].id.is_none())
                 {
-                    return Err(MempoolError::Full.into());
+                    return Err(refuse_full(self.stamp, bump));
                 }
                 for &member in &chunk.members {
                     let node = &after_graph.nodes[member];
@@ -265,7 +391,7 @@ impl ReplacementInputs {
                 }
             }
             if size > self.max_vsize {
-                return Err(MempoolError::Full.into());
+                return Err(refuse_full(self.stamp, bump));
             }
         }
         let order = before_graph.removal_order(&removal_priority)?;
@@ -295,8 +421,16 @@ impl ReplacementInputs {
             removals,
             entry: Some(self.entry),
             fee_estimation: self.fee_estimation,
+            rolling_fee_bump: bump,
         })
     }
+}
+
+/// The refusal for a candidate the size trim would remove, carrying the floor
+/// bump the trim earned up to and including the candidate's chunk, stamped
+/// with the pool state the trim was computed against.
+fn refuse_full(stamp: crate::pool::fee_policy::PolicyStamp, bump: Option<u64>) -> Refusal {
+    Refusal::Full(bump.map(|rate| TrimBump { stamp, rate }))
 }
 
 impl Mempool {
@@ -419,6 +553,7 @@ impl Mempool {
             projected_vsize,
             max_vsize: self.limits.max_total_bytes,
             limits: self.limits,
+            incremental_relay_fee: self.policy_snapshot().incremental_relay_fee_sat_per_kvb,
             fee_estimation,
             enforcement,
         })
@@ -430,12 +565,30 @@ impl Mempool {
         &self,
         candidate: &ReplacementCandidate,
     ) -> Result<ReplacementPlan, RbfError> {
+        // Read-only door: a refusal here changes no pool state, so its floor
+        // bump is not applied.
         let prepared = self
             .capture_replacement(candidate, 0, 0, FeeEstimation::Estimate)?
-            .verify()?;
+            .verify()
+            .map_err(|refusal| refusal.into_parts().0)?;
         Ok(ReplacementPlan {
             evicted: prepared.evicted,
         })
+    }
+
+    /// Raises the rolling floor to a refused trim's bump when the pool still
+    /// matches the state the bump was computed against. `StalePlan` means
+    /// the pool moved since, nothing was applied, and the caller recaptures
+    /// instead of reporting a refusal computed against facts that no longer
+    /// hold. Callers hold the pool write guard: the raise advances
+    /// `rolling_epoch`, so it is a pool state transition exactly like any
+    /// other mutation.
+    pub(crate) fn track_refused_trim(&mut self, bump: TrimBump) -> Result<(), RbfError> {
+        if !bump.stamp.matches(self) {
+            return Err(RbfError::StalePlan);
+        }
+        self.track_package_removed(bump.rate);
+        Ok(())
     }
 
     pub(crate) fn commit_pool_change(
@@ -466,6 +619,12 @@ impl Mempool {
         if let Some(txid) = arrival {
             self.record_entry_arrival(txid);
         }
+        // The stamp matched, so the evictions this bump belongs to just
+        // committed against the state it was computed at: raise the floor
+        // exactly once, after the removals, as Core's `TrimToSize` does.
+        if let Some(bump) = prepared.rolling_fee_bump {
+            self.track_package_removed(bump);
+        }
         Ok(self.finish_mutation(changes))
     }
 
@@ -478,9 +637,40 @@ impl Mempool {
         time: u64,
         height: u32,
     ) -> Result<crate::mutation::MutationResult, RbfError> {
-        let prepared = self
-            .capture_replacement(candidate, time, height, FeeEstimation::Estimate)?
-            .verify()?;
+        let inputs = self.capture_replacement(candidate, time, height, FeeEstimation::Estimate)?;
+        let prepared = match inputs.verify() {
+            Ok(prepared) => prepared,
+            // One `&mut` borrow spans capture and verify, so the refusal's
+            // stamp is current; the stale arm is defensive only.
+            Err(refusal) => {
+                let (error, bump) = refusal.into_parts();
+                if matches!(bump, Some(bump) if self.track_refused_trim(bump).is_err()) {
+                    return Err(RbfError::StalePlan);
+                }
+                return Err(error);
+            }
+        };
         self.commit_pool_change(prepared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_bump;
+
+    #[test]
+    fn trim_bump_adds_incremental_to_the_floored_chunk_rate() {
+        assert_eq!(trim_bump(400, 800, 1_000), Some(3_000));
+        assert_eq!(trim_bump(0, 400, 1_000), Some(1_000));
+        // Charged weight 5 rounds up to 2 vB before the rate division.
+        assert_eq!(trim_bump(1_500, 5, 1_000), Some(751_000));
+    }
+
+    #[test]
+    fn trim_bump_floors_negative_fees_and_drops_nonpositive_bumps() {
+        // floor(-1_000 * 1_000 / 3) + 1_000 stays far below zero.
+        assert_eq!(trim_bump(-1_000, 12, 1_000), None);
+        // A rate of exactly -incremental is still no bump.
+        assert_eq!(trim_bump(-1_000, 1_000, 1_000), None);
     }
 }

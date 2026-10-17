@@ -89,6 +89,8 @@ pub use chain_feed::{
 };
 pub use embed::{Node, NodeError};
 
+pub use state::DataDirLockError;
+
 pub use mining::MiningCoordinator;
 
 pub use run::run;

@@ -196,6 +196,10 @@ impl MiningControl for RecordingMining {
         self.publishes.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {
+        self.publishes.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn generate(
         &self,
         _request: bitcoin_rs_mining::GenerateRequest,

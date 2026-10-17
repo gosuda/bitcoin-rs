@@ -54,7 +54,13 @@ pub enum PolicyError {
 
 /// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
 /// in sat/kvB. The selected rate is 1,000 sat/kvB; Core 31.1's default is 100.
-const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+pub(crate) const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+/// Half-life of the rolling minimum fee's exponential decay, in seconds (Core
+/// `ROLLING_FEE_HALFLIFE`, `txmempool.h:213`).
+pub(crate) const ROLLING_FEE_HALFLIFE_SECS: u64 = 12 * 60 * 60;
+
+/// Maximum resident age before expiry also removes an entry's descendants.
+pub(crate) const MEMPOOL_EXPIRY_SECS: u64 = 336 * 60 * 60;
 
 /// Typed snapshot of the mempool relay-policy surface the RPC `getmempoolinfo`
 /// response projects, built from the policy the pool actually enforces.

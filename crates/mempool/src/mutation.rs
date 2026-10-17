@@ -50,6 +50,8 @@ pub enum RemovalReason {
     Descendant,
     /// Size or fee-rate policy evicted the entry.
     PolicyEviction,
+    /// The entry or an ancestor outlived `MEMPOOL_EXPIRY_SECS`.
+    Expiry,
     /// A wholesale clear emptied the pool.
     Clear,
     /// A reorg disconnected the entry's containing state.

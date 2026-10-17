@@ -2,23 +2,26 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 use thiserror::Error;
 
+use crate::chunk_index::{ChunkIndex, ComponentState, MemberFacts, ProjectedChunks};
 use crate::fee_estimator::{FeeEstimator, FeeRate};
 use crate::mutation::{
     MutationChange, MutationOutcome, MutationResult, MutationSequence, RemovalReason,
 };
-use crate::{
-    EntryId, MempoolEntry, MempoolLimits, MempoolPolicySnapshot, ParetoFront, PolicyError,
-};
+use crate::policy::MEMPOOL_EXPIRY_SECS;
+use crate::{EntryId, MempoolEntry, MempoolLimits, MempoolPolicySnapshot, PolicyError};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+mod chunk_order_tests;
 pub(crate) mod fee_policy;
 pub(crate) mod package;
 
@@ -113,6 +116,24 @@ pub struct PrioritisedTransaction {
     pub modified_fee: Option<i128>,
 }
 
+/// Complete plan of removals for a candidate or connecting block.
+///
+/// One owner of block-inclusion and conflict-descendant removal semantics:
+/// resident block transactions leave as `BlockInclusion` in block order,
+/// their conflicts and full descendant subtrees leave as `Conflict`, each
+/// resident planned at most once. `fee_deltas_cleared` counts the distinct
+/// block transactions whose prioritisation overlay the block lifecycle
+/// clears, so the mining generation can advance past exactly those overlays
+/// and still invalidate on any concurrent `prioritise`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockRemovalPlan {
+    /// Ordered entries and their exact removal reasons. Every `EntryId` is
+    /// unique across the plan.
+    pub removals: Vec<(EntryId, RemovalReason)>,
+    /// Number of distinct block transactions with a stored fee overlay.
+    pub fee_deltas_cleared: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FeeRateAggregate {
     count: u64,
@@ -154,6 +175,21 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+    /// Core rolling minimum fee (`GetMinFee`/`trackPackageRemoved`/
+    /// `removeForBlock` state). Locked after the pool lock and never held
+    /// across another call: a capacity eviction or replacement trim raises
+    /// the floor, every committed block connection stamps it for decay, and
+    /// admission, relay, and the `getmempoolinfo` projection read it through
+    /// [`Mempool::min_fee_sat_per_kvb`].
+    rolling_min_fee: parking_lot::Mutex<crate::rolling_min_fee::RollingMinFee>,
+    /// Revision of the rolling floor's raising transitions. Only
+    /// actual raises advance it — a refused or committed trim whose rate
+    /// exceeds the stored floor — never decay, reads, or block stamps. It is
+    /// part of [`crate::pool::fee_policy::PolicyStamp`], so an admission that
+    /// captured its facts before a concurrent floor raise fails its stamp
+    /// check and retries against the newer floor instead of committing below
+    /// it. Advanced only while holding the pool write guard.
+    rolling_epoch: u64,
 }
 
 /// The index and total state derived from `entries`: everything a mutation
@@ -172,6 +208,10 @@ struct Derived {
     /// Spending index keyed by spent outpoint then entry id. Reach it through
     /// `is_outpoint_spent` and `outpoint_spender`.
     spending: std::collections::BTreeSet<(SpendingKey, EntryId)>,
+    /// Acceptance-time index: each entry's `time` then its id, oldest first.
+    /// `has_expired_entries` and `expire` read it, so expiry never scans the
+    /// arena. The id breaks ties and makes a recycled slot a distinct key.
+    by_time: std::collections::BTreeSet<(u64, EntryId)>,
     /// Witness-id index. Reach it through `contains_wtxid` and
     /// `entry_by_wtxid`.
     by_wtxid: HashMap<Wtxid, EntryId>,
@@ -182,8 +222,10 @@ struct Derived {
     /// Recycled component ids. A component whose last member leaves frees
     /// its id here instead of growing the arena forever.
     free_components: Vec<u32>,
-    /// Fee-priority index for mining and eviction consumers.
-    pareto: ParetoFront,
+    /// Maintained chunk order for mining and eviction consumers: every live
+    /// component's exact linearization, and the one global chunk index.
+    /// Reach it through `chunks_by_feerate`.
+    chunks: ChunkIndex,
     /// Running sum of `vsize` over `entries`.
     ///
     /// Maintained by the mutation methods below rather than folded on demand.
@@ -203,9 +245,6 @@ struct Derived {
     /// Fee-rate counts and vsize sums keyed by each live
     /// `MempoolEntry.fee_rate`.
     fee_rate_aggregates: std::collections::BTreeMap<u64, FeeRateAggregate>,
-    /// Cached first key of `fee_rate_aggregates`. Reads are `O(1)`; inserts and
-    /// removals maintain it together with the aggregates.
-    fee_rate_floor: Option<u64>,
 }
 
 impl Derived {
@@ -215,19 +254,16 @@ impl Derived {
     fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
         self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
         self.total_fee -= u128::from(entry.fee);
-        let removed_floor = match self.fee_rate_aggregates.entry(entry.fee_rate) {
+        match self.fee_rate_aggregates.entry(entry.fee_rate) {
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
                 let aggregate = occupied.get_mut();
                 if aggregate.count > 1 {
                     debug_assert!(aggregate.vsize >= u64::from(entry.vsize));
                     aggregate.count -= 1;
                     aggregate.vsize -= u64::from(entry.vsize);
-                    false
                 } else {
                     debug_assert_eq!(aggregate.vsize, u64::from(entry.vsize));
-                    let removed_floor = self.fee_rate_floor == Some(entry.fee_rate);
                     occupied.remove();
-                    removed_floor
                 }
             }
             std::collections::btree_map::Entry::Vacant(_) => {
@@ -235,17 +271,11 @@ impl Derived {
                     false,
                     "fee-rate multiset drifted: removed a rate with no tracked count"
                 );
-                false
             }
-        };
-        if removed_floor {
-            self.fee_rate_floor = self
-                .fee_rate_aggregates
-                .first_key_value()
-                .map(|(&rate, _aggregate)| rate);
         }
         self.by_txid.remove(&entry.txid);
         self.by_wtxid.remove(&entry.wtxid);
+        let _ = self.by_time.remove(&(entry.time, id));
         for output in &entry.tx.outputs {
             let _ = self
                 .funding
@@ -416,16 +446,6 @@ impl VisitSet {
         Self::default()
     }
 
-    fn test(&self, id: EntryId) -> bool {
-        let Some(index) = slot_index(id) else {
-            return false;
-        };
-        let Some(&word) = self.words.get(index / 64) else {
-            return false;
-        };
-        word & (1_u64 << (index % 64)) != 0
-    }
-
     /// Returns whether the set did not already hold `id`.
     fn insert(&mut self, id: EntryId) -> bool {
         let Some(index) = slot_index(id) else {
@@ -445,6 +465,48 @@ impl VisitSet {
 
     fn members(&self) -> &[EntryId] {
         &self.members
+    }
+}
+
+/// Membership marks a component walk records visited entries in.
+trait VisitMarks {
+    /// Returns whether the marks did not already hold `id`.
+    fn insert(&mut self, id: EntryId) -> bool;
+}
+
+impl VisitMarks for VisitSet {
+    fn insert(&mut self, id: EntryId) -> bool {
+        Self::insert(self, id)
+    }
+}
+
+/// Membership for walks confined to one connected component. A component
+/// holds at most the cluster-entry limit, so a small inline list does the
+/// work in time and space bounded by the cluster, where [`VisitSet`]'s bitset
+/// grows to the highest arena slot and zero-fills arena-scale words on every
+/// call.
+#[derive(Debug, Default)]
+struct WalkSet {
+    seen: SmallVec<[EntryId; 16]>,
+}
+
+impl WalkSet {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn test(&self, id: EntryId) -> bool {
+        self.seen.contains(&id)
+    }
+}
+
+impl VisitMarks for WalkSet {
+    fn insert(&mut self, id: EntryId) -> bool {
+        if self.test(id) {
+            return false;
+        }
+        self.seen.push(id);
+        true
     }
 }
 
@@ -516,65 +578,15 @@ pub struct SnapshotEntry {
 pub struct MempoolMiningSnapshot {
     /// Pool mempool sequence at capture. Every admission and removal change
     /// moves it; in-pool prioritisation does not (it emits no mutation
-    /// change). Template caches also need the fee-delta revision.
+    /// change). Template caches key on it together with `fee_delta_sequence`.
     pub sequence: u64,
-    /// Fee-priority revision captured under the same pool guard as `sequence`.
+    /// Fee-delta sequence at capture, read under the same pool state as
+    /// `sequence` and the transaction facts. In-pool prioritisation moves it;
+    /// template caches key on it together with `sequence`.
     pub fee_delta_sequence: u64,
-    /// Entries in modified-priority order. `ancestors` positions and the
+    /// Entries in maintained chunk order. `ancestors` positions and the
     /// order itself both refer to this vector.
     pub entries: Vec<SnapshotEntry>,
-}
-
-/// A dependency-closed fee chunk supplied by the mempool's graph owner.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MempoolChunk {
-    /// Snapshot entry positions, in dependency order.
-    pub indices: Vec<usize>,
-    /// Modified fees used for ordering, including local prioritisation.
-    pub modified_fee: i128,
-    /// Exact policy weight used in the fee-rate denominator.
-    pub policy_weight: u32,
-}
-
-impl MempoolMiningSnapshot {
-    /// Derives ordered chunks from this immutable view, after the pool guard
-    /// has been released. Mining and replacement share the same graph solver.
-    pub fn fee_chunks(&self) -> Result<Vec<MempoolChunk>, crate::FeeDiagramError> {
-        let fees = self
-            .entries
-            .iter()
-            .map(|entry| {
-                let fee = i128::from(entry.fee) + i128::from(entry.fee_delta);
-                let weight =
-                    crate::accounting::charged_weight(entry.weight, entry.vsize, entry.sigop_cost);
-                Ok(crate::fee_diagram::FeeWeight {
-                    fee,
-                    weight: u32::try_from(weight).map_err(|_| crate::FeeDiagramError::Weight)?,
-                })
-            })
-            .collect::<Result<Vec<_>, crate::FeeDiagramError>>()?;
-        let parents = self
-            .entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .ancestors
-                    .iter()
-                    .map(|&parent| {
-                        usize::try_from(parent).map_err(|_| crate::FeeDiagramError::Dependencies)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::fee_diagram::ordered_chunks(&fees, &parents)?
-            .into_iter()
-            .map(|chunk| MempoolChunk {
-                indices: chunk.members,
-                modified_fee: chunk.total.fee,
-                policy_weight: chunk.total.weight,
-            })
-            .collect())
-    }
 }
 
 impl Mempool {
@@ -591,6 +603,10 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            rolling_min_fee: parking_lot::Mutex::new(
+                crate::rolling_min_fee::RollingMinFee::default(),
+            ),
+            rolling_epoch: 0,
         }
     }
 
@@ -658,7 +674,13 @@ impl Mempool {
         self.mempool_sequence
     }
 
-    /// Existing fee-overlay revision; prioritisation does not move membership.
+    /// Returns the current fee-delta sequence: a generation counter for
+    /// fee-priority metadata. Prioritisation does not move membership.
+    /// The mining generation key reads it together with
+    /// [`Mempool::sequence_number`]. It advances on prioritisation
+    /// (even when the stored delta nets to zero), on mined removal of a
+    /// stored delta, and on clear while stored deltas remain; ordinary
+    /// removal and replacement leave it alone.
     #[must_use]
     pub const fn fee_delta_sequence_number(&self) -> u64 {
         self.fee_delta_sequence
@@ -670,6 +692,48 @@ impl Mempool {
         self.limits.min_relay_fee_sat_per_kvb
     }
 
+    /// Returns the admission, relay, and eviction floor in sat/kvB: Core's
+    /// rolling minimum fee, floored at the configured min-relay rate.
+    ///
+    /// Reading is a state transition, exactly as Core's `GetMinFee`: when a
+    /// block has connected since the last bump and the clock has moved past
+    /// the ten-second grace, the stored rate decays once and may reset to
+    /// zero. The rolling lock is taken after the pool lock and dropped
+    /// before the call returns — never held across another pool call.
+    #[must_use]
+    pub fn min_fee_sat_per_kvb(&self, now: u64) -> u64 {
+        let incremental = crate::policy::DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB;
+        let rate = {
+            let mut rolling = self.rolling_min_fee.lock();
+            rolling.current(
+                now,
+                self.total_vsize(),
+                self.limits.max_total_bytes,
+                incremental,
+            )
+        };
+        rate.max(self.limits.min_relay_fee_sat_per_kvb)
+    }
+
+    /// Core `trackPackageRemoved`: raises the rolling floor to `removed`
+    /// sat/kvB when it exceeds the stored rate, holding decay until the next
+    /// connected block.
+    ///
+    /// Takes `&mut self`: every raise is a pool state transition serialized
+    /// under the write guard, so a read-guard floor/stamp capture stays
+    /// coherent — no floor can rise between the capture and its stamp check.
+    /// The leaf rolling mutex is locked after the pool guard and released
+    /// before this returns. Only an actual rise advances `rolling_epoch`;
+    /// decay, reads, and block stamps never do. Callers must already hold the
+    /// write guard at the state the bump was computed against;
+    /// [`Mempool::commit_pool_change`] (stamp checked) and
+    /// [`Mempool::track_refused_trim`] (stamp checked) are the only callers.
+    pub(crate) fn track_package_removed(&mut self, removed: u64) {
+        if self.rolling_min_fee.lock().track_package_removed(removed) {
+            self.rolling_epoch = MutationSequence::advance(self.rolling_epoch);
+        }
+    }
+
     /// Bitcoin Core `RemovalReasonToString` mapping for `mempool:removed`.
     const fn core_removal_reason(reason: RemovalReason) -> &'static str {
         match reason {
@@ -677,6 +741,7 @@ impl Mempool {
             RemovalReason::Conflict => "conflict",
             RemovalReason::Replaced | RemovalReason::Descendant => "replaced",
             RemovalReason::PolicyEviction => "sizelimit",
+            RemovalReason::Expiry => "expiry",
             RemovalReason::Reorg => "reorg",
             RemovalReason::Clear => "unknown",
         }
@@ -722,7 +787,18 @@ impl Mempool {
                 crate::rbf::LimitEnforcement::Full,
             )
             .map_err(crate::RbfError::into_pool_error)?;
-        let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
+        let plan = match inputs.verify() {
+            Ok(plan) => plan,
+            // One `&mut` borrow spans capture and verify, so the refusal's
+            // stamp is current; the stale arm is defensive only.
+            Err(refusal) => {
+                let (error, bump) = refusal.into_parts();
+                if matches!(bump, Some(bump) if self.track_refused_trim(bump).is_err()) {
+                    return Err(MempoolError::StalePolicy);
+                }
+                return Err(error.into_pool_error());
+            }
+        };
         self.commit_pool_change(plan)
             .map_err(crate::RbfError::into_pool_error)
     }
@@ -844,6 +920,9 @@ impl Mempool {
         self.account_insert(id, admitted_sequence);
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
+        // One relinearization for the merged cluster, seeded from the entry
+        // just linked in, so no arena scan is needed to find its members.
+        self.relinearize_from_seed(component, id);
         // Core fires `mempool:added` from `CTxMemPool::addUnchecked`, the
         // pool-internal install funnel, after the entry is linked into the
         // pool. `prepare` runs only while a consumer is attached.
@@ -866,6 +945,7 @@ impl Mempool {
         let tx = Arc::clone(&entry.tx);
         let txid = entry.txid;
         let wtxid = entry.wtxid;
+        let time = entry.time;
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
         let added_fee_rate = entry.fee_rate;
@@ -878,11 +958,6 @@ impl Mempool {
             .or_default();
         aggregate.count += 1;
         aggregate.vsize += added_vsize;
-        self.derived.fee_rate_floor = Some(
-            self.derived
-                .fee_rate_floor
-                .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
-        );
         self.derived.by_txid.insert(
             txid,
             IndexedEntry {
@@ -891,6 +966,7 @@ impl Mempool {
             },
         );
         self.derived.by_wtxid.insert(wtxid, id);
+        self.derived.by_time.insert((time, id));
         for output in &tx.outputs {
             self.derived
                 .funding
@@ -981,7 +1057,7 @@ impl Mempool {
                 base = Some(neighbour_component);
                 continue;
             };
-            let mut visited = VisitSet::new();
+            let mut visited = WalkSet::new();
             let mut members = Vec::new();
             self.collect_component_members(neighbour, &mut visited, &mut members);
             for member in &members {
@@ -1033,22 +1109,25 @@ impl Mempool {
     }
 
     /// Returns a component id to the free list. Its summary must be zero.
+    /// Forgetting the id here, at the one owner that frees components, also
+    /// drops the absorbed component's chunk keys when a merge retires it.
     fn free_component(&mut self, component: u32) {
         debug_assert!(
             self.component_summary(component)
                 .is_some_and(|summary| *summary == ComponentSummary::default()),
             "freed a component that still reports members"
         );
+        self.derived.chunks.forget(component);
         self.derived.free_components.push(component);
     }
 
     /// Collects the connected component holding `seed` with one walk over
     /// the parent/child links, recording membership in `visited` so callers
     /// can partition several seeds without re-walking.
-    fn collect_component_members(
+    fn collect_component_members<M: VisitMarks>(
         &self,
         seed: EntryId,
-        visited: &mut VisitSet,
+        visited: &mut M,
         members: &mut Vec<EntryId>,
     ) {
         if !visited.insert(seed) {
@@ -1244,7 +1323,7 @@ impl Mempool {
         let components = u64::try_from(self.derived.components.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<ComponentSummary>()).unwrap_or(0));
-        let pareto = self.derived.pareto.dynamic_memory_usage();
+        let chunks = self.derived.chunks.dynamic_memory_usage();
 
         arena
             .saturating_add(transactions)
@@ -1254,7 +1333,7 @@ impl Mempool {
             .saturating_add(spending)
             .saturating_add(links)
             .saturating_add(components)
-            .saturating_add(pareto)
+            .saturating_add(chunks)
     }
     /// Estimates the fee rate that historically confirmed within
     /// `conf_target_blocks`, from the admission and confirmation history this
@@ -1293,23 +1372,29 @@ impl Mempool {
     /// Everything block-template selection needs is read in this single
     /// coherent pass — shared transaction payloads, per-entry fee, sigop,
     /// weight, and size metadata, the signed overlay, ancestor-package
-    /// aggregates, ancestor topology, and the current sequence number — so
+    /// aggregates, ancestor topology, and both sequence counters — so
     /// the caller's read critical section ends when this returns and
     /// selection works on the owned copy with the lock released. Entries
-    /// appear in modified-priority order (the order `ParetoFront` ranks
-    /// them), and `ancestors` positions refer to this vector, so a consumer
+    /// appear in maintained chunk order (the order `chunks_by_feerate`
+    /// yields), and `ancestors` positions refer to this vector, so a consumer
     /// can walk packages without re-consulting the pool.
+    ///
+    /// Selection that only needs the top chunks should read
+    /// [`Self::chunks_by_feerate`] under the guard instead: this copy exists
+    /// for consumers that need every entry with the lock released
+    /// (`assemble_ordered_candidate` and the RPC mining handler).
     #[must_use]
     pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
         let order: Vec<EntryId> = self
             .derived
-            .pareto
-            .top_n(self.derived.pareto.len())
+            .chunks
+            .chunks_descending(self)
+            .flat_map(|chunk| chunk.members.iter().copied())
             .collect();
         debug_assert_eq!(
             order.len(),
             self.entries.len(),
-            "priority index and entry arena disagree on the pool contents"
+            "chunk index and entry arena disagree on the pool contents"
         );
         let position: HashMap<EntryId, u32> = order
             .iter()
@@ -1320,7 +1405,7 @@ impl Mempool {
             .iter()
             .map(|&id| {
                 let Some(entry) = self.entry(id) else {
-                    panic!("priority index names a missing entry");
+                    panic!("chunk index names a missing entry");
                 };
                 let ancestors = self
                     .ancestor_ids_for_entry(id)
@@ -1354,10 +1439,40 @@ impl Mempool {
         }
     }
 
+    /// Walks the maintained chunks from the highest feerate to the lowest.
+    /// The caller holds the pool read guard; every view borrows the pool, so
+    /// nothing copies. Template selection and eviction read only this; the
+    /// eviction order is the same walk reversed.
+    pub fn chunks_by_feerate(&self) -> impl DoubleEndedIterator<Item = crate::ChunkView<'_>> + '_ {
+        self.derived.chunks.chunks_descending(self)
+    }
+
+    /// Returns the maintained chunk index. Projection merges its untouched
+    /// chunks with side-linearized pieces without copying the pool.
+    pub(crate) fn chunk_index(&self) -> &ChunkIndex {
+        &self.derived.chunks
+    }
+
     /// Returns an entry by public id.
     #[must_use]
     pub fn entry(&self, id: EntryId) -> Option<&MempoolEntry> {
         self.entries.get(id)
+    }
+
+    /// Returns one chunk-index member borrowed from the entry arena. The
+    /// index names only live entries; a missing id is a pool invariant
+    /// violation. Mining selection resolves its copies through this while
+    /// the caller holds the pool read guard.
+    pub fn chunk_member(&self, id: EntryId) -> &MempoolEntry {
+        self.entry(id).unwrap_or_else(|| {
+            panic!("chunk index names entry {id} that left the pool");
+        })
+    }
+
+    /// Returns the direct in-pool parents of one live entry, or an empty
+    /// slice when the id is vacant.
+    pub fn parents_of(&self, id: EntryId) -> &[EntryId] {
+        self.links(id).map_or(&[], |links| links.parents.as_slice())
     }
 
     /// Walks every live entry in slab order.
@@ -1405,8 +1520,8 @@ impl Mempool {
     /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
     ///
     /// Walks `entries` and sorts; cost O(N log N) per call. Actual-fee-ordered
-    /// traversal without going through `ParetoFront` (which ranks on signed
-    /// modified fees with ancestor-aware package scoring).
+    /// traversal without going through the chunk index (which ranks on signed
+    /// modified fees with dependency-closed chunk scoring).
     #[cfg(test)]
     #[must_use]
     fn iter_by_fee_rate_desc(&self) -> Vec<EntryId> {
@@ -1420,21 +1535,6 @@ impl Mempool {
             .collect();
         pairs.sort_by_key(|pair| core::cmp::Reverse(pair.0));
         pairs.into_iter().map(|(_, id)| id).collect()
-    }
-
-    /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
-    /// for an empty pool.
-    #[must_use]
-    pub(crate) fn lowest_fee_rate(&self) -> Option<u64> {
-        debug_assert_eq!(
-            self.derived.fee_rate_floor,
-            self.derived
-                .fee_rate_aggregates
-                .first_key_value()
-                .map(|(&rate, _aggregate)| rate),
-            "cached fee-rate floor drifted from its multiset"
-        );
-        self.derived.fee_rate_floor
     }
 
     /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
@@ -1513,6 +1613,12 @@ impl Mempool {
 
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
+        // The overlay changes modified fees, so the entry's cluster
+        // relinearizes from the entry itself. Component ids are exact on
+        // merge and split, so the seed's component is the whole closure's.
+        if let Some(component) = self.component_id(id) {
+            self.relinearize_from_seed(component, id);
+        }
         Ok(())
     }
 
@@ -1561,16 +1667,220 @@ impl Mempool {
         self.remove_entry_and_descendants_into(id, reason, changes);
     }
 
+    /// Pure projection of every removal `block` would commit: resident block
+    /// transactions as `BlockInclusion` plus their conflicts and full
+    /// descendant subtrees as `Conflict`, deduplicated so each resident is
+    /// planned at most once. Does not mutate pool state, allocate slab slots,
+    /// or advance sequences.
+    #[must_use]
+    pub fn plan_block_removals(&self, block: &Block) -> BlockRemovalPlan {
+        let txids = block.txids();
+        let txs: Vec<&Tx> = block.txs.iter().collect();
+        self.plan_block_removals_from_txs(&txs, &txids)
+    }
+
+    /// Shared planning core behind [`Self::plan_block_removals`] and
+    /// [`Self::remove_for_block`]: one owner of block-inclusion and
+    /// conflict-descendant semantics over the caller's aligned slices.
+    fn plan_block_removals_from_txs(
+        &self,
+        block_txs: &[&Tx],
+        block_txids: &[Txid],
+    ) -> BlockRemovalPlan {
+        assert_eq!(
+            block_txs.len(),
+            block_txids.len(),
+            "block transactions and validated txids must stay aligned"
+        );
+        let mut planned: HashSet<EntryId> = HashSet::new();
+        let mut removals: Vec<(EntryId, RemovalReason)> = Vec::new();
+        for (tx, txid) in block_txs.iter().zip(block_txids) {
+            if let Some(id) = self.entry_id_by_txid(txid) {
+                if planned.insert(id) {
+                    removals.push((id, RemovalReason::BlockInclusion));
+                }
+            }
+            for root in self.conflicts_for(tx) {
+                if planned.contains(&root) {
+                    continue;
+                }
+                let mut subtree = Vec::new();
+                self.collect_unplanned_descendants(root, &planned, &mut subtree);
+                subtree.sort_unstable();
+                for id in subtree {
+                    if planned.insert(id) {
+                        removals.push((id, RemovalReason::Conflict));
+                    }
+                }
+            }
+        }
+        let mut seen_txids: HashSet<Txid> = HashSet::new();
+        let mut fee_deltas_cleared = 0_u64;
+        for txid in block_txids {
+            if seen_txids.insert(*txid) && self.fee_deltas.contains_key(txid) {
+                fee_deltas_cleared += 1;
+            }
+        }
+        BlockRemovalPlan {
+            removals,
+            fee_deltas_cleared,
+        }
+    }
+
+    /// Descendants of `root` through unplanned nodes only, `root` included.
+    /// Planned nodes are treated as already retired: they are neither
+    /// reported nor traversed, matching the pruned links the sequential
+    /// removal would walk after retiring them.
+    fn collect_unplanned_descendants(
+        &self,
+        root: EntryId,
+        planned: &HashSet<EntryId>,
+        out: &mut Vec<EntryId>,
+    ) {
+        if planned.contains(&root) {
+            return;
+        }
+        let mut seen: HashSet<EntryId> = HashSet::new();
+        seen.insert(root);
+        out.push(root);
+        let mut stack = alloc::vec![root];
+        while let Some(current) = stack.pop() {
+            let Some(links) = self.links(current) else {
+                continue;
+            };
+            for &child in &links.children {
+                if planned.contains(&child) {
+                    continue;
+                }
+                if seen.insert(child) {
+                    out.push(child);
+                    stack.push(child);
+                }
+            }
+        }
+    }
+
+    /// Yields all chunks in descending feerate order as if `plan` had applied.
+    /// Untouched components are read from the maintained index; every touched
+    /// component is partitioned into its surviving connected pieces and each
+    /// piece is relinearized on the side with the exact solver and its own
+    /// fresh equal-feerate prefix run. The pool is borrowed, never cloned,
+    /// and left unchanged.
+    #[must_use]
+    pub fn chunks_after(&self, plan: &BlockRemovalPlan) -> ProjectedChunks<'_> {
+        let mut planned: HashSet<EntryId> = HashSet::new();
+        for (id, _) in &plan.removals {
+            planned.insert(*id);
+        }
+        let mut confirmed: HashSet<EntryId> = HashSet::new();
+        for (id, reason) in &plan.removals {
+            if *reason == RemovalReason::BlockInclusion {
+                confirmed.insert(*id);
+            }
+        }
+        let mut touched: HashSet<u32> = HashSet::new();
+        for (id, _) in &plan.removals {
+            if let Some(component) = self.component_id(*id) {
+                touched.insert(component);
+            }
+        }
+        let mut pieces: Vec<ComponentState> = Vec::new();
+        let mut synthetic = u32::MAX;
+        let mut touched_ordered: Vec<u32> = touched.iter().copied().collect();
+        touched_ordered.sort_unstable();
+        for component in touched_ordered {
+            let Some(members) = self.derived.chunks.members_of(component) else {
+                continue;
+            };
+            let surviving: Vec<EntryId> = members
+                .iter()
+                .copied()
+                .filter(|id| !planned.contains(id))
+                .collect();
+            if surviving.is_empty() {
+                continue;
+            }
+            for piece in self.connected_pieces(&surviving, &planned) {
+                let facts: Vec<MemberFacts<'_>> = piece
+                    .iter()
+                    .filter_map(|&id| {
+                        let live = self.entries.slot(id)?;
+                        Some(MemberFacts {
+                            id,
+                            entry: &live.entry,
+                            parents: live.links.parents.as_slice(),
+                        })
+                    })
+                    .collect();
+                if facts.is_empty() {
+                    continue;
+                }
+                let state = match facts.as_slice() {
+                    [only] => ComponentState::singleton(synthetic, only),
+                    _ => ComponentState::linearized(synthetic, &facts),
+                };
+                pieces.push(state);
+                synthetic = synthetic.wrapping_sub(1);
+            }
+        }
+        ProjectedChunks::new(self, confirmed, touched, pieces)
+    }
+
+    /// Partitions `surviving` members of one touched component into connected
+    /// pieces over the surviving parent/child edges. Planned nodes are never
+    /// traversed, so each piece is what the real removal would leave as one
+    /// connected component with its own prefix run.
+    fn connected_pieces(
+        &self,
+        surviving: &[EntryId],
+        planned: &HashSet<EntryId>,
+    ) -> Vec<Vec<EntryId>> {
+        let present: HashSet<EntryId> = surviving.iter().copied().collect();
+        let mut visited: HashSet<EntryId> = HashSet::new();
+        let mut pieces = Vec::new();
+        for &seed in surviving {
+            if !visited.insert(seed) {
+                continue;
+            }
+            let mut piece = alloc::vec![seed];
+            let mut stack = alloc::vec![seed];
+            while let Some(current) = stack.pop() {
+                let Some(links) = self.links(current) else {
+                    continue;
+                };
+                for &neighbour in links.parents.iter().chain(links.children.iter()) {
+                    if planned.contains(&neighbour) {
+                        continue;
+                    }
+                    if !present.contains(&neighbour) {
+                        continue;
+                    }
+                    if visited.insert(neighbour) {
+                        piece.push(neighbour);
+                        stack.push(neighbour);
+                    }
+                }
+            }
+            pieces.push(piece);
+        }
+        pieces
+    }
+
     /// Removes the transactions a connected block confirmed, clears their
     /// prioritisation overlays, and records the confirmations in the fee
     /// history. Every removed entry commits as one `Removed(BlockInclusion)`
     /// change, in commit order: block-transaction order, each removal
     /// committing parent before descendants.
+    ///
+    /// Core's `removeForBlock` postamble runs for every connected block, an
+    /// empty removal included: the rolling floor is stamped at `now` and may
+    /// decay again after the ten-second grace.
     pub fn remove_for_block(
         &mut self,
         block_txs: &[&Tx],
         block_txids: &[Txid],
         height: u32,
+        now: u64,
     ) -> MutationResult {
         assert_eq!(
             block_txs.len(),
@@ -1579,26 +1889,80 @@ impl Mempool {
         );
         self.estimator.block_connected(block_txids, height);
 
-        let mut changes = Vec::new();
-        for (tx, txid) in block_txs.iter().zip(block_txids) {
-            if let Some(id) = self.entry_id_by_txid(txid) {
-                self.remove_entries_with_reasons(
-                    &[(id, RemovalReason::BlockInclusion)],
-                    &mut changes,
-                );
-            }
-            for conflict in self.conflicts_for(tx) {
-                self.remove_entry_and_descendants_into(
-                    conflict,
-                    RemovalReason::Conflict,
-                    &mut changes,
-                );
-            }
+        let plan = self.plan_block_removals_from_txs(block_txs, block_txids);
+        let mut changes = Vec::with_capacity(plan.removals.len());
+        self.remove_entries_with_reasons(&plan.removals, &mut changes);
+        for txid in block_txids {
             if self.fee_deltas.remove(txid).is_some() {
                 self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
             }
         }
+        self.rolling_min_fee.lock().note_block(now);
         self.finish_mutation(changes)
+    }
+
+    /// Whether any entry is older than the expiry window at `now`: its
+    /// acceptance time is strictly below `now - MEMPOOL_EXPIRY_SECS`. An
+    /// entry exactly at the cutoff has not expired, and an empty pool has
+    /// nothing to expire. A read of the acceptance-time index's first key.
+    #[must_use]
+    pub fn has_expired_entries(&self, now: u64) -> bool {
+        let cutoff = now.saturating_sub(MEMPOOL_EXPIRY_SECS);
+        self.derived
+            .by_time
+            .first()
+            .is_some_and(|&(time, _)| time < cutoff)
+    }
+
+    /// Core `Expire`: removes every entry accepted strictly before
+    /// `now - MEMPOOL_EXPIRY_SECS` together with all its descendants, each
+    /// exactly once, as one `Removed(Expiry)` batch in entry-id order. A
+    /// descendant leaves with its expired ancestor even when it is newer.
+    /// Nothing expired commits nothing and moves no sequence, so a repeated
+    /// call at the same `now` is a no-op.
+    pub fn expire(&mut self, now: u64) -> MutationResult {
+        let cutoff = now.saturating_sub(MEMPOOL_EXPIRY_SECS);
+        let mut visited = VisitSet::new();
+        let mut stage = Vec::new();
+        for &(_, root) in self.derived.by_time.range(..(cutoff, EntryId::MIN)) {
+            self.stage_with_descendants(root, &mut visited, &mut stage);
+        }
+        stage.sort_unstable();
+        let removals: Vec<_> = stage
+            .into_iter()
+            .map(|id| (id, RemovalReason::Expiry))
+            .collect();
+        let mut changes = Vec::with_capacity(removals.len());
+        self.remove_entries_with_reasons(&removals, &mut changes);
+        self.finish_mutation(changes)
+    }
+
+    /// Appends `root` and every descendant not yet in `visited` to `stage`.
+    /// One visited set serves the whole expiry pass, so a descendant shared
+    /// by several expired ancestors is staged once and the pass stays linear
+    /// in the entries it removes.
+    fn stage_with_descendants(
+        &self,
+        root: EntryId,
+        visited: &mut VisitSet,
+        stage: &mut Vec<EntryId>,
+    ) {
+        if !visited.insert(root) {
+            return;
+        }
+        stage.push(root);
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let Some(links) = self.links(current) else {
+                continue;
+            };
+            for &child in &links.children {
+                if visited.insert(child) {
+                    stage.push(child);
+                    stack.push(child);
+                }
+            }
+        }
     }
 
     /// Removes the entries named by `txids`, each with its descendants, as
@@ -1745,51 +2109,76 @@ impl Mempool {
         self.refresh_metadata(&affected);
     }
 
-    /// Settles the components the removals disturbed.
+    /// Settles the components the removals disturbed, relinearizing every
+    /// surviving piece. An emptied component's id is freed, which also drops
+    /// its chunk keys. Otherwise the survivor seeds name each split piece:
+    /// the first keeps the id, the rest take fresh ids, and every piece
+    /// relinearizes. The settle runs before the metadata refresh because
+    /// relinearization reads only entry fees, weights, txids, and links,
+    /// never package totals.
     fn recompute_dirty_components(&mut self, seeds: &[EntryId], dirty: &[u32]) {
-        let mut visited = VisitSet::new();
-        for component in dirty {
-            let Some(summary) = self.component_summary_mut(*component) else {
+        for &component in dirty {
+            let Some(summary) = self.component_summary_mut(component) else {
                 continue;
             };
             if summary.member_count == 0 {
-                self.free_component(*component);
+                self.free_component(component);
                 continue;
             }
             *summary = ComponentSummary::default();
-            let mut relabelled = false;
-            for seed in seeds {
-                if !self.entries.contains(*seed)
-                    || self.component_id(*seed) != Some(*component)
-                    || visited.test(*seed)
-                {
+            // Components are closed under their links, so every piece of this
+            // dirty component is reachable only from its own seeds: one
+            // bounded visited set per component is enough.
+            let mut visited = WalkSet::new();
+            let mut pieces = Vec::new();
+            for &seed in seeds {
+                if !self.seed_starts_piece(component, seed, &visited) {
                     continue;
                 }
                 let mut members = Vec::new();
-                self.collect_component_members(*seed, &mut visited, &mut members);
-                let target = if relabelled {
-                    self.alloc_component()
-                } else {
-                    relabelled = true;
-                    *component
-                };
-                for member in &members {
-                    if let Some(slot) = self.entries.slot_mut(*member) {
-                        slot.component = target;
-                    }
-                }
-                let rebuilt = ComponentSummary {
-                    member_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
-                    weight: members.iter().fold(0_u64, |total, member| {
-                        total.saturating_add(
-                            self.entry(*member).map_or(0, MempoolEntry::policy_weight),
-                        )
-                    }),
-                };
-                if let Some(slot) = self.component_summary_mut(target) {
-                    *slot = rebuilt;
-                }
+                self.collect_component_members(seed, &mut visited, &mut members);
+                pieces.push(members);
             }
+            // The first surviving piece keeps the dirty id; every later split
+            // piece takes a fresh id. Each piece relinearizes once relabelled.
+            let mut pieces = pieces.into_iter();
+            if let Some(first) = pieces.next() {
+                self.relabel_piece(&first, component);
+                self.relinearize_members(component, &first);
+            }
+            for rest in pieces {
+                let target = self.alloc_component();
+                self.relabel_piece(&rest, target);
+                self.relinearize_members(target, &rest);
+            }
+        }
+    }
+
+    /// Returns whether a survivor seed names an unclaimed piece of a dirty
+    /// component: the seed is live, still carries the component id, and no
+    /// earlier walk reached it.
+    fn seed_starts_piece(&self, component: u32, seed: EntryId, visited: &WalkSet) -> bool {
+        self.entries.contains(seed)
+            && self.component_id(seed) == Some(component)
+            && !visited.test(seed)
+    }
+
+    /// Writes a split piece's component id onto its members and rebuilds the
+    /// id's summary from the same member list.
+    fn relabel_piece(&mut self, members: &[EntryId], target: u32) {
+        for member in members {
+            if let Some(slot) = self.entries.slot_mut(*member) {
+                slot.component = target;
+            }
+        }
+        let rebuilt = ComponentSummary {
+            member_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
+            weight: members.iter().fold(0_u64, |total, member| {
+                total.saturating_add(self.entry(*member).map_or(0, MempoolEntry::policy_weight))
+            }),
+        };
+        if let Some(slot) = self.component_summary_mut(target) {
+            *slot = rebuilt;
         }
     }
     /// Recomputes one entry's six package totals directly from the spend
@@ -1849,19 +2238,66 @@ impl Mempool {
         affected
     }
 
-    /// Recomputes package totals and priority keys for `affected` only.
+    /// Recomputes package totals for `affected` only. The chunk order is not
+    /// touched here: inserts relinearize from the new entry, removals settle
+    /// and relinearize every split piece, and fee overlays relinearize the
+    /// touched entry's cluster.
     fn refresh_metadata(&mut self, affected: &[EntryId]) {
         for id in affected {
             self.recompute_entry_totals(*id);
         }
-        for id in affected {
-            match self.entry(*id).cloned() {
-                Some(entry) => self.derived.pareto.insert(*id, &entry),
-                None => {
-                    let _ = self.derived.pareto.remove(*id);
-                }
-            }
+    }
+
+    /// Relinearizes the component holding `seed` from that entry's own walk,
+    /// so member discovery touches only the cluster, never the whole arena.
+    /// A one-member component's walk yields exactly the seed, so its facts
+    /// are built directly with no walk and no member or fact vectors; the
+    /// index content is identical. The seed is live at both call sites; a
+    /// dead seed forgets, as the filtered walk would.
+    fn relinearize_from_seed(&mut self, component: u32, seed: EntryId) {
+        if self
+            .component_summary(component)
+            .is_some_and(|summary| summary.member_count == 1)
+        {
+            let entries = &self.entries;
+            let Some(live) = entries.slot(seed) else {
+                self.derived.chunks.forget(component);
+                return;
+            };
+            let fact = MemberFacts {
+                id: seed,
+                entry: &live.entry,
+                parents: &live.links.parents,
+            };
+            self.derived
+                .chunks
+                .relinearize(component, core::slice::from_ref(&fact));
+            return;
         }
+        let mut members = Vec::new();
+        self.collect_component_members(seed, &mut WalkSet::new(), &mut members);
+        self.relinearize_members(component, &members);
+    }
+
+    /// Stores one component's freshly walked members in the chunk index,
+    /// borrowing entry facts and parent links straight from the arena. The
+    /// borrow splits `entries` from `derived` up front, so the index write
+    /// never aliases the facts it reads. Members that left the pool mid-walk
+    /// are skipped; an empty survivor list forgets the component.
+    fn relinearize_members(&mut self, component: u32, members: &[EntryId]) {
+        let entries = &self.entries;
+        let facts = members
+            .iter()
+            .filter_map(|&id| {
+                let live = entries.slot(id)?;
+                Some(MemberFacts {
+                    id,
+                    entry: &live.entry,
+                    parents: &live.links.parents,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.derived.chunks.relinearize(component, &facts);
     }
 
     /// Rebuilds every entry's package totals and the whole priority index.
@@ -1917,13 +2353,30 @@ impl Mempool {
             }
         }
 
-        let pareto_entries = ids
-            .into_iter()
-            .filter_map(|id| self.entry(id).cloned().map(|entry| (id, entry)))
-            .collect::<Vec<_>>();
-        self.derived.pareto = ParetoFront::default();
-        for (id, entry) in pareto_entries {
-            self.derived.pareto.insert(id, &entry);
+        // Test oracle: rebuild the chunk index from scratch over every
+        // component, so incremental maintenance has a from-scratch reference.
+        // The walks finish before any index write, so the arena borrow is
+        // not held across `relinearize_members`.
+        self.derived.chunks = ChunkIndex::default();
+        let mut components = Vec::new();
+        let mut seen = VisitSet::new();
+        for (index, _live) in self.entries.iter() {
+            let Ok(id) = EntryId::try_from(index) else {
+                continue;
+            };
+            // The walk inserts its seed and returns empty when an earlier
+            // walk already reached it, so no separate membership test.
+            let mut members = Vec::new();
+            self.collect_component_members(id, &mut seen, &mut members);
+            if members.is_empty() {
+                continue;
+            }
+            if let Some(component) = self.component_id(id) {
+                components.push((component, members));
+            }
+        }
+        for (component, members) in components {
+            self.relinearize_members(component, &members);
         }
     }
 
@@ -2234,6 +2687,17 @@ mod tests {
         let pool = Mempool::new(MempoolLimits::default());
         assert_eq!(pool.min_relay_fee_sat_per_kvb(), 1_000);
     }
+    #[test]
+    fn min_fee_floors_at_min_relay_while_the_rolling_rate_is_zero() {
+        let pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            ..MempoolLimits::default()
+        });
+        // A fresh pool's rolling rate is zero, so the floor is the configured
+        // min-relay rate at any clock.
+        assert_eq!(pool.min_fee_sat_per_kvb(0), 1_000);
+        assert_eq!(pool.min_fee_sat_per_kvb(u64::MAX), 1_000);
+    }
 
     #[test]
     fn insert_entry_rejects_below_min_relay_fee() {
@@ -2328,7 +2792,7 @@ mod tests {
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         assert!(
             !pool
-                .remove_for_block(&[&removed], &[removed_txid], 8)
+                .remove_for_block(&[&removed], &[removed_txid], 8, 1)
                 .is_empty()
         );
         assert_eq!(pool.aggregate_fees(), u64::MAX);
@@ -2401,7 +2865,7 @@ mod tests {
         );
 
         assert_eq!(
-            pool.remove_for_block(&[first.as_ref()], &[first_txid], 4)
+            pool.remove_for_block(&[first.as_ref()], &[first_txid], 4, 1)
                 .len(),
             1
         );
@@ -2417,7 +2881,7 @@ mod tests {
         );
 
         assert_eq!(
-            pool.remove_for_block(&[second.as_ref()], &[second_txid], 5)
+            pool.remove_for_block(&[second.as_ref()], &[second_txid], 5, 1)
                 .len(),
             1
         );
@@ -2425,149 +2889,6 @@ mod tests {
         assert_eq!(
             pool.fee_rate_histogram().collect::<Vec<_>>(),
             vec![(30_000, 100)]
-        );
-        Ok(())
-    }
-
-    fn independent_lowest_fee_rate(pool: &Mempool) -> Option<u64> {
-        pool.entries
-            .iter()
-            .map(|(_index, entry)| entry.fee_rate)
-            .min()
-    }
-
-    fn assert_floor(pool: &Mempool, expected: Option<u64>, stage: &str) {
-        assert_eq!(
-            pool.lowest_fee_rate(),
-            expected,
-            "maintained floor mismatched expected after {stage}"
-        );
-        assert_eq!(
-            pool.lowest_fee_rate(),
-            independent_lowest_fee_rate(pool),
-            "maintained floor drifted from entries after {stage}"
-        );
-    }
-
-    #[test]
-    fn lowest_fee_rate_tracks_duplicate_rates_and_every_removal_path() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits {
-            min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 10_000,
-            ..MempoolLimits::default()
-        });
-        assert_floor(&pool, None, "empty");
-
-        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7, 0);
-        pool.insert_entry(high)?;
-        assert_floor(&pool, Some(5_000), "insert high");
-
-        let low_a_tx = tx(2, Vec::new());
-        let low_a_txid = low_a_tx.txid();
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(low_a_tx.clone()),
-            1_000,
-            1_500,
-            1,
-            7,
-            0,
-        ))?;
-        assert_floor(&pool, Some(1_500), "insert lower rate");
-
-        let low_b_tx = tx(3, Vec::new());
-        let low_b_txid = low_b_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low_b_tx), 1_000, 1_500, 1, 7, 0))?;
-        assert_floor(&pool, Some(1_500), "duplicate min rate");
-
-        let removed = pool.remove_for_block(&[&low_a_tx], &[low_a_txid], 8);
-        assert_eq!(removed.len(), 1);
-        assert_floor(&pool, Some(1_500), "block inclusion of one duplicate min");
-
-        let evicted = pool.evict_below_fee_rate(2_000);
-        assert_eq!(change_txids(&evicted), vec![Hash256::from(low_b_txid)]);
-        assert_floor(&pool, Some(5_000), "evict_below remaining min");
-
-        let mined = tx(4, Vec::new());
-        let mined_txid = mined.txid();
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(mined.clone()),
-            1_000,
-            2_000,
-            1,
-            7,
-            0,
-        ))?;
-        assert_floor(&pool, Some(2_000), "insert new min before block");
-        let removed = pool.remove_for_block(&[&mined], &[mined_txid], 8);
-        assert_eq!(removed.len(), 1);
-        assert_floor(&pool, Some(5_000), "remove_for_block of current min");
-
-        let bulky_low = MempoolEntry::new(Arc::new(tx(5, Vec::new())), 5_000, 5_000, 1, 7, 0);
-        pool.insert_entry(bulky_low)?;
-        assert_floor(&pool, Some(1_000), "insert eviction victim");
-        let evicted = pool.enforce_size_limit(5_000)?;
-        assert_eq!(evicted.len(), 1);
-        assert_floor(&pool, Some(5_000), "size-limit eviction of min");
-
-        pool.prioritise(
-            pool.iter_txids()
-                .into_iter()
-                .next()
-                .expect("survivor after eviction"),
-            250_000,
-        )
-        .expect("prioritise must not touch actual fee_rate");
-        assert_floor(&pool, Some(5_000), "prioritise overlay");
-
-        pool.clear();
-        assert_floor(&pool, None, "clear");
-        Ok(())
-    }
-
-    #[test]
-    fn lowest_fee_rate_tracks_bip125_replacement() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits {
-            min_relay_fee_sat_per_kvb: 0,
-            ..MempoolLimits::default()
-        });
-        let prev = OutPoint {
-            txid: txid_of([0x11; 32]),
-            vout: 0,
-        };
-        let original = single_output_tx(
-            &[prev],
-            Sequence::ENABLE_RBF_NO_LOCKTIME,
-            1_000,
-            vec![0x51].into(),
-        );
-        pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7, 0))?;
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(tx(8, Vec::new())),
-            1_000,
-            1_500,
-            1,
-            7,
-            0,
-        ))?;
-        assert_floor(&pool, Some(1_500), "before replacement");
-
-        let replacement = single_output_tx(
-            &[prev],
-            Sequence::ENABLE_RBF_NO_LOCKTIME,
-            900,
-            vec![0x52].into(),
-        );
-        pool.replace_transaction(
-            &crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1)
-                .with_sigop_cost(4),
-            10,
-            1,
-        )
-        .expect("replacement must apply");
-        assert_floor(
-            &pool,
-            Some(1_500),
-            "replacement must not drop the bystander min",
         );
         Ok(())
     }
@@ -2667,7 +2988,7 @@ mod tests {
         assert!(pool.derived.by_txid.is_empty());
         assert!(pool.derived.funding.is_empty());
         assert!(pool.derived.spending.is_empty());
-        assert!(pool.derived.pareto.is_empty());
+        assert!(pool.derived.chunks.is_empty());
         assert!(pool.fee_deltas.is_empty(), "clear is a wholesale reset");
         assert!(pool.sequence_number() > seq_before_clear);
         Ok(())
@@ -2919,7 +3240,7 @@ mod tests {
             .entry_id_by_txid(&child_txid)
             .expect("child id resolves");
 
-        let removed = pool.remove_for_block(&[&parent], &[parent_txid], 8);
+        let removed = pool.remove_for_block(&[&parent], &[parent_txid], 8, 1);
 
         assert_eq!(
             removed.changes,
@@ -2994,7 +3315,6 @@ mod tests {
         );
         assert_eq!(entry.fee_delta, 500);
         assert_eq!(entry.modified_fee(), 1_500);
-        assert_eq!(entry.modified_fee_rate(), 15_000);
         assert_eq!(
             pool.aggregate_fees(),
             1_000,
@@ -3021,7 +3341,7 @@ mod tests {
         assert_eq!(entry.fee_rate, 10_000);
         assert_eq!(entry.modified_fee(), -1_000);
         assert_eq!(
-            pool.derived.pareto.len(),
+            pool.derived.chunks.len(),
             1,
             "a negative overlay still indexes the entry"
         );
@@ -3158,7 +3478,11 @@ mod tests {
         };
         assert_eq!(child_after.ancestor_fee, 3_000, "actual fees do not move");
         assert_eq!(child_after.ancestor_fee_delta, 500);
-        assert_eq!(child_after.modified_ancestor_fee_rate(), 17_500);
+        assert_eq!(
+            i128::from(child_after.ancestor_fee) + child_after.ancestor_fee_delta,
+            3_500,
+            "the modified ancestor package fee carries the overlay"
+        );
         let Some(grandchild_after) = pool.entry(grandchild_id) else {
             panic!("missing grandchild");
         };
@@ -3242,7 +3566,7 @@ mod tests {
             .expect("stranger delta applies");
 
         let removed =
-            pool.remove_for_block(&[&parent, &stranger], &[parent_txid, stranger_txid], 8);
+            pool.remove_for_block(&[&parent, &stranger], &[parent_txid, stranger_txid], 8, 1);
 
         assert_eq!(removed.len(), 1, "only the mined parent leaves");
         assert_eq!(
@@ -3302,83 +3626,20 @@ mod tests {
             .expect("higher id resolves");
 
         assert_eq!(
-            pool.derived.pareto.top_n(1).collect::<Vec<_>>(),
-            vec![higher_fee_id]
+            pool.chunks_by_feerate()
+                .flat_map(|chunk| chunk.members.iter().copied())
+                .next(),
+            Some(higher_fee_id)
         );
         pool.prioritise(lower_fee_txid, 2_000)
             .expect("delta applies");
 
         assert_eq!(
-            pool.derived.pareto.top_n(1).collect::<Vec<_>>(),
-            vec![lower_fee_id]
+            pool.chunks_by_feerate()
+                .flat_map(|chunk| chunk.members.iter().copied())
+                .next(),
+            Some(lower_fee_id)
         );
-        Ok(())
-    }
-
-    #[test]
-    fn mining_snapshot_copies_metadata_topology_and_sequence() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits::default());
-        let parent = Arc::new(tx(15, Vec::new()));
-        let parent_txid = parent.txid();
-        let _parent_id =
-            pool.insert_entry(MempoolEntry::new(Arc::clone(&parent), 100, 1_000, 1, 7, 0))?;
-        let child = Arc::new(tx(16, vec![OutPoint::new(parent_txid, 0)]));
-        let child_txid = child.txid();
-        let _child_id =
-            pool.insert_entry(MempoolEntry::new(Arc::clone(&child), 100, 2_000, 2, 7, 0))?;
-
-        let snapshot = pool.mining_snapshot();
-        assert_eq!(snapshot.sequence, pool.sequence_number());
-        assert_eq!(snapshot.entries.len(), 2);
-        let [child_entry, parent_entry] = &snapshot.entries[..] else {
-            panic!("snapshot must hold both entries");
-        };
-        assert_eq!(child_entry.txid, child_txid);
-        assert_eq!(parent_entry.txid, parent_txid);
-        assert_eq!(child_entry.ancestors, vec![1], "positions are in-snapshot");
-        assert_eq!(parent_entry.ancestors, Vec::<u32>::new());
-        // Metadata fidelity: copied scalars are the ones derived from the
-        // transaction itself, not policy reconstructions of them.
-        assert_eq!(child_entry.fee, 2_000);
-        assert_eq!(child_entry.fee_delta, 0);
-        assert_eq!(child_entry.vsize, 100);
-        assert_eq!(
-            child_entry.bip141_vsize,
-            u32::try_from(child.vsize()).unwrap_or(u32::MAX)
-        );
-        assert_eq!(
-            child_entry.size,
-            u32::try_from(child.total_size()).unwrap_or(u32::MAX)
-        );
-        assert_eq!(child_entry.weight, child.weight());
-        assert_eq!(
-            child_entry.sigop_cost, 0,
-            "the fixture scripts are sigop-free and the constructor took 0"
-        );
-        assert_eq!(child_entry.wtxid, child.wtxid());
-        assert_eq!(child_entry.ancestor_size, 200);
-        assert_eq!(child_entry.ancestor_fee, 3_000);
-        assert_eq!(child_entry.ancestor_fee_delta, 0);
-
-        pool.prioritise(parent_txid, 2_000).expect("delta applies");
-        let bumped = pool.mining_snapshot();
-        assert_eq!(
-            bumped.sequence, snapshot.sequence,
-            "prioritisation emits no mutation change and moves no sequence"
-        );
-        let [bumped_parent, bumped_child] = &bumped.entries[..] else {
-            panic!("bumped snapshot must hold both entries");
-        };
-        assert_eq!(
-            bumped_parent.txid, parent_txid,
-            "the overlay lifted the parent"
-        );
-        assert_eq!(bumped_child.ancestors, vec![0]);
-        assert_eq!(
-            bumped_child.ancestor_fee, 3_000,
-            "actual package fees hold still"
-        );
-        assert_eq!(bumped_child.ancestor_fee_delta, 2_000);
         Ok(())
     }
 
@@ -3440,7 +3701,7 @@ mod tests {
             "arrivals alone are not confirmation evidence"
         );
 
-        pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8);
+        pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8, 1);
         assert!(
             pool.estimate_fee_rate(2).is_some(),
             "the confirmations this pool observed itself answer the estimate"
@@ -3638,7 +3899,10 @@ mod tests {
         assert!(!pool.contains_txid(&replacement_txid));
         assert_eq!(pool.mining_snapshot().entries, before.0);
         assert_eq!(pool.estimator_history(), before.1);
-        assert_eq!(pool.policy_stamp(), before.2);
+        // Entries and history are untouched, but the refused trim's floor
+        // raise revisions the stamp.
+        assert_ne!(pool.policy_stamp(), before.2);
+        assert!(pool.min_fee_sat_per_kvb(9) > 0);
     }
 
     /// Every entry's four package totals, in entry-id order.
@@ -3722,7 +3986,7 @@ mod tests {
             };
             let tx = entry.tx.clone();
             let txid = entry.txid;
-            let removed = pool.remove_for_block(&[&tx], &[txid], 8);
+            let removed = pool.remove_for_block(&[&tx], &[txid], 8, 1);
             assert!(
                 !removed.is_empty(),
                 "entry {victim} must be present in the fixture"
@@ -3786,11 +4050,7 @@ mod tests {
         );
 
         let incremental = totals(&pool);
-        let index = pool
-            .derived
-            .pareto
-            .top_n(pool.derived.pareto.len())
-            .collect::<Vec<_>>();
+        let index = pool.chunk_order();
         pool.recompute_all_metadata();
         assert_eq!(
             incremental,
@@ -3799,11 +4059,8 @@ mod tests {
         );
         assert_eq!(
             index,
-            pool.derived
-                .pareto
-                .top_n(pool.derived.pareto.len())
-                .collect::<Vec<_>>(),
-            "eviction left a stale priority index behind"
+            pool.chunk_order(),
+            "eviction left a stale chunk index behind"
         );
         Ok(())
     }
@@ -3851,7 +4108,7 @@ mod tests {
             panic!("fixture must hold the victim entry");
         };
         let victim_tx = victim.tx.clone();
-        let removed = pool.remove_for_block(&[&victim_tx], &[victim_txid], 8);
+        let removed = pool.remove_for_block(&[&victim_tx], &[victim_txid], 8, 1);
         assert!(!removed.is_empty(), "the victim must actually be removed");
         assert!(
             outs.get(2).is_some_and(|out| pool.contains_txid(&out.txid)),
@@ -3876,11 +4133,7 @@ mod tests {
         pool.prioritise(txid, 5_000_000)
             .expect("prioritise must apply");
 
-        let after_prioritise = pool
-            .derived
-            .pareto
-            .top_n(pool.derived.pareto.len())
-            .collect::<Vec<_>>();
+        let after_prioritise = pool.chunk_order();
         let totals_after = totals(&pool);
         pool.recompute_all_metadata();
         assert_eq!(
@@ -3890,11 +4143,8 @@ mod tests {
         );
         assert_eq!(
             after_prioritise,
-            pool.derived
-                .pareto
-                .top_n(pool.derived.pareto.len())
-                .collect::<Vec<_>>(),
-            "prioritise left stale priority keys behind"
+            pool.chunk_order(),
+            "prioritise left stale chunk keys behind"
         );
         Ok(())
     }
@@ -3920,6 +4170,155 @@ mod tests {
             "a child inserted before its parent kept stale ancestor totals"
         );
         Ok(())
+    }
+
+    #[test]
+    fn full_refusal_raises_the_floor_to_the_candidate_chunk_rate() {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 1_000,
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let seated = single_output_tx(&[], Sequence::MAX, 1_001, vec![0x51, 1].into());
+        pool.insert_entry(MempoolEntry::new(Arc::new(seated), 900, 90_000, 1, 7, 0))
+            .expect("first fits");
+        assert_eq!(pool.min_fee_sat_per_kvb(2), 0);
+        let candidate = single_output_tx(&[], Sequence::MAX, 1_002, vec![0x51, 2].into());
+        let refused = pool.insert_entry(MempoolEntry::new(Arc::new(candidate), 900, 10, 2, 7, 0));
+        assert!(matches!(refused, Err(MempoolError::Full)));
+        // Candidate chunk rate floor(10 * 1_000 / 900) = 11, plus 1_000.
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.min_fee_sat_per_kvb(2), 1_011);
+    }
+
+    #[test]
+    fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            max_total_bytes: 400,
+            ..MempoolLimits::default()
+        });
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(1, Vec::new())),
+            200,
+            400,
+            1,
+            1,
+            0,
+        ))
+        .expect("low");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(2, Vec::new())),
+            200,
+            800,
+            1,
+            1,
+            0,
+        ))
+        .expect("high");
+        crate::eviction::evict_lowest_fee_packages(&mut pool, 200).expect("eviction");
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 3_000);
+        pool.remove_for_block(&[], &[], 8, 1_000);
+        // Usage 200 of 400 is exactly half: full 12 h halflife, 3_000 -> 1_500.
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 1_500);
+    }
+
+    #[test]
+    fn expire_removes_stale_root_with_descendants() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(41, Vec::new());
+        let parent_txid = parent.txid();
+        let child = tx(42, vec![OutPoint::new(parent_txid, 0)]);
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 1, 0))
+            .expect("parent");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(child),
+            100,
+            1_000,
+            crate::policy::MEMPOOL_EXPIRY_SECS,
+            1,
+            0,
+        ))
+        .expect("child");
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        assert!(pool.has_expired_entries(now));
+        let expired = pool.expire(now);
+        assert_eq!(expired.len(), 2);
+        assert!(
+            expired.changes.iter().all(|change| matches!(
+                change.outcome,
+                crate::mutation::MutationOutcome::Removed(crate::RemovalReason::Expiry)
+            )),
+            "every expiry change is tagged Expiry: {expired:?}"
+        );
+        assert!(pool.is_empty());
+        // Idempotent: a repeated call commits nothing and moves no sequence.
+        let sequence = pool.sequence_number();
+        assert!(pool.expire(now).is_empty());
+        assert_eq!(pool.sequence_number(), sequence);
+    }
+
+    #[test]
+    fn expire_keeps_entry_at_cutoff() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(43, Vec::new())),
+            100,
+            1_000,
+            1,
+            1,
+            0,
+        ))
+        .expect("at cutoff");
+        assert!(!pool.has_expired_entries(now));
+        assert!(pool.expire(now).is_empty());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn expire_keeps_a_recycled_slot_with_a_fresh_timestamp() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let old = Arc::new(tx(51, Vec::new()));
+        let old_txid = old.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&old), 100, 1_000, 0, 1, 0))
+            .expect("old");
+        let recycled = pool.entry_id_by_txid(&old_txid).expect("old id resolves");
+        pool.remove_for_block(&[old.as_ref()], &[old_txid], 1, 1);
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        let fresh = Arc::new(tx(52, Vec::new()));
+        let fresh_txid = fresh.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&fresh), 100, 1_000, now, 1, 0))
+            .expect("fresh");
+        assert_eq!(
+            pool.entry_id_by_txid(&fresh_txid),
+            Some(recycled),
+            "the vacated slot is reused"
+        );
+        // The stale (0, id) key left with the old entry: only the fresh key
+        // remains, so nothing is expired and expiry reaps nothing live.
+        assert!(!pool.has_expired_entries(now));
+        assert!(pool.expire(now).is_empty());
+        assert!(pool.contains_txid(&fresh_txid));
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn has_expired_entries_false_when_empty_or_cleared() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert!(!pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(44, Vec::new())),
+            100,
+            1_000,
+            0,
+            1,
+            0,
+        ))
+        .expect("stale");
+        assert!(pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
+        pool.clear();
+        assert!(!pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
     }
 
     fn single_output_tx(
@@ -4485,7 +4884,7 @@ mod spend_index_tests {
         };
         let root_tx = root.tx.clone();
         let before = pool.len();
-        let removed = pool.remove_for_block(&[&root_tx], &[root_txid], 8);
+        let removed = pool.remove_for_block(&[&root_tx], &[root_txid], 8, 1);
         assert_ne!(removed.len(), 0);
         // The root left, while its descendants remain as transactions that
         // now spend confirmed outputs.
@@ -4614,24 +5013,17 @@ mod dynamic_memory_usage_tests {
         );
     }
 
-    /// The priority index is charged for both copies of every entry.
+    /// The chunk index is charged for its keys and component states.
     #[test]
-    fn the_priority_index_is_charged_for_both_of_its_key_collections() {
-        use core::mem::size_of;
-
+    fn the_chunk_index_is_charged_for_what_it_holds() {
         const COUNT: u64 = 32;
 
         let mut pool = pool_with(u8::try_from(COUNT).unwrap_or(0), 64);
-        let index = pool.derived.pareto.dynamic_memory_usage();
-
-        let one_id_each = COUNT.saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0));
-        assert!(
-            index > one_id_each.saturating_mul(4),
-            "the index holds two keys per entry, not one id: {index} vs {one_id_each}"
-        );
+        let index = pool.derived.chunks.dynamic_memory_usage();
+        assert!(index > 0, "a populated index must report a nonzero cost");
 
         let with_index = pool.dynamic_memory_usage();
-        pool.derived.pareto = ParetoFront::default();
+        pool.derived.chunks = ChunkIndex::default();
         let without_index = pool.dynamic_memory_usage();
         assert_eq!(
             with_index.saturating_sub(without_index),
@@ -5310,7 +5702,8 @@ mod graph_tests {
                             .collect::<Vec<_>>();
                         let confirmed_refs: Vec<&Tx> = confirmed.iter().collect();
                         let confirmed_ids: Vec<Txid> = confirmed.iter().map(Tx::txid).collect();
-                        let _ = pool.remove_for_block(&confirmed_refs, &confirmed_ids, HEIGHT + 1);
+                        let _ =
+                            pool.remove_for_block(&confirmed_refs, &confirmed_ids, HEIGHT + 1, 1);
                     }
                     8 if !live.is_empty() => {
                         let victim = live[rng.below(live.len())];

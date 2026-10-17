@@ -147,7 +147,7 @@ pub(crate) fn finish_preview(
 ) -> crate::standardness::PackageAcceptanceFacts {
     use crate::standardness::PackageAcceptanceFacts;
     if txs.len() == 1 {
-        prepared[0].verify(&requests[0]);
+        prepared[0].verify(&requests[0], None);
         return PackageAcceptanceFacts {
             package_error: None,
             results: vec![prepared[0].fact.clone()],
@@ -160,9 +160,12 @@ pub(crate) fn finish_preview(
         checks,
         None,
         crate::gateway::AdmissionMode::PackageTest,
+        None,
     )
 }
 
+/// Package submission's shared tail: policy, then the script stage with the
+/// gateway's cache on real submission and `None` on preview.
 pub(crate) fn finish_package(
     txs: &[Tx],
     requests: &[crate::AdmissionRequest],
@@ -170,6 +173,7 @@ pub(crate) fn finish_package(
     checks: Option<PackageChecks>,
     aggregate_error: Option<AcceptanceRejectReason>,
     mode: crate::gateway::AdmissionMode,
+    script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
 ) -> crate::standardness::PackageAcceptanceFacts {
     use crate::standardness::PackageAcceptanceFacts;
     let mut facts = PackageAcceptanceFacts {
@@ -222,7 +226,7 @@ pub(crate) fn finish_package(
         return facts;
     }
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
-        job.verify_scripts(request);
+        job.verify_scripts(request, script_cache);
         facts.results[index] = job.fact.clone();
         if job.fact.allowed == Some(false) {
             break;

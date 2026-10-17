@@ -310,6 +310,14 @@ pub trait MiningControl: Send + Sync {
     /// Publishes a completed authoritative mutation to template waiters.
     fn publish_generation(&self);
 
+    /// Publishes a fee-priority (prioritisation) generation change to
+    /// template waiters.
+    ///
+    /// `fee_delta_sequence` is the pool's post-change fee-delta sequence,
+    /// captured after the prioritisation committed. The membership sequence
+    /// is left at its last published value.
+    fn publish_fee_delta_generation(&self, fee_delta_sequence: u64);
+
     /// Assembles, solves, and optionally submits `request.count` blocks paying `request.payout`.
     ///
     /// Each submitted block's commit point is the ordinary apply path (`ARCH-07`):
@@ -340,8 +348,8 @@ pub trait MiningControl: Send + Sync {
 /// fakes this type replaces; publication counters record every wake.
 ///
 /// INVARIANT: an armed failure short-circuits every result-returning method,
-/// including `submit_header`, before canned state is read; both wake counters
-/// remain independently observable.
+/// including `submit_header`, before canned state is read; every wake
+/// recording stays independently observable.
 #[cfg(any(test, feature = "test-seam"))]
 pub struct FakeMiningControl {
     /// Template returned by template-mode `get_block_template` calls.
@@ -370,6 +378,12 @@ pub struct FakeMiningControl {
     publishes: AtomicU64,
     /// Every `publish_generation_from` sequence, in call order.
     pub published_from: Mutex<Vec<u64>>,
+    /// Every `publish_fee_delta_generation` sequence, in call order.
+    pub published_fee_from: Mutex<Vec<u64>>,
+    /// Staged tip hashes, in notification order.
+    pub staged_tips: Mutex<Vec<Hash256>>,
+    /// Committed block hashes, in publication order.
+    pub published_blocks: Mutex<Vec<Hash256>>,
 }
 
 #[cfg(any(test, feature = "test-seam"))]
@@ -402,6 +416,9 @@ impl Default for FakeMiningControl {
             fail: Mutex::new(None),
             publishes: AtomicU64::new(0),
             published_from: Mutex::new(Vec::new()),
+            published_fee_from: Mutex::new(Vec::new()),
+            staged_tips: Mutex::new(Vec::new()),
+            published_blocks: Mutex::new(Vec::new()),
         }
     }
 }
@@ -508,6 +525,10 @@ impl MiningControl for FakeMiningControl {
         self.publishes.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn publish_fee_delta_generation(&self, fee_delta_sequence: u64) {
+        self.published_fee_from.lock().push(fee_delta_sequence);
+    }
+
     fn generate(
         &self,
         request: GenerateRequest,
@@ -531,6 +552,19 @@ impl MiningControl for FakeMiningControl {
 impl crate::coordinator::MempoolSequenceWake for FakeMiningControl {
     fn publish_generation_from(&self, sequence: u64) {
         self.published_from.lock().push(sequence);
+    }
+
+    fn stage_tip(&self, tip: &bitcoin_rs_chain::TipSnapshot, _block: &Block) {
+        self.staged_tips.lock().push(tip.hash);
+    }
+
+    fn publish_block_generation(
+        &self,
+        tip_hash: Hash256,
+        _removals: &bitcoin_rs_mempool::MutationResult,
+    ) {
+        self.published_blocks.lock().push(tip_hash);
+        self.publish_generation();
     }
 }
 

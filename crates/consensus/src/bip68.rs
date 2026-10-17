@@ -12,7 +12,7 @@ const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
 /// Checks one input's BIP68 relative lock; `prevout_mtp` is only read for time-
 /// based locks.
 pub fn check_sequence_lock(
-    tx_version: i32,
+    tx_version: u32,
     sequence: u32,
     prevout_height: u32,
     prevout_mtp: u32,
@@ -60,7 +60,7 @@ pub const fn sequence_lock_is_time_based(sequence: u32) -> bool {
 /// Unconfirmed prevouts use `block_height`, so positive height locks fail.
 #[must_use]
 pub fn sequence_lock_satisfied(
-    tx_version: i32,
+    tx_version: u32,
     sequence: u32,
     prevout_height: u32,
     prevout_mtp: u32,
@@ -86,7 +86,8 @@ pub fn sequence_lock_satisfied(
 #[cfg(test)]
 mod tests {
     use super::{
-        SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_TYPE_FLAG, sequence_lock_satisfied,
+        ConsensusError, SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_TYPE_FLAG,
+        sequence_lock_satisfied,
     };
 
     #[test]
@@ -123,5 +124,18 @@ mod tests {
             super::check_sequence_lock(2, SEQUENCE_LOCKTIME_DISABLE_FLAG | 2, 100, 0, 100, 0),
             Ok(())
         );
+    }
+
+    #[test]
+    fn max_version_enforces_relative_lock_unsigned() {
+        // The wire version 0xFFFF_FFFF reads as 4294967295, not -1: the
+        // relative lock Core enforces applies to version >= 2 under unsigned
+        // comparison.
+        assert!(!sequence_lock_satisfied(u32::MAX, 2, 100, 0, 100, 0));
+        assert!(matches!(
+            super::check_sequence_lock(u32::MAX, 2, 100, 0, 100, 0),
+            Err(ConsensusError::Bip { bip: "BIP68", .. })
+        ));
+        assert!(sequence_lock_satisfied(1, 2, 100, 0, 100, 0));
     }
 }

@@ -149,7 +149,7 @@ process_gate = "overhaul_process_harness::policy_cases"
 unsupported = [
   "Aggregate CPFP/package RBF submission: submitpackage returns -32601; Esplora /txs/package returns 404.",
   "Core transient non-optimal SFL diagrams, its randomized work-budget decisions and tie ordering are not emulated by the exact closure solver; adversarial/churn parity remains unverified.",
-  "Core allocator-based capacity and rolling minimum fee with block/time decay are not implemented; capacity uses virtual size and the existing pressure heuristic.",
+  "Core allocator-based capacity is not implemented; capacity and the rolling minimum fee with eviction/trim bump and post-block decay are measured against total virtual size.",
   "Core speculative insert-and-trim failure side effects are not reproduced; candidate refusal is atomic.",
   "Generic consensus/script details, missing-input/max-fee numeric codes and CompactSize-inclusive nulldata accounting retain local behavior."
 ]

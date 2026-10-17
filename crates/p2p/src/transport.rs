@@ -81,9 +81,9 @@ impl Negotiated {
 }
 
 impl RecvTransport {
-    /// Reads the next message, observing its command and payload before typed
-    /// decoding. A v2 message of an empty or undefined type is dropped and
-    /// reading continues, as BIP324 peers do.
+    /// Reads at most one message: `Ok(None)` when the v2 transport carried a
+    /// decoy packet or a message of an empty or undefined type, which BIP324
+    /// peers drop. A v1 frame always carries a message and is never `None`.
     ///
     /// POST: a poll-timeout I/O error keeps any partial frame or packet.
     pub(crate) fn read_message<R: Read>(
@@ -91,19 +91,19 @@ impl RecvTransport {
         reader: &mut R,
         magic: Magic,
         observe: impl FnOnce(&str, &[u8]),
-    ) -> Result<(Message, bytes::Bytes), PeerError> {
+    ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
-            Self::V1(receiver) => receiver.read_message_with(reader, magic, observe),
+            Self::V1(receiver) => receiver.read_message_with(reader, magic, observe).map(Some),
             Self::V2(packets) => {
-                let (command, payload) = loop {
-                    let contents = packets.read_contents(reader).map_err(transport_error)?;
-                    if let Some(message) = msg_type::decode(&contents) {
-                        break message;
-                    }
+                let Some(contents) = packets.read_contents(reader).map_err(transport_error)? else {
+                    return Ok(None);
+                };
+                let Some((command, payload)) = msg_type::decode(&contents) else {
+                    return Ok(None);
                 };
                 observe(&command, &payload);
                 let message = decode_payload(&command, &payload)?;
-                Ok((message, payload))
+                Ok(Some((message, payload)))
             }
         }
     }
@@ -150,6 +150,7 @@ pub(crate) fn establish<S: Read + Write>(
         }
         match handshake.advance(stream) {
             Ok(Step::Send) => stream.write_all(&handshake.take_outbound())?,
+            Ok(Step::Yield) => {}
             Ok(Step::V1(prefix)) => {
                 return Ok(Negotiated {
                     recv: RecvTransport::V1(V1Receiver::with_prefix(&prefix)),

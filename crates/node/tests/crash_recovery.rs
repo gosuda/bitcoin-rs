@@ -22,6 +22,7 @@ use std::{
 const CHILD_ENV: &str = "BITCOIN_RS_CRASH_TEST_CHILD";
 const DATA_DIR_ENV: &str = "BITCOIN_RS_CRASH_TEST_DATADIR";
 const SCENARIO_ENV: &str = "BITCOIN_RS_CRASH_TEST_SCENARIO";
+const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
 
 #[test]
 fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
@@ -558,11 +559,30 @@ fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> 
     }
     Ok(())
 }
+fn crash_test_backend(
+    default: bitcoin_rs_storage::StorageBackend,
+) -> bitcoin_rs_storage::StorageBackend {
+    let value = match std::env::var(CRASH_TEST_BACKEND_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return default,
+        Err(error) => panic!("invalid {CRASH_TEST_BACKEND_ENV}: {error}"),
+    };
+    let backend: bitcoin_rs_storage::StorageBackend = match value.parse() {
+        Ok(backend) => backend,
+        Err(error) => panic!("invalid {CRASH_TEST_BACKEND_ENV} {value:?}: {error}"),
+    };
+    assert!(
+        backend.is_compiled_in(),
+        "BITCOIN_RS_CRASH_TEST_BACKEND {value:?} is not compiled into this test binary"
+    );
+    backend
+}
 fn test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
+    config.storage.backend = crash_test_backend(config.storage.backend);
     config
 }
 

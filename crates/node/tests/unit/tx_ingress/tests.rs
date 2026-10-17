@@ -65,6 +65,7 @@ fn zero_fee_gateway() -> Arc<MempoolGateway> {
         }))),
         None,
         ValidationEngine::Native,
+        None,
     ))
 }
 
@@ -143,6 +144,7 @@ fn consumer_preserves_exact_connection_id() {
             captured: Arc::clone(&recorded_origin),
         })),
         ValidationEngine::Native,
+        None,
     ));
 
     let source = test_source();
@@ -175,6 +177,7 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
         Arc::clone(&pool),
         None,
         ValidationEngine::Native,
+        None,
     ));
 
     let source = test_source();
@@ -232,6 +235,7 @@ fn coinbase_is_rejected_not_orphaned() {
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
         ValidationEngine::Native,
+        None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
@@ -262,6 +266,7 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
         ValidationEngine::Native,
+        None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
@@ -301,6 +306,7 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
         ValidationEngine::Native,
+        None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);

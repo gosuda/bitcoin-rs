@@ -332,11 +332,8 @@ impl PeerTable {
         let (floor, minimum) = {
             let pool = gateway.read();
             let minimum = pool.min_relay_fee_sat_per_kvb();
-            let policy = pool.policy_snapshot();
-            let floor = bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb(
-                &pool,
-                policy.incremental_relay_fee_sat_per_kvb,
-            );
+            // Core rolling floor measured against total virtual size.
+            let floor = pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
             (
                 if ibd {
                     Amount::MAX_MONEY.to_sat()
@@ -567,6 +564,7 @@ mod tests {
             ))),
             None,
             ValidationEngine::Native,
+            None,
         )
     }
 
@@ -1237,6 +1235,7 @@ mod tests {
             }))),
             None,
             ValidationEngine::Native,
+            None,
         );
         let (source, rx) = connect(&table, 1, false, false, crate::PeerRole::FullRelay, true);
         table.receive_fee_filter(source, 991);

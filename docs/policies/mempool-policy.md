@@ -19,7 +19,9 @@ Both processes run isolated regtest chains funded by identical block bytes.
 `POL-02` and `POL-03` own admission, preparation stamps, and atomic refusal.
 [Mempool mutations](../contracts/mempool-mutations.md) owns publication order:
 replacement removes victims before publishing acceptance; ordinary insertion
-keeps its accepted-before-capacity-removals event order. This page does not
+keeps its accepted-before-capacity-removals event order. Entries strictly older
+than 336 hours and their descendants expire after each committed transaction or
+package admission and reorg re-add; preview never expires. This page does not
 define another graph, mutation owner, or commit protocol.
 
 ## 3. Policy matrix
@@ -43,7 +45,8 @@ define another graph, mutation owner, or commit protocol.
 | TRUC sizes/topology | Root at most 10,000 adjusted vB; child at most 1,000. At most one unconfirmed ancestor and one descendant. | Exact unit boundaries; process size/grandchild rejections |
 | TRUC sibling eviction | An eligible existing 1-parent/1-child sibling joins the RBF conflict set even without a double-spend. Its fees and diagram remain binding. | Signed weak/strong sibling process cases |
 | Ephemeral dust | At most one dust output; both base and modified fees must be zero. A child spending any output of that unconfirmed parent must spend all its dust. | Process fee rejections; zero-floor gateway spend/overlay/purity tests |
-| Fee floors | Minimum relay uses modified fees and the integer relay charge. The pressure heuristic differs from Core (§5). | Both-RPC floor tests and process prioritisation |
+| Fee floors | Minimum relay uses modified fees and the integer relay charge. The rolling minimum fee follows Core eviction/trim bumps and post-block decay, measured against total virtual size (§5). | Both-RPC floor tests and process prioritisation |
+| Expiry | Entries strictly older than 336 hours and their descendants expire after committed transaction or package admission and reorg re-add; preview never expires. | Expiry unit and gateway tests |
 | Sigops | Gateway computes BIP141 cost from resolved outputs; at most 16,000. Policy weight is `max(wire_weight, sigops * 20)`, and policy vsize is its ceiling divided by four. | Independent rust-bitcoin accounting tests and admission boundaries |
 | Finality | Absolute locktime at tip+1; BIP68 uses confirmed height/MTP, unconfirmed parents at the next block, gated on CSV; coinbase depth at least 100. | `policy_contract`, `admission`, gateway tests |
 | Maximum fee | After successful policy/script verification, base fee is compared to the integer charge at the caller rate and actual vsize; a zero charge disables the guard. | Both-RPC precedence tests and signed 1 sat maximum-fee boundary |
@@ -85,16 +88,24 @@ The machine-readable list lives in `crates/rpc/core-compat.toml` under `admissio
   parents CPFP with aggregate fees, atomic refusal and no replacement/capacity
   eviction; `package::tests::native_package_*` owns that evidence. Its policy
   is not a claim of Core `submitpackage` compatibility.
-- The graph owner computes exact optimal dependency closures. Core uses bounded,
+- The graph owner computes exact optimal dependency closures, and the pool
+  keeps each cluster's linearization current at every mutation so mining and
+  eviction read a maintained chunk index instead of re-solving. Core uses bounded,
   history-dependent SFL linearization and can temporarily have a non-optimal
   diagram. Those transient work-budget decisions and tie ordering are not
   emulated. An independently optimal diagram is not evidence of full Core
   parity. The 64-node process vector and exhaustive small-DAG oracle cover
   their stated cases only; adversarial/churn parity remains unverified.
-- Capacity is a virtual-size sum rather than Core's allocator usage. The existing
-  half-full/lowest-entry pressure-floor heuristic is not Core's rolling minimum
-  with block/time decay. Candidate-capacity refusal is atomic here; no parity
-  claim is made for Core's speculative insert-and-trim side effects.
+- Capacity is a virtual-size sum rather than Core's allocator usage. The rolling
+  minimum fee follows Core eviction/trim bumps and post-block halflife decay,
+  measured against total virtual size. Candidate-capacity refusal is atomic here;
+  no parity claim is made for Core's speculative insert-and-trim side effects.
+- Template selection stops at the first chunk whose aggregate modified-fee rate
+  `floor(modified_fee * 1000 / ceil(charged_weight / 4))` is below 1 sat/kvB, so a
+  zero-fee or negative-fee chunk is absent unless descendant fees rescue its aggregate.
+  After the main walk, ordered prefixes of resource-skipped chunks fill the tail when
+  their outside ancestors are selected, they are final, they fit including count
+  growth, and their aggregate rate meets the same floor.
 - Generic consensus/script error details, the missing-input/max-fee numeric error
   codes, and the configured nulldata budget's CompactSize accounting retain
   their recorded differences. `getmempoolinfo.optimal` stays true for this

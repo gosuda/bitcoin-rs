@@ -1,5 +1,8 @@
 //! Validated block connection and its ordered persistence/publication transaction.
 
+#[cfg(test)]
+mod tests;
+
 use super::SameBlockSpentSet;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
@@ -284,6 +287,33 @@ pub(super) fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
     block_rules_result?;
+    // BIP325: a committed signet block must carry a valid solution. The check
+    // follows Merkle and witness binding because the solution lives in the
+    // coinbase commitment, and a proposal skips it as Core does when
+    // `fCheckPOW` is false (`validation.cpp:3939`). Keeping it out of
+    // `verify_block_rules_precomputed`, which has no intent, is what makes
+    // that skip possible.
+    if intent == ApplyIntent::Commit
+        && let Some(challenge) = handles.network.signet_challenge()
+    {
+        bitcoin_rs_consensus::check_signet_block_solution(block, challenge)?;
+    }
+    // Early compact-block announce: a commit-intent block that passes block
+    // rules and the signet check above is PoW-valid (self-PoW passed above;
+    // proposals never reach this hook), so a signet-invalid block never
+    // announces early. The published-tip match skips reorg connects: the tip
+    // stays the old tip until settlement, so only a true tip child fires. The
+    // hook only hands the block to P2P — no tip is published and no mining
+    // generation advances here.
+    if intent == ApplyIntent::Commit
+        && softfork_state.segwit_active
+        && let Some(hook) = handles.pow_valid_block.get()
+        && handles
+            .applied_tip_snapshot()
+            .is_some_and(|tip| tip.hash == prev_hash)
+    {
+        hook(block, block_hash, height);
+    }
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
     let bip30_bip34_started = quanta::Instant::now();
     let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
@@ -295,19 +325,27 @@ pub(super) fn apply_block_admitted<'b>(
     bip30_bip34_result?;
 
     let script_verify_started = quanta::Instant::now();
+    // The cache erases on block use like Core's: only a commit consults it,
+    // so a proposal never burns mempool-filled entries for a block that may
+    // never connect.
+    let script_cache = if intent == ApplyIntent::Commit {
+        handles.script_cache.as_deref()
+    } else {
+        None
+    };
     // A matching proof certifies exactly this transaction-validation slot.
     let script_verify_result = if transactions_proven {
         Ok(())
     } else {
         verify_block_transactions(
             handles,
-            block,
             &mut view,
             &tx_plan,
             Arc::clone(&resolved),
             &validation_context,
             provenance,
             &parsed,
+            script_cache,
         )
     };
     let script_verify_dur = script_verify_started.elapsed();
@@ -555,15 +593,26 @@ pub(super) fn apply_block_admitted<'b>(
     };
     let commit_id = match publication {
         PublishMode::Now => {
-            // RCV-02 steps 3–4: certify, then commit. `sync` makes the
-            // appended body bytes, the blocks directory, and every deferred
-            // index row durable; the durable-head batch then names them with
-            // one `write_durable_if` receipt — head, undo record, and
-            // locator row together. `Ok` is the receipt for the whole
-            // prefix (`INV-06`: the head never names bytes that are not
-            // already durable). An `Err` is not a rollback receipt: like a
-            // `UtxoCommit` refusal it leaves the caller to reconcile
-            // through recovery.
+            // Step-21 block-to-template baseline: connect-tail entry edge. The
+            // bench harness timestamps this event's delivery as the measured
+            // interval's start; the tail below runs through head commit,
+            // journal emission, and head publication. Debug-only, like the
+            // publish profile below; no behavior change.
+            tracing::debug!(height, %block_hash, "apply_block: tail begin");
+            // Staged-tip preparation hook: fires after in-memory staging (UTXO
+            // commit, bookkeeping, outcome assembled) and before the durable
+            // sync below. Only a direct child of the published tip qualifies;
+            // a reorg connect never matches because the published tip stays on
+            // the old branch until settlement. Replay never reaches this arm.
+            // The hook enqueues only and publishes nothing; the tip below is
+            // still uncertified when the hook runs.
+            if let Some(hook) = handles.tip_staged.get()
+                && handles
+                    .applied_tip_snapshot()
+                    .is_some_and(|tip| tip.hash == prev_hash)
+            {
+                hook(&outcome.tip, block);
+            }
             let durable_sync_started = quanta::Instant::now();
             sync_appended_blocks(handles)?;
             let durable_sync_us = durable_sync_started.elapsed().as_micros();

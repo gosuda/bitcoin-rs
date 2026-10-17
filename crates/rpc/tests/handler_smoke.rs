@@ -394,6 +394,11 @@ impl ChainControl for RecordingChainControl {
             None => Ok(()),
         }
     }
+
+    // No block verifier is wired, so the chain cannot be declared verified.
+    fn verify_chain(&self, _check_level: u8, _nblocks: u32) -> bool {
+        false
+    }
 }
 
 #[test]

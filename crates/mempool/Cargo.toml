@@ -25,6 +25,7 @@ hashbrown.workspace = true
 parking_lot.workspace = true
 metrics.workspace = true
 bytemuck.workspace = true
+smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -32,6 +33,7 @@ tracing.workspace = true
 bitcoin.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
+proptest.workspace = true
 # Own integration tests are a separate crate: the lib compiles there without
 # `cfg(test)`, so the cross-crate admission park seam must arrive through the
 # `test-seam` feature, the same way `bitcoin-rs-node` and `bitcoin-rs-rpc`
@@ -39,5 +41,5 @@ criterion.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
-name = "pareto"
+name = "insert_fill"
 harness = false

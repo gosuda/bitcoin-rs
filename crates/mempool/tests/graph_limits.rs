@@ -236,7 +236,7 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error
     ))?;
     assert_eq!(pool.estimate_fee_rate(2), None);
 
-    pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8);
+    pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8, 1);
     assert!(pool.estimate_fee_rate(2).is_some());
     Ok(())
 }

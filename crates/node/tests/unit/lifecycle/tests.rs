@@ -33,6 +33,60 @@ fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn verifychain_arguments_select_the_check_core_asks_for() {
+    for (check_level, level) in [
+        (0, CheckLevel::ReadBodies),
+        (1, CheckLevel::CheckBodies),
+        (2, CheckLevel::CheckUndo),
+        (3, CheckLevel::CheckUndo),
+        (4, CheckLevel::CheckUndo),
+    ] {
+        assert_eq!(
+            verify_request(check_level, 6),
+            VerifyRequest {
+                level,
+                depth: NonZeroU32::new(6),
+            },
+            "level {check_level}"
+        );
+    }
+    assert_eq!(
+        verify_request(3, 0).depth,
+        None,
+        "zero blocks is the whole chain"
+    );
+}
+
+#[test]
+fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let state = NodeState::open(isolated_config(dir.path()), None)?;
+    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let mut previous = genesis.block_hash();
+    for height in 1..=3 {
+        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?;
+        state.apply_block(&block)?;
+        previous = block.block_hash();
+    }
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+    for check_level in 0..=4 {
+        for nblocks in [0, 2, 100] {
+            assert!(
+                control.verify_chain(check_level, nblocks),
+                "level {check_level}, {nblocks} blocks"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
     let _ = state.publish_checkpoint()?;
@@ -68,6 +122,7 @@ fn disabled_zmq_still_seals_the_observer_slot() {
         pool,
         Some(observer),
         ValidationEngine::Native,
+        None,
     ));
     assert!(
         gateway.has_observer(),

@@ -9,11 +9,15 @@ use bitcoin_rs_mining::{
     MiningControl, MiningControlError,
 };
 use bitcoin_rs_node::Network;
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, OutPoint, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 use super::support::{
-    coordinator, disconnect_applied, excess_coinbase_child, is_witness_commitment, mined_child,
-    mined_child_labeled, mined_regtest_header, open_network, propose_block, regtest_mining,
+    WITNESS_COMMITMENT_PREFIX, WITNESS_RESERVED, coordinator, disconnect_applied,
+    excess_coinbase_child, is_witness_commitment, mined_child, mined_child_labeled,
+    mined_regtest_header, open_at_genesis, open_network, propose_block, regtest_mining,
     solved_template_block,
 };
 
@@ -123,6 +127,87 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> Result<()> {
         }
         other => panic!("expected bad-txnmrklroot, got {other:?}"),
     }
+    Ok(())
+}
+
+/// A height-1 child of the signet genesis whose commitment carries no signet
+/// section: the witness commitment, BIP34 push, reserved nonce, and
+/// signet-difficulty proof of work all hold, so only BIP325 can refuse it.
+fn signet_child_without_signet_section() -> Result<Block> {
+    // One transaction, so the commitment root is the zeroed coinbase wtxid
+    // and the commitment is `H(root || reserved)` over 64 zero bytes.
+    let commitment = bitcoin_rs_primitives::encode::double_sha256(&[0_u8; 64]).to_le_bytes();
+    let mut commitment_script = WITNESS_COMMITMENT_PREFIX.to_vec();
+    commitment_script.extend_from_slice(&commitment);
+    let genesis = Network::Signet.genesis_block();
+    let coinbase = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::null(),
+            // BIP34 height-1 push plus the extranonce byte.
+            script_sig: Script::from_bytes(vec![0x51, 0x00]),
+            sequence: Sequence::MAX,
+            witness: Witness::from_stack(vec![WITNESS_RESERVED.to_vec()]),
+        }],
+        outputs: vec![
+            TxOut {
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: Script::from_bytes(commitment_script),
+            },
+        ],
+    };
+    let mut block = Block {
+        header: Header {
+            version: 0x2000_0000,
+            prev_blockhash: genesis.block_hash(),
+            merkle_root: Hash256::default(),
+            time: genesis.header.time + 600,
+            bits: genesis.header.bits,
+            nonce: 0,
+        },
+        txs: vec![coinbase],
+    };
+    block.header.merkle_root = block.txs[0].txid().into();
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
+    Ok(block)
+}
+
+// CONTRACT: API-19, BIP325
+#[test]
+fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> Result<()> {
+    let fixture = open_at_genesis(Network::Signet)?;
+    let mining = coordinator(&fixture);
+    mining.publish_generation();
+    let block = signet_child_without_signet_section()?;
+
+    // A proposal skips the solution, as Core skips it without fCheckPOW.
+    assert_eq!(
+        propose_block(&mining, block.clone())?,
+        BlockValidationResult::Accepted
+    );
+
+    // The commit path checks the solution and reports the BIP22 reason.
+    match mining.submit_block(block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-signet-blksig");
+        }
+        other => panic!("expected bad-signet-blksig, got {other:?}"),
+    }
+
+    // A refused solution never moves the tip.
+    let tip = fixture
+        .chainstate()
+        .applied_tip_snapshot()
+        .unwrap_or_else(|| panic!("applied tip missing"));
+    assert_eq!(
+        tip.hash,
+        Hash256::from(Network::Signet.genesis_block().block_hash())
+    );
     Ok(())
 }
 

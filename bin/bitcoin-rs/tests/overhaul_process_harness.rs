@@ -326,10 +326,11 @@ fn verifychain_reports_damaged_native_frames_without_repairing_them() {
     }
     let missing = path.with_extension("missing");
     std::fs::rename(&path, &missing).expect("hide fixture file");
-    assert!(matches!(
-        node.rpc("verifychain", &json!([0, 0])),
-        Err(Error::Rpc { code: -1, .. })
-    ));
+    assert_eq!(
+        node.rpc("verifychain", &json!([0, 0]))
+            .expect("missing body file must yield a boolean"),
+        json!(false)
+    );
     std::fs::rename(missing, &path).expect("restore missing file");
     node.stop().expect("stop before removing isolated datadir");
     drop(datadir);

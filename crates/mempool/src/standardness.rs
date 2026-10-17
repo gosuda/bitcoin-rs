@@ -49,10 +49,10 @@ impl Default for StandardnessPolicy {
 }
 
 /// Minimum transaction version considered standard.
-const TX_VERSION_MIN: i32 = 1;
+const TX_VERSION_MIN: u32 = 1;
 
 /// Version 3 is accepted with BIP431 admission checks.
-const TX_VERSION_MAX: i32 = 3;
+const TX_VERSION_MAX: u32 = 3;
 
 /// Standardness policy rejection reason for a single transaction.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -500,7 +500,7 @@ mod tests {
         out
     }
 
-    fn standard_tx(version: i32) -> Tx {
+    fn standard_tx(version: u32) -> Tx {
         Tx {
             version,
             lock_time: LockTime::ZERO,
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn only_versions_one_through_three_are_standard() {
         for (version, expected) in [
-            (0_i32, Err(StandardnessError::Version)),
+            (0_u32, Err(StandardnessError::Version)),
             (1, Ok(())),
             (2, Ok(())),
             (3, Ok(())),

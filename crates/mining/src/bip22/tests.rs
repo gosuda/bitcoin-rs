@@ -28,6 +28,7 @@ fn consensus_failures_use_core_bip22_reasons() {
             "bad-cb-amount",
         ),
         (ConsensusError::MissingCoinbase, "bad-cb-missing"),
+        (ConsensusError::SixtyFourByteMutation, "bad-cb-missing"),
         (ConsensusError::EmptyBlock, "bad-cb-missing"),
         (
             ConsensusError::ExtraCoinbase { tx_index: 1 },
@@ -45,6 +46,7 @@ fn consensus_failures_use_core_bip22_reasons() {
             ConsensusError::BlockWeight { weight: 5, max: 4 },
             "bad-blk-weight",
         ),
+        (ConsensusError::SignetSolution, "bad-signet-blksig"),
         (ConsensusError::EmptyInputs, "bad-txns-vin-empty"),
         (
             ConsensusError::BlockBaseSize {
@@ -65,6 +67,7 @@ fn consensus_failures_use_core_bip22_reasons() {
             "bad-txns-in-belowout",
         ),
         (bip("BIP34"), "bad-cb-height"),
+        (bip("BIP68"), "bad-txns-nonfinal"),
         (bip("BIP113"), "bad-txns-nonfinal"),
         (
             bip("COINBASE_MATURITY"),

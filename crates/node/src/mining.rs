@@ -16,12 +16,15 @@ use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_chainstate::bytes_are_block;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
+use bitcoin_rs_mempool::MutationResult;
 use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::AvailableMiningRule;
 use bitcoin_rs_mining::BlockTemplateMode;
 use bitcoin_rs_mining::BlockTemplateRequest;
 use bitcoin_rs_mining::BlockTemplateResult;
 use bitcoin_rs_mining::BlockValidationResult;
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_mining::Candidate;
 use bitcoin_rs_mining::CandidateContext;
 use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::GenerateRequest;
@@ -37,7 +40,11 @@ pub use bitcoin_rs_mining::MiningGenerationSignal;
 use bitcoin_rs_mining::MiningInfo;
 use bitcoin_rs_mining::MiningRule;
 use bitcoin_rs_mining::MiningService;
+use bitcoin_rs_mining::PreparedTemplateBody;
+use bitcoin_rs_mining::SelectedBody;
 use bitcoin_rs_mining::header_reject_reason;
+use bitcoin_rs_mining::select_template_body;
+use bitcoin_rs_mining::select_template_body_after;
 use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_mining::solve_block;
 use bitcoin_rs_mining::update_uncommitted_block_structures;
@@ -95,6 +102,25 @@ impl MiningCoordinator {
             shutdown,
             service,
         }
+    }
+
+    /// Test seam: long-poll calls registered on the coordinator wait; see [`MiningService`].
+    #[cfg(feature = "test-seam")]
+    #[must_use]
+    pub fn parked_long_poll_waiters(&self) -> usize {
+        self.service.parked_long_poll_waiters()
+    }
+
+    /// Test seam: waits for the preparation worker's finished candidate for
+    /// `tip_hash`; see [`MiningService::wait_for_prepared_candidate`]. Used
+    /// by the storage-sync-barrier proof; never publishes or assembles.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn wait_for_prepared_candidate(
+        &self,
+        tip_hash: Hash256,
+        timeout: core::time::Duration,
+    ) -> Option<Arc<Candidate>> {
+        self.service.wait_for_prepared_candidate(tip_hash, timeout)
     }
 
     fn propose(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
@@ -236,18 +262,55 @@ impl MempoolSnapshotSource for MempoolAdapter {
         )
     }
 
-    fn mining_snapshot_at(
+    fn select_template(
         &self,
-        expected_sequence: u64,
-        expected_fee_revision: u64,
-    ) -> Option<MempoolMiningSnapshot> {
-        let mempool = self.mempool.read();
-        if mempool.sequence_number() != expected_sequence
-            || mempool.fee_delta_sequence_number() != expected_fee_revision
-        {
-            return None;
+        expected_sequences: Option<(u64, u64)>,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<Option<SelectedBody>, MiningControlError> {
+        // One read guard covers both sequence checks and the index walk; only
+        // the selected transactions leave the pool, and the guard drops
+        // before the service builds the coinbase and Merkle roots.
+        let pool = self.mempool.read();
+        if expected_sequences.is_some_and(|(sequence, fee_delta_sequence)| {
+            pool.sequence_number() != sequence
+                || pool.fee_delta_sequence_number() != fee_delta_sequence
+        }) {
+            return Ok(None);
         }
-        Some(mempool.mining_snapshot())
+        select_template_body(&pool, context, payout)
+            .map(Some)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+    }
+
+    fn select_template_after(
+        &self,
+        block: &Block,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<PreparedTemplateBody, MiningControlError> {
+        // One read guard covers the source sequences, the removal plan, the
+        // stable identity resolution, and the projected walk; only owned
+        // copies leave the pool, and the guard drops before the service
+        // finishes the candidate.
+        let pool = self.mempool.read();
+        let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
+        let plan = pool.plan_block_removals(block);
+        let body = select_template_body_after(&pool, &plan, context, payout)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        // The plan was derived from this same state, so every id resolves; a
+        // missed identity can only shrink the expectation, which the install
+        // check then discards against the committed receipt.
+        let removals = plan
+            .removals
+            .iter()
+            .filter_map(|(id, reason)| pool.entry(*id).map(|entry| (entry.txid, *reason)))
+            .collect();
+        Ok(PreparedTemplateBody {
+            body,
+            source_sequences,
+            removals,
+        })
     }
 
     fn pooled_transaction_count(&self) -> u64 {
@@ -354,6 +417,14 @@ impl MempoolSequenceWake for MiningCoordinator {
     fn publish_generation_from(&self, sequence: u64) {
         self.service.publish_generation_from(sequence);
     }
+
+    fn stage_tip(&self, tip: &TipSnapshot, block: &Block) {
+        self.service.stage_tip(tip, block);
+    }
+
+    fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult) {
+        self.service.publish_block_generation(tip_hash, removals);
+    }
 }
 
 impl MiningControl for MiningCoordinator {
@@ -457,6 +528,11 @@ impl MiningControl for MiningCoordinator {
 
     fn publish_generation(&self) {
         self.service.publish_generation();
+    }
+
+    fn publish_fee_delta_generation(&self, fee_delta_sequence: u64) {
+        self.service
+            .publish_fee_delta_generation(fee_delta_sequence);
     }
 
     /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).

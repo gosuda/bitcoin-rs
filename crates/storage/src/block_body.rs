@@ -207,8 +207,14 @@ pub trait BlockBodyStore: Send + Sync {
         None
     }
 
-    /// Makes body bytes durable before their checkpoint can be published.
+    /// Syncs flat-file body bytes only; index rows need `flush_index`
+    /// or a following same-store durable batch.
     fn sync(&self) -> Result<(), StorageError>;
+
+    /// Makes deferred index rows durable; the default no-op suits indexless stores only.
+    fn flush_index(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 /// Flat-file bodies addressed by indexed, typed positions.
@@ -545,7 +551,10 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     }
 
     fn sync(&self) -> Result<(), StorageError> {
-        self.files.sync()?;
+        self.files.sync()
+    }
+
+    fn flush_index(&self) -> Result<(), StorageError> {
         self.index.flush()
     }
 }

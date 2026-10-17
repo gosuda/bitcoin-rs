@@ -10,6 +10,7 @@ use bitcoin_rs_storage::{
 };
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use parking_lot::Mutex;
 
 use crate::test_fixtures::{MemoryBodies, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
@@ -82,6 +83,49 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
         Some(7),
         "replay must consume the durable receipt rather than creating a new one"
     );
+    Ok(())
+}
+
+/// A boot-time replay of an already-committed gap must never fire the
+/// staged-tip hook: the gap's durable receipt already certifies it, so there
+/// is no speculative tip to prepare. The replay still lands exactly on the
+/// stored head. A replay path that staged speculative work would record a
+/// fire here.
+#[test]
+fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut handles, child) = restored_chainstate()?;
+    let bodies = Arc::new(MemoryBodies::default());
+    bodies.persist_block_body(
+        1,
+        Hash256::from(child.block_hash()),
+        &consensus_bytes(&child),
+    )?;
+    let head = install_head(&mut handles, &child, bodies)?;
+
+    let fires: Arc<Mutex<Vec<(Hash256, Hash256)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&fires);
+    handles
+        .set_tip_staged(Arc::new(
+            move |staged: &bitcoin_rs_chain::TipSnapshot, block: &Block| {
+                recorder
+                    .lock()
+                    .push((staged.hash, Hash256::from(block.block_hash())));
+            },
+        ))
+        .map_err(|_| "the staged-tip hook installs once")?;
+
+    super::reconcile_at_boot(&handles)?;
+
+    assert!(
+        fires.lock().is_empty(),
+        "replay of a committed gap schedules no speculative preparation work"
+    );
+    let landed = handles
+        .applied_tip
+        .load_full()
+        .ok_or("replay did not publish an applied tip")?;
+    assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     Ok(())
 }
 

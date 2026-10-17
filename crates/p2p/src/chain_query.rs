@@ -17,7 +17,10 @@ use bitcoin_rs_chain::{
     BlockBodySource, BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader,
 };
 use bitcoin_rs_primitives::layout::{ParsedBlock, ParsedTransaction};
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network, deserialize};
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, Header, Network, consensus_bytes, deserialize,
+};
+use parking_lot::Mutex;
 #[cfg(test)]
 use parking_lot::RwLock;
 
@@ -45,6 +48,31 @@ enum ServingPolicy {
     BlockTransactions,
 }
 
+type HeldBlock = (Hash256, Arc<Block>);
+
+/// Holds the block body from the most recent early-announcement attempt.
+///
+/// The query serves `getblocktxn` and compact `getdata` from this body
+/// before the store has it. Each attempt replaces the body. A failed
+/// connect does not clear it, as with Core's `m_most_recent_block`.
+#[derive(Clone, Default)]
+pub struct RecentBlockSlot {
+    inner: Arc<Mutex<Option<HeldBlock>>>,
+}
+
+impl RecentBlockSlot {
+    /// Holds `block` under `hash`, replacing the previous body.
+    pub fn store(&self, hash: Hash256, block: Arc<Block>) {
+        *self.inner.lock() = Some((hash, block));
+    }
+
+    /// The held body when the most recent early send was `hash`.
+    #[must_use]
+    pub fn load(&self) -> Option<(Hash256, Arc<Block>)> {
+        self.inner.lock().clone()
+    }
+}
+
 /// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
 pub struct ActiveChainQuery {
@@ -53,6 +81,7 @@ pub struct ActiveChainQuery {
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     network: Network,
     compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
+    recent: RecentBlockSlot,
 }
 
 impl ActiveChainQuery {
@@ -73,6 +102,7 @@ impl ActiveChainQuery {
             block_body_source: None,
             network,
             compact_filters: None,
+            recent: RecentBlockSlot::default(),
         }
     }
 
@@ -90,6 +120,15 @@ impl ActiveChainQuery {
         filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
     ) -> Self {
         self.compact_filters = filters;
+        self
+    }
+
+    /// Attaches the early-announce body rendezvous so `getblocktxn` and
+    /// compact `getdata` for the most recently announced hash answer from
+    /// the held body before the store carries it.
+    #[must_use]
+    pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
+        self.recent = recent;
         self
     }
 
@@ -186,6 +225,34 @@ impl ActiveChainQuery {
     ) -> Option<Message> {
         self.load_block(height, hash, include_witness, ServingPolicy::Inventory)
             .map(|(body, _)| Message::BlockPayload(body))
+    }
+
+    /// The held early-announced body for `hash`, when the most recent early
+    /// send was this block.
+    fn recent_body(&self, hash: BlockHash) -> Option<Arc<Block>> {
+        let (slot_hash, body) = self.recent.load()?;
+        (BlockHash::from(slot_hash) == hash).then_some(body)
+    }
+
+    /// One `blocktxn` reply from consensus-encoded body bytes under the
+    /// peer's servable BIP152 profile. Shared by the stored path and the
+    /// held early-announced body.
+    fn blocktxn_message(
+        payload: &[u8],
+        request: &BlockTransactionsRequest,
+        compact_version: Option<u64>,
+    ) -> Result<Option<Message>, PeerError> {
+        let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload) else {
+            return Ok(None);
+        };
+        BlockTransactions::from_request(request, &block)
+            .map(|mut transactions| {
+                if compact_version == Some(1) {
+                    strip_witnesses(&mut transactions);
+                }
+                Some(Message::BlockTxn(BlockTxn { transactions }))
+            })
+            .map_err(|_| PeerError::Misbehavior("getblocktxn index out of range"))
     }
 }
 
@@ -451,6 +518,16 @@ impl ChainQuery for ActiveChainQuery {
         headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError> {
         let hash = native_block_hash(request.block_hash);
+        if let Some(body) = self.recent_body(hash) {
+            if !headroom() {
+                return Ok(None);
+            }
+            return Self::blocktxn_message(
+                &consensus_bytes(body.as_ref()),
+                request,
+                compact_version,
+            );
+        }
         let Some((tip_height, height)) =
             self.serving_position(hash, ServingPolicy::BlockTransactions)
         else {
@@ -471,18 +548,7 @@ impl ChainQuery for ActiveChainQuery {
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
             return Ok(Some(Message::BlockPayload(payload)));
         }
-        let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
-        else {
-            return Ok(None);
-        };
-        BlockTransactions::from_request(request, &block)
-            .map(|mut transactions| {
-                if compact_version == Some(1) {
-                    strip_witnesses(&mut transactions);
-                }
-                Some(Message::BlockTxn(BlockTxn { transactions }))
-            })
-            .map_err(|_| PeerError::Misbehavior("getblocktxn index out of range"))
+        Self::blocktxn_message(payload.as_ref(), request, compact_version)
     }
 }
 
@@ -505,6 +571,11 @@ impl ActiveChainQuery {
         compact_version: Option<u64>,
         policy: ServingPolicy,
     ) -> Option<Message> {
+        // The held early-announced body answers before the store, for both
+        // the announcement race and compact `getdata`.
+        if let Some(body) = self.recent_body(hash) {
+            return cmpct_message_from_native(&body, compact_version?);
+        }
         self.serving_position(hash, policy)?;
         let version = u32::try_from(compact_version?).ok()?;
         if version != 1 && version != 2 {
@@ -621,6 +692,23 @@ fn fresh_nonce() -> u64 {
     std::collections::hash_map::RandomState::new()
         .build_hasher()
         .finish()
+}
+
+/// Builds one `cmpctblock` message from a native block already in hand,
+/// without a store lookup: the early-announce path relays a block whose body
+/// is not yet durable. The single build is shared by every eligible peer;
+/// `None` for a non-BIP152 version or an unencodable block.
+pub(crate) fn cmpct_message_from_native(block: &Block, version: u64) -> Option<Message> {
+    let version = u32::try_from(version).ok()?;
+    if version != 1 && version != 2 {
+        return None;
+    }
+    let bytes = consensus_bytes(block);
+    let registry = bitcoin::consensus::encode::deserialize::<RegistryBlock>(bytes.as_ref()).ok()?;
+    let cmpct = HeaderAndShortIds::from_block(&registry, fresh_nonce(), version, &[]).ok()?;
+    Some(Message::CmpctBlock(CmpctBlock {
+        compact_block: cmpct,
+    }))
 }
 
 fn header_for_active_stop(
@@ -2703,5 +2791,51 @@ mod tests {
 
     fn header_hashes(headers: &[Header]) -> Vec<BlockHash> {
         headers.iter().map(Header::compute_hash).collect()
+    }
+
+    /// A `getblocktxn` and a compact `getdata` for the held early-announced
+    /// hash answer from the held body with no body source attached: the
+    /// replies cannot come from the store because there is none.
+    #[test]
+    fn held_early_body_answers_before_the_store() -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let block = block_at(&headers, 1)?;
+        let slot = RecentBlockSlot::default();
+        slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+        let query = query_with(headers)?.with_recent_block(slot);
+        let request = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_block_hash(block.block_hash()),
+            indexes: vec![1],
+        };
+        assert!(
+            query
+                .block_transactions(&request, Some(2), &|| false)?
+                .is_none(),
+            "a saturated gate must defer the held-body reply"
+        );
+        let reply = query
+            .block_transactions(&request, Some(2), &|| true)?
+            .ok_or("held body must answer getblocktxn")?;
+        assert!(
+            matches!(reply, Message::BlockTxn(_)),
+            "expected BlockTxn from the held body, got {reply:?}"
+        );
+        let compact = ChainQuery::compact_block_for(&query, 1, block.block_hash(), Some(2))
+            .ok_or("held body must answer compact getdata")?;
+        assert!(
+            matches!(compact, Message::CmpctBlock(_)),
+            "expected CmpctBlock from the held body, got {compact:?}"
+        );
+        // An unknown hash still finds nothing without a store.
+        let missing = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_block_hash(BlockHash::default()),
+            indexes: vec![0],
+        };
+        assert!(
+            query
+                .block_transactions(&missing, Some(2), &|| true)?
+                .is_none()
+        );
+        Ok(())
     }
 }

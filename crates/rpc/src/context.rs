@@ -185,6 +185,15 @@ pub trait ChainControl: Send + Sync {
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<(), ChainControlError>;
+
+    /// Verifies the newest applied blocks for `verifychain`.
+    ///
+    /// `check_level` is Core's `0..=4` level and `nblocks` counts back from
+    /// the applied tip, zero meaning the whole chain. The answer is true only
+    /// when every block in the window was checked and passed; a window that
+    /// reaches history this node does not hold, and any damaged block or
+    /// undo record, answer false.
+    fn verify_chain(&self, check_level: u8, nblocks: u32) -> bool;
 }
 
 /// A completed, durable Core snapshot activation.
@@ -383,10 +392,27 @@ impl AdmissionChain for ChainAdmissionView {
             .and_then(|node| tree.median_time_past_at(node))
             .unwrap_or(0);
         // CSV activation at the next block gates BIP68 relative locks,
-        // matching the block-connect and mining evaluation contexts.
-        let csv_active = tip_node.is_some_and(|node| {
-            softfork_state(&tree, self.network, Some(node), height + 1).csv_active
-        });
+        // matching the block-connect and mining evaluation contexts. The
+        // full next-block softfork state also feeds the script-execution
+        // cache fill: the gateway re-verifies under exactly these flags.
+        let next_softfork =
+            tip_node.map(|node| softfork_state(&tree, self.network, Some(node), height + 1));
+        let csv_active = next_softfork.as_ref().is_some_and(|state| state.csv_active);
+        let next_block_script_flags = {
+            let state = next_softfork.unwrap_or(bitcoin_rs_consensus::SoftforkState {
+                csv_active: false,
+                segwit_active: false,
+            });
+            // The next block's hash is unknowable before it is built; the
+            // zero hash is never the BIP16 exception, so P2SH applies exactly
+            // as connect derives it for every non-exception block.
+            bitcoin_rs_consensus::verify_block::verify_flags(
+                self.network,
+                height + 1,
+                Hash256::default(),
+                state,
+            )
+        };
         // Confirmed coin metadata for BIP68 and coinbase maturity. Height `h`
         // uses the MTP of the block before `h`, the same derivation the
         // block-connect path applies. MTP lookups are cached per height.
@@ -429,6 +455,7 @@ impl AdmissionChain for ChainAdmissionView {
             height,
             locktime_cutoff,
             csv_active,
+            next_block_script_flags,
             confirmed,
         })
     }
@@ -591,6 +618,7 @@ impl Default for MempoolHandles {
                 Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
                 None,
                 ValidationEngine::Native,
+                None,
             )),
         }
     }
@@ -660,6 +688,7 @@ impl Context {
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
                     Some(observer),
                     ValidationEngine::Native,
+                    None,
                 )),
             },
             ..ContextHandles::default()
@@ -1552,6 +1581,7 @@ mod tests {
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
                     None,
                     ValidationEngine::Native,
+                    None,
                 )),
             },
             network: NetworkHandles {
@@ -2120,6 +2150,7 @@ mod tests {
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
                     None,
                     ValidationEngine::Native,
+                    None,
                 )),
             },
             indexes: IndexHandles {
@@ -2299,7 +2330,7 @@ mod admission_chain_tests {
                 connection_id: 1,
             }),
             None,
-            0,
+            unix_time_secs(),
             &ctx.chain.admission_chain(),
         )?;
         assert!(matches!(result, SubmitOutcome::Committed(_)));

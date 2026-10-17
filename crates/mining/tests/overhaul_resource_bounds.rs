@@ -22,6 +22,7 @@ use bitcoin_rs_mempool::{
 use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    unix_time_secs,
 };
 use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
@@ -92,7 +93,12 @@ fn fixture(members: u32) -> TestResult<Fixture> {
     assert_eq!(pool.limits.max_replacement_clusters, CLUSTERS);
     assert_eq!(pool.len(), usize::try_from(CLUSTERS * members)?);
     Ok(Fixture {
-        gateway: MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native),
+        gateway: MempoolGateway::new(
+            Arc::new(RwLock::new(pool)),
+            None,
+            ValidationEngine::Native,
+            None,
+        ),
         roots,
         tips,
     })
@@ -186,10 +192,10 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
             )
         }
         "mining" => {
-            let snapshot = gateway.read().mining_snapshot();
+            let pool = gateway.read();
             let context = context();
-            let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
-            assert_eq!(candidate.transactions.len(), snapshot.entries.len());
+            let candidate = assemble_candidate(&context, &pool, &[0x51])?;
+            assert_eq!(candidate.transactions.len(), pool.len());
             let sigops = total_sigop_cost(&candidate);
             assert!(candidate.weight <= context.max_weight && sigops <= context.max_sigops);
             Ok(
@@ -261,11 +267,13 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
         ValidationEngine::Native,
+        None,
     );
     let chain = Chain(coins);
+    let now = unix_time_secs();
     let parent_id = parent.txid();
     assert!(matches!(
-        gateway.submit_transaction(Arc::new(parent), AdmissionOrigin::Rpc, None, 1, &chain)?,
+        gateway.submit_transaction(Arc::new(parent), AdmissionOrigin::Rpc, None, now, &chain)?,
         SubmitOutcome::Committed(_)
     ));
     {
@@ -277,10 +285,8 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
         assert_eq!(entry.sigop_cost, 15_920);
         assert_eq!(entry.vsize, 79_600);
         assert!(wire_weight < 318_400);
-        assert_eq!(
-            pool.mining_snapshot().fee_chunks()?[0].policy_weight,
-            318_400
-        );
+        let chunk = pool.chunks_by_feerate().next().ok_or("empty pool")?;
+        assert_eq!(chunk.charged_weight, 318_400);
     }
     let mut middle = transaction(
         OutPoint::new(parent_id, 0),
@@ -291,7 +297,7 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
     assert_eq!(middle.weight(), 401);
     let middle_id = middle.txid();
     assert!(matches!(
-        gateway.submit_transaction(Arc::new(middle), AdmissionOrigin::Rpc, None, 1, &chain)?,
+        gateway.submit_transaction(Arc::new(middle), AdmissionOrigin::Rpc, None, now, &chain)?,
         SubmitOutcome::Committed(_)
     ));
     let mut last = transaction(OutPoint::new(middle_id, 0), 300, &[0, 20]);
@@ -317,16 +323,15 @@ fn check_weight_boundary(extra: u8) -> TestResult<Value> {
     let preview = gateway.preview_transactions(std::slice::from_ref(&last), None, &chain)?;
     assert_eq!(preview.results[0].allowed, Some(extra == 0));
     assert_eq!(gateway.read().sequence_number(), sequence);
+    let now = unix_time_secs();
     let submitted =
-        gateway.submit_transaction(Arc::new(last), AdmissionOrigin::Rpc, None, 1, &chain);
+        gateway.submit_transaction(Arc::new(last), AdmissionOrigin::Rpc, None, now, &chain);
     if extra == 0 {
         assert!(matches!(submitted?, SubmitOutcome::Committed(_)));
         let pool = gateway.read();
         let weight: u64 = pool
-            .mining_snapshot()
-            .fee_chunks()?
-            .iter()
-            .map(|chunk| u64::from(chunk.policy_weight))
+            .chunks_by_feerate()
+            .map(|chunk| chunk.charged_weight)
             .sum();
         assert_eq!(weight, 404_000);
         assert_eq!(

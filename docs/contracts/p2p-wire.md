@@ -356,6 +356,11 @@ covers the delivery-path forward.
   Each punishment increments `node.sync.invalid_block_disconnects`. A
   `BodyMutated` or `Operational` settlement failure stays retryable and
   non-punitive, and a `Fatal` settlement halts admission without peer blame.
+  `BodyMutated` names only the delivered bytes, so the header stays valid and
+  the body is fetched again: a Merkle or witness mismatch, and a body without a
+  coinbase that holds a 64-byte transaction (`SixtyFourByteMutation`; inner
+  Merkle nodes posing as transactions, CVE-2017-12842, Core `IsBlockMutated`).
+  Any other body without a coinbase is `Permanent`.
   A body that fails header binding before it can be staged keeps its
   existing delivery-rejection policy.
 - **Unresolved-body quota**: a body staged while the tree cannot resolve its

@@ -108,7 +108,8 @@ a running pinned binary, not a replay of captured JSON.
   Each case also requires the reference's expected accept/reject result.
 - Block cases cover a Core coinbase-only block, bad merkle root, multiple
   coinbase transactions, short coinbase scriptSig, excessive coinbase
-  value, incorrect BIP34 height, and timestamp equal to MTP. A final
+  value, incorrect BIP34 height, timestamp equal to MTP, and a
+  max-version (0xFFFFFFFF) BIP68 spend with an unmet relative lock. A final
   Core-produced block spends the mature funding coin after all rejections.
 - Transaction previews cover a valid mature spend, immature coinbase,
   duplicate inputs, overspend, output above the money range, missing input,

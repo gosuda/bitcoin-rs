@@ -104,6 +104,12 @@ fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn s
         typed(&empty.dispatch("verifychain", &json!([0, 6]))?)?;
     assert!(verify.0);
 
+    let verify: corepc_types::v31::VerifyChain =
+        typed(&handler.dispatch("verifychain", &json!([0, 6]))?)?;
+    // The fixture has an applied tip but no chain control: nothing verifies
+    // the chain, so it cannot be declared verified.
+    assert!(!verify.0);
+
     let at_tip: corepc_types::v31::GetBlockHash =
         typed(&handler.dispatch("getblockhash", &json!([42]))?)?;
     assert_eq!(at_tip.0, best.0);
@@ -332,6 +338,8 @@ impl MiningControl for CompatMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {}
 
     fn generate(
         &self,

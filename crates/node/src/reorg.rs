@@ -94,6 +94,14 @@ impl ReorgObserver for NodeReorgObserver<'_> {
 fn trim_after_reorg(
     gateway: &bitcoin_rs_mempool::MempoolGateway,
 ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
+    // Expire entries older than MEMPOOL_EXPIRY_SECS before the size check so
+    // a settled branch never retains stale transactions; expiry commits and
+    // publishes through the gateway like any other mutation and runs under
+    // the same reorg fence as the trim below.
+    let _ = gateway.expire(
+        bitcoin_rs_mempool::AdmissionOrigin::Reorg,
+        bitcoin_rs_primitives::unix_time_secs(),
+    );
     let max_bytes = gateway.max_total_bytes();
     if max_bytes == 0 || gateway.read().total_vsize() <= max_bytes {
         return Ok(());

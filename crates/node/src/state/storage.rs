@@ -11,6 +11,7 @@ use bitcoin_rs_storage::FlatFileBlockStore;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
 use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::StoreGuard;
 use bitcoin_rs_storage::pruning::PruneError;
 use bitcoin_rs_storage::recovery_evidence::RecoveryEvidencePublisher;
 use parking_lot::Mutex;
@@ -37,6 +38,8 @@ pub(super) struct NodeStorage {
 struct ChainstateComposer<'a> {
     backend: StorageBackend,
     data_dir: &'a std::path::Path,
+    /// The data-directory lock; the block files carry it like the store does.
+    guard: &'a StoreGuard,
 }
 
 impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
@@ -61,10 +64,15 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
         ));
-        let block_files = Arc::new(match committed {
-            Some(extent) => FlatFileBlockStore::open_with_committed_extent(self.data_dir, extent)?,
-            None => FlatFileBlockStore::open(self.data_dir)?,
-        });
+        let block_files = Arc::new(
+            match committed {
+                Some(extent) => {
+                    FlatFileBlockStore::open_with_committed_extent(self.data_dir, extent)?
+                }
+                None => FlatFileBlockStore::open(self.data_dir)?,
+            }
+            .guarded_by(Arc::clone(self.guard)),
+        );
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
@@ -89,6 +97,7 @@ impl NodeStorage {
     pub(super) fn open(
         config: &NodeConfig,
         chainstate_cache_bytes: u64,
+        guard: &StoreGuard,
     ) -> Result<(Self, Arc<FlatFileBlockStore>)> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir)
@@ -100,9 +109,11 @@ impl NodeStorage {
             backend,
             &chainstate_dir,
             Some(chainstate_cache_bytes),
+            guard,
             ChainstateComposer {
                 backend,
                 data_dir: &config.data_dir,
+                guard,
             },
         )
         .map_err(anyhow::Error::new)

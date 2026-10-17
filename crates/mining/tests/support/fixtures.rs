@@ -5,9 +5,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_mempool::{
-    Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot, SnapshotEntry,
-};
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, SnapshotEntry};
 use bitcoin_rs_mining::{Candidate, CandidateContext};
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
@@ -80,12 +78,64 @@ pub(crate) fn insert_with_cost(
     Ok(())
 }
 
-pub(crate) fn snapshot(sequence: u64, entries: Vec<SnapshotEntry>) -> MempoolMiningSnapshot {
-    MempoolMiningSnapshot {
-        sequence,
-        fee_delta_sequence: 0,
-        entries,
+/// Forged consensus facts for one pool entry in limit-boundary tests.
+///
+/// `vsize` drives fee-rate ordering and cluster accounting; `weight` and
+/// `size` override the wire numbers after `MempoolEntry::new` and drive the
+/// selection limits. Keep forged weights under `101_000` and member counts
+/// under 64 so admission cluster checks pass.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Forged {
+    pub(crate) vsize: u32,
+    pub(crate) fee: u64,
+    pub(crate) weight: u64,
+    pub(crate) size: u32,
+    pub(crate) sigop_cost: u32,
+}
+
+impl Forged {
+    /// Forged `fee`, `weight`, and `size` with the common 100-vbyte rate
+    /// basis and no sigops.
+    pub(crate) const fn new(fee: u64, weight: u64, size: u32) -> Self {
+        Self {
+            vsize: 100,
+            fee,
+            weight,
+            size,
+            sigop_cost: 0,
+        }
     }
+
+    pub(crate) const fn with_vsize(mut self, vsize: u32) -> Self {
+        self.vsize = vsize;
+        self
+    }
+
+    pub(crate) const fn with_sigops(mut self, sigop_cost: u32) -> Self {
+        self.sigop_cost = sigop_cost;
+        self
+    }
+}
+
+/// Pool insert with forged consensus weight/size/sigops. Acceptance time and
+/// height are fixed: selection ranks by modified fee rate, never by arrival.
+pub(crate) fn insert_forged(
+    pool: &mut Mempool,
+    tx: Tx,
+    forged: Forged,
+) -> Result<(), Box<dyn Error>> {
+    let mut entry = MempoolEntry::new(
+        Arc::new(tx),
+        forged.vsize,
+        forged.fee,
+        1,
+        100,
+        forged.sigop_cost,
+    );
+    entry.weight = forged.weight;
+    entry.size = forged.size;
+    pool.insert_entry(entry)?;
+    Ok(())
 }
 
 /// Snapshot entry whose weight, size, and vsize are measured from `tx`.

@@ -10,20 +10,23 @@ use alloc::sync::Arc;
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness,
+    Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness, unix_time_secs,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Records every published envelope in order.
+#[derive(Default)]
+struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);
+
+impl crate::MempoolObserver for Seen {
+    fn on_mutation(&self, envelope: &crate::MutationEnvelope) {
+        self.0.lock().push(envelope.clone());
+    }
+}
+
 #[test]
 fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestResult {
-    #[derive(Default)]
-    struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);
-    impl crate::MempoolObserver for Seen {
-        fn on_mutation(&self, envelope: &crate::MutationEnvelope) {
-            self.0.lock().push(envelope.clone());
-        }
-    }
     let seen = Arc::new(Seen::default());
     let gateway = MempoolGateway::new(
         Arc::new(parking_lot::RwLock::new(Mempool::new(
@@ -31,6 +34,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         ))),
         Some(seen.clone()),
         ValidationEngine::Native,
+        None,
     );
     gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
     let parent = spend(&[coin(801)], &[100_000], false);
@@ -54,11 +58,12 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
             .is_err()
     );
     let history = gateway.read().estimator_history();
+    let now = unix_time_secs();
     let result = gateway.submit_local_package(
         vec![child.clone(), parent.clone()],
         crate::LocalOrigin::Rpc,
         None,
-        1,
+        now,
         &chain,
     )?;
     assert!(
@@ -314,11 +319,12 @@ fn native_package_resident_parent_fees_do_not_subsidize_child() -> TestResult {
             script_pubkey: Script::from_bytes(vec![0x51]),
         },
     )]);
+    let now = unix_time_secs();
     gateway.submit_local_transaction(
         Arc::new(parent.clone()),
         crate::LocalOrigin::Rpc,
         None,
-        0,
+        now,
         &chain,
     )?;
     let before = gateway.read().sequence_number();
@@ -328,7 +334,7 @@ fn native_package_resident_parent_fees_do_not_subsidize_child() -> TestResult {
                 vec![parent, child],
                 crate::LocalOrigin::Rpc,
                 None,
-                0,
+                now,
                 &chain
             )
             .is_err()
@@ -362,11 +368,12 @@ fn native_package_uses_confirmed_parent_coins_without_readmitting_parent() -> Te
             parent.outputs[0].clone(),
         )]),
     };
+    let now = unix_time_secs();
     let result = gateway.submit_local_package(
         vec![child.clone(), parent.clone()],
         crate::LocalOrigin::Rpc,
         None,
-        0,
+        now,
         &chain,
     )?;
     assert_eq!(result.len(), 1);
@@ -458,7 +465,7 @@ fn native_package_plan_reports_stale_pool_state_without_mutation() -> TestResult
         200,
         0,
     );
-    let plan = gateway.read().prepare_package(vec![entry])?;
+    let plan = gateway.read().prepare_package(vec![entry], 0)?;
     let history = gateway.read().estimator_history();
     gateway.prioritise(txid, 1)?;
     assert_eq!(
@@ -519,13 +526,38 @@ impl AdmissionChain for Coins {
 }
 
 fn gateway() -> MempoolGateway {
+    gateway_observed(None)
+}
+
+fn gateway_observed(observer: Option<Arc<dyn crate::MempoolObserver>>) -> MempoolGateway {
     MempoolGateway::new(
         Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         }))),
-        None,
+        observer,
         ValidationEngine::Native,
+        None,
+    )
+}
+
+/// A resident stamped with time zero: older than the mempool lifetime
+/// against any wall clock, so the tests below never sleep.
+fn stale_entry(tx: &Tx) -> Result<crate::MempoolEntry, std::num::TryFromIntError> {
+    Ok(crate::MempoolEntry::new(
+        Arc::new(tx.clone()),
+        u32::try_from(tx.vsize())?,
+        1_000,
+        0,
+        200,
+        0,
+    ))
+}
+
+fn expired(txid: Txid) -> crate::MutationChange {
+    crate::mutation::change(
+        &txid,
+        crate::MutationOutcome::Removed(crate::RemovalReason::Expiry),
     )
 }
 
@@ -584,12 +616,13 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
         },
     )]);
     let parent = spend(&[coin(1)], &[100_000, 0], false);
+    let now = unix_time_secs();
     assert!(matches!(
         gateway.submit_transaction(
             Arc::new(parent.clone()),
             AdmissionOrigin::Rpc,
             None,
-            0,
+            now,
             &chain
         )?,
         SubmitOutcome::Committed(_)
@@ -637,7 +670,7 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
     );
     let facts = gateway.preview_transactions(core::slice::from_ref(&child), None, &chain)?;
     assert_eq!(facts.results[0].allowed, Some(true), "{facts:?}");
-    gateway.submit_transaction(Arc::new(child), AdmissionOrigin::Rpc, None, 0, &chain)?;
+    gateway.submit_transaction(Arc::new(child), AdmissionOrigin::Rpc, None, now, &chain)?;
     assert_eq!(gateway.read().len(), 2);
     Ok(())
 }
@@ -738,5 +771,86 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
     );
     assert!(facts.results.iter().all(|fact| fact.allowed.is_none()));
     assert!(gateway.read().is_empty());
+    Ok(())
+}
+
+// Core expires stale entries after each accepted transaction: a committed
+// package does too, and only after its own envelope published.
+#[test]
+fn native_package_commit_expires_an_unrelated_stale_entry_after_its_own_envelope() -> TestResult {
+    let seen = Arc::new(Seen::default());
+    let gateway = gateway_observed(Some(seen.clone()));
+    let stale = spend(&[coin(820)], &[100_000], false);
+    gateway.insert_entry(AdmissionOrigin::Rpc, stale_entry(&stale)?)?;
+    let parent = spend(&[coin(821)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let chain = Coins(vec![(
+        coin(821),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+    )]);
+
+    let result = gateway.submit_local_package(
+        vec![child.clone(), parent.clone()],
+        crate::LocalOrigin::Rpc,
+        None,
+        unix_time_secs(),
+        &chain,
+    )?;
+
+    assert_eq!(result.len(), 2);
+    let pool = gateway.read();
+    assert!(!pool.contains_txid(&stale.txid()));
+    assert!(pool.contains_txid(&parent.txid()));
+    assert!(pool.contains_txid(&child.txid()));
+    let envelopes = seen.0.lock();
+    assert_eq!(envelopes.len(), 3, "stale insert, package commit, expiry");
+    assert_eq!(envelopes[1].result, result);
+    assert_eq!(envelopes[2].origin, AdmissionOrigin::Rpc);
+    assert_eq!(envelopes[2].result.changes, vec![expired(stale.txid())]);
+    Ok(())
+}
+
+// A package member that expires with its stale resident parent was admitted
+// and published, then removed: the caller sees the ordinary full refusal.
+#[test]
+fn native_package_member_expires_with_its_stale_parent_and_is_refused_as_full() -> TestResult {
+    let seen = Arc::new(Seen::default());
+    let gateway = gateway_observed(Some(seen.clone()));
+    let parent = spend(&[coin(822)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    gateway.insert_entry(AdmissionOrigin::Rpc, stale_entry(&parent)?)?;
+
+    let refused = gateway.submit_local_package(
+        vec![parent.clone(), child.clone()],
+        crate::LocalOrigin::Rpc,
+        None,
+        unix_time_secs(),
+        &Coins(vec![]),
+    );
+
+    assert_eq!(
+        refused,
+        Err(SubmitError::Policy(AcceptanceRejectReason::Mempool(
+            crate::MempoolError::Full
+        )))
+    );
+    assert!(gateway.read().is_empty());
+    let envelopes = seen.0.lock();
+    assert_eq!(envelopes.len(), 3, "stale insert, package commit, expiry");
+    assert_eq!(
+        envelopes[1].result.changes,
+        vec![crate::mutation::change(
+            &child.txid(),
+            crate::MutationOutcome::Accepted
+        )],
+        "the refused member's commit stays published"
+    );
+    let removed = &envelopes[2].result.changes;
+    assert_eq!(removed.len(), 2);
+    assert!(removed.contains(&expired(parent.txid())));
+    assert!(removed.contains(&expired(child.txid())));
     Ok(())
 }

@@ -188,7 +188,7 @@ cargo build --release -p bitcoin-rs --features kernel
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
 ```
 
-Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)`, `kernel::verify_tx_scripts(tx, spent, flags, engine)`, and `verify_transaction(..., engine)` take a `bitcoin_rs_consensus::ValidationEngine` value at each call. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
+Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value, while `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&SignatureCache>`. Pass `None` for uncached calls, or `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction, keeping `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
 
 ## Operator migration: validation engine
 

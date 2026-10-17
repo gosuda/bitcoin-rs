@@ -75,10 +75,13 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
 
 /// Connects a block at `height` through the pool seam that feeds
 /// `FeeEstimator::block_connected` (and untracks whatever it confirms).
+/// The block time is fixed from the height: the estimator tracks block
+/// height, not the fee floor, so any explicit time keeps this fixture
+/// deterministic without pinning rolling-fee behavior.
 fn connect_block(ctx: &Context, confirmed: &[&Tx], confirmed_txids: &[Txid], height: u32) {
     let pool = ctx.mempool.gateway.pool();
     let mut guard = pool.write();
-    let _ = guard.remove_for_block(confirmed, confirmed_txids, height);
+    let _ = guard.remove_for_block(confirmed, confirmed_txids, height, u64::from(height) * 600);
 }
 
 /// Routes `/fee-estimates` and parses the JSON map of target → sat/vB.

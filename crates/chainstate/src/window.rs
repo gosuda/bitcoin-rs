@@ -100,12 +100,23 @@ impl WindowGroup {
     fn flush(
         &mut self,
         handles: &Chainstate,
+        staged_block: Option<&Block>,
     ) -> core::result::Result<Vec<ConnectOutcome>, ApplyError> {
         let (first, last) = match (self.pending.first(), self.pending.last()) {
             (Some(first), Some(last)) => (first, last),
             _ => return Ok(Vec::new()),
         };
         let first_prev = first.prev_hash;
+        // Staged-tip hook for the newest pending block: fires after the whole
+        // prefix staged in memory and before the group's durable sync. Only
+        // the last block is handed off; earlier pending blocks are its
+        // ancestors and publish atomically in this same flush. The block is
+        // borrowed from the caller's apply batch, which outlives the group.
+        // The hook enqueues only; the batch, journal, and publication below
+        // are unchanged, and a flush failure abandons the prefix unpublished.
+        if let (Some(staged), Some(hook)) = (staged_block, handles.tip_staged.get()) {
+            hook(&last.outcome.tip, staged);
+        }
         let sync_started = quanta::Instant::now();
         sync_appended_blocks(handles)?;
         let group_sync_us = sync_started.elapsed().as_micros();
@@ -266,7 +277,7 @@ pub(super) fn apply_window_admitted(
                 // its durable group before reporting, so the durable head
                 // and the published tip keep moving together. A flush
                 // failure is the ambiguous-batch case: fatal, never retried.
-                flush_group(&mut group, handles, &mut committed)?;
+                flush_group(&mut group, handles, &mut committed, blocks)?;
                 return Err(WindowApplyError {
                     applied: committed.len(),
                     committed,
@@ -277,10 +288,10 @@ pub(super) fn apply_window_admitted(
             }
         }
         if group.should_flush() {
-            flush_group(&mut group, handles, &mut committed)?;
+            flush_group(&mut group, handles, &mut committed, blocks)?;
         }
     }
-    flush_group(&mut group, handles, &mut committed)?;
+    flush_group(&mut group, handles, &mut committed, blocks)?;
     Ok(committed)
 }
 
@@ -292,8 +303,21 @@ fn flush_group(
     group: &mut WindowGroup,
     handles: &Chainstate,
     committed: &mut Vec<ConnectOutcome>,
+    blocks: &[&Block],
 ) -> core::result::Result<(), WindowApplyError> {
-    match group.flush(handles) {
+    // The staged prefix is a contiguous suffix starting at `committed.len()`,
+    // so the newest staged block is borrowed straight from the caller's apply
+    // batch — no clone in chainstate. Empty group: nothing staged, no hook.
+    // Failure-prefix flush: the failing block was never staged, so the same
+    // index still names the newest successfully staged block.
+    let staged_block = if group.pending.is_empty() {
+        None
+    } else {
+        blocks
+            .get(committed.len() + group.pending.len() - 1)
+            .copied()
+    };
+    match group.flush(handles, staged_block) {
         Ok(flushed) => {
             committed.extend(flushed);
             Ok(())
@@ -359,6 +383,9 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         ApplyError::Consensus(error) => match error {
             ConsensusError::MerkleRoot
             | ConsensusError::MerkleMutation
+            // Inner Merkle nodes posing as transactions in a coinbase-less
+            // body reach a valid header's root; the header is not at fault.
+            | ConsensusError::SixtyFourByteMutation
             | ConsensusError::WitnessNonceSize
             | ConsensusError::WitnessCommitment
             | ConsensusError::UnexpectedWitness => BodyMutated,
@@ -563,7 +590,7 @@ fn prove_window<'a>(
             }
             let Ok(resolved) = resolve_block_prevouts(
                 Arc::clone(&unit.resolved),
-                block,
+                &block.txs,
                 &unit.tx_plan,
                 context.height,
                 unit.view.txids(),
@@ -571,12 +598,17 @@ fn prove_window<'a>(
                 return Vec::new();
             };
             unit.view.set_resolved(resolved);
+            // This window only feeds commits (`apply_window_admitted` below),
+            // so its pre-proof consults the node-owned cache exactly like the
+            // single-block commit path; the later commit reuses the proof and
+            // never takes twice. `None` under the kernel engine.
             match bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
                 &mut unit.view,
                 context.height,
                 context.locktime_cutoff,
                 context.flags,
                 &unit.parsed,
+                handles.script_cache.as_deref(),
             ) {
                 Ok(checks) => units.push(checks),
                 Err(_) => return Vec::new(),
@@ -617,3 +649,6 @@ fn prove_window<'a>(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod cache_tests;

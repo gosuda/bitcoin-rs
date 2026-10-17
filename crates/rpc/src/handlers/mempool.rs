@@ -25,14 +25,12 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let stats = pool.stats();
     let maxmempool = pool.limits.max_total_bytes;
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
-    // `mempoolminfee` rises above `minrelaytxfee` under size pressure. The
-    // eviction crate owns that heuristic; this handler only reports it, so
-    // the quoted floor cannot drift from the one the admission preview
-    // enforces.
-    let mempool_min_fee_sat_per_kvb = bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb(
-        &pool,
-        policy.incremental_relay_fee_sat_per_kvb,
-    );
+    // `mempoolminfee` is the Core rolling floor measured against total
+    // virtual size: it rises to an evicted chunk's rate on eviction, then
+    // decays while blocks arrive. This handler only reports it, so the
+    // quoted floor cannot drift from the one the admission preview enforces.
+    let mempool_min_fee_sat_per_kvb =
+        pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
     let info = v31::GetMempoolInfo {
         loaded: true,
         size: i64_saturated(stats.txs),

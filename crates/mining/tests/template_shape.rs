@@ -47,6 +47,12 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     }
 
     let snapshot = mempool.mining_snapshot();
+    assert_eq!(snapshot.sequence, mempool.sequence_number());
+    assert_eq!(
+        snapshot.fee_delta_sequence,
+        mempool.fee_delta_sequence_number(),
+        "snapshot fee sequence comes from the same pool state"
+    );
     let context = CandidateContext {
         height: 250,
         version: 0x2000_0001,
@@ -56,18 +62,14 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
         locktime_cutoff: 10,
         ..context()
     };
-    let candidate = assemble_candidate(&context, &snapshot, PAYOUT)?;
+    let candidate = assemble_candidate(&context, &mempool, PAYOUT)?;
 
     assert_eq!(
         candidate.template_id,
-        TemplateId::new(&context.previous_block_hash, snapshot.sequence)
-    );
-    assert_eq!(
-        candidate.template_id.as_str(),
-        format!(
-            "{}{}",
-            context.previous_block_hash.to_string_be(),
-            snapshot.sequence
+        TemplateId::with_fee_revision(
+            &context.previous_block_hash,
+            snapshot.sequence,
+            snapshot.fee_delta_sequence
         )
     );
     assert_eq!(candidate.previous_block_hash, context.previous_block_hash);
@@ -155,8 +157,8 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
         segwit_active: false,
         ..context()
     };
-    let first = assemble_candidate(&legacy, &snapshot, PAYOUT)?;
-    let second = assemble_candidate(&legacy, &snapshot, PAYOUT)?;
+    let first = assemble_candidate(&legacy, &mempool, PAYOUT)?;
+    let second = assemble_candidate(&legacy, &mempool, PAYOUT)?;
     assert_eq!(txids(&first.transactions), txids(&second.transactions));
     assert_eq!(
         txids(&first.transactions),
@@ -177,7 +179,8 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
         version: 1,
         ..context()
     };
-    let zero = assemble_candidate(&context, &zero_fee_pool().mining_snapshot(), PAYOUT)?;
+    let empty = zero_fee_pool();
+    let zero = assemble_candidate(&context, &empty, PAYOUT)?;
     assert_eq!(
         zero.transactions.len(),
         0,
@@ -186,14 +189,14 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
 
     let mut one_pool = zero_fee_pool();
     insert(&mut one_pool, tx(1, 1_000, None), 120, 1_000, 1, 100)?;
-    let one = assemble_candidate(&context, &one_pool.mining_snapshot(), PAYOUT)?;
+    let one = assemble_candidate(&context, &one_pool, PAYOUT)?;
     assert_eq!(one.transactions.len(), 1);
     Ok(())
 }
 
 #[test]
 fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
-    let snapshot = zero_fee_pool().mining_snapshot();
+    let empty = zero_fee_pool();
     for (csv_active, segwit_active) in [(false, false), (true, false), (false, true), (true, true)]
     {
         let candidate = assemble_candidate(
@@ -205,7 +208,7 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
                 segwit_active,
                 ..context()
             },
-            &snapshot,
+            &empty,
             PAYOUT,
         )?;
         assert_eq!(candidate.csv_active, csv_active);
@@ -222,7 +225,8 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
         version: 1,
         ..context()
     };
-    let candidate = assemble_candidate(&context, &zero_fee_pool().mining_snapshot(), PAYOUT)?;
+    let empty = zero_fee_pool();
+    let candidate = assemble_candidate(&context, &empty, PAYOUT)?;
     let unsolved = candidate.into_unsolved_block()?;
     assert_eq!(unsolved.txs.len(), 1);
     assert_eq!(unsolved.header.nonce, 0);

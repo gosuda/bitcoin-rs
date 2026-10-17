@@ -127,6 +127,10 @@ fn apply_errors_delegate_consensus_and_chain_reasons() {
         "bad-cb-missing"
     );
     assert_eq!(
+        rejected(ApplyError::Consensus(ConsensusError::SixtyFourByteMutation)),
+        "bad-cb-missing"
+    );
+    assert_eq!(
         rejected(ApplyError::Chain(ChainError::InvalidPow {
             hash: Hash256::default(),
             target: ChainWork::ZERO,

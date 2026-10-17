@@ -23,8 +23,12 @@ mod block_view;
 mod engine;
 /// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
+/// Bounded script-execution cache shared by mempool admission and connect.
+pub mod script_cache;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
+/// BIP325 signet block solution check.
+pub mod signet;
 /// Shared transaction-level BIP141 sigop accounting.
 mod sigops;
 /// Optional Bitcoin Core-compatible USDT tracepoints (`usdt` feature).
@@ -66,11 +70,13 @@ mod bip113_tests {
 
 pub use block_view::{BlockFacts, BlockView};
 pub use engine::ValidationEngine;
+pub use script_cache::{SCRIPT_EXECUTION_CACHE_ENTRIES, ScriptExecutionCache};
+pub use signet::check_signet_block_solution;
 pub use sigops::transaction_sigop_cost;
 pub use verify_block::{
     BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, check_block_body_binding,
-    compute_merkle_root, verify_block_rules, verify_block_rules_precomputed, verify_flags,
-    verify_merkle_root_with_txids,
+    compute_merkle_root, is_sixty_four_byte_mutation, verify_block_rules,
+    verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
     ScriptStageTimings, check_coinbase_maturity, is_final_tx, verify_block_input_scripts,
@@ -127,6 +133,8 @@ pub enum ConsensusError {
     EmptyBlock,
     #[error("block first transaction is not coinbase")]
     MissingCoinbase,
+    #[error("block without a coinbase contains a 64-byte transaction")]
+    SixtyFourByteMutation,
     #[error("block transaction {tx_index} is coinbase outside position 0")]
     ExtraCoinbase { tx_index: usize },
     #[error("block merkle tree contains a duplicate transaction mutation")]
@@ -147,6 +155,8 @@ pub enum ConsensusError {
     BlockWeight { weight: u64, max: u64 },
     #[error("stripped block size {size} exceeds max {max}")]
     BlockBaseSize { size: u64, max: u64 },
+    #[error("signet block solution is invalid")]
+    SignetSolution,
     #[error("{bip}: {reason}")]
     Bip { bip: &'static str, reason: String },
     #[error("block prevout matrix has {actual} rows for {expected} transactions")]

@@ -3,12 +3,16 @@
 //! Startup returns a fully owned `Node`, not detached state and worker handles.
 //! The daemon and embedding surfaces both enter this lifecycle directly.
 
+use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 
 use bitcoin_rs_chain::BlockBodySource;
+use bitcoin_rs_chainstate::verify::{
+    CheckLevel, VerifyOutcome, VerifyRequest, verify_recent_blocks,
+};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_rpc::{
     RpcServer,
@@ -115,6 +119,40 @@ impl ChainControl for RpcChainControl {
         // not keep occupying bounded download staging.
         self.sync.purge_invalidated(&invalidated);
         Ok(())
+    }
+
+    fn verify_chain(&self, check_level: u8, nblocks: u32) -> bool {
+        match verify_recent_blocks(&self.handles, verify_request(check_level, nblocks)) {
+            Ok(VerifyOutcome::Passed { .. }) => true,
+            // Core reports a window that reaches blocks it does not hold as
+            // `SKIPPED_MISSING_BLOCKS`, which `verifychain` answers false.
+            Ok(VerifyOutcome::SkippedNoBlockData { height }) => {
+                tracing::info!(
+                    height,
+                    "verifychain window reaches blocks this node does not hold"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "verifychain found a damaged block");
+                false
+            }
+        }
+    }
+}
+
+/// Maps Core's `verifychain` arguments onto the chainstate verifier. Levels
+/// above 2 run the level-2 checks: the verifier does not replay disconnect or
+/// reconnect. Zero blocks means the whole chain.
+fn verify_request(check_level: u8, nblocks: u32) -> VerifyRequest {
+    let level = match check_level {
+        0 => CheckLevel::ReadBodies,
+        1 => CheckLevel::CheckBodies,
+        _ => CheckLevel::CheckUndo,
+    };
+    VerifyRequest {
+        level,
+        depth: NonZeroU32::new(nblocks),
     }
 }
 
@@ -568,6 +606,10 @@ pub(crate) fn start_node(
     guard.services.event_loop_signal = event_loop_signal;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
+    // The early-announce body rendezvous: one slot shared by the announcer
+    // (writer, on every early send) and the chain query (reader, for compact
+    // `getdata` and `getblocktxn` before the body is durable).
+    let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
     let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         bitcoin_rs_p2p::ActiveChainQuery::new(
             chainstate.block_tree_reader(),
@@ -575,7 +617,8 @@ pub(crate) fn start_node(
             state.config().network,
         )
         .with_block_body_source(Arc::clone(&block_body_source))
-        .with_compact_filters(state.compact_filter_query()),
+        .with_compact_filters(state.compact_filter_query())
+        .with_recent_block(recent_block.clone()),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
@@ -603,8 +646,21 @@ pub(crate) fn start_node(
             Arc::clone(&p2p_chain_query),
             bitcoin_rs_p2p::BlockAnnounceConfig::default(),
         )
-        .with_ibd(state.ibd(), state.config().network),
+        .with_ibd(state.ibd(), state.config().network)
+        .with_recent_block(recent_block),
     );
+    // Early compact-block announce: connect fires this hook after block rules
+    // pass for a tip child, before the durable commit. The hook only hands
+    // the block to the announcer — it never publishes a tip or advances the
+    // mining generation, so miners switch on the post-commit path.
+    let announcer_for_hook = Arc::clone(&block_announcer);
+    let pow_valid_hook: bitcoin_rs_chainstate::PowValidBlockHook =
+        Arc::new(move |block, hash, height| {
+            announcer_for_hook.announce_pow_valid(block, hash, height);
+        });
+    chainstate
+        .set_pow_valid_block(pow_valid_hook)
+        .map_err(|_| anyhow::anyhow!("pow-valid hook already installed"))?;
     if let Some(announce_rx) = state.take_block_announce_receiver() {
         guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
             Arc::clone(&block_announcer),

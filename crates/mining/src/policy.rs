@@ -1,198 +1,439 @@
-#[cfg(test)]
-use std::cell::Cell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use bitcoin_rs_consensus::is_final_tx;
-use bitcoin_rs_mempool::MempoolMiningSnapshot;
-use bitcoin_rs_primitives::{Tx, Txid};
+use bitcoin_rs_mempool::{ChunkView, EntryId, Mempool, MempoolEntry};
+use bitcoin_rs_primitives::Tx;
 
 use crate::MiningError;
-use crate::template::{CandidateContext, FixedReservation, SelectedBody, transaction_count_size};
+use crate::template::{
+    CandidateContext, FixedReservation, SelectedBody, SelectedTx, transaction_count_size,
+};
 
-#[cfg(test)]
-thread_local! {
-    static CHUNK_PACKAGE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
+/// Core `DEFAULT_BLOCK_MIN_TX_FEE` (`policy.h`): the lowest rate a template
+/// chunk or chunk prefix may pay, in satoshis per kvB of rounded virtual size.
+/// Fixed, with no configuration key.
+const BLOCK_MIN_TX_FEE_SAT_PER_KVB: i128 = 1;
+
+/// Exact sums over the first members of one chunk: the whole chunk, or a
+/// prefix of its linearization.
+///
+/// Every field is a plain sum over the members counted, so removing the last
+/// member with [`PackageTotals::minus`] yields the sums of the shorter prefix
+/// without revisiting the others. Rounding to vbytes belongs to the rate test
+/// alone: `charged_weight` stays exact, because summing per-entry vbytes can
+/// overstate the block's rounded size (two 41 WU members round to 11 vB each,
+/// 22 vB, while the pair rounds to `ceil(82 / 4)` = 21 vB).
+#[derive(Clone, Copy, Default)]
+struct PackageTotals {
+    /// Actual fees: what the coinbase may claim.
+    fee: u64,
+    /// Consensus weights.
+    weight: u64,
+    /// Serialized sizes.
+    size: u64,
+    /// Sigop costs.
+    sigop_cost: u64,
+    /// Modified fees: actual fees plus signed overlays. Feerate input only.
+    modified_fee: i128,
+    /// Policy-charged weights, summed exactly before any rounding.
+    charged_weight: u64,
 }
 
-/// One dependency-closed package selected for a candidate.
-struct SelectedPackage {
-    /// Snapshot positions in topological order.
-    indices: Vec<usize>,
-    /// Sum of actual fees for the residual package.
-    fee: u64,
-    /// Sum of weights for the residual package.
+impl PackageTotals {
+    /// Sums every member of `chunk`.
+    fn of_chunk(chunk: &ChunkView<'_>) -> Result<Self, MiningError> {
+        chunk
+            .entries()
+            .try_fold(Self::default(), |totals, (_, entry)| totals.plus(entry))
+    }
+
+    /// Adds one entry. Overflow is an error, never a saturated total.
+    fn plus(self, entry: &MempoolEntry) -> Result<Self, MiningError> {
+        Ok(Self {
+            fee: self
+                .fee
+                .checked_add(entry.fee)
+                .ok_or(MiningError::FeeOverflow)?,
+            weight: self
+                .weight
+                .checked_add(entry.weight)
+                .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?,
+            size: self
+                .size
+                .checked_add(u64::from(entry.size))
+                .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
+            sigop_cost: self
+                .sigop_cost
+                .checked_add(u64::from(entry.sigop_cost))
+                .ok_or(MiningError::CandidateScalarOverflow {
+                    field: "sigop cost",
+                })?,
+            modified_fee: self.modified_fee.checked_add(entry.modified_fee()).ok_or(
+                MiningError::CandidateScalarOverflow {
+                    field: "modified fee",
+                },
+            )?,
+            charged_weight: self
+                .charged_weight
+                .checked_add(entry.policy_weight())
+                .ok_or(MiningError::CandidateScalarOverflow {
+                    field: "charged weight",
+                })?,
+        })
+    }
+
+    /// Removes an entry that [`Self::plus`] added. The sums are exact, so no
+    /// field can underflow.
+    fn minus(self, entry: &MempoolEntry) -> Self {
+        Self {
+            fee: self.fee - entry.fee,
+            weight: self.weight - entry.weight,
+            size: self.size - u64::from(entry.size),
+            sigop_cost: self.sigop_cost - u64::from(entry.sigop_cost),
+            modified_fee: self.modified_fee - entry.modified_fee(),
+            charged_weight: self.charged_weight - entry.policy_weight(),
+        }
+    }
+}
+
+/// Whether a chunk or chunk prefix pays the block minimum fee.
+///
+/// Core `ToFeePerVSize` rounds the summed charged weight up to whole vbytes
+/// once; the rate is `floor(modified_fee * 1000 / vsize)` in sat/kvB, floored
+/// toward negative infinity so a negative aggregate is never read as zero. A
+/// zero vsize has no rate and fails like an overflow instead of falling back
+/// to a made-up denominator.
+fn meets_block_min_fee_rate(modified_fee: i128, charged_weight: u64) -> Result<bool, MiningError> {
+    let rate = modified_fee
+        .checked_mul(1_000)
+        .and_then(|scaled| scaled.checked_div_euclid(i128::from(charged_weight.div_ceil(4))))
+        .ok_or(MiningError::CandidateScalarOverflow { field: "fee rate" })?;
+    Ok(rate >= BLOCK_MIN_TX_FEE_SAT_PER_KVB)
+}
+
+/// Running totals of the body under construction, reservation included.
+#[derive(Clone, Copy)]
+struct BodyUsage {
     weight: u64,
-    /// Sum of serialized sizes for the residual package.
     size: u64,
-    /// Sum of sigop costs for the residual package.
-    sigop_cost: u64,
+    sigops: u64,
+    /// Sum of actual fees of the selected transactions.
+    fees: u64,
+}
+
+impl BodyUsage {
+    /// Claims the actual fees of the package this usage was grown for.
+    fn claim_fees(self, totals: &PackageTotals) -> Result<Self, MiningError> {
+        let fees = self
+            .fees
+            .checked_add(totals.fee)
+            .ok_or(MiningError::FeeOverflow)?;
+        Ok(Self { fees, ..self })
+    }
+}
+
+/// A chunk the main walk passed over for lack of room, kept for the tail pass.
+///
+/// Recorded only when the chunk cleared the fee floor, every in-pool parent
+/// outside it was already selected, every member is final, and at least its
+/// first member would still fit. Selected transactions only grow, so any
+/// prefix of a recorded chunk stays dependency-closed and final, and a chunk
+/// whose first member did not fit then cannot gain room later.
+struct SkippedChunk<'pool> {
+    chunk: ChunkView<'pool>,
+    /// Sums of the whole chunk, computed once by the main walk.
+    totals: PackageTotals,
+}
+
+/// The body under construction.
+///
+/// `selected` holds exactly the entry ids of `ordered`. Both only grow, and
+/// each append is a dependency-closed whole chunk or chunk prefix, so every
+/// parent precedes its child and `usage` never rolls back.
+struct Selection {
+    usage: BodyUsage,
+    selected: HashSet<EntryId>,
+    ordered: Vec<SelectedTx>,
+}
+
+impl Selection {
+    /// Whether the block already reached its weight or size limit. A zero
+    /// limit means the context sets none.
+    fn is_full(&self, context: &CandidateContext) -> bool {
+        (context.max_weight > 0 && self.usage.weight >= context.max_weight)
+            || (context.max_size > 0 && self.usage.size >= context.max_size)
+    }
+
+    /// Usage after appending `members` transactions summing to `totals`, or
+    /// `None` when weight, serialized size, or sigop cost would pass the
+    /// context's limit. Fees are not claimed here.
+    fn grown_by(
+        &self,
+        context: &CandidateContext,
+        members: usize,
+        totals: &PackageTotals,
+    ) -> Result<Option<BodyUsage>, MiningError> {
+        let count = self.ordered.len();
+        let next_count =
+            count
+                .checked_add(members)
+                .ok_or(MiningError::CandidateScalarOverflow {
+                    field: "transaction count",
+                })?;
+        let count_growth = transaction_count_size(next_count)? - transaction_count_size(count)?;
+        let Some(weight) = self
+            .usage
+            .weight
+            .checked_add(totals.weight)
+            .and_then(|weight| weight.checked_add(count_growth * 4))
+        else {
+            return Ok(None);
+        };
+        let Some(size) = self
+            .usage
+            .size
+            .checked_add(totals.size)
+            .and_then(|size| size.checked_add(count_growth))
+        else {
+            return Ok(None);
+        };
+        let Some(sigops) = self.usage.sigops.checked_add(totals.sigop_cost) else {
+            return Ok(None);
+        };
+        if weight > context.max_weight || size > context.max_size || sigops > context.max_sigops {
+            return Ok(None);
+        }
+        Ok(Some(BodyUsage {
+            weight,
+            size,
+            sigops,
+            fees: self.usage.fees,
+        }))
+    }
+
+    /// Appends the first `len` members of `chunk` in linearization order and
+    /// adopts `usage`, which already accounts for them.
+    fn append(&mut self, chunk: &ChunkView<'_>, len: usize, usage: BodyUsage) {
+        for (member, entry) in chunk.entries().take(len) {
+            self.selected.insert(member);
+            self.ordered.push(SelectedTx {
+                tx: Arc::clone(&entry.tx),
+                txid: entry.txid,
+                wtxid: entry.wtxid,
+                fee: entry.fee,
+                sigop_cost: entry.sigop_cost,
+                weight: entry.weight,
+            });
+        }
+        self.usage = usage;
+    }
+
+    /// Whether every in-pool parent of `chunk` that sits outside it is already
+    /// selected. A skipped parent chunk therefore makes dependent later chunks
+    /// unavailable.
+    fn parents_selected(&self, chunk: &ChunkView<'_>) -> bool {
+        chunk.members.iter().all(|&member| {
+            chunk
+                .parents_of(member)
+                .all(|parent| self.selected.contains(&parent) || chunk.members.contains(&parent))
+        })
+    }
+
+    /// The record of a chunk that did not fit whole, or `None` when no prefix
+    /// of it can ever fit: a one-member chunk has no shorter prefix, and a
+    /// first member that does not fit now never will, because selection only
+    /// grows.
+    fn tail_candidate<'pool>(
+        &self,
+        context: &CandidateContext,
+        pool: &Mempool,
+        chunk: ChunkView<'pool>,
+        totals: PackageTotals,
+    ) -> Result<Option<SkippedChunk<'pool>>, MiningError> {
+        let [first, _, ..] = chunk.members else {
+            return Ok(None);
+        };
+        let first = PackageTotals::default().plus(pool.chunk_member(*first))?;
+        let fits = self.grown_by(context, 1, &first)?.is_some();
+        Ok(fits.then_some(SkippedChunk { chunk, totals }))
+    }
+
+    /// Walks the caller's chunks from the highest feerate. Returns the chunks it
+    /// skipped for weight, serialized size, or sigop cost, in index order.
+    fn walk<'view>(
+        &mut self,
+        context: &CandidateContext,
+        pool: &Mempool,
+        chunks: impl Iterator<Item = ChunkView<'view>>,
+    ) -> Result<Vec<SkippedChunk<'view>>, MiningError> {
+        let mut skipped = Vec::new();
+        // The caller yields chunks in descending feerate order, each a
+        // linearization: every ancestor precedes its child. A selected chunk's
+        // own ancestors are therefore already selected whenever its direct
+        // parents are, so checking direct parents keeps the body
+        // ancestor-closed without a transitive walk.
+        for chunk in chunks {
+            if self.is_full(context) {
+                break;
+            }
+            // Chunks come in decreasing feerate, so everything after the first
+            // chunk below the block minimum pays less as well (Core `addChunks`).
+            if !meets_block_min_fee_rate(chunk.modified_fee, chunk.charged_weight)? {
+                break;
+            }
+            if !self.parents_selected(&chunk) {
+                continue;
+            }
+            let totals = PackageTotals::of_chunk(&chunk)?;
+            if !chunk_is_final(context, pool, &chunk) {
+                continue;
+            }
+            let Some(usage) = self.grown_by(context, chunk.len(), &totals)? else {
+                skipped.extend(self.tail_candidate(context, pool, chunk, totals)?);
+                continue;
+            };
+            let usage = usage.claim_fees(&totals)?;
+            self.append(&chunk, chunk.len(), usage);
+        }
+        Ok(skipped)
+    }
+
+    /// The longest linearization prefix of `chunk` that fits and whose
+    /// aggregate rate meets the block minimum, with the usage after appending
+    /// it. The prefix may be the whole chunk. Prefix sums are the chunk's sums
+    /// trimmed from the end one member at a time, so a chunk costs one pass
+    /// over its members.
+    fn longest_prefix(
+        &self,
+        context: &CandidateContext,
+        pool: &Mempool,
+        chunk: &ChunkView<'_>,
+        totals: PackageTotals,
+    ) -> Result<Option<(usize, BodyUsage)>, MiningError> {
+        let mut prefix = totals;
+        for (index, &last) in chunk.members.iter().enumerate().rev() {
+            let len = index + 1;
+            if let Some(usage) = self.grown_by(context, len, &prefix)?
+                && meets_block_min_fee_rate(prefix.modified_fee, prefix.charged_weight)?
+            {
+                return Ok(Some((len, usage.claim_fees(&prefix)?)));
+            }
+            prefix = prefix.minus(pool.chunk_member(last));
+        }
+        Ok(None)
+    }
+
+    /// Fills the room the main walk left with prefixes of the chunks it
+    /// skipped, in index order. The pass only appends, so total fees never
+    /// fall.
+    fn fill_tail(
+        &mut self,
+        context: &CandidateContext,
+        pool: &Mempool,
+        skipped: Vec<SkippedChunk<'_>>,
+    ) -> Result<(), MiningError> {
+        for SkippedChunk { chunk, totals } in skipped {
+            if self.is_full(context) {
+                break;
+            }
+            let Some((len, usage)) = self.longest_prefix(context, pool, &chunk, totals)? else {
+                continue;
+            };
+            self.append(&chunk, len, usage);
+        }
+        Ok(())
+    }
 }
 
 /// Selects dependency-closed packages under the candidate's resource limits.
 ///
-/// Packages follow the mempool owner's dependency-closed fee chunks.
-/// Mining applies finality and block resource limits to each complete chunk.
-/// A package that fails finality or would overflow weight, serialized size, or
-/// sigop cost is skipped atomically; later packages may still fit.
-/// Returned body weight and size include the block transaction count.
-pub(crate) fn select_packages(
+/// The main walk follows the caller's dependency-closed fee chunks from the
+/// highest feerate while the caller holds the pool read guard. It stops at
+/// the first chunk whose aggregate rate, `floor(modified_fee * 1000 /
+/// ceil(charged_weight / 4))`, is below `BLOCK_MIN_TX_FEE_SAT_PER_KVB`. The
+/// rate belongs to the chunk, not to each transaction: descendants' fees can
+/// lift a low-fee or negative-fee parent over the minimum, and a chunk that
+/// pays less than it is never selected, whatever its actual fees. A chunk that
+/// is not final, whose parents outside it are not all selected, or that would
+/// overflow weight, serialized size, or sigop cost is skipped atomically; later
+/// chunks may still fit.
+///
+/// A tail pass then fills the room left with prefixes of the chunks skipped
+/// for weight, serialized size, or sigop cost. Each chunk, in index order,
+/// contributes its longest linearization prefix that fits and whose aggregate
+/// rate meets the same minimum. A chunk skipped for finality, or one whose
+/// outside parents were not selected, contributes nothing. Only the selected
+/// transactions are copied out of the pool. Returned body weight includes the
+/// block transaction count; the reservation covers the header and coinbase.
+///
+/// `chunks` is either the live [`Mempool::chunks_by_feerate`] walk or a
+/// [`ProjectedChunks::iter`](bitcoin_rs_mempool::ProjectedChunks::iter) walk;
+/// both share every fee-floor, finality, dependency, resource, and topological
+/// rule here. `sequences` is the generation the body was read at: the live
+/// sequences for the live walk, or the predicted post-removal sequences for a
+/// projection. The projection owner must outlive the borrowed iteration.
+pub(crate) fn select_packages<'a>(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
+    pool: &Mempool,
+    chunks: impl Iterator<Item = ChunkView<'a>>,
+    sequences: (u64, u64),
     reservation: FixedReservation,
 ) -> Result<SelectedBody, MiningError> {
     let count_size = transaction_count_size(0)?;
-    let mut used_weight = reservation
+    let weight = reservation
         .weight
         .checked_add(count_size * 4)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
-    let mut used_size = reservation
+    let size = reservation
         .size
         .checked_add(count_size)
         .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
-    if used_weight > context.max_weight {
+    if weight > context.max_weight {
         return Err(MiningError::CapacityExhausted { field: "weight" });
     }
-    if used_size > context.max_size {
+    if size > context.max_size {
         return Err(MiningError::CapacityExhausted { field: "size" });
     }
     if reservation.sigops > context.max_sigops {
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
 
-    let mut selected = vec![false; snapshot.entries.len()];
-    let mut ordered = Vec::new();
-    let mut used_sigops = reservation.sigops;
-    let mut fees = 0_u64;
-    let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
-
-    // Preserve the existing typed reference error before evaluating the graph.
-    for (entry, row) in snapshot.entries.iter().enumerate() {
-        for &ancestor in &row.ancestors {
-            if !usize::try_from(ancestor).is_ok_and(|index| index < snapshot.entries.len()) {
-                return Err(MiningError::MissingAncestor { entry, ancestor });
-            }
-        }
-    }
-    for chunk in snapshot.fee_chunks()? {
-        if (context.max_weight > 0 && used_weight >= context.max_weight)
-            || (context.max_size > 0 && used_size >= context.max_size)
-        {
-            break;
-        }
-        // A skipped parent chunk makes dependent later chunks unavailable.
-        if chunk.indices.iter().any(|&index| {
-            snapshot.entries[index].ancestors.iter().any(|&ancestor| {
-                let ancestor = usize::try_from(ancestor).unwrap_or(usize::MAX);
-                !selected[ancestor] && !chunk.indices.contains(&ancestor)
-            })
-        }) {
-            continue;
-        }
-        let package = chunk_package(snapshot, chunk.indices)?;
-        if !package_is_final(context, snapshot, &pooled, &package) {
-            continue;
-        }
-
-        let next_count = ordered.len().checked_add(package.indices.len()).ok_or(
-            MiningError::CandidateScalarOverflow {
-                field: "transaction count",
-            },
-        )?;
-        let count_growth =
-            transaction_count_size(next_count)? - transaction_count_size(ordered.len())?;
-        let Some(next_weight) = used_weight
-            .checked_add(package.weight)
-            .and_then(|weight| weight.checked_add(count_growth * 4))
-        else {
-            continue;
-        };
-        let Some(next_size) = used_size
-            .checked_add(package.size)
-            .and_then(|size| size.checked_add(count_growth))
-        else {
-            continue;
-        };
-        let Some(next_sigops) = used_sigops.checked_add(package.sigop_cost) else {
-            continue;
-        };
-        if next_weight > context.max_weight
-            || next_size > context.max_size
-            || next_sigops > context.max_sigops
-        {
-            continue;
-        }
-        let Some(next_fees) = fees.checked_add(package.fee) else {
-            return Err(MiningError::FeeOverflow);
-        };
-
-        for &member in &package.indices {
-            selected[member] = true;
-            ordered.push(member);
-        }
-        used_weight = next_weight;
-        used_size = next_size;
-        used_sigops = next_sigops;
-        fees = next_fees;
-    }
+    let mut selection = Selection {
+        usage: BodyUsage {
+            weight,
+            size,
+            sigops: reservation.sigops,
+            fees: 0,
+        },
+        selected: HashSet::new(),
+        ordered: Vec::new(),
+    };
+    let skipped = selection.walk(context, pool, chunks)?;
+    selection.fill_tail(context, pool, skipped)?;
 
     Ok(SelectedBody {
-        ordered,
-        fees,
-        weight: used_weight.saturating_sub(reservation.weight),
+        sequence: sequences.0,
+        fee_delta_sequence: sequences.1,
+        transactions: selection.ordered,
+        fees: selection.usage.fees,
+        weight: selection.usage.weight.saturating_sub(reservation.weight),
+        reservation,
     })
 }
 
-fn chunk_package(
-    snapshot: &MempoolMiningSnapshot,
-    indices: Vec<usize>,
-) -> Result<SelectedPackage, MiningError> {
-    #[cfg(test)]
-    CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-    let mut fee = 0_u64;
-    let mut weight = 0_u64;
-    let mut size = 0_u64;
-    let mut sigop_cost = 0_u64;
-    for &index in &indices {
-        let entry = &snapshot.entries[index];
-        fee = fee.checked_add(entry.fee).ok_or(MiningError::FeeOverflow)?;
-        weight = weight
-            .checked_add(entry.weight)
-            .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
-        size = size
-            .checked_add(u64::from(entry.size))
-            .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
-        sigop_cost = sigop_cost.checked_add(u64::from(entry.sigop_cost)).ok_or(
-            MiningError::CandidateScalarOverflow {
-                field: "sigop cost",
-            },
-        )?;
-    }
-
-    Ok(SelectedPackage {
-        indices,
-        fee,
-        weight,
-        size,
-        sigop_cost,
-    })
-}
-
-fn package_is_final(
-    context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
-    pooled: &HashSet<Txid>,
-    package: &SelectedPackage,
-) -> bool {
-    package.indices.iter().all(|&index| {
-        let entry = &snapshot.entries[index];
+fn chunk_is_final(context: &CandidateContext, pool: &Mempool, chunk: &ChunkView<'_>) -> bool {
+    chunk.entries().all(|(member, entry)| {
         is_final_tx(&entry.tx, context.height, context.locktime_cutoff)
-            && next_block_sequence_locks_final(context, pooled, &entry.tx)
+            && member_sequence_locks_final(context, pool, chunk, member, &entry.tx)
     })
 }
 
-fn next_block_sequence_locks_final(
+fn member_sequence_locks_final(
     context: &CandidateContext,
-    pooled: &HashSet<Txid>,
+    pool: &Mempool,
+    chunk: &ChunkView<'_>,
+    member: EntryId,
     tx: &Tx,
 ) -> bool {
     if !context.csv_active {
@@ -202,7 +443,14 @@ fn next_block_sequence_locks_final(
         return true;
     }
     tx.inputs.iter().all(|input| {
-        if !pooled.contains(&input.previous_output.txid) {
+        let prev = &input.previous_output.txid;
+        if !pool.contains_txid(prev) {
+            return true;
+        }
+        let required = chunk
+            .parents_of(member)
+            .any(|parent| pool.chunk_member(parent).txid == *prev);
+        if !required {
             return true;
         }
         bitcoin_rs_consensus::bip68::sequence_lock_satisfied(
@@ -214,121 +462,4 @@ fn next_block_sequence_locks_final(
             context.locktime_cutoff,
         )
     })
-}
-
-#[cfg(test)]
-#[expect(clippy::expect_used)]
-mod tests {
-    use std::cell::Cell;
-    use std::sync::Arc;
-
-    use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
-    use bitcoin_rs_primitives::{
-        Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
-        Txid, Witness,
-    };
-
-    use super::{CHUNK_PACKAGE_CONSTRUCTIONS, select_packages};
-    use crate::template::{CandidateContext, FixedReservation};
-
-    #[test]
-    fn stops_candidate_package_construction_once_a_positive_dimension_is_full() {
-        let filler = snapshot_entry(independent_tx(1), 5_000_000, 1_000, 1_000, 0);
-        let leftover = snapshot_entry(independent_tx(2), 4_000, 10, 10, 0);
-        let snapshot = MempoolMiningSnapshot {
-            sequence: 1,
-            fee_delta_sequence: 0,
-            entries: vec![filler, leftover],
-        };
-        for limits in [(1_004, 4_000_000), (4_000_000, 1_001)] {
-            CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-            let selected = select_packages(
-                &context(limits.0, limits.1, 80_000),
-                &snapshot,
-                FixedReservation::EMPTY,
-            )
-            .expect("selection under a full dimension");
-            assert_eq!(selected.ordered, vec![0], "limits {limits:?}");
-            assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
-        }
-    }
-
-    /// Even an empty body needs one byte to encode its reserved coinbase count.
-    #[test]
-    fn transaction_count_reservation_rejects_zero_size_capacity() {
-        let zero_size = snapshot_entry(independent_tx(1), 1_000, 10, 0, 0);
-        let snapshot = MempoolMiningSnapshot {
-            sequence: 2,
-            fee_delta_sequence: 0,
-            entries: vec![zero_size],
-        };
-
-        assert!(matches!(
-            select_packages(
-                &context(4_000_000, 0, 80_000),
-                &snapshot,
-                FixedReservation::EMPTY
-            ),
-            Err(crate::MiningError::CapacityExhausted { field: "size" })
-        ));
-    }
-
-    fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {
-        CandidateContext {
-            previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
-            height: 100,
-            version: 0x2000_0000,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 2,
-            locktime_cutoff: 1,
-            network: Network::Regtest,
-            csv_active: true,
-            segwit_active: true,
-            max_weight,
-            max_size,
-            max_sigops,
-        }
-    }
-
-    fn snapshot_entry(tx: Tx, fee: u64, weight: u64, size: u32, sigop_cost: u32) -> SnapshotEntry {
-        let tx = Arc::new(tx);
-        SnapshotEntry {
-            txid: tx.txid(),
-            wtxid: tx.wtxid(),
-            vsize: size.max(1),
-            bip141_vsize: size.max(1),
-            size,
-            weight,
-            sigop_cost,
-            fee,
-            fee_delta: 0,
-            time: 0,
-            height: 0,
-            ancestor_size: u64::from(size.max(1)),
-            ancestor_fee: fee,
-            ancestor_fee_delta: 0,
-            ancestors: vec![],
-            tx,
-        }
-    }
-
-    fn independent_tx(label: u8) -> Tx {
-        let mut bytes = [0_u8; 32];
-        bytes[0] = label;
-        Tx {
-            version: 2,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&bytes)), 0),
-                script_sig: vec![].into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51, label].into(),
-            }],
-            lock_time: LockTime::ZERO,
-        }
-    }
 }

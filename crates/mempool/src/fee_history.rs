@@ -185,7 +185,7 @@ mod tests {
         }
         let txids: Vec<Txid> = txs.iter().map(|tx| tx.txid()).collect();
         let refs: Vec<&Tx> = txs.iter().map(AsRef::as_ref).collect();
-        let _ = guard.remove_for_block(&refs, &txids, 101);
+        let _ = guard.remove_for_block(&refs, &txids, 101, 1);
         drop(guard);
         mempool
     }

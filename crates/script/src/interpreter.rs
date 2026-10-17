@@ -18,6 +18,7 @@ use thiserror::Error;
 use crate::checker::{SigVersion, TxSignatureChecker};
 use crate::eval::{self, MAX_SCRIPT_ELEMENT_SIZE};
 use crate::script::{is_push_only, witness_program};
+use crate::signature_cache::SignatureCache;
 use crate::stack::{ScriptItem, Stack};
 use crate::taproot;
 
@@ -363,11 +364,10 @@ impl Interpreter {
             &spending,
             input_idx,
             script_pubkey,
-            script_sig,
-            witness,
             flags,
             prevouts,
             &cache,
+            None,
         )
     }
 }
@@ -432,56 +432,87 @@ impl<'tx> PreparedTransaction<'tx> {
         })
     }
 
+    /// Validates and consumes resolved prevouts the caller already owns.
+    ///
+    /// The borrowed transaction and owned outputs cannot change after
+    /// validation; outputs move into the retained vector without cloning
+    /// their script buffers.
+    ///
+    /// # Errors
+    /// Returns [`PrevoutError`] if the count or ordered outpoint identities differ.
+    pub fn from_spent_outputs(
+        tx: &'tx Tx,
+        prevouts: Vec<(OutPoint, TxOut)>,
+    ) -> Result<Self, PrevoutError> {
+        validate_prevouts(tx, &prevouts)?;
+        Ok(Self {
+            tx,
+            prevouts: prevouts.into_iter().map(|(_, output)| output).collect(),
+            cache: SighashCache::new(tx),
+        })
+    }
+
     /// Verifies an input using this transaction's bytes and resolved prevout.
+    ///
+    /// `cache` is the admission-local positive signature-result cache for this
+    /// call only. Existing block and uncached callers pass `None`; admission
+    /// passes `Some` to share successful group results across its passes. The
+    /// cache is never stored; every encoding and script check still runs.
     ///
     /// # Errors
     /// Returns input-index or script errors. Prevout wiring was checked at construction.
-    pub fn verify_input(&self, input_idx: usize, flags: VerifyFlags) -> Result<bool, ScriptError> {
+    pub fn verify_input(
+        &self,
+        input_idx: usize,
+        flags: VerifyFlags,
+        cache: Option<&SignatureCache>,
+    ) -> Result<bool, ScriptError> {
         let inputs = self.tx.inputs.len();
-        let input = self
-            .tx
-            .inputs
-            .get(input_idx)
-            .ok_or(ScriptError::InputIndexOutOfRange {
+        if self.tx.inputs.get(input_idx).is_none() {
+            return Err(ScriptError::InputIndexOutOfRange {
                 index: input_idx,
                 inputs,
-            })?;
+            });
+        }
         execute_spend(
             self.tx,
             input_idx,
             &self.prevouts[input_idx].script_pubkey,
-            &input.script_sig,
-            &input.witness,
             flags,
             &self.prevouts,
             &self.cache,
+            cache,
         )
     }
 }
 
 /// Callers have checked the input/prevout bounds and bound the cache to these
-/// immutable transaction bytes and ordered prevouts.
+/// immutable transaction bytes and ordered prevouts. Only `script_pubkey`
+/// stays an explicit override; scriptSig and witness are read from
+/// `spending.inputs[input_idx]` because `execute_with_prevouts` grafts
+/// substitutes into its spend copy before calling, so they always match here.
 fn execute_spend(
     spending: &Tx,
     input_idx: usize,
     script_pubkey: &[u8],
-    script_sig: &[u8],
-    witness: &[Vec<u8>],
     flags: VerifyFlags,
     prevouts: &[TxOut],
     cache: &SighashCache<'_>,
+    sig_cache: Option<&SignatureCache>,
 ) -> Result<bool, ScriptError> {
+    let input = &spending.inputs[input_idx];
     let mut checker = TxSignatureChecker::new(
         spending,
         input_idx,
         prevouts[input_idx].value,
         prevouts,
         cache,
+        sig_cache,
     );
     verify_script(
-        script_sig,
+        &input.script_sig,
         script_pubkey,
-        witness,
+        &input.witness,
         flags.filled(),
         &mut checker,
     )?;

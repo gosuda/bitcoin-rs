@@ -318,8 +318,10 @@ pub(crate) fn coinbase_transaction_typed(
 ) -> Option<corepc_types::v31::CoinbaseTransaction> {
     let tx = tx?;
     let input = tx.inputs.first()?;
+    // `corepc` pins the coinbase version to `i32`; the native version is the
+    // unsigned wire value, so re-read the same four bytes as signed.
     Some(corepc_types::v31::CoinbaseTransaction {
-        version: tx.version,
+        version: i32::from_le_bytes(tx.version.to_le_bytes()),
         locktime: tx.lock_time.to_consensus(),
         sequence: input.sequence.to_consensus(),
         coinbase: input.script_sig.to_lower_hex_string(),

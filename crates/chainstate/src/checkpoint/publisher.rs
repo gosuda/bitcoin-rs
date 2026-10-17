@@ -252,8 +252,8 @@ impl CheckpointPublisher {
                 });
             }
         }
-        // A checkpoint may name this tip only after body files then index rows sync.
         self.block_body_store.sync()?;
+        self.block_body_store.flush_index()?;
         let written = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
             checkpoint::headers::HeaderCheckpointConfig {

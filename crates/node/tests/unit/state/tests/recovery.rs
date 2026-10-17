@@ -1,5 +1,26 @@
 use super::*;
 
+const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
+
+fn crash_test_backend(
+    default: bitcoin_rs_storage::StorageBackend,
+) -> bitcoin_rs_storage::StorageBackend {
+    let value = match std::env::var(CRASH_TEST_BACKEND_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return default,
+        Err(error) => panic!("invalid {CRASH_TEST_BACKEND_ENV}: {error}"),
+    };
+    let backend: bitcoin_rs_storage::StorageBackend = match value.parse() {
+        Ok(backend) => backend,
+        Err(error) => panic!("invalid {CRASH_TEST_BACKEND_ENV} {value:?}: {error}"),
+    };
+    assert!(
+        backend.is_compiled_in(),
+        "BITCOIN_RS_CRASH_TEST_BACKEND {value:?} is not compiled into this test binary"
+    );
+    backend
+}
+
 #[test]
 fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -22,6 +43,7 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     // Journal rewind disarms disconnect markers itself. These tests own the
     // checkpoint-settlement path that remains when the journal cannot.
     config.chainstate_journal.enabled = false;
@@ -78,6 +100,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
@@ -162,6 +185,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node-invalidate-preflight");
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
@@ -233,6 +257,7 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -311,6 +336,7 @@ fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
 
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -340,6 +366,7 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
 
     // Apply genesis and publish a checkpoint at height 0.
@@ -397,6 +424,7 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -510,6 +538,7 @@ fn applied_regtest_chain(
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
+    config.storage.backend = crash_test_backend(config.storage.backend);
     config.storage.prune_target_mb = 1;
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -588,6 +617,40 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
             assert_eq!(std::fs::read(path)?, damaged);
         }
     }
+    Ok(())
+}
+
+#[test]
+fn startup_verification_refuses_a_corrupt_tip_body() -> anyhow::Result<()> {
+    use bitcoin_rs_chainstate::verify::VerifyError;
+
+    let (_dir, state, config) = applied_regtest_chain(2, 2)?;
+    drop(state);
+    let path = config.data_dir.join("blocks/blk00000.dat");
+    let mut damaged = std::fs::read(&path)?;
+    // The last byte is the tip body's final payload byte, its coinbase lock
+    // time: far past the 44-byte record header, so the frame still validates
+    // and only the body's commitment to its header is wrong.
+    *damaged
+        .last_mut()
+        .ok_or_else(|| anyhow::anyhow!("empty block file"))? ^= 0xff;
+    std::fs::write(&path, &damaged)?;
+
+    let error = NodeState::open(config, None)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a damaged tip body was accepted"))?;
+    assert!(
+        matches!(
+            error.downcast_ref::<VerifyError>(),
+            Some(VerifyError::Binding { height: 2, .. })
+        ),
+        "unexpected refusal: {error:#}"
+    );
+    assert_eq!(
+        std::fs::read(&path)?,
+        damaged,
+        "refusing to start must not repair or truncate the block file"
+    );
     Ok(())
 }
 

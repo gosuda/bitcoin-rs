@@ -372,7 +372,7 @@ impl<'a> Projection<'a> {
         });
         Ok(TransactionValue {
             txid: txid.to_string(),
-            version: transaction.version.cast_unsigned(),
+            version: transaction.version,
             locktime: transaction.lock_time.to_consensus(),
             vin: inputs,
             vout: outputs,

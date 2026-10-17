@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{self, Read};
+use std::time::{Duration, Instant};
 
 use bitcoin::p2p::Magic;
 use bitcoin::secp256k1::SecretKey;
@@ -16,6 +17,8 @@ use crate::bip324::TransportError;
 use crate::bip324::keys::{KeyMaterial, Role, Session, shared_secret};
 use crate::bip324::packet::PacketError;
 use crate::bip324::reader::{MAX_RECV_CONTENTS_LEN, is_poll_timeout};
+use crate::transport::establish;
+use crate::{PeerError, PeerLease};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -88,6 +91,7 @@ fn connect(
         if done_initiator.is_none() {
             match initiator.advance(&mut to_initiator) {
                 Ok(Step::Send) => to_responder.bytes.extend(initiator.take_outbound()),
+                Ok(Step::Yield) => {}
                 Ok(Step::Established(mut established)) => {
                     if let Some(message) = first_message {
                         to_responder
@@ -104,6 +108,7 @@ fn connect(
         if done_responder.is_none() {
             match responder.advance(&mut to_responder) {
                 Ok(Step::Send) => to_initiator.bytes.extend(responder.take_outbound()),
+                Ok(Step::Yield) => {}
                 Ok(Step::Established(established)) => done_responder = Some(*established),
                 Ok(Step::V1(_)) => return Err("responder reported a v1 peer".into()),
                 Err(error) if is_poll_timeout(&error) => {}
@@ -138,7 +143,8 @@ fn handshakes_agree_on_a_session_and_carry_packets_both_ways() -> TestResult {
     let first = connected
         .responder
         .recv
-        .read_contents(&mut connected.to_responder)?;
+        .read_contents(&mut connected.to_responder)?
+        .ok_or_else(|| io::Error::other("the initiator's first packet"))?;
     assert_eq!(first.as_ref(), b"first");
 
     let reply = connected.responder.send.seal(b"reply", &[], false)?;
@@ -146,7 +152,8 @@ fn handshakes_agree_on_a_session_and_carry_packets_both_ways() -> TestResult {
     let received = connected
         .initiator
         .recv
-        .read_contents(&mut connected.to_initiator)?;
+        .read_contents(&mut connected.to_initiator)?
+        .ok_or_else(|| io::Error::other("the responder's reply packet"))?;
     assert_eq!(received.as_ref(), b"reply");
     Ok(())
 }
@@ -161,7 +168,8 @@ fn handshakes_resume_through_single_byte_reads() -> TestResult {
     let first = connected
         .responder
         .recv
-        .read_contents(&mut connected.to_responder)?;
+        .read_contents(&mut connected.to_responder)?
+        .ok_or_else(|| io::Error::other("the initiator's packet"))?;
     assert_eq!(first.as_ref(), b"after");
     Ok(())
 }
@@ -352,6 +360,7 @@ fn finish(
     loop {
         match responder.advance(inbox) {
             Ok(Step::Send) => drop(responder.take_outbound()),
+            Ok(Step::Yield) => {}
             other => return other,
         }
     }
@@ -454,6 +463,165 @@ fn decoys_before_the_version_packet_are_skipped() -> TestResult {
         finish(&mut responder, &mut inbox, &tail)?,
         Step::Established(_)
     ));
+    Ok(())
+}
+
+/// Each decoy packet before the version returns one [`Step::Yield`], leaving
+/// the handshake resumable; the version packet after them still establishes.
+#[test]
+fn each_decoy_before_the_version_yields_once() -> TestResult {
+    let (initiator, mut responder, mut inbox, mut session) = scripted(17, 5)?;
+    // Seal in wire order: the cipher advances per packet, so the first decoy
+    // carries the garbage AAD, the second an empty AAD, and the version an
+    // empty AAD after them.
+    let mut wire = session.send_garbage_terminator.to_vec();
+    wire.extend(session.send.seal(&[0; 100], &initiator.garbage, true)?);
+    wire.extend(session.send.seal(&[0; 7], &[], true)?);
+    let version = session.send.seal(&[], &[], false)?;
+    // Feed only the terminator and the two decoys first: each decoy yields
+    // once, and decoys alone never establish.
+    inbox.bytes.extend(&wire);
+    let mut yielded = 0;
+    loop {
+        match responder.advance(&mut inbox) {
+            Ok(Step::Send) => drop(responder.take_outbound()),
+            Ok(Step::Yield) => yielded += 1,
+            Ok(Step::Established(_)) => return Err("decoys alone must not establish".into()),
+            Ok(Step::V1(_)) => return Err("unexpected v1".into()),
+            Err(error) if is_poll_timeout(&error) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert_eq!(yielded, 2, "one yield per decoy packet");
+    // The version packet after the decoys still establishes, without another
+    // yield: it carries a message, not a decoy.
+    inbox.bytes.extend(version);
+    inbox.closed = true;
+    loop {
+        match responder.advance(&mut inbox)? {
+            Step::Send => drop(responder.take_outbound()),
+            Step::Yield => yielded += 1,
+            Step::Established(_) => break,
+            Step::V1(_) => return Err("unexpected v1".into()),
+        }
+    }
+    assert_eq!(
+        yielded, 2,
+        "the version packet establishes without another yield"
+    );
+    Ok(())
+}
+
+/// A pre-version byte stream that releases one sealed decoy per `interval`,
+/// like a socket fed decoys faster than its poll; the version packet is never
+/// released. Outbound bytes are collected and ignored.
+struct DecoyDribble {
+    blobs: Vec<Vec<u8>>,
+    released: usize,
+    next_at: Instant,
+    interval: Duration,
+    pending: VecDeque<u8>,
+    written: Vec<u8>,
+}
+
+impl DecoyDribble {
+    fn new(blobs: Vec<Vec<u8>>, interval: Duration) -> Self {
+        let mut dribble = Self {
+            blobs,
+            released: 0,
+            next_at: Instant::now() + interval,
+            interval,
+            pending: VecDeque::new(),
+            written: Vec::new(),
+        };
+        // The terminator is due at once so the handshake reaches the version
+        // wait; each further decoy per interval.
+        dribble.release_one();
+        dribble
+    }
+
+    fn release_one(&mut self) {
+        let at = self.released;
+        if at < self.blobs.len() {
+            let blob = core::mem::take(&mut self.blobs[at]);
+            self.pending.extend(blob);
+            self.released = at + 1;
+        }
+    }
+}
+
+impl Read for DecoyDribble {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let now = Instant::now();
+        while self.released < self.blobs.len() && now >= self.next_at {
+            self.next_at += self.interval;
+            self.release_one();
+        }
+        if self.pending.is_empty() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let read = buffer.len().min(self.pending.len());
+        for (slot, byte) in buffer.iter_mut().zip(self.pending.drain(..read)) {
+            *slot = byte;
+        }
+        Ok(read)
+    }
+}
+
+impl std::io::Write for DecoyDribble {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.written.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Decoys alone must not hold the handshake past its deadline: the scripted
+/// responder, whose session matches the sealed stream, is fed its terminator
+/// and then one decoy per 10 ms, but never the version packet, so `establish`
+/// fails on a 500 ms deadline within 2 s.
+#[test]
+fn decoys_never_hold_the_handshake_past_the_deadline() -> TestResult {
+    // Reuse the matched pair: a fresh responder would derive another secret,
+    // its terminator scan would fail fast, and the deadline would prove
+    // nothing. The scripted responder already consumed the key and garbage.
+    let (initiator, mut responder, _, mut session) = scripted(18, 5)?;
+    // The first packet carries the garbage as AAD; later decoys an empty AAD.
+    let mut blobs = vec![session.send_garbage_terminator.to_vec()];
+    blobs.push(session.send.seal(&[0; 16], &initiator.garbage, true)?);
+    for _ in 0..120 {
+        blobs.push(session.send.seal(&[0; 16], &[], true)?);
+    }
+    let mut stream = DecoyDribble::new(blobs, Duration::from_millis(10));
+    let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+    let started = Instant::now();
+    let result = establish(
+        &mut stream,
+        &mut responder,
+        MAGIC,
+        &lease,
+        started + Duration::from_millis(500),
+    );
+    assert!(
+        matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut),
+        "{result:?}"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "the handshake must wait out its deadline, not fail fast: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "decoys must not hold the handshake past its deadline"
+    );
+    assert!(responder.received_any(), "the decoys did arrive");
     Ok(())
 }
 

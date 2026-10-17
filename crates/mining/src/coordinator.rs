@@ -1,6 +1,7 @@
 //! Candidate lifecycle state and pure mining-domain projections.
 //!
-//! Generation is keyed by `(applied_tip_hash, mempool_sequence, fee_revision)`. Template
+//! Generation is keyed by `(applied_tip_hash, mempool_sequence,
+//! fee_delta_sequence)`. Template
 //! assembly is single-flight per key, cached by [`TemplateId`], and woken by
 //! explicit generation publication. [`MiningService`] drives this state
 //! through capability sources implemented by the node; proposal validation
@@ -8,6 +9,8 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
+use std::time::Instant;
 
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -15,10 +18,15 @@ use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_consensus::{MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
+use bitcoin_rs_mempool::MutationOutcome;
+use bitcoin_rs_mempool::MutationResult;
+use bitcoin_rs_mempool::RemovalReason;
 use bitcoin_rs_mempool::SnapshotEntry;
+use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use compact_str::CompactString;
@@ -42,9 +50,10 @@ use crate::control::TemplateMutation;
 use crate::control::difficulty_for_bits;
 use crate::template::Candidate;
 use crate::template::CandidateContext;
+use crate::template::SelectedBody;
 use crate::template::TemplateId;
-use crate::template::assemble_candidate;
 use crate::template::assemble_ordered_candidate;
+use crate::template::finish_candidate;
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -55,13 +64,15 @@ const GENERATION_RACE: &str = "generation key changed during candidate assembly"
 /// Upper bound for a single long-poll wait slice while rechecking predicates.
 const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 
-/// Applied-tip hash plus pool-owned revisions identifying one candidate generation.
+/// Applied-tip hash plus the mempool membership and fee-delta sequences that
+/// identify one candidate generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GenerationKey {
     /// Applied tip hash in consensus little-endian storage order.
     tip_hash: Hash256,
-    /// Mempool sequence captured with the tip.
+    /// Mempool membership-mutation sequence captured with the tip.
     mempool_sequence: u64,
+    /// Mempool fee-delta (prioritisation) sequence captured with the tip.
     fee_delta_sequence: u64,
 }
 
@@ -90,15 +101,33 @@ struct InFlight {
 #[derive(Default)]
 struct CoordinatorState {
     published: Option<GenerationKey>,
+    /// Pool membership sequence captured at construction, used to compose a
+    /// full key for a fee-sequence publication before any generation is
+    /// published.
+    seed: u64,
+    /// Test-seam probe: long-poll waiters parked on the wake condvar.
+    #[cfg(any(test, feature = "test-seam"))]
+    parked_long_poll_waiters: usize,
     cache: HashMap<TemplateId, Arc<Candidate>>,
     /// Insertion order for deterministic eviction of the oldest entry.
     cache_order: VecDeque<TemplateId>,
+    /// Last resolved signalling-rule snapshot. The template path serves only
+    /// the current candidate tip and height, so one entry is enough and a tip
+    /// move naturally invalidates it; no history is retained.
+    signalling_rules: Option<(Hash256, u32, Vec<AvailableMiningRule>)>,
     in_flight: Option<InFlight>,
     next_flight_id: u64,
     last_candidate: Option<LastCandidateInfo>,
 }
 
 impl CoordinatorState {
+    /// Membership sequence a fee-sequence publication carries: the published
+    /// generation's component, or the construction seed when nothing is
+    /// published (including after a membership invalidation cleared it).
+    fn retained_mempool_sequence(&self) -> u64 {
+        self.published.map_or(self.seed, |key| key.mempool_sequence)
+    }
+
     fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
         self.cache.get(id).cloned()
     }
@@ -119,6 +148,25 @@ impl CoordinatorState {
         self.cache.insert(id, candidate);
     }
 
+    fn signalling_cache_get(&self, tip: &Hash256, height: u32) -> Option<Vec<AvailableMiningRule>> {
+        let (cached_tip, cached_height, rules) = self.signalling_rules.as_ref()?;
+        if cached_tip == tip && *cached_height == height {
+            Some(rules.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Installs the resolved rules, replacing whatever tip they describe.
+    fn signalling_cache_insert(
+        &mut self,
+        tip: Hash256,
+        height: u32,
+        rules: Vec<AvailableMiningRule>,
+    ) {
+        self.signalling_rules = Some((tip, height, rules));
+    }
+
     /// Drops the cached candidate and any matching in-flight assembly for `key`.
     fn invalidate_key(&mut self, key: GenerationKey) {
         let id = key.template_id();
@@ -135,15 +183,47 @@ impl CoordinatorState {
     }
 }
 
+/// Template body selected against a staged block's projected removals.
+///
+/// [`MempoolSnapshotSource::select_template_after`] captures the source pool
+/// sequences, the removal plan's stable identities, and the projected body
+/// under one pool read. The install check matches `removals` against the
+/// committed receipt and the body's predicted sequences against the live
+/// generation; `EntryId` never leaves the pool.
+#[derive(Debug)]
+pub struct PreparedTemplateBody {
+    /// Body selected from the projected pool, carrying the predicted
+    /// post-removal sequences.
+    pub body: SelectedBody,
+    /// Pool membership and fee-delta sequences the projection read.
+    pub source_sequences: (u64, u64),
+    /// Planned removals as stable transaction ids with their exact reasons.
+    pub removals: Vec<(Txid, RemovalReason)>,
+}
+
 /// Mempool-sequence wake that avoids the mempool read lock.
 ///
 /// Membership notifications carry no fee revision. Avoid a second pool view
 /// or contention with an in-flight writer on that path. Implementations invalidate
 /// membership generations using the supplied sequence; the next template read
-/// captures both live pool revisions.
+/// captures both live pool revisions. The staged-tip hook path also
+/// avoids the pool lock: it only enqueues, and installation waits for the
+/// committed receipt.
 pub trait MempoolSequenceWake: Send + Sync {
     /// Invalidates an older membership generation without a pool read, then wakes waiters.
     fn publish_generation_from(&self, sequence: u64);
+    /// Stages a tip-child block for background template preparation.
+    ///
+    /// Hook-only: enqueues the staged tip and returns at once. Never
+    /// publishes a tip, a generation, or a candidate; installation waits for
+    /// the committed receipt. Repeated stages for one tip are idempotent.
+    fn stage_tip(&self, tip: &TipSnapshot, block: &Block);
+    /// Publishes a committed block generation with its actual removal receipt.
+    ///
+    /// The receipt is retained so a still-finishing preparation can install
+    /// against it; the generation key and waiter wake follow the ordinary
+    /// [`MiningService::publish_generation`] path.
+    fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult);
 }
 
 /// Applied-chain tip the lifecycle reads instead of node state.
@@ -156,16 +236,38 @@ pub trait AppliedTipSource: Send + Sync {
 pub trait MempoolSnapshotSource: Send + Sync {
     /// Membership and fee-priority revisions captured under one pool read lock.
     fn current_revisions(&self) -> (u64, u64);
-    /// Captures a snapshot only if both pool revisions still match.
+    /// Selects the template body only if both pool revisions still match.
     ///
-    /// The comparison and the capture share one pool read lock: a snapshot is
-    /// only valid for the sequence it was taken at, so generation-key
-    /// coherence is checked and captured atomically.
-    fn mining_snapshot_at(
+    /// Both sequence checks and the selection share one pool read lock, so the
+    /// body always matches the generation key it is assembled for. The guard
+    /// is released before the candidate finishes: only the selected
+    /// transactions leave the pool. Returns `None` when the pool moved past
+    /// `expected_sequences`, which the caller retries as a generation race.
+    fn select_template(
         &self,
-        expected_sequence: u64,
-        expected_fee_revision: u64,
-    ) -> Option<MempoolMiningSnapshot>;
+        expected_sequences: Option<(u64, u64)>,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<Option<SelectedBody>, MiningControlError>;
+    /// Selects the template body as if `block` had applied, without mutating
+    /// the pool.
+    ///
+    /// The source sequences, the removal plan's stable txid-and-reason
+    /// identities, and the projected selection share one pool read lock, so
+    /// the returned [`PreparedTemplateBody`] always describes the pool state
+    /// it was read at. The guard is released before the candidate finishes:
+    /// only owned copies leave the pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MiningControlError::Failed`] when the projected selection
+    /// refuses the candidate context's limits.
+    fn select_template_after(
+        &self,
+        block: &Block,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<PreparedTemplateBody, MiningControlError>;
     /// Captures the mining snapshot an explicit generate selection assembles from.
     ///
     /// Pool facts are captured under one read lock; `Ordered` selections
@@ -216,10 +318,16 @@ pub trait ChainContextSource: Send + Sync {
 
 /// Mining-domain candidate lifecycle service driven by capability sources.
 ///
-/// Owns the template cache, single-flight assembly, and long-poll
-/// publication state. The node facade constructs it with adapters over the
-/// applied tip, the mempool, and the block tree, and keeps proposal
-/// validation and solved-block submission on the authoritative apply path.
+/// Owns the template cache, single-flight assembly, long-poll publication
+/// state, and the staged-template preparation worker. The node facade
+/// constructs it with adapters over the applied tip, the mempool, and the
+/// block tree, and keeps proposal validation and solved-block submission on
+/// the authoritative apply path.
+///
+/// Consistency: pool selection runs under one read guard (snapshot
+/// isolation); accepted-generation and cache publication are linearizable
+/// under the coordinator mutex. Repeated identical stage and publication
+/// notifications are idempotent.
 pub struct MiningService {
     /// Network whose genesis anchors an empty applied chain.
     network: Network,
@@ -233,6 +341,8 @@ pub struct MiningService {
     state: Mutex<CoordinatorState>,
     /// Wake for long-poll and single-flight waiters.
     wake: Condvar,
+    /// Staged-template preparation worker and its shared mailbox.
+    prep: PrepWorker,
 }
 
 impl MiningService {
@@ -250,26 +360,139 @@ impl MiningService {
         coinbase_script: Vec<u8>,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> Self {
+        // Seed the retained membership sequence from the actual pool state so
+        // the first fee-sequence publication composes a full key without a
+        // zero fallback.
+        let seed = mempool.current_revisions().0;
+        let shutdown = shutdown.into();
+        let shared = Arc::new(PrepShared {
+            network,
+            coinbase_script: coinbase_script.clone(),
+            shutdown: shutdown.clone(),
+            mempool: Arc::clone(&mempool),
+            chain: Arc::clone(&chain),
+            mailbox: parking_lot::Mutex::new(PrepMailbox::default()),
+            wake: parking_lot::Condvar::new(),
+        });
         Self {
             network,
             applied_tip,
             mempool,
             chain,
             coinbase_script,
-            shutdown: shutdown.into(),
-            state: Mutex::default(),
+            shutdown,
+            state: Mutex::new(CoordinatorState {
+                seed,
+                ..CoordinatorState::default()
+            }),
             wake: Condvar::new(),
+            prep: PrepWorker::spawn(shared),
         }
+    }
+
+    /// Stages a tip-child block for background template preparation.
+    ///
+    /// Hook-only: enqueues the staged tip and returns at once, copying the
+    /// block into an `Arc` only for an eligible tip the worker has not seen.
+    /// Never publishes a tip, a generation, or a candidate; installation
+    /// waits for the committed receipt. Repeated stages for one tip are
+    /// idempotent.
+    pub fn stage_tip(&self, tip: &TipSnapshot, block: &Block) {
+        if self.prep.owns_tip(tip.hash) {
+            return;
+        }
+        // The block copy happens outside the mailbox lock: holding the mutex
+        // across a multi-megabyte clone would delay worker and waiter
+        // wakeups. A raced duplicate stage drops its copy below.
+        let staged = StagedPrep {
+            tip: tip.clone(),
+            block: Arc::new(block.clone()),
+        };
+        let mut mailbox = self.prep.mailbox();
+        if mailbox.stopped {
+            return;
+        }
+        if PrepWorker::owns_tip_inner(&mailbox, tip.hash) {
+            return;
+        }
+        mailbox.pending = Some(staged);
+        drop(mailbox);
+        self.prep.notify();
+    }
+
+    /// Test seam: waits for the preparation targeting `tip_hash` to finish,
+    /// returning the existing ready candidate without publishing or
+    /// assembling anything.
+    ///
+    /// Parks on the mailbox condvar (never sleeps or polls) until the worker
+    /// finishes exactly this tip, or until `timeout`, stop, shutdown, or a
+    /// preparation failure. Only a `Ready` candidate for the exact tip is
+    /// returned, as the stored `Arc`; every other outcome is `None`. The
+    /// timeout is a deadlock bound, never a performance assertion.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn wait_for_prepared_candidate(
+        &self,
+        tip_hash: Hash256,
+        timeout: Duration,
+    ) -> Option<Arc<Candidate>> {
+        let deadline = Instant::now() + timeout;
+        let mut mailbox = self.prep.mailbox();
+        loop {
+            if mailbox.stopped || self.shutdown.is_triggered() {
+                return None;
+            }
+            match mailbox.active.as_ref() {
+                Some(active) if active.target_tip == tip_hash => match &active.progress {
+                    PrepProgress::Ready { candidate, .. } => {
+                        return Some(Arc::clone(candidate));
+                    }
+                    PrepProgress::Failed => return None,
+                    PrepProgress::Selecting | PrepProgress::Finishing => {}
+                },
+                _ => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            self.prep.wait_for(&mut mailbox, deadline - now);
+        }
+    }
+
+    /// Publishes a committed block generation with its actual removal receipt.
+    ///
+    /// The receipt is retained before waking so a foreground request for this
+    /// tip joins a still-finishing preparation against exactly these
+    /// identities and reasons instead of abandoning it. The generation key
+    /// and waiter wake follow the ordinary [`Self::publish_generation`] path,
+    /// so disconnects and other mutations keep their generic publication.
+    pub fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult) {
+        let receipt = BlockReceipt::from_result(tip_hash, removals);
+        {
+            let mut mailbox = self.prep.mailbox();
+            mailbox.receipt = Some(receipt);
+        }
+        // Wake joined foregrounds parked on a Ready preparation: the receipt
+        // they wait for is now stored, before the generic publication below.
+        self.prep.notify();
+        self.publish_generation();
     }
 
     /// Publishes the live generation key and wakes every long-poll / single-flight waiter.
     ///
     /// Callers must invoke this after every authoritative applied-tip or mempool
     /// mutation and before any dependent notification. The published key is
-    /// captured from live applied-tip / mempool state under the coordinator lock.
+    /// captured from live applied-tip / mempool state; installing it and waking
+    /// waiters share one coordinator-lock critical section.
     pub fn publish_generation(&self) {
+        // Baseline order: the live key is read before the state lock is taken;
+        // only the two sequence-based publishers must keep their retained
+        // component reads and the publication in one critical section. A key
+        // that raced a newer publication heals through `ensure_published`'s
+        // live re-derivation.
         let key = self.live_generation_key();
-        self.publish_key(key);
+        let mut state = self.state.lock();
+        self.publish_locked(&mut state, key);
     }
 
     /// Invalidates an older membership generation and wakes waiters without a pool read.
@@ -291,6 +514,40 @@ impl MiningService {
         self.wake.notify_all();
     }
 
+    /// Publishes a fee-priority (prioritisation) generation change and wakes
+    /// every waiter without taking the mempool read lock.
+    ///
+    /// The `prioritisetransaction` path calls this after a successful
+    /// prioritisation, passing the pool's post-change fee-delta sequence
+    /// captured under a short pool read that has already been released. The
+    /// published key preserves the last published membership sequence. The
+    /// retained-component read, the state update, and the wake share one
+    /// coordinator-state critical section, so a concurrent membership
+    /// publication cannot interleave between the read and the overwrite and no
+    /// fee component is lost.
+    pub fn publish_fee_delta_generation(&self, fee_delta_sequence: u64) {
+        let mut state = self.state.lock();
+        let key = GenerationKey {
+            tip_hash: self.live_tip_hash(),
+            mempool_sequence: state.retained_mempool_sequence(),
+            fee_delta_sequence,
+        };
+        self.publish_locked(&mut state, key);
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    /// Test-seam probe: long-poll waiters currently parked in
+    /// [`Self::wait_for_generation_change`].
+    ///
+    /// A reader that observes a count of at least one knows a waiter has read
+    /// `live == waited` under the state mutex and registered on the wake
+    /// condvar (`wait_for` releases the mutex only after enqueueing), so any
+    /// later publication's notify reaches it.
+    #[must_use]
+    pub fn parked_long_poll_waiters(&self) -> usize {
+        self.state.lock().parked_long_poll_waiters
+    }
+
     fn live_tip_hash(&self) -> Hash256 {
         self.applied_tip
             .applied_tip()
@@ -307,9 +564,10 @@ impl MiningService {
         }
     }
 
-    /// Installs `key` as the published generation and wakes every waiter.
-    fn publish_key(&self, key: GenerationKey) {
-        let mut state = self.state.lock();
+    /// Installs `key` and wakes every waiter under an already-held state lock,
+    /// so a retained-component read and its publication share one critical
+    /// section and cannot interleave with another sequence-based publication.
+    fn publish_locked(&self, state: &mut CoordinatorState, key: GenerationKey) {
         if let Some(previous) = state.published
             && previous != key
         {
@@ -347,7 +605,15 @@ impl MiningService {
             if live != waited {
                 return Ok(live);
             }
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                state.parked_long_poll_waiters += 1;
+            }
             let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                state.parked_long_poll_waiters -= 1;
+            }
         }
     }
 
@@ -394,7 +660,7 @@ impl MiningService {
                 continue;
             }
             let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-            let version_bits_available = self.chain.signalling_rules(&tip, candidate.height);
+            let version_bits_available = self.signalling_rules_for(&tip, candidate.height);
             return Ok(template_from_candidate(
                 self.network,
                 candidate,
@@ -496,13 +762,219 @@ impl MiningService {
         Err(last_race.unwrap_or_else(generation_race))
     }
 
-    /// Cache lookup or single-flight assembly for one generation key.
-    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+    /// Joins the preparation targeting `key`'s tip: returns its finished data
+    /// once ready, waits in bounded slices while it is queued, selecting, or
+    /// finishing, and releases the waiter (fall back, never a duplicate
+    /// finish) when no job targets this tip, the preparation failed, the
+    /// worker stopped, or the chain moved on. Shutdown releases the waiter
+    /// with `Unavailable`.
+    ///
+    /// A still-pending match waits too: the worker owns that tip and will
+    /// start it, so a foreground request must not run a duplicate lazy
+    /// finish beside it.
+    ///
+    /// A `Ready` match whose live key equals the key it predicted waits for
+    /// the committed receipt of its tip. That state exists only after the
+    /// pool removal committed (the gateway observer wakes foregrounds before
+    /// the connect effects publish the receipt), so the receipt is imminent
+    /// and joining beats a duplicate lazy finish. The tip leg is what makes
+    /// this sound: the staged target is the connecting block's own tip, so a
+    /// foreground key can equal the prediction only once that tip applied —
+    /// a staged block refused before its commit keeps the applied tip on the
+    /// parent, which never targets the preparation and serves lazily. A
+    /// `Ready` match whose key the live pool no longer predicts (for example
+    /// a later prioritisation) has no receipt coming for it and returns at
+    /// once, so a stale preparation can never park a foreground. Receipt
+    /// content mismatch is decided by the install check, not here.
+    fn join_preparation(
+        &self,
+        key: GenerationKey,
+    ) -> Result<Option<ReadyPreparation>, MiningControlError> {
+        let mut mailbox = self.prep.mailbox();
+        loop {
+            if self.shutdown.is_triggered() {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            if mailbox.stopped {
+                return Ok(None);
+            }
+            let targeted = mailbox
+                .active
+                .as_ref()
+                .is_some_and(|active| active.target_tip == key.tip_hash)
+                || mailbox
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.tip.hash == key.tip_hash);
+            if !targeted {
+                return Ok(None);
+            }
+            let failed = mailbox.active.as_ref().is_some_and(|active| {
+                active.target_tip == key.tip_hash && matches!(active.progress, PrepProgress::Failed)
+            });
+            if failed {
+                mailbox.active = None;
+                return Ok(None);
+            }
+            let ready = match mailbox.active.as_ref() {
+                Some(active) if active.target_tip == key.tip_hash => match &active.progress {
+                    PrepProgress::Ready {
+                        source_sequences,
+                        expected_removals,
+                        candidate,
+                    } => {
+                        let committed = mailbox
+                            .receipt
+                            .as_ref()
+                            .is_some_and(|receipt| receipt.tip_hash == key.tip_hash);
+                        let predicted = candidate.template_id == key.template_id();
+                        (committed || !predicted).then(|| ReadyPreparation {
+                            source_sequences: *source_sequences,
+                            expected_removals: expected_removals.clone(),
+                            candidate: Arc::clone(candidate),
+                        })
+                    }
+                    // Selecting, Finishing, or a defensively rechecked Failed
+                    // (the `failed` guard above already released that case):
+                    // keep waiting for progress.
+                    PrepProgress::Selecting | PrepProgress::Finishing | PrepProgress::Failed => {
+                        None
+                    }
+                },
+                _ => None,
+            };
+            if let Some(ready) = ready {
+                return Ok(Some(ready));
+            }
+            #[cfg(test)]
+            {
+                mailbox.parked_joins += 1;
+            }
+            self.prep.wait_for(&mut mailbox, LONG_POLL_SLICE);
+            #[cfg(test)]
+            {
+                mailbox.parked_joins -= 1;
+            }
+            if self.live_tip_hash() != key.tip_hash {
+                return Ok(None);
+            }
+            // The pool read runs with the mailbox released: a key the live
+            // pool moved off can never receive its receipt, so the waiter
+            // falls back instead of parking behind it.
+            let live =
+                parking_lot::MutexGuard::unlocked(&mut mailbox, || self.live_generation_key());
+            if live != key {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Discards the preparation targeting `tip` when it still owns the slot,
+    /// waking any joined waiter to fall back to lazy assembly.
+    fn discard_preparation(&self, tip: Hash256) {
+        let mut mailbox = self.prep.mailbox();
+        let current = mailbox
+            .active
+            .as_ref()
+            .is_some_and(|active| active.target_tip == tip);
+        if current {
+            mailbox.active = None;
+        }
+        drop(mailbox);
+        self.prep.notify();
+    }
+
+    /// Installs the staged preparation for `key` when the committed receipt
+    /// and the live generation match its expectations.
+    ///
+    /// A successful install matches, in order: the committed target, the
+    /// exact removal identities and reasons, the wrapping membership advance
+    /// (one step per actual removal), the predicted body sequences, and the
+    /// live generation. A delayed worker that selected post-removal state
+    /// carries an empty expectation that cannot match a nonempty receipt. No
+    /// candidate is exposed before the committed receipt is accepted. Returns
+    /// `Ok(None)` when no preparation targets this tip or the check refuses
+    /// it; the caller falls back to lazy assembly.
+    fn prepared_candidate_for_key(
+        &self,
+        key: GenerationKey,
+    ) -> Result<Option<Arc<Candidate>>, MiningControlError> {
+        let Some(ready) = self.join_preparation(key)? else {
+            return Ok(None);
+        };
+        if self.live_generation_key() != key {
+            return Ok(None);
+        }
+        // A receipt for another tip is stale, not a refusal: keep the slot
+        // and let the matching publication decide. A same-tip receipt with
+        // different removals is definitive and discards the preparation.
+        let receipt_matches = {
+            let mailbox = self.prep.mailbox();
+            match &mailbox.receipt {
+                None => None,
+                Some(receipt) if receipt.tip_hash != key.tip_hash => None,
+                Some(receipt) => Some(receipt.removals == ready.expected_removals),
+            }
+        };
+        match receipt_matches {
+            None => return Ok(None),
+            Some(false) => {
+                self.discard_preparation(key.tip_hash);
+                return Ok(None);
+            }
+            Some(true) => {}
+        }
+        let removals = u64::try_from(ready.expected_removals.len()).unwrap_or(u64::MAX);
+        if ready.source_sequences.0.wrapping_add(removals) != key.mempool_sequence {
+            self.discard_preparation(key.tip_hash);
+            return Ok(None);
+        }
+        // The installed candidate's identity already encodes the predicted
+        // post-removal membership and fee sequences: an unrelated
+        // prioritisation moves the live key off it and refuses the install.
+        if ready.candidate.template_id != key.template_id() {
+            self.discard_preparation(key.tip_hash);
+            return Ok(None);
+        }
         let template_id = key.template_id();
         let mut state = self.state.lock();
         if let Some(cached) = state.cache_get(&template_id) {
-            return Ok(cached);
+            return Ok(Some(cached));
         }
+        // Recheck under the state lock: the tip may have moved while the pool
+        // read ran. A stale install never publishes a speculative tip.
+        if self.live_generation_key() != key {
+            return Ok(None);
+        }
+        state.cache_insert(template_id, Arc::clone(&ready.candidate));
+        state.last_candidate = Some(last_candidate_info(&ready.candidate));
+        state.published = Some(key);
+        drop(state);
+        // The installed job owns nothing further: release the single slot so
+        // a stale Ready never outlives its generation. Same-key foregrounds
+        // already share the cached candidate above.
+        self.discard_preparation(key.tip_hash);
+        self.wake.notify_all();
+        Ok(Some(ready.candidate))
+    }
+
+    /// Cache lookup or single-flight assembly for one generation key.
+    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let template_id = key.template_id();
+        {
+            let state = self.state.lock();
+            if let Some(cached) = state.cache_get(&template_id) {
+                return Ok(cached);
+            }
+        }
+        // A staged preparation for this tip installs without a second
+        // finish; a still-running one is joined, never duplicated.
+        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
+            return Ok(candidate);
+        }
+        let mut state = self.state.lock();
 
         loop {
             if self.shutdown.is_triggered() {
@@ -549,12 +1021,7 @@ impl MiningService {
             Ok(candidate) => {
                 if live == key {
                     state.cache_insert(template_id, Arc::clone(candidate));
-                    state.last_candidate = Some(LastCandidateInfo {
-                        weight: candidate.weight,
-                        transactions: u64::try_from(candidate.transactions.len())
-                            .unwrap_or(u64::MAX)
-                            .saturating_add(1),
-                    });
+                    state.last_candidate = Some(last_candidate_info(candidate));
                     state.published = Some(key);
                     Ok(Arc::clone(candidate))
                 } else {
@@ -589,14 +1056,16 @@ impl MiningService {
         if tip.hash != key.tip_hash {
             return Err(generation_race());
         }
-        let Some(snapshot) = self
-            .mempool
-            .mining_snapshot_at(key.mempool_sequence, key.fee_delta_sequence)
+        let context = self.candidate_context(&tip)?;
+        let Some(body) = self.mempool.select_template(
+            Some((key.mempool_sequence, key.fee_delta_sequence)),
+            &context,
+            &self.coinbase_script,
+        )?
         else {
             return Err(generation_race());
         };
-        let context = self.candidate_context(&tip)?;
-        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
+        let candidate = finish_candidate(&context, &body, &self.coinbase_script)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         if candidate.template_id != key.template_id() {
             return Err(MiningControlError::Failed(CompactString::from(
@@ -608,26 +1077,22 @@ impl MiningService {
 
     /// Resolves the candidate context for a block extending `tip`.
     fn candidate_context(&self, tip: &TipSnapshot) -> Result<CandidateContext, MiningControlError> {
-        let current_time = current_unix_seconds().max(1);
-        let chain = self
-            .chain
-            .resolve_mining_context(tip, current_time)
-            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
-        Ok(CandidateContext {
-            previous_block_hash: chain.previous_block_hash,
-            height: chain.height,
-            version: chain.version,
-            bits: chain.bits,
-            min_time: chain.min_time,
-            current_time: current_time.max(chain.min_time),
-            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
-            network: self.network,
-            csv_active: chain.csv_active,
-            segwit_active: chain.segwit_active,
-            max_weight: MAX_BLOCK_WEIGHT,
-            max_size: MAX_BLOCK_SERIALIZED_SIZE,
-            max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
-        })
+        candidate_context_for(self.network, &self.chain, tip)
+    }
+
+    /// Cached deployment facts for `tip` at `height`: hits reuse the stored
+    /// vector, misses resolve outside the coordinator lock and then install,
+    /// so chain-tree reads never nest inside coordinator state.
+    fn signalling_rules_for(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule> {
+        let cached = self.state.lock().signalling_cache_get(&tip.hash, height);
+        if let Some(cached) = cached {
+            return cached;
+        }
+        let resolved = self.chain.signalling_rules(tip, height);
+        self.state
+            .lock()
+            .signalling_cache_insert(tip.hash, height, resolved.clone());
+        resolved
     }
 
     /// Assembles a fresh candidate for an explicit generate request.
@@ -650,10 +1115,16 @@ impl MiningService {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
         let context = self.candidate_context(&tip)?;
-        let snapshot = self.mempool.selection_snapshot(selection, &context)?;
         match selection {
-            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
+            GenerateSelection::Mempool => {
+                let body = self
+                    .mempool
+                    .select_template(None, &context, payout)?
+                    .ok_or_else(generation_race)?;
+                finish_candidate(&context, &body, payout)
+            }
             GenerateSelection::Ordered(_) => {
+                let snapshot = self.mempool.selection_snapshot(selection, &context)?;
                 assemble_ordered_candidate(&context, &snapshot, payout)
             }
         }
@@ -690,6 +1161,389 @@ impl Drop for InFlightAssemblyGuard<'_> {
             drop(state);
             self.service.wake.notify_all();
         }
+    }
+}
+/// Staged tip and block handed to the preparation worker.
+struct StagedPrep {
+    tip: TipSnapshot,
+    block: Arc<Block>,
+}
+
+/// One preparation's progress from enqueue to finished candidate.
+enum PrepProgress {
+    /// The worker has not selected yet; source sequences are unknown.
+    Selecting,
+    /// Selected under the pool read; finishing the candidate without any lock.
+    Finishing,
+    /// Candidate finished; installable once the committed receipt matches.
+    Ready {
+        source_sequences: (u64, u64),
+        expected_removals: Vec<(Txid, RemovalReason)>,
+        candidate: Arc<Candidate>,
+    },
+    /// Selection or finishing failed; foreground falls back to lazy assembly.
+    Failed,
+}
+
+/// The single preparation the worker owns, if any.
+struct ActivePrep {
+    target_tip: Hash256,
+    progress: PrepProgress,
+}
+
+/// Committed block-removal receipt retained while a preparation finishes.
+struct BlockReceipt {
+    tip_hash: Hash256,
+    removals: Vec<(Txid, RemovalReason)>,
+}
+
+impl BlockReceipt {
+    /// Keeps every committed removal's stable identity and exact reason, in
+    /// commit order. Admissions carry no removal and contribute nothing.
+    fn from_result(tip_hash: Hash256, removals: &MutationResult) -> Self {
+        let removals = removals
+            .changes
+            .iter()
+            .filter_map(|change| match change.outcome {
+                MutationOutcome::Removed(reason) => Some((Txid::from(change.txid), reason)),
+                MutationOutcome::Accepted => None,
+            })
+            .collect();
+        Self { tip_hash, removals }
+    }
+}
+
+/// Bounded preparation mailbox shared by the service and its worker: one
+/// pending newest job plus at most one owned job.
+#[derive(Default)]
+struct PrepMailbox {
+    /// Newest unstarted staged tip; a newer stage replaces it.
+    pending: Option<StagedPrep>,
+    /// The job the worker owns; at most one.
+    active: Option<ActivePrep>,
+    /// Latest committed removal receipt, retained for a finishing preparation.
+    receipt: Option<BlockReceipt>,
+    /// Test probe: foreground joins parked on the mailbox condvar. A reader
+    /// that observes a count of at least one knows a waiter evaluated its
+    /// predicate under the mailbox mutex and registered on the condvar
+    /// (`wait_for` releases the mutex only after enqueueing), so any later
+    /// notify reaches it.
+    #[cfg(test)]
+    parked_joins: usize,
+    /// Set by stop; the worker exits and waiters release.
+    stopped: bool,
+}
+
+/// Capability sources plus the preparation mailbox owned by both the service
+/// and its worker. Never points back at the service: the worker cannot join
+/// itself and dropping the last service reference still stops the thread.
+struct PrepShared {
+    network: Network,
+    coinbase_script: Vec<u8>,
+    shutdown: bitcoin_rs_chain::LatchReader,
+    mempool: Arc<dyn MempoolSnapshotSource>,
+    chain: Arc<dyn ChainContextSource>,
+    mailbox: parking_lot::Mutex<PrepMailbox>,
+    wake: parking_lot::Condvar,
+}
+
+/// The service's one preparation thread over shared mailbox state.
+///
+/// The worker owns capability sources and mailbox state only — never the
+/// service — so drops cannot self-join and no reference cycle forms.
+/// `std::thread::JoinHandle` is `Sync`, so the plain `Option` keeps the
+/// service `Send + Sync` with no wrapper.
+struct PrepWorker {
+    shared: Arc<PrepShared>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PrepWorker {
+    /// Spawns the service's one preparation thread over `shared`.
+    ///
+    /// A refused spawn logs the exact OS error and degrades to no worker
+    /// instead of panicking: the slot is marked stopped, stages no-op, and
+    /// every foreground request falls back to lazy assembly. Correctness
+    /// never depends on the thread.
+    fn spawn(shared: Arc<PrepShared>) -> Self {
+        let worker = Arc::clone(&shared);
+        let handle = match std::thread::Builder::new()
+            .name("btcrs-template-prep".into())
+            .spawn(move || {
+                let _exit = WorkerExitGuard::new(Arc::clone(&worker));
+                preparation_loop(&worker);
+            }) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "template preparation worker spawn failed; continuing without background preparation"
+                );
+                {
+                    let mut mailbox = shared.mailbox.lock();
+                    mailbox.stopped = true;
+                }
+                None
+            }
+        };
+        Self { shared, handle }
+    }
+
+    /// Whether the worker already owns a job for `target`.
+    fn owns_tip(&self, target: Hash256) -> bool {
+        Self::owns_tip_inner(&self.mailbox(), target)
+    }
+
+    fn owns_tip_inner(mailbox: &parking_lot::MutexGuard<'_, PrepMailbox>, target: Hash256) -> bool {
+        mailbox
+            .active
+            .as_ref()
+            .is_some_and(|active| active.target_tip == target)
+            || mailbox
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.tip.hash == target)
+    }
+
+    fn mailbox(&self) -> parking_lot::MutexGuard<'_, PrepMailbox> {
+        self.shared.mailbox.lock()
+    }
+
+    fn notify(&self) {
+        self.shared.wake.notify_all();
+    }
+
+    fn wait_for(&self, guard: &mut parking_lot::MutexGuard<'_, PrepMailbox>, timeout: Duration) {
+        self.shared.wake.wait_for(guard, timeout);
+    }
+
+    /// Signals the worker to exit and joins it. Holds no pool lock: a
+    /// selecting worker finishes its bounded read, a parked one wakes. A
+    /// panicked join logs the exact payload message instead of propagating:
+    /// `Drop` cannot fail, but the failure stays visible.
+    fn stop(&mut self) {
+        {
+            let mut mailbox = self.mailbox();
+            mailbox.stopped = true;
+        }
+        self.notify();
+        if let Some(handle) = self.handle.take() {
+            if let Err(payload) = handle.join() {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                tracing::warn!(
+                    message,
+                    "template preparation worker panicked; preparation is disabled"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for PrepWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Releases every preparation waiter when the worker exits for any reason,
+/// including an unwinding panic. Owned by the worker closure; the panic
+/// itself is never caught or suppressed, only cleaned up after, and its
+/// payload is logged by the joining `stop`.
+struct WorkerExitGuard {
+    shared: Arc<PrepShared>,
+}
+
+impl WorkerExitGuard {
+    fn new(shared: Arc<PrepShared>) -> Self {
+        Self { shared }
+    }
+}
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        let mut mailbox = self.shared.mailbox.lock();
+        mailbox.stopped = true;
+        mailbox.pending = None;
+        mailbox.active = None;
+        // The panic payload is not visible here; the joining `stop` logs the
+        // exact message. Log the fact of the unwind immediately so the
+        // failure is visible even while the service lives.
+        let unwinding = std::thread::panicking();
+        drop(mailbox);
+        if unwinding {
+            tracing::warn!(
+                "template preparation worker panicked; waiters released, payload follows at join"
+            );
+        }
+        self.shared.wake.notify_all();
+    }
+}
+
+/// Finished preparation data copied out of the mailbox for the install check.
+struct ReadyPreparation {
+    source_sequences: (u64, u64),
+    expected_removals: Vec<(Txid, RemovalReason)>,
+    candidate: Arc<Candidate>,
+}
+
+/// Takes the newest staged job, or `None` on stop or shutdown.
+///
+/// An owned job for the staged tip stays: repeated stage notifications are
+/// idempotent and never disturb running or finished work. A newer tip
+/// replaces only the unstarted pending slot.
+fn wait_for_staged_job(shared: &PrepShared) -> Option<StagedPrep> {
+    let mut mailbox = shared.mailbox.lock();
+    loop {
+        if mailbox.stopped || shared.shutdown.is_triggered() {
+            return None;
+        }
+        if let Some(job) = mailbox.pending.take() {
+            let owned = mailbox
+                .active
+                .as_ref()
+                .is_some_and(|active| active.target_tip == job.tip.hash);
+            if owned {
+                continue;
+            }
+            mailbox.active = Some(ActivePrep {
+                target_tip: job.tip.hash,
+                progress: PrepProgress::Selecting,
+            });
+            // Wake joined foreground waiters: a pending match they waited on
+            // is now owned and progressing.
+            shared.wake.notify_all();
+            return Some(job);
+        }
+        // Bounded slice, not an unbounded park: a latch-only shutdown that
+        // never drops the service still releases the worker within one slice.
+        shared.wake.wait_for(&mut mailbox, LONG_POLL_SLICE);
+    }
+}
+
+/// Records a failed preparation for `target` when it still owns the slot,
+/// then wakes any joined foreground waiter to fall back to lazy assembly.
+fn mark_prep_failed(shared: &PrepShared, target: Hash256) {
+    let mut mailbox = shared.mailbox.lock();
+    let current = mailbox
+        .active
+        .as_ref()
+        .is_some_and(|active| active.target_tip == target);
+    if current {
+        mailbox.active = Some(ActivePrep {
+            target_tip: target,
+            progress: PrepProgress::Failed,
+        });
+    }
+    drop(mailbox);
+    shared.wake.notify_all();
+}
+
+/// The worker's one loop: select the staged tip's projection under the pool
+/// read, finish the candidate after releasing it, and publish the finished
+/// preparation for the install check. No candidate is exposed before the
+/// committed receipt arrives; the install path owns that gate.
+fn preparation_loop(shared: &PrepShared) {
+    loop {
+        let Some(job) = wait_for_staged_job(shared) else {
+            return;
+        };
+        let Ok(context) = candidate_context_for(shared.network, &shared.chain, &job.tip) else {
+            mark_prep_failed(shared, job.tip.hash);
+            continue;
+        };
+        let Ok(prepared) =
+            shared
+                .mempool
+                .select_template_after(&job.block, &context, &shared.coinbase_script)
+        else {
+            mark_prep_failed(shared, job.tip.hash);
+            continue;
+        };
+        {
+            let mut mailbox = shared.mailbox.lock();
+            let current = mailbox
+                .active
+                .as_ref()
+                .is_some_and(|active| active.target_tip == job.tip.hash);
+            if !current {
+                // Superseded while selecting: drop the projection, keep the
+                // newer job's slot untouched.
+                continue;
+            }
+            mailbox.active = Some(ActivePrep {
+                target_tip: job.tip.hash,
+                progress: PrepProgress::Finishing,
+            });
+        }
+        let Ok(candidate) = finish_candidate(&context, &prepared.body, &shared.coinbase_script)
+        else {
+            mark_prep_failed(shared, job.tip.hash);
+            continue;
+        };
+        {
+            let mut mailbox = shared.mailbox.lock();
+            let current = mailbox
+                .active
+                .as_ref()
+                .is_some_and(|active| active.target_tip == job.tip.hash);
+            if current {
+                mailbox.active = Some(ActivePrep {
+                    target_tip: job.tip.hash,
+                    progress: PrepProgress::Ready {
+                        source_sequences: prepared.source_sequences,
+                        expected_removals: prepared.removals,
+                        candidate: Arc::new(candidate),
+                    },
+                });
+            }
+            // Else superseded while finishing: drop the finished work, keep
+            // the newer job's slot untouched.
+        }
+        shared.wake.notify_all();
+    }
+}
+
+/// Resolves the candidate context for a block extending `tip` at the current
+/// time. Shared by foreground assembly and the preparation worker so both
+/// describe the same candidate shape.
+fn candidate_context_for(
+    network: Network,
+    chain: &Arc<dyn ChainContextSource>,
+    tip: &TipSnapshot,
+) -> Result<CandidateContext, MiningControlError> {
+    let current_time = current_unix_seconds().max(1);
+    let chain = chain
+        .resolve_mining_context(tip, current_time)
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+    Ok(CandidateContext {
+        previous_block_hash: chain.previous_block_hash,
+        height: chain.height,
+        version: chain.version,
+        bits: chain.bits,
+        min_time: chain.min_time,
+        current_time: current_time.max(chain.min_time),
+        locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+        network,
+        csv_active: chain.csv_active,
+        segwit_active: chain.segwit_active,
+        max_weight: MAX_BLOCK_WEIGHT,
+        max_size: MAX_BLOCK_SERIALIZED_SIZE,
+        max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
+    })
+}
+
+/// Builds the cached-candidate report line the lazy and prepared install
+/// paths share, so both publications describe the same candidate shape.
+fn last_candidate_info(candidate: &Candidate) -> LastCandidateInfo {
+    LastCandidateInfo {
+        weight: candidate.weight,
+        transactions: u64::try_from(candidate.transactions.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
     }
 }
 
@@ -885,6 +1739,10 @@ impl MiningControlError {
 }
 
 /// Parses a BIP22/BIP23 long-poll id into its generation key.
+///
+/// At fee revision zero the id retains Core's hash plus decimal membership
+/// sequence; later fee revisions append `:<revision>`. Both forms parse;
+/// legacy ids imply fee revision zero.
 #[must_use]
 fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
     let hash_hex = id.get(..64)?;
@@ -903,21 +1761,16 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
     })
 }
 
-/// Signet challenge and flag for `network`, or `None` off signet.
+/// Signet challenge and flag for `network`, or `None` off signet. The
+/// challenge is the one `Network::signet_challenge` that block validation
+/// also reads.
 #[must_use]
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
-    // Core's default 1-of-2 signet challenge.
-    const DEFAULT_SIGNET_CHALLENGE: [u8; 71] = [
-        0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3,
-        0xd4, 0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d,
-        0x1e, 0x08, 0x6b, 0xe4, 0x30, 0x21, 0x03, 0x59, 0xef, 0x50, 0x21, 0x96, 0x4f, 0xe2, 0x2d,
-        0x6f, 0x8e, 0x05, 0xb2, 0x46, 0x3c, 0x95, 0x40, 0xce, 0x96, 0x88, 0x3f, 0xe3, 0xb2, 0x78,
-        0x76, 0x0f, 0x04, 0x8f, 0x51, 0x89, 0xf2, 0xe6, 0xc4, 0x52, 0xae,
-    ];
-
-    (network == Network::Signet).then(|| SignetMiningInfo {
-        challenge: DEFAULT_SIGNET_CHALLENGE.to_vec(),
-    })
+    network
+        .signet_challenge()
+        .map(|challenge| SignetMiningInfo {
+            challenge: challenge.to_vec(),
+        })
 }
 
 #[cfg(test)]

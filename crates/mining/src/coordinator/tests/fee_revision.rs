@@ -1,7 +1,9 @@
 use super::*;
+use crate::template::{SelectedBody, select_template_body, select_template_body_after};
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{Sequence, TxIn, Txid, Witness};
+use bitcoin_rs_primitives::{Block, Sequence, TxIn, Txid, Witness};
+use compact_str::CompactString;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
@@ -51,14 +53,50 @@ impl MempoolSnapshotSource for Sources {
         let pool = self.pool.lock();
         (pool.sequence_number(), pool.fee_delta_sequence_number())
     }
-    fn mining_snapshot_at(
+    fn select_template(
         &self,
-        sequence: u64,
-        fee_revision: u64,
-    ) -> Option<MempoolMiningSnapshot> {
+        expected_sequences: Option<(u64, u64)>,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<Option<SelectedBody>, MiningControlError> {
+        // One read guard covers both sequence checks and the index walk; only
+        // the selected transactions leave the pool, and the guard drops
+        // before the service finishes the coinbase and Merkle roots.
         let pool = self.pool.lock();
-        (pool.sequence_number() == sequence && pool.fee_delta_sequence_number() == fee_revision)
-            .then(|| pool.mining_snapshot())
+        if expected_sequences.is_some_and(|(sequence, fee_revision)| {
+            pool.sequence_number() != sequence || pool.fee_delta_sequence_number() != fee_revision
+        }) {
+            return Ok(None);
+        }
+        select_template_body(&pool, context, payout)
+            .map(Some)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+    }
+    fn select_template_after(
+        &self,
+        block: &Block,
+        context: &CandidateContext,
+        payout: &[u8],
+    ) -> Result<PreparedTemplateBody, MiningControlError> {
+        // One read guard covers the source sequences, the removal plan, the
+        // stable identity resolution, and the projected walk; only owned
+        // copies leave the pool, and the guard drops before the service
+        // finishes the candidate.
+        let pool = self.pool.lock();
+        let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
+        let plan = pool.plan_block_removals(block);
+        let body = select_template_body_after(&pool, &plan, context, payout)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        let removals = plan
+            .removals
+            .iter()
+            .filter_map(|(id, reason)| pool.entry(*id).map(|entry| (entry.txid, *reason)))
+            .collect();
+        Ok(PreparedTemplateBody {
+            body,
+            source_sequences,
+            removals,
+        })
     }
     fn selection_snapshot(
         &self,

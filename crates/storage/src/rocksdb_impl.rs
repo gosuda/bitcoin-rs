@@ -20,9 +20,20 @@ pub struct RocksDbStore {
     write_lock: parking_lot::Mutex<()>,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
+    /// Last field: drops after the database handle above has closed.
+    _guard: Option<crate::StoreGuard>,
 }
 
 impl RocksDbStore {
+    /// Keeps `guard` alive until this store's database handle is closed.
+    #[must_use]
+    pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
+        Self {
+            _guard: Some(guard),
+            ..self
+        }
+    }
+
     /// Opens or creates a `RocksDB` store at `path` with all column families.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, ROCKSDB_DEFAULT_CACHE_BYTES)
@@ -73,6 +84,7 @@ impl RocksDbStore {
             write_lock: parking_lot::Mutex::new(()),
             #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
+            _guard: None,
         })
     }
 

@@ -12,9 +12,12 @@ pub(crate) struct PreparedPackage {
 }
 
 impl Mempool {
+    /// Plans one all-or-nothing package insertion. `now` is the wall-clock
+    /// second the rolling minimum fee is read at.
     pub(crate) fn prepare_package(
         &self,
         entries: Vec<MempoolEntry>,
+        now: u64,
     ) -> Result<PreparedPackage, AcceptanceRejectReason> {
         let size = entries.iter().try_fold(self.total_vsize(), |sum, entry| {
             sum.checked_add(u64::from(entry.vsize))
@@ -35,11 +38,7 @@ impl Mempool {
         {
             return Err(MempoolError::TooManyEntries.into());
         }
-        let policy = self.policy_snapshot();
-        let floor = crate::eviction::mempool_min_fee_sat_per_kvb(
-            self,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
+        let floor = self.min_fee_sat_per_kvb(now);
         let mut fee = 0_i128;
         let mut vsize = 0_u32;
         for entry in &entries {

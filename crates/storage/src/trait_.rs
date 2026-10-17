@@ -256,6 +256,12 @@ pub trait KvStore: Send + Sync + 'static {
     /// after the atomic batch applied but before durability was confirmed, so
     /// it must not be treated as `Ok(false)` or as permission to blindly retry
     /// a non-idempotent batch. The state owner must reconcile the outcome.
+    ///
+    /// On `Ok(true)`, every earlier completed deferred write on the same
+    /// store is durable alongside this batch, including when this batch
+    /// itself stages to empty. Later operations supersede earlier writes
+    /// to the same key, so recovery observes the accumulated state in
+    /// commit order.
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],

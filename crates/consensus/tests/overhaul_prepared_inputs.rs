@@ -75,7 +75,8 @@ fn missing_or_duplicate_prevouts_fail_before_scripts() {
                 0,
                 0,
                 VerifyFlags::MANDATORY,
-                ValidationEngine::Native
+                ValidationEngine::Native,
+                None
             ),
             Err(expected)
         );

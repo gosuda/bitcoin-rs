@@ -287,8 +287,9 @@ impl Reconstruction {
 /// answered.
 /// POST: return a block only when every slot holds a body, the
 /// transaction-ID merkle root of the assembled body equals
-/// `header.merkle_root`, and the transaction-ID tree is not mutated;
-/// otherwise return `Err`. The slot count needs no re-check here: the vector
+/// `header.merkle_root`, the transaction-ID tree is not mutated, and the body
+/// is not a coinbase-less body with a 64-byte transaction; otherwise return
+/// `Err`. The slot count needs no re-check here: the vector
 /// is sized from the declared short IDs and prefills, `place_prefills`
 /// rejects a prefill outside the declared slots, and `fill_from_hints`
 /// rejects a short-ID count that does not match the unfilled slots.
@@ -298,7 +299,10 @@ impl Reconstruction {
 /// `[a, b, c, c]` hash to the same root, so the reduction also rejects a
 /// mutated tree and the caller answers with the same-peer full-block
 /// fallback (Core 31.1 `READ_STATUS_FAILED` before delivery,
-/// `blockencodings.cpp:207-219`).
+/// `blockencodings.cpp:207-219`). A 64-byte transaction in a body without a
+/// coinbase can pose as an inner tree node and reach the header's root with
+/// fabricated leaves (CVE-2017-12842), so that body takes the same fallback
+/// (Core `IsBlockMutated`, `validation.cpp:4035-4061`).
 fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<Block, ()> {
     if filled.iter().any(Option::is_none) {
         return Err(());
@@ -307,6 +311,9 @@ fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<Block, ()> 
     let block = Block { header, txs };
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).map_err(|_| ())?;
+    if bitcoin_rs_consensus::is_sixty_four_byte_mutation(&block.txs) {
+        return Err(());
+    }
     Ok(block)
 }
 
@@ -432,7 +439,9 @@ mod tests {
     use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
     use bitcoin_rs_primitives::{
         Amount, Hash256, LockTime, OutPoint, Sequence, TxIn, TxOut, Witness, consensus_bytes,
+        unix_time_secs,
     };
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;
 
@@ -565,6 +574,24 @@ mod tests {
         let expired = received_at + PENDING_DEADLINE + core::time::Duration::from_secs(1);
         reconstruction.receive_cmpctblock(&first, 2, &hints, expired);
         assert_eq!(hints.scans.load(Ordering::Relaxed), scanned + 1);
+    }
+
+    /// A non-coinbase transaction whose witness-stripped serialization is the
+    /// 64 bytes of two Merkle child hashes: `test_tx` plus a 3-byte output
+    /// script.
+    fn sixty_four_byte_tx(byte: u8) -> Tx {
+        let mut tx = test_tx(byte);
+        tx.outputs[0].script_pubkey = vec![byte; 3].into();
+        assert_eq!(tx.base_size(), 64, "fixture must be a Merkle node's size");
+        tx
+    }
+
+    /// A coinbase of the same shape as `test_tx`.
+    fn test_coinbase(byte: u8) -> Tx {
+        let mut tx = test_tx(byte);
+        tx.inputs[0].previous_output = OutPoint::null();
+        assert!(tx.is_coinbase(), "fixture must be a coinbase");
+        tx
     }
 
     fn test_tx(byte: u8) -> Tx {
@@ -1093,6 +1120,70 @@ mod tests {
     }
 
     #[test]
+    fn sixty_four_byte_transaction_without_coinbase_completion_falls_back() {
+        let (native, cmpct) = sample_cmpct(vec![test_tx(1), sixty_four_byte_tx(2)], 2, 0x7a);
+        assert!(
+            !native.txs[0].is_coinbase(),
+            "fixture body must have no coinbase"
+        );
+        let hints = SetHints { txs: native.txs };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "a coinbase-less body with a 64-byte transaction must fall back, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn sixty_four_byte_transaction_completed_by_blocktxn_falls_back() {
+        let (native, cmpct) = sample_cmpct(vec![test_tx(1), sixty_four_byte_tx(2)], 2, 0x7b);
+        let hints = SetHints {
+            txs: vec![native.txs[0].clone()],
+        };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected a getblocktxn request, got {outcome:?}");
+        };
+        assert_eq!(request.txs_request.indexes, vec![1]);
+
+        let txn = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![registry_tx(&native.txs[1])],
+            },
+        };
+        let outcome = reconstruction.receive_blocktxn(&txn, now());
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "the blocktxn completion must take the same fallback, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn sixty_four_byte_transaction_beside_a_coinbase_completes() {
+        let (native, cmpct) = sample_cmpct(vec![test_coinbase(1), sixty_four_byte_tx(2)], 2, 0x7c);
+        let hints = SetHints {
+            txs: native.txs.clone(),
+        };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+
+        let Outcome::Complete(block) = outcome else {
+            panic!("a body with a coinbase is not a mutation, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native.txs);
+    }
+
+    #[test]
     fn blocktxn_merkle_mismatch_falls_back() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x78);
         let hints = SetHints {
@@ -1216,6 +1307,365 @@ mod tests {
             matches!(outcome, Outcome::RequestMissing(_)),
             "a failed completion must release retained-byte capacity, got {outcome:?}"
         );
+    }
+
+    struct MissingCoins;
+    impl bitcoin_rs_mempool::AdmissionChain for MissingCoins {
+        fn snapshot(&self, _: &Tx) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
+            Some(bitcoin_rs_mempool::ChainAdmissionSnapshot {
+                prevouts: Vec::new(),
+                height: 0,
+                locktime_cutoff: 0,
+                prevout_meta: hashbrown::HashMap::new(),
+                csv_active: false,
+                ..bitcoin_rs_mempool::ChainAdmissionSnapshot::default()
+            })
+        }
+    }
+
+    fn test_gateway() -> bitcoin_rs_mempool::MempoolGateway {
+        bitcoin_rs_mempool::MempoolGateway::new(
+            Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
+                bitcoin_rs_mempool::MempoolLimits::default(),
+            ))),
+            None,
+            bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
+        )
+    }
+
+    fn peer_source(connection_id: u64) -> bitcoin_rs_mempool::PeerToken {
+        bitcoin_rs_mempool::PeerToken {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            connection_id,
+        }
+    }
+
+    /// Holdable peer spend: `OP_RETURN` output, one-push witness, missing
+    /// outpoint (the `dispatch.rs` orphan shape; bare `test_tx` is not standard).
+    fn orphan_tx(prev_byte: u8, witness_byte: u8) -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from(Hash256::from_le_bytes(&[prev_byte; 32])),
+                    vout: 0,
+                },
+                script_sig: Vec::<u8>::new().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_stack(vec![vec![witness_byte]]),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6a, 4, 1, 2, 3, 4].into(),
+            }],
+            lock_time: LockTime::ZERO,
+        }
+    }
+
+    /// 10_000-in/9_000-out parent/child values (gateway `parent_and_child`).
+    fn p2p_parent() -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xD0; 32])), 0),
+                script_sig: Vec::<u8>::new().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: vec![0x51].into(),
+            }],
+        }
+    }
+
+    fn p2p_child(parent_txid: Txid, marker: u8) -> Tx {
+        let mut script = vec![0x76, 0xa9, 0x14];
+        script.extend_from_slice(&[marker; 20]);
+        script.extend_from_slice(&[0x88, 0xac]);
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(parent_txid, 0),
+                script_sig: Vec::<u8>::new().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(9_000),
+                script_pubkey: script.into(),
+            }],
+        }
+    }
+
+    #[track_caller]
+    fn hold_orphan(gateway: &bitcoin_rs_mempool::MempoolGateway, tx: &Arc<Tx>) {
+        let outcome = gateway.submit_transaction(
+            Arc::clone(tx),
+            bitcoin_rs_mempool::AdmissionOrigin::Peer(peer_source(1)),
+            None,
+            0,
+            &MissingCoins,
+        );
+        assert!(
+            matches!(outcome, Ok(bitcoin_rs_mempool::SubmitOutcome::Held { .. })),
+            "a peer tx with missing parents must be orphan-held, got {outcome:?}"
+        );
+    }
+
+    /// Ring-only short ID completes; reconstruction never admits.
+    #[test]
+    fn extra_ring_orphan_only_hint_completes_reconstruction() {
+        let gateway = test_gateway();
+        let orphan = Arc::new(orphan_tx(0xA1, 0x01));
+        hold_orphan(&gateway, &orphan);
+        assert!(
+            !gateway.read().contains_txid(&orphan.txid()),
+            "an orphan-held tx must not be pool-resident"
+        );
+        assert_eq!(gateway.get_tx(orphan.txid()), None);
+
+        let native = conforming_block(vec![test_tx(0xC0), (*orphan).clone()]);
+        let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x60);
+        let mut reconstruction = Reconstruction::new();
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &gateway, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("a ring-only hint must complete the block, got {outcome:?}");
+        };
+        assert_eq!(block.block_hash(), native.block_hash());
+        assert_eq!(block.txs, native.txs);
+        assert!(
+            !gateway.read().contains_txid(&orphan.txid()),
+            "reconstruction must never admit a hinted body"
+        );
+        assert_eq!(gateway.get_tx(orphan.txid()), None);
+    }
+
+    /// Pool+ring duplicate identity is one claim, not a collision.
+    #[test]
+    fn pool_and_ring_share_identity_without_false_collision() {
+        let gateway = test_gateway();
+        let parent = p2p_parent();
+        let parent_txid = parent.txid();
+        let child = Arc::new(p2p_child(parent_txid, 0x07));
+        hold_orphan(&gateway, &child);
+        let fresh_time = unix_time_secs();
+        gateway
+            .insert_entry(
+                bitcoin_rs_mempool::AdmissionOrigin::Rpc,
+                bitcoin_rs_mempool::MempoolEntry::new(
+                    Arc::new(parent),
+                    100,
+                    1_000,
+                    fresh_time,
+                    1,
+                    0,
+                ),
+            )
+            .unwrap_or_else(|error| panic!("parent insertion failed: {error}"));
+        let retried = gateway.retry_orphans(&MissingCoins, fresh_time);
+        assert!(
+            retried.iter().any(|retry| matches!(
+                retry.result,
+                Ok(bitcoin_rs_mempool::SubmitOutcome::Committed(_))
+            )),
+            "the orphan child must admit once its parent commits"
+        );
+        assert!(gateway.read().contains_txid(&child.txid()));
+
+        let native = conforming_block(vec![test_tx(0xC1), (*child).clone()]);
+        let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x61);
+        let mut reconstruction = Reconstruction::new();
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &gateway, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("a pool+ring duplicate identity must complete, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native.txs);
+    }
+
+    /// v2 resolves each witness variant from one shared gateway.
+    #[test]
+    fn v2_witness_variants_stay_distinct() {
+        let gateway = test_gateway();
+        let first = Arc::new(orphan_tx(0xA2, 0x01));
+        let second = Arc::new(orphan_tx(0xA2, 0x02));
+        assert_eq!(first.txid(), second.txid(), "variants must share a txid");
+        assert_ne!(
+            first.wtxid(),
+            second.wtxid(),
+            "variants must differ in wtxid"
+        );
+        hold_orphan(&gateway, &first);
+        hold_orphan(&gateway, &second);
+
+        let native_first = conforming_block(vec![test_tx(0xC2), (*first).clone()]);
+        let cmpct_first = compact_of(&native_first, COMPACT_BLOCK_VERSION, 0x62);
+        let mut reconstruction = Reconstruction::new();
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct_first, COMPACT_BLOCK_VERSION, &gateway, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("v2 must resolve the first variant, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native_first.txs);
+
+        let native_second = conforming_block(vec![test_tx(0xC2), (*second).clone()]);
+        let cmpct_second = compact_of(&native_second, COMPACT_BLOCK_VERSION, 0x66);
+        let mut reconstruction = Reconstruction::new();
+        let outcome = reconstruction.receive_cmpctblock(
+            &cmpct_second,
+            COMPACT_BLOCK_VERSION,
+            &gateway,
+            now(),
+        );
+        let Outcome::Complete(block) = outcome else {
+            panic!("v2 must resolve the second variant, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native_second.txs);
+    }
+
+    /// v1 retires the ambiguous txid slot; v2 resolves it.
+    #[test]
+    fn v1_shared_txid_ambiguity_requests_missing() {
+        let gateway = test_gateway();
+        let first = Arc::new(orphan_tx(0xA3, 0x01));
+        let second = Arc::new(orphan_tx(0xA3, 0x02));
+        assert_eq!(first.txid(), second.txid(), "variants must share a txid");
+        assert_ne!(
+            first.wtxid(),
+            second.wtxid(),
+            "variants must differ in wtxid"
+        );
+        hold_orphan(&gateway, &first);
+        hold_orphan(&gateway, &second);
+
+        let native = conforming_block(vec![test_tx(0xC3), (*first).clone()]);
+        let cmpct_v1 = compact_of(&native, 1, 0x63);
+        let mut reconstruction = Reconstruction::new();
+        let outcome = reconstruction.receive_cmpctblock(&cmpct_v1, 1, &gateway, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("v1 txid ambiguity must safely request the slot, got {outcome:?}");
+        };
+        assert_eq!(request.txs_request.indexes, vec![1]);
+        assert_eq!(
+            request.txs_request.block_hash,
+            wire_block_hash(native.block_hash())
+        );
+
+        let cmpct_v2 = compact_of(&native, COMPACT_BLOCK_VERSION, 0x63);
+        let mut reconstruction = Reconstruction::new();
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct_v2, COMPACT_BLOCK_VERSION, &gateway, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("v2 must resolve the same variants, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native.txs);
+    }
+
+    /// Forwards hint reads to the real gateway, then holds `evict` through
+    /// the real submission path after the walk returns and before the body
+    /// pass runs: scheduling control around the real store.
+    struct EvictAfterWalk<'a> {
+        hints: &'a dyn CompactBlockHints,
+        gateway: &'a bitcoin_rs_mempool::MempoolGateway,
+        evict: Vec<Tx>,
+    }
+
+    impl CompactBlockHints for EvictAfterWalk<'_> {
+        fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+            self.hints.for_each_identity(f);
+            for tx in &self.evict {
+                hold_orphan(self.gateway, &Arc::new(tx.clone()));
+            }
+        }
+
+        fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+            self.hints.get_tx_by_txid(txid)
+        }
+
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+            self.hints.get_tx_by_wtxid(wtxid)
+        }
+    }
+
+    /// The walk claims the victim, then the ring evicts it before the body
+    /// fetch: the slot degrades to `getblocktxn`.
+    #[test]
+    fn eviction_between_walk_and_fetch_requests_missing() {
+        let gateway = test_gateway();
+        let victim = Arc::new(orphan_tx(0xB0, 0xB0));
+        hold_orphan(&gateway, &victim);
+        let native = conforming_block(vec![test_tx(0xC4), (*victim).clone()]);
+        let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x64);
+
+        let mut baseline = Reconstruction::new();
+        let outcome = baseline.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &gateway, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("the held victim must complete before eviction, got {outcome:?}");
+        };
+        assert_eq!(block.block_hash(), native.block_hash());
+        assert_eq!(block.txs, native.txs);
+
+        let evict: Vec<Tx> = (0..100_u8).map(|i| orphan_tx(0x10 + i, 0x20 + i)).collect();
+        let racing = EvictAfterWalk {
+            hints: &gateway,
+            gateway: &gateway,
+            evict,
+        };
+        let mut reconstruction = Reconstruction::new();
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &racing, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("a body evicted after the walk must be requested, got {outcome:?}");
+        };
+        assert_eq!(request.txs_request.indexes, vec![1]);
+        assert_eq!(
+            request.txs_request.block_hash,
+            wire_block_hash(native.block_hash())
+        );
+    }
+
+    /// Hints never rescue a merkle mismatch; the pool stays empty.
+    #[test]
+    fn gateway_hints_do_not_rescue_merkle_mismatch() {
+        let gateway = test_gateway();
+        let orphan = Arc::new(orphan_tx(0xA5, 0x05));
+        hold_orphan(&gateway, &orphan);
+        let txs = vec![test_tx(0xC5), (*orphan).clone()];
+        let header = Header {
+            version: 1,
+            prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
+            merkle_root: Hash256::from_le_bytes(&[0; 32]),
+            time: 7,
+            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 9,
+        };
+        let bridged =
+            bitcoin::consensus::encode::deserialize::<RegistryBlock>(&consensus_bytes(&Block {
+                header,
+                txs,
+            }))
+            .unwrap_or_else(|error| panic!("sample block must decode: {error}"));
+        let compact = HeaderAndShortIds::from_block(&bridged, 0x65, 2, &[])
+            .unwrap_or_else(|error| panic!("sample compact block must build: {error}"));
+        let mut reconstruction = Reconstruction::new();
+        let outcome = reconstruction.receive_cmpctblock(
+            &CmpctBlock {
+                compact_block: compact,
+            },
+            COMPACT_BLOCK_VERSION,
+            &gateway,
+            now(),
+        );
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "ring hints must never rescue a merkle mismatch, got {outcome:?}"
+        );
+        assert!(gateway.read().is_empty(), "hints are read-only");
     }
 
     /// Serializes the precomputed colliding fixture transaction; only the

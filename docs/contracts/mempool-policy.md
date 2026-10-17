@@ -84,18 +84,23 @@ holds the reference pins and the admission-profile evidence.
   incremental relay charge. Exact checked arithmetic rejects an unrepresentable
   fee/weight. Equality or crossing of complete affected fee diagrams rejects;
   surviving relatives and newly joined clusters participate in the comparison.
-- Existing entries and their dependency links are the graph authority. An
-  immutable projection supplies exact maximum-rate dependency closures to
-  replacement, mining and eviction. No mutable alternate graph or persistent
-  chunk representation is added. Solver work is bounded by the captured node
-  and edge counts; each cluster follows its configured count/weight bounds.
+- Existing entries and their dependency links are the graph authority. The
+  pool keeps each cluster's exact linearization current on every insert,
+  removal, and fee-delta change; one index orders all chunks (feerate, then
+  equal-feerate prefix weight, then greatest member txid), so mining and
+  eviction walk the maintained order instead of re-solving. Replacement keeps
+  its own projection and re-solves the affected diagrams before and after.
+  Work per mutation is bounded by the cluster limits; a from-scratch re-solve
+  of the whole pool is the test oracle, not a runtime path.
 - Mining treats every derived fee chunk as indivisible. If its finality,
   weight, serialized-size or sigop check fails, all members are skipped and
   dependent later chunks remain unavailable. The configured candidate limits
-  are inclusive. Invalid or cyclic snapshot references produce typed owner
-  errors, never a fabricated order. Core 31.1 `node/miner.cpp::addChunks`
-  supplies the independent reference for whole-chunk skipping; local configured
-  limits and BIP68 checks follow this contract and POL-06.
+  are inclusive. Selection reads only the pool owner's maintained index under
+  one read guard and copies only the selected transactions, so invalid or
+  cyclic references cannot reach it; there is no snapshot graph to validate.
+  Core 31.1 `node/miner.cpp::addChunks` supplies the independent reference
+  for whole-chunk skipping; local configured limits and BIP68 checks follow
+  this contract and POL-06.
 - Core's bounded, history-dependent SFL work behavior is intentionally not
   emulated. The exact solver and its independently checked arithmetic do not
   prove Core parity in non-optimal transient states. This difference remains a
@@ -129,6 +134,19 @@ holds the reference pins and the admission-profile evidence.
 
 ## Proven by
 
+- `pool::chunk_order_tests::maintained_chunk_order_matches_the_from_scratch_solver`
+  (proptest): random insert/remove/confirm/replace/prioritise/clear sequences
+  over multi-output transactions; after every mutation the maintained order
+  equals an independent per-component re-solve ordered by the index key, and
+  the index satisfies its partition, totals, topology, and rate invariants.
+- `pool::chunk_order_tests::equal_rate_parent_sorts_before_its_child`:
+  an equal-rate parent and child stay two chunks with the parent first.
+- `pool::chunk_order_tests::remove_for_block_confirms_and_conflicts` and
+  `rbf_replacement_keeps_the_index_current`: inclusion, conflict, and
+  replacement removals keep every surviving piece indexed.
+- `chunk_index::tests`: the key order pins (rate beats prefix, prefix beats
+  raw weight, greatest txid breaks cross-component ties), total-order
+  proptest, and relinearize-replaces/forget-drops maintenance.
 - `overhaul_process_harness::replacement_signaling_matches_pinned_core` and
   `policy_cases`: isolated Core/candidate processes, identical funding blocks,
   real signatures, nonsignaling replacement, insufficient fees, graph merge/split,

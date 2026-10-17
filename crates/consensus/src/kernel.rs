@@ -135,14 +135,24 @@ mod kernel_backend {
         pub(super) fn prepare_tx(
             &self,
             index: usize,
-            spent_outputs: &[(OutPoint, TxOut)],
+            spent_outputs: Vec<(OutPoint, TxOut)>,
         ) -> Result<super::PreparedTx<'_>, ConsensusError> {
             let kernel_tx = self.block.transaction(index).map_err(map_kernel_error)?;
+            let outputs = spent_outputs
+                .iter()
+                .map(|(_, prevout)| kernel_txout(prevout))
+                .collect::<Result<Vec<_>, _>>()?;
+            let precomputed =
+                bitcoinkernel::PrecomputedTransactionData::new(&kernel_tx, outputs.as_slice())
+                    .map_err(map_kernel_error)?;
             Ok(super::PreparedTx::Kernel {
-                state: prepare_kernel_tx(kernel_tx, spent_outputs)?,
+                state: PreparedKernelTx {
+                    kernel_tx,
+                    precomputed,
+                },
                 spent_outputs: spent_outputs
-                    .iter()
-                    .map(|(_, output)| output.clone())
+                    .into_iter()
+                    .map(|(_, output)| output)
                     .collect(),
             })
         }
@@ -267,21 +277,22 @@ impl BlockParse {
         }
     }
 
-    /// Prepares resolved prevouts for this parse's engine.
-    /// `PrevoutCount`/`PrevoutMismatch` precede backend work; setup errors map to `Kernel`.
+    /// Prepares resolved prevouts the caller already owns for this parse's
+    /// engine. `PrevoutCount`/`PrevoutMismatch` precede backend work; setup
+    /// errors map to `Kernel`. The outputs move into the prepared state.
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
         tx: &'b Tx,
-        spent_outputs: &[(OutPoint, TxOut)],
+        spent_outputs: Vec<(OutPoint, TxOut)>,
     ) -> Result<PreparedTx<'b>, ConsensusError> {
         match self {
             Self::Native(_) => Ok(PreparedTx::Native(
-                bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?,
+                bitcoin_rs_script::PreparedTransaction::from_spent_outputs(tx, spent_outputs)?,
             )),
             #[cfg(feature = "kernel")]
             Self::Kernel(block) => {
-                bitcoin_rs_script::validate_prevouts(tx, spent_outputs)?;
+                bitcoin_rs_script::validate_prevouts(tx, &spent_outputs)?;
                 block.prepare_tx(index, spent_outputs)
             }
         }
@@ -332,7 +343,7 @@ pub(crate) fn verify_prepared_input(
 ) -> Result<(), ConsensusError> {
     match prepared {
         PreparedTx::Native(state) => {
-            crate::verify_tx::verify_input_script_native(state, input_index, flags)
+            crate::verify_tx::verify_input_script_native(state, input_index, flags, None)
         }
         #[cfg(feature = "kernel")]
         PreparedTx::Kernel {
@@ -354,18 +365,26 @@ pub(crate) fn verify_prepared_input(
 ///
 /// `spent_outputs` must pair input outpoints and outputs in input order.
 /// `PrevoutCount`/`PrevoutMismatch` precede backend work; script/setup failures
-/// map to `Script`/`Kernel`.
+/// map to `Script`/`Kernel`. The native signature cache is admission-local;
+/// the kernel branch validates prevouts before dispatch as before and ignores
+/// it without bypassing validation.
 pub fn verify_tx_scripts(
     tx: &Tx,
     spent_outputs: &[(OutPoint, TxOut)],
     flags: VerifyFlags,
     engine: ValidationEngine,
+    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     match engine {
         ValidationEngine::Native => {
             let prepared = bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?;
             for (input_index, _) in spent_outputs.iter().enumerate() {
-                crate::verify_tx::verify_input_script_native(&prepared, input_index, flags)?;
+                crate::verify_tx::verify_input_script_native(
+                    &prepared,
+                    input_index,
+                    flags,
+                    signature_cache,
+                )?;
             }
             Ok(())
         }
@@ -421,9 +440,9 @@ mod tests {
         {
             let parsed = BlockParse::parse(&consensus_bytes(&block), engine)
                 .unwrap_or_else(|error| panic!("fixture parse: {error}"));
-            assert!(parsed.prepare_tx(0, tx, &rows).is_ok());
+            assert!(parsed.prepare_tx(0, tx, rows.clone()).is_ok());
             assert!(matches!(
-                parsed.prepare_tx(0, tx, &swapped),
+                parsed.prepare_tx(0, tx, swapped.clone()),
                 Err(ConsensusError::PrevoutMismatch { input_index: 0 })
             ));
         }

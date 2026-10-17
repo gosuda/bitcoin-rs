@@ -115,6 +115,7 @@ fn admission_request(
         prevouts,
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
+        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -136,7 +137,12 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
-    let gateway = Arc::new(MempoolGateway::new(pool, None, ValidationEngine::Native));
+    let gateway = Arc::new(MempoolGateway::new(
+        pool,
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
 
     let prev = outpoint(1, 0);
     let tx = tx_one_input(prev, Vec::new(), Vec::new(), 99_000, P2PKH_SCRIPT.to_vec());
@@ -206,7 +212,12 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
-    let gateway = Arc::new(MempoolGateway::new(pool, None, ValidationEngine::Native));
+    let gateway = Arc::new(MempoolGateway::new(
+        pool,
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
 
     let prev = outpoint(3, 0);
     let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
@@ -254,7 +265,12 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
-    let gateway = Arc::new(MempoolGateway::new(pool, None, ValidationEngine::Native));
+    let gateway = Arc::new(MempoolGateway::new(
+        pool,
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
 
     let prev = outpoint(4, 0);
     let witness_script = vec![opcode::OP_CHECKMULTISIG; 800];
@@ -303,7 +319,12 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
-    let gateway = Arc::new(MempoolGateway::new(pool, None, ValidationEngine::Native));
+    let gateway = Arc::new(MempoolGateway::new(
+        pool,
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
 
     let parent = tx_one_input(
         outpoint(5, 0),
@@ -382,7 +403,12 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
-    let gateway = Arc::new(MempoolGateway::new(pool, None, ValidationEngine::Native));
+    let gateway = Arc::new(MempoolGateway::new(
+        pool,
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
 
     let prev = outpoint(5, 0);
     let tx = tx_one_input(
@@ -442,6 +468,7 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
         pool,
         None,
         bitcoin_rs_consensus::ValidationEngine::Native,
+        None,
     ));
 
     let parent = Tx {

@@ -67,8 +67,10 @@ scanning and wallet interoperability remain unverified.
   `getrawtransaction` and verbose block transaction entries reuse that owner;
   block `coinbase_tx.version` uses the same unsigned conversion, while block
   header versions keep their signed interpretation. Raw transaction chain
-  times appear only for positive confirmations. Native transaction
-  representations, consensus checks and undo availability are unchanged.
+  times appear only for positive confirmations. The native transaction
+  version is the unsigned wire value; relative-lock rules compare it
+  unsigned; the block header version stays signed; stored bytes are
+  unchanged.
 - The node ships no wallet and holds no private key material. Methods
   that would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. The key-free helpers `getdescriptorinfo`,
@@ -164,85 +166,119 @@ scanning and wallet interoperability remain unverified.
 
 #### Block database verification
 
-- `verifychain` captures one applied publication, excluding genesis from the
-  window. Defaults remain level 3 and six blocks; a nonpositive depth means
-  all applied descendants and a larger depth is clipped to the applied height.
-  Signed 32-bit parameters are required; levels are clamped to 0–4.
+- One owner verifies: `chainstate::verify::verify_recent_blocks` serves both
+  the `verifychain` RPC (through the node-owned chain control) and the
+  startup check, so RPC never walks storage itself. The walk follows parent
+  links back from the applied tip, excluding genesis. Defaults remain level 3
+  and six blocks; a nonpositive depth means every block above genesis, and a
+  larger depth is clipped to the applied height. Both parameters are Core
+  signed 32-bit integers: absent or null means the default, a non-number is a
+  type error, and anything outside the signed 32-bit range is out of range;
+  levels clamp to 0–4.
 
-  Proof: `handlers::chain::verifychain_tests::complete_window_and_level_zero_require_real_readable_blocks`,
-  `parameters_use_signed_core_ranges_without_silent_defaults` and
-  `applied_window_ignores_a_higher_header_tip_and_recovery_refuses_reads`;
+  Proof: `handlers::chain::verifychain_tests::parameters_follow_core_signed_ranges`,
+  `empty_window_is_verified_without_a_verifier` and
+  `handlers::chain::verifychain_tests::tip_without_control_is_not_verified`;
+  `node::lifecycle::tests::verifychain_arguments_select_the_check_core_asks_for`
+  pins the level/depth mapping against the real verifier;
   `overhaul_process_harness::verifychain_reads_the_requested_window_and_preserves_state`
   compares window and parameter behavior against pinned Core.
 
-- Every requested body is read and decoded, including level 0. Its header must
-  match the captured ancestry and satisfy the chain owner's proof-of-work check.
-  Levels 1–4 additionally check the Merkle root and mutation rule. Corrupt bytes,
-  malformed or truncated referenced frames, mismatched headers, invalid work or
-  failed Merkle checks return `false`.
+- Every requested body is read and decoded, including level 0, and its header
+  must hash to the block the header chain names. Levels 1–4 additionally
+  check the header's proof of work. Corrupt bytes, malformed or truncated
+  referenced frames, mismatched headers, invalid work or failed Merkle checks
+  return `false`.
 
-  Proof: `handlers::chain::verifychain_tests::merkle_and_stored_header_corruption_cannot_pass`
-  and `corrupt_stored_frame_is_false_at_every_level`;
+  Proof: `chainstate::verify_tests::bodies_that_are_not_the_named_block_fail_to_decode`
+  and `a_body_that_decodes_but_breaks_its_header_binding_needs_the_body_level`;
   `block_body::body_position_prefetch_tests::verification_distinguishes_corrupt_frames_from_missing_bodies`
   exercises each frame field, short frames and unchanged availability-only reads;
   `overhaul_process_harness::verifychain_reports_damaged_native_frames_without_repairing_them`
   checks those outcomes through the running daemon.
 
-- Levels 1–4 reuse consensus-owned context-free body checks: coinbase placement
-  and scriptSig bounds, nonempty transaction inputs/outputs, output money ranges,
-  null/duplicate inputs, a 1,000,000-byte stripped block limit, and aggregate
-  legacy sigop cost. Failure returns `false` even when the stored header, PoW
-  and Merkle root are valid. Shared shape/value rules retain the same owner as
-  normal transaction validation; RPC has no copy of those rules.
+- Level 1 reuses the consensus-owned context-free body checks: coinbase
+  placement and scriptSig bounds, nonempty transaction inputs/outputs, output
+  money ranges, null/duplicate inputs, a 1,000,000-byte stripped block limit,
+  and aggregate legacy sigop cost. Failure returns `false` even when the
+  stored header, PoW and Merkle root are valid. Shared shape/value rules
+  retain the same owner as normal transaction validation; RPC has no copy of
+  those rules.
   [Core 31.1 `CheckBlock`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp#L3966-L4033)
   excludes contextual witness commitments, full witness weight, finality and
-  UTXO/script execution. Level 1 therefore does not apply those checks or infer
-  activation flags. Verification retains only the current block and its facts,
-  rather than accumulating the requested history in memory.
+  UTXO/script execution. Level 1 therefore does not apply those checks, so a
+  body that only mutates witness data still passes. The walk retains only the
+  current block, rather than accumulating the requested history in memory.
 
   Proof: `verify_block::tests::non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots`,
   `non_contextual_size_and_aggregate_legacy_sigops_have_core_boundaries` and
   `non_contextual_checks_do_not_apply_witness_or_chain_context`;
-  `handlers::chain::verifychain_tests::level_one_checks_transaction_rules_after_header_and_merkle_authentication`
-  exercises the RPC with valid-PoW, valid-Merkle invalid bodies;
+  `chainstate::verify_tests::a_body_with_valid_commitments_but_broken_transaction_rules_needs_the_body_level`
+  pins the wiring at the verification owner;
   `verifychain_block_rules::level_one_body_rules_agree_with_pinned_core_block_rejections`
   compares the consensus entrypoint to Core's independent `submitblock` rejection
   reasons (not an assertion that Core admitted invalid blocks);
   `overhaul_process_harness::verifychain_reads_the_requested_window_and_preserves_state`
   compares level-one witness-nonce mutation outcomes through both live daemons.
 
-- `chain::BlockBodySource` preserves read errors separately from unavailable
-  bodies. An absent body may be pruned, absent from snapshot history, or missing
-  unexpectedly; absence alone does not establish corruption. Unavailable bodies
-  or ancestry, absent readers, and read errors return RPC `-1` when the requested
-  non-genesis window requires them, with an incomplete verification reason even
-  if an available suffix already passed. A genesis-only or empty applied window
-  needs no body reader and can return `true`. No requested block is silently
-  skipped. Snapshot history is checked only when available.
+- Level 2 additionally reads each undo record and decodes it against its
+  block; levels 3 and 4 run the level-2 checks and do not replay disconnect
+  or reconnect. A history lease pins the window for the whole walk so a
+  concurrent prune pass cannot delete rows about to be read; the lease is
+  released when the walk ends. Data this node never kept or intentionally no
+  longer keeps — history below the executed prune line or an in-flight claim,
+  history below an assumed-valid snapshot base, a store without block bodies,
+  or a pin the retention owner withdrew — ends the walk as skipped once every
+  block the node still holds has passed. Shutdown likewise skips instead of
+  failing.
 
-  Proof: `handlers::chain::verifychain_tests::unavailable_history_and_io_failure_are_explicit_incomplete_results`
-  and `genesis_only_is_empty_but_snapshot_ancestry_is_not`;
+  Proof: `chainstate::verify_tests::undo_records_are_read_and_decoded_only_at_the_undo_level`,
+  `an_executed_prune_line_ends_the_window_without_hiding_damage_above_it`,
+  `a_window_reaching_a_prune_in_flight_is_skipped_until_the_claim_ends`,
+  `an_assumed_valid_base_is_never_checked`, `a_historical_role_keeps_its_whole_window`,
+  `rows_a_prune_pass_took_while_the_pin_was_withdrawn_are_not_damage`,
+  `shutdown_during_the_walk_skips_instead_of_failing` and
+  `a_store_without_block_bodies_skips_the_window`;
+  `node::lifecycle::tests::verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth`.
+
+- The answer is `true` only when every block in the window was checked and
+  passed. Any damaged block or undo record, and any window reaching history
+  this node does not hold (pruned, snapshot-only, unreadable or missing
+  bodies), answers `false`: Core's boolean failure. This deliberately differs
+  from upstream's incomplete-verification `-1`, which stays out so the RPC
+  keeps Core's boolean surface and one owner keeps the whole mapping. No
+  requested block is silently passed.
+
+  Proof: `handlers::chain::verifychain_tests::tip_without_control_is_not_verified`
+  and `core_compat::chain_state_responses_deserialize_into_pinned_types`, which
+  pins the empty-window `true` and the tipped-without-verifier `false`; the
+  daemon missing-file case in
+  `overhaul_process_harness::verifychain_reports_damaged_native_frames_without_repairing_them`
+  asserts `false` under this boolean contract (migrated from upstream's `-1`).
+
+- The walk holds no tree or chain-transition guard during body reads, and
+  needs none: an applied ancestor's body and undo record are immutable, so
+  there is no captured publication for a concurrent transition to invalidate.
+  A request that arrives after the handler stopped reports interruption
+  before touching chain state. The existing blocking-call budget applies.
+
+  Proof: `handlers::chain::verifychain_tests::cancelled_requests_report_interruption`;
   `state::storage::body_read_tests::stored_body_read_preserves_failure_instead_of_reporting_absence`.
 
-- The scan holds no tree or chain-transition guard during body reads. The existing
-  transition boundary fences publication checks; a replaced publication, recovery
-  closure or shutdown returns `-1`. Shutdown is checked between reads and while
-  waiting for tree/transition guards. A storage read already in progress must return
-  before cancellation can be observed. The existing blocking-call budget applies.
-
-  Proof: `handlers::chain::verifychain_tests::shutdown_and_changed_tip_cannot_report_completion`,
-  `shutdown_does_not_wait_for_a_chain_transition_or_tree_writer` (shutdown begins
-  only after the worker observes lock contention), and
-  `applied_window_ignores_a_higher_header_tip_and_recovery_refuses_reads`.
-
 - This is a read-only integrity check: it never changes the UTXO set, rewrites
-  bodies, repairs storage, or advances a durable root. Signet challenge validation,
-  level-2 undo checks and level-3/4 disconnect/reconnect verification remain
-  unimplemented. `Deviation` stays in the registry: Core returns `false` for
-  incomplete verification where this implementation reports a reason via `-1`;
-  excess arguments retain the local `-32602` shape error.
+  bodies, repairs storage, or advances a durable root. Startup verifies the
+  last six applied blocks one level stronger than any RPC level, adding
+  header-body binding (including the witness commitment) to the undo-level
+  checks, and refuses to open on damage; the refusal names the block and
+  states that verification repairs nothing. The RPC levels stay at Core's
+  context-free scope so a witness-only mutation still passes them. Signet
+  challenge validation and level-3/4 disconnect/reconnect verification remain
+  outside `verifychain`.
+  `Deviation` stays in the registry for those omissions; excess arguments
+  retain the local `-32602` shape error.
 
-  Proof: `handlers::chain::verifychain_tests::failure_and_cancellation_leave_chain_and_coins_untouched`;
+  Proof: `node::state::tests::recovery::startup_verification_refuses_a_corrupt_tip_body`;
+  `handlers::chain::verifychain_tests::parameters_follow_core_signed_ranges`;
   `overhaul_process_harness::verifychain_reads_the_requested_window_and_preserves_state`
   and `verifychain_reports_damaged_native_frames_without_repairing_them` check
   unchanged tips, UTXO hashes and damaged bytes. This is not proof of the omitted
@@ -483,8 +519,17 @@ scanning and wallet interoperability remain unverified.
 - `submitold` and `workid` are BIP23 extras the pinned template contract
   does not model; neither is emitted.
 - On signet, the template carries `signet` in `rules` (mandatory) and
-  `signet_challenge`. Other networks omit `signet_challenge`.
-  - Malformed `longpollid` values, including invalid UTF-8 split boundaries, are rejected without panicking.
+  `signet_challenge`, the default challenge that `Network::signet_challenge`
+  owns and block validation checks. Other networks omit `signet_challenge`.
+- `longpollid` is `{tip_be_hex}{mempool_sequence}` when the fee-priority
+  revision is zero. A nonzero revision adds `:{fee_delta_sequence}`.
+  An id without the suffix represents fee revision zero. Malformed ids,
+  including invalid UTF-8 split boundaries, are rejected without panicking.
+- A successful `prioritisetransaction` publishes a new fee generation, so
+  the next template keeps the tip and membership components and advances
+  the fee component, and pending long-poll waiters return with that id.
+  Admissions invalidate older membership generations and wake long-polls.
+  The next template read captures membership and fee revisions together.
 
 ### `API-12`: Mainnet template operational gates
 
@@ -603,6 +648,13 @@ scanning and wallet interoperability remain unverified.
   `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`,
   `bad-cb-amount`, `high-hash`, `time-too-old`, …). Operational apply
   refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- A body without a coinbase that holds a 64-byte transaction is a mutated
+  body, not an invalid header, and still projects `bad-cb-missing`, as Core's
+  first-transaction rule reports it.
+- A signet block whose BIP325 solution fails is `bad-signet-blksig`. The
+  solution is checked when a block commits, after the block rules, and not
+  by `proposal` mode, as Core skips it when it is not checking proof of
+  work.
 - Storage, UTXO, durable-head, and internal verifier failures propagate as
   `MiningControlError::Failed`, never as a BIP22 block rejection. The same
   distinction applies to `generateblock` prevalidation.
@@ -912,8 +964,9 @@ evidence does not establish mainnet memory or throughput qualifications.
   Each binding owns its dispatcher latch and quota. Rebinding the same Context
   creates a fresh dispatcher, while old requests retain the old cancellation
   latch; an old server's shutdown cannot cancel or revive the new service.
-- Registry execution metadata classifies the three wait methods and
-  `scantxoutset`'s `start` action. Every `Handler::dispatch`, including direct
+- Registry execution metadata classifies the three wait methods,
+  `scantxoutset`'s `start` action, and a template `getblocktemplate` request
+  carrying a string `longpollid`. Every `Handler::dispatch`, including direct
   callers, batch entries and notifications, acquires its dispatcher's
   bounded blocking quota. A bound listener permits one fewer such call than
   one source address may hold (`max_connections - max_connections / 4 - 1`,
@@ -923,7 +976,7 @@ evidence does not establish mainnet memory or throughput qualifications.
   before; reserving ordinary capacity per source is not provided.
   A standalone dispatcher defaults to 16 blocking calls. Admission never
   waits for capacity. Scan status/abort remain ordinary calls.
-  Proof: `rpc::registry::tests::scan_start_is_blocking_but_status_abort_and_gbt_are_outside_this_budget`,
+  Proof: `rpc::registry::tests::scan_start_and_gbt_long_poll_are_blocking`,
   `rpc::registry::tests::tip_waits_are_blocking_requests`, and
   `rpc::handlers::registry_tests::one_worker_rejects_waits_and_direct_dispatch_cannot_bypass_budget`
   pin classification and direct-dispatch quota enforcement. The dispatcher
@@ -956,8 +1009,12 @@ evidence does not establish mainnet memory or throughput qualifications.
   blocking call close keep-alive after their response, including refusals, so
   a refused call cannot retain the last ordinary worker as an idle connection.
   Notification-only calls retain HTTP 204; mixed batches retain response order.
-  Existing `getblocktemplate` long polling is outside this admission and
-  RPC-only cancellation contract and can still occupy ordinary workers.
+  A template `getblocktemplate` request with a string `longpollid` counts
+  toward the blocking quota and closes keep-alive like any classified call;
+  overload answers the same `-1` quota error, not Core's HTTP `503`, so
+  long-poll clients reconnect per poll. A long-poll is not on the RPC
+  cancellation latch. A non-string `longpollid` is neither waiting nor
+  blocking; a malformed string id is blocking but fails fast.
 - Arity errors retain Core's `-1` but return concise method usage rather than
   its generated help body. These cancellation, overload, transport and help
   differences are declared `Deviation`; no full compatibility promotion is made.

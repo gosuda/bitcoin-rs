@@ -14,8 +14,8 @@ use crate::{AssumeUtxoDiskStatus, Chainstate};
 
 /// Limit the owned raw record before copying and decoding. Engine-internal
 /// pages/cache/decompression are outside the storage method's copy bound.
-const MAX_UNDO_QUERY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_BLOCK_QUERY_BYTES: usize = 4_000_000;
+pub(crate) const MAX_UNDO_QUERY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_BLOCK_QUERY_BYTES: usize = 4_000_000;
 
 impl BlockUndoSource for Chainstate {
     fn block_spends(

@@ -988,10 +988,6 @@ pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the read-only walk and its cancellation/publication fence in one owner"
-)]
 pub(crate) fn verifychain(
     ctx: &Arc<Context>,
     params: &Value,
@@ -999,139 +995,50 @@ pub(crate) fn verifychain(
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
-    let parameter = |index: usize, name, default: i32| {
+    // A request that arrives after the handler stopped reports interruption
+    // before touching any chain state.
+    if cancellation.is_triggered() {
+        return Err(RpcError::Misc("Block verification interrupted".to_owned()));
+    }
+    let parameter = |index: usize, name: &str, default: i64| -> Result<i64, RpcError> {
         let Some(value) = array.get(index).filter(|value| !value.is_null()) else {
             return Ok(default);
         };
         if !value.is_number() {
             return Err(super::wrong_type(index + 1, name, value, "number"));
         }
+        // An unsigned value beyond `i64::MAX` saturates, so it meets the
+        // range check below instead of silently becoming the default.
         value
             .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
+            .or_else(|| value.as_u64().map(|_| i64::MAX))
             .ok_or_else(|| RpcError::Misc("JSON integer out of range".to_owned()))
     };
-    let checklevel = parameter(0, "checklevel", 3)?.clamp(0, 4);
-    let requested = parameter(1, "nblocks", 6)?;
-    let stable_read = || loop {
-        if cancellation.is_triggered() {
-            return Err(RpcError::Misc("Block verification interrupted".to_owned()));
-        }
-        if let Some(guard) = ctx
-            .chain
-            .chain_transition
-            .try_lock_for(std::time::Duration::from_millis(50))
-        {
-            return Ok(guard);
-        }
-        #[cfg(test)]
-        verifychain_tests::notify_lock_wait();
+    // Core reads both parameters with `getInt`: anything outside the signed
+    // 32-bit range is out of range, and the level then clamps to `0..=4`.
+    let checklevel = i32::try_from(parameter(0, "checklevel", 3)?)
+        .map_err(|_| RpcError::Misc("JSON integer out of range".to_owned()))?
+        .clamp(0, 4);
+    let depth = parameter(1, "nblocks", 6)?;
+    // Core treats a non-positive depth as the whole chain; a depth outside
+    // the signed 32-bit range never reaches that rule.
+    let nblocks = match i32::try_from(depth) {
+        Ok(depth) => u32::try_from(depth).unwrap_or(0),
+        Err(_) => return Err(RpcError::Misc("JSON integer out of range".to_owned())),
     };
-    let applied = {
-        let _guard = stable_read()?;
-        ctx.chain.applied_tip.load_full()
-    };
-    let applied_height = applied.as_ref().map_or(0, |tip| tip.height);
-    // The window excludes genesis. A nonpositive depth selects every applied
-    // descendant, never the header-only best chain.
-    let depth = if requested <= 0 {
-        applied_height
-    } else {
-        applied_height.min(requested.unsigned_abs())
-    };
-    // Storage I/O holds neither the tree nor transition lock. Recheck under
-    // the existing transition boundary before work and before reporting success.
-    let check_current = || {
-        let _guard = stable_read()?;
-        if cancellation.is_triggered() {
-            return Err(RpcError::Misc("Block verification interrupted".to_owned()));
-        }
-        if ctx.chain.closed_for_recovery.is_triggered() {
-            return Err(RpcError::Misc(
-                "Chainstate is unavailable for verification".to_owned(),
-            ));
-        }
-        let current = ctx.chain.applied_tip.load_full();
-        let unchanged = match (&applied, &current) {
-            (Some(before), Some(after)) => Arc::ptr_eq(before, after),
-            (None, None) => true,
-            _ => false,
-        };
-        if !unchanged {
-            return Err(RpcError::Misc(
-                "Active chain changed during block verification; retry".to_owned(),
-            ));
-        }
-        Ok(())
-    };
-    let mut cursor = applied.as_ref().map(|tip| tip.tip_id);
-    let mut expected_hash = applied.as_ref().map_or_else(
-        || ctx.chain.chain_network.genesis_block_hash(),
-        |tip| tip.hash,
-    );
-    for offset in 0..depth {
-        check_current()?;
-        let height = applied_height - offset;
-        let (header, parent) = {
-            let tree = loop {
-                if let Some(tree) = ctx
-                    .chain
-                    .block_tree
-                    .try_read_for(std::time::Duration::from_millis(50))
-                {
-                    break tree;
-                }
-                #[cfg(test)]
-                verifychain_tests::notify_lock_wait();
-                check_current()?;
-            };
-            let node = cursor
-                .and_then(|id| tree.node(id).ok())
-                .filter(|node| node.height == height && node.hash == expected_hash)
-                .ok_or_else(|| {
-                    RpcError::Misc(
-                        "Applied block ancestry unavailable; verification incomplete".to_owned(),
-                    )
-                })?;
-            (node.header, node.parent)
-        };
-        let source = ctx.chain.block_body_source.as_ref().ok_or_else(|| {
-            RpcError::Misc("Block body reader unavailable; verification incomplete".to_owned())
-        })?;
-        let body = source.block_body(height, expected_hash.into());
-        check_current()?;
-        let bytes = match body {
-            Err(bitcoin_rs_chain::BlockBodyReadError::Corrupt(error)) => {
-                tracing::warn!(height, %error, "verifychain: stored block frame is corrupt");
-                return typed_to_sonic(&v31::VerifyChain(false));
-            }
-            Err(error) => return Err(RpcError::Misc(format!(
-                "Unable to read block at height {height}: {error}"
-            ))),
-            Ok(bytes) => bytes,
-        }.ok_or_else(|| RpcError::Misc(format!(
-            "Block data unavailable at height {height}; verification incomplete (history may be pruned or absent after snapshot import)"
-        )))?;
-        let Ok(block) = deserialize::<Block>(&bytes) else {
-            tracing::warn!(height, "verifychain: stored block body is corrupt");
-            return typed_to_sonic(&v31::VerifyChain(false));
-        };
-        // Core's level-zero disk reader also authenticates the header and PoW.
-        if block.header != header
-            || block.block_hash().0 != expected_hash
-            || bitcoin_rs_chain::validate_pow(&header, expected_hash, ctx.chain.chain_network)
-                .is_err()
-            || (checklevel >= 1
-                && bitcoin_rs_consensus::verify_block::verify_block_non_contextual(&block).is_err())
-        {
-            tracing::warn!(height, "verifychain: stored block validation failed");
-            return typed_to_sonic(&v31::VerifyChain(false));
-        }
-        expected_hash = header.prev_blockhash.into();
-        cursor = parent;
+    let level = u8::try_from(checklevel).unwrap_or(4);
+    if ctx.chain.applied_tip.load_full().is_none() {
+        return typed_to_sonic(&v31::VerifyChain(true));
     }
-    check_current()?;
-    typed_to_sonic(&v31::VerifyChain(true))
+    // One owner verifies: the node-owned chain control answers from the
+    // shared recent-blocks verifier, so RPC never walks storage itself.
+    // Without that verifier the chain cannot be declared verified.
+    let verified = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .is_some_and(|control| control.verify_chain(level, nblocks));
+    typed_to_sonic(&v31::VerifyChain(verified))
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1785,7 +1692,7 @@ fn block_verbose_typed(
     let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
-    let coinbase_version = crate::tx_render::wire_transaction_version(coinbase_tx.version);
+    let coinbase_version = u32::from_le_bytes(coinbase_tx.version.to_le_bytes());
     let mut value = if verbosity < 2 {
         typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
@@ -1842,7 +1749,8 @@ fn block_verbose_typed(
             ctx.chain.chain_network,
         )?
     };
-    // The pinned coinbase DTO narrows this unsigned wire field to i32.
+    // The pinned coinbase DTO narrows this unsigned wire field to i32; the
+    // overwrite restores the native unsigned wire value.
     // Both typed block envelopes must already contain this object.
     let coinbase = value
         .as_object_mut()
@@ -2429,8 +2337,8 @@ mod tests {
         // remains int32_t. Literal expected values independently pin that split.
         let mut block = fixture_block_with_spend();
         block.header.version = -1;
-        block.txs[0].version = -1;
-        block.txs[1].version = i32::MIN;
+        block.txs[0].version = u32::MAX;
+        block.txs[1].version = 1_u32 << 31;
         block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
             .expect("fixture merkle root");
         let record = BlockRecord::from_block(0, &block);

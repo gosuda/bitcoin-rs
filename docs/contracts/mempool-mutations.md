@@ -55,8 +55,9 @@ state (`crates/mempool/src/orphan.rs`).
   wake threads the last change's sequence into
   `MempoolSequenceWake::publish_generation_from`, which invalidates an older
   membership generation and wakes waiters without a mempool read. The next
-  template read captures membership and fee revisions together; fee-priority
-  RPC changes use the existing explicit `publish_generation()` call.
+  template read captures membership and fee revisions together. Fee-priority
+  RPC changes pass the pool's committed fee revision to
+  `publish_fee_delta_generation()`.
   `node` attaches that mining observer at gateway construction and the ZMQ
   sequence observer as an extra named leg on the gateway's `CompositeObserver`.
 
@@ -67,7 +68,13 @@ state (`crates/mempool/src/orphan.rs`).
   order. Each change carries the txid and a `MutationOutcome`:
   `Accepted`, or `Removed(RemovalReason)`.
 - `RemovalReason` is one of `BlockInclusion`, `Conflict`, `Replaced`,
-  `Descendant`, `PolicyEviction`, `Clear`, `Reorg`.
+  `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
+- `RemovalReason::Expiry` records transactions whose insertion timestamp is
+  strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`),
+  removed along with their descendants. Expiry runs after each committed
+  transaction or package admission and reorg re-add; preview operations never
+  expire entries. If expiry removes an admitted member, admission returns a
+  mempool-full error.
 - `Mempool::sequence_number` advances exactly once per emitted change while
   the write lock is held. A failed insert, a no-op removal, and a clear of
   an empty pool assign nothing.
@@ -252,6 +259,29 @@ state (`crates/mempool/src/orphan.rs`).
   prevents a rejected witness from blocking another valid witness for the
   same transaction, as described by
   [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
+- The reconstruction extra pool is hint-only state owned by `MempoolGateway`.
+  It holds at most 100 wtxid-keyed bodies in FIFO order. A duplicate wtxid
+  insert is a no-op. A coinbase is refused. Only three classes fill it:
+  transactions removed as `Replaced` or `Descendant`, peer orphan-held
+  bodies, and peer policy-only rejects. Replaced bodies are captured before
+  the pool commit and inserted under the pool write lock after it succeeds.
+  Policy rejects must be strictly below 100 000 serialized bytes. Consensus
+  rejects never fill it. `MissingInputs` on null or invalid-outpoint bodies
+  is excluded. Policy evictions, block inclusions, reorg sweeps, and package
+  submissions never fill it. Orphan and policy-reject fills are peer-origin
+  only. Replacements fill from any origin. Entries are never admitted or
+  relayed by being retained: `get_tx`, `get_tx_by_wtxid`, `have_tx`, and the
+  `TxInventory` implementation are unchanged.
+- Compact reconstruction reads the pool then the ring through
+  `for_each_reconstruction_identity`, `reconstruction_tx_by_txid`, and
+  `reconstruction_tx_by_wtxid`. The `CompactBlockHints` trait is unchanged;
+  its `MempoolGateway` implementation delegates to them. Lock order is pool
+  then lifecycle then ring. The ring is a leaf mutex. Nothing is acquired
+  under it except the walk callback, which must not re-enter the gateway.
+  Body lookups never take the orphan lock. The walk skips ring identities
+  already resident in the pool. Version 1 matches by txid and version 2 by
+  wtxid. Two witness variants of one txid stay distinct. One identity present
+  in both pool and ring is a single claim, not a collision.
 - `retry_orphans` claims one bounded ready set only while generation is
   stable. Each claim carries the body and the one announcer selected for it,
   and the retry submits as that peer; it never infers a peer from the resident
@@ -289,9 +319,9 @@ state (`crates/mempool/src/orphan.rs`).
   evicted-parent rejection, ancestry accounting, the replacement fee
   rules, the BIP431/TRUC topology gates, the ephemeral-spend rule, and
   the projected cluster limits still apply — Core's `bypassLimits` path
-  never skips `CalculateMemPoolAncestors`. After `remove_for_reorg` the
-  node trims the settled
-  pool once with `enforce_size_limit(AdmissionOrigin::Reorg,
+  never skips `CalculateMemPoolAncestors`. After `remove_for_reorg`,
+  reorg trim invokes expiry before any early return; the settled
+  pool is trimmed once with `enforce_size_limit(AdmissionOrigin::Reorg,
   max_total_bytes)`; that is the only size trim one reorg performs, and
   it runs last so the walk cannot shed a parent before its child lands.
   Node

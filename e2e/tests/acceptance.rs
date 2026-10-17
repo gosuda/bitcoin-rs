@@ -350,6 +350,55 @@ fn curated_live_acceptance() -> Result<()> {
     ] {
         compare_case(&mut core, &mut node, name, Input::Block(&block), false)?;
     }
+    // A max-version (0xFFFFFFFF) BIP68 spend: the version is read unsigned,
+    // so the relative lock applies and both nodes must reject the block.
+    let (_, funding_prevout) = funds.confirmed_output(0)?;
+    let mut version_max = core_candidate(&mut core, &[serialize_hex(&valid)])?;
+    {
+        let spend = &mut version_max.txdata[1];
+        spend.version = bitcoin::transaction::Version(-1);
+        spend.input[0].sequence = Sequence::from_consensus(1000);
+        sign_p2pkh_inputs(spend, &[funding_prevout])?;
+        // Refresh the coinbase witness commitment from the recomputed witness
+        // root (the segwit candidate is Merkle- and commitment-bound).
+        let root = version_max
+            .witness_root()
+            .ok_or_else(|| Error::Assertion("fixture has no witness root".into()))?;
+        let commitment = Block::compute_witness_commitment(&root, &[0; 32]);
+        let coinbase = &mut version_max.txdata[0];
+        let index = coinbase
+            .output
+            .iter()
+            .position(|output| {
+                output.script_pubkey.as_bytes().first() == Some(&0x6a)
+                    && output.script_pubkey.len() >= 38
+            })
+            .ok_or_else(|| Error::Assertion("candidate has no witness commitment".into()))?;
+        coinbase.output[index].script_pubkey = ScriptBuf::from_bytes(
+            [
+                &[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..],
+                commitment.as_byte_array(),
+            ]
+            .concat(),
+        );
+    }
+    update_merkle_and_pow(&mut version_max)?;
+    let reply = core.rpc(
+        "getblocktemplate",
+        &json!([{"mode": "proposal", "data": serialize_hex(&version_max)}]),
+    )?;
+    assert_eq!(
+        reply.as_str(),
+        Some("bad-txns-nonfinal"),
+        "Core must reject a max-version unmet-BIP68 proposal: {reply}"
+    );
+    compare_case(
+        &mut core,
+        &mut node,
+        "version-max-unmet-bip68",
+        Input::Block(&version_max),
+        false,
+    )?;
     // A positive control after all rejections also proves the shared parent
     // is still usable and the mature coin has not been consumed by previews.
     let spend_block = core_candidate(&mut core, &[serialize_hex(&valid)])?;

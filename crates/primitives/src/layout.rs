@@ -30,8 +30,8 @@ use crate::{
     Amount, Block, DecodeError, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness,
     encode::{
-        ConsensusDecode, double_sha256, finalize_double_sha256, read_array, read_i32_le,
-        read_u32_le, read_u64_le,
+        ConsensusDecode, double_sha256, finalize_double_sha256, read_array, read_u32_le,
+        read_u64_le,
     },
     varint,
 };
@@ -579,7 +579,7 @@ impl<'a> ParsedTransaction<'a> {
     #[must_use]
     pub fn materialize(&self) -> Tx {
         let mut version_reader = slice_at(self.bytes, self.version_span);
-        let version = read_i32_le(&mut version_reader)
+        let version = read_u32_le(&mut version_reader)
             .unwrap_or_else(|_| unreachable!("validated version span"));
         let mut lock_time_reader = slice_at(self.bytes, self.lock_time_span);
         let lock_time = LockTime::from_consensus(

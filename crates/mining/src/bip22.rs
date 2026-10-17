@@ -20,7 +20,11 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
         ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
         ConsensusError::SigopsLimit { .. } => SIGOPS_LIMIT_REASON,
-        ConsensusError::EmptyBlock | ConsensusError::MissingCoinbase => "bad-cb-missing",
+        // A 64-byte mutation is a coinbase-less body, so `submitblock` still
+        // reports Core's first-transaction rule (`validation.cpp:3960`).
+        ConsensusError::EmptyBlock
+        | ConsensusError::MissingCoinbase
+        | ConsensusError::SixtyFourByteMutation => "bad-cb-missing",
         ConsensusError::ExtraCoinbase { .. } => "bad-cb-multiple",
         ConsensusError::MerkleMutation => "bad-txns-duplicate",
         ConsensusError::MerkleRoot => "bad-txnmrklroot",
@@ -31,6 +35,7 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::WitnessCommitment => "bad-witness-merkle-match",
         ConsensusError::BlockWeight { .. } => "bad-blk-weight",
         ConsensusError::BlockBaseSize { .. } => "bad-blk-length",
+        ConsensusError::SignetSolution => "bad-signet-blksig",
         ConsensusError::Script { reason, .. } => {
             return CompactString::from(format!("block-script-verify-flag-failed ({reason})"));
         }

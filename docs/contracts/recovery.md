@@ -82,14 +82,14 @@ record lives in the chainstate key-value store and the ordered protocol is
 owned by `crates/chainstate`.
 
 One connect or disconnect commits one atomic named-family batch whose
-`write_durable_if` receipt covers the head row, the block's undo row, and its
-body locator row; the appended body bytes and the blocks directory are synced
-before the batch may name them. The coins themselves commit in memory and
-become durable through the checkpoint export; the undo and body records in
-the batch are what make a committed tip recoverable. The chainstate journal
-is derived from this batch and may lag it, never lead it. `commit_id` is
-strictly monotonic on disconnect as well as on connect: a reorg lowers
-`height`, never `commit_id`.
+`write_durable_if` receipt covers the head row, the block's undo row, its
+body locator row, and block-file maximum-height rows; the appended body bytes
+and the blocks directory are synced before the batch may name them. The coins
+themselves commit in memory and become durable through the checkpoint export;
+the undo and body records in the batch are what make a committed tip
+recoverable. The chainstate journal is derived from this batch and may lag it,
+never lead it. `commit_id` is strictly monotonic on disconnect as well as on
+connect: a reorg lowers `height`, never `commit_id`.
 
 AssumeUTXO activation and historical archive updates use the same transition
 reservation but separate recovery namespaces. Activation first syncs immutable
@@ -177,10 +177,12 @@ For one block, or a bounded fully verified prefix during IBD:
    reads with the generation fence.
 2. Build exact forward and undo facts without mutating the public stable
    view.
-3. Append required body and undo frames. Sync files and required directory
-   entries.
-4. Apply one atomic storage batch containing coins, metadata, and the new
-   durable head. Wait for durable completion.
+3. Append required block-body frames. Sync the block files and required
+   directory entries.
+4. Apply one atomic storage batch containing the durable head row, undo rows,
+   body locator records, and block-file maximum-height rows. Wait for durable
+   completion. A successful commit on this nonempty batch makes prior deferred
+   body-index writes on the same store durable with the head.
 5. Publish the committed chain and coin view.
 6. Feed the committed chain update into the mempool canonical lifecycle,
    update the fee estimator, and reconcile projections.
@@ -188,6 +190,35 @@ For one block, or a bounded fully verified prefix during IBD:
    alignment.
 8. Dispatch notifications and relay in the declared observable order outside
    all domain locks.
+
+Coins commit in memory rather than as rows in the durable-head batch; their
+durability is achieved through checkpoint export.
+
+Speculative template preparation is distinct from durable authority. Before the
+block-file sync in step 3, chainstate fires an optional staged-tip hook to
+enqueue prospective work:
+- In `PublishMode::Now`, the hook fires only when the staged block is a direct
+  child of the currently published tip. Reorg connects never match because the
+  published tip stays on the old branch until settlement.
+- In `PublishMode::Grouped`, the hook fires only for the newest block of the
+  staged prefix, immediately before the group sync. If a window fails, only the
+  last successful block before the failure is handed off.
+- The node gates hook enqueuing by initial block download (IBD).
+- In `PublishMode::Replay`, the hook never fires. Replaying committed gap blocks
+  schedules no speculative preparation.
+
+The hook enqueues work without waiting for preparation to finish. The existing commit order remains:
+block-file sync (step 3), atomic storage batch commit (step 4), public chain and
+coin view publication (step 5), and follower dispatch (step 8). Speculative
+projections never advance `tip` or `DurableHead`. They publish no applied tip,
+advance no durable serials, and expose no candidate before durable commit.
+
+Cache installation requires an authoritative committed receipt for the exact
+tip, matching txids and removal reasons, and the live full generation key. Any
+mismatch, prioritisation, or failure discards the preparation and falls back to
+lazy assembly. In follower dispatch (step 8), a gatewayless connect publishes a
+truthful empty receipt at the same point. Receipt publication notifies
+foreground waiters, including when the connect has no mempool gateway.
 
 A failure before stable publication leaves the fence closed until explicit
 recovery. A guard destructor must never quietly reopen the fence after an
@@ -199,6 +230,8 @@ caps are stated constants, not emergent cadence:
 `DURABLE_HEAD_GROUP_BLOCKS` = 64 blocks or `DURABLE_HEAD_GROUP_MAX_BYTES` =
 8 MiB of block data, whichever first — one durable batch every one to two
 seconds at IBD rates, and a crash-redo bound of at most 64 body re-applies.
+Callers of `BlockBodyStore::sync` without a following durable batch on the
+body-index store must call `flush_index` after syncing the block files.
 This is the ordered commit protocol. It is also called the durable root
 recovery contract.
 
@@ -254,7 +287,7 @@ The crash and error points in this contract and
 | Crash or error point | Recovery result |
 |---|---|
 | Body append mid-frame | The in-progress frame is discarded on next start; no durable head references it. |
-| Undo append mid-frame | Same as body append; partial undo is not the authoritative head. |
+| Undo row written, head batch not committed | An undo row without a committed head reference is not authoritative. The head batch atomically commits the head and the undo rows it names. |
 | Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. |
 | Durable batch complete, no publish | Restart sees the new head, coins, and `refs`; mempool and index reconcile. |
 | Durable batch ambiguous | Recovery resolves the ambiguity by `CommitId` and full identity; no mixed head/coins. |
@@ -476,7 +509,15 @@ durable.
     refusing with `ApplyError::Shutdown`.
   - `committed_gap_append_gap_does_not_enter_retention_relief` proves a poisoned
     writer returns its original append-gap refusal without progress publication,
-    preserving its recovery marker and journal head while closing admission.
+    preserving its recovery marker and journal head while closing admission;
+  - `replay_of_a_committed_gap_never_fires_the_staged_tip_hook` proves replay
+    of an authenticated gap never fires the speculative staged-tip hook (`RCV-02`).
+- `crates/chainstate/tests/unit/apply/`:
+  - `window_tx_count_tests::a_grouped_window_stages_only_its_newest_block_before_the_sync`
+    proves a grouped IBD window stages only its newest block before the durable sync (`RCV-02`);
+  - `window_invalidation_tests::a_failing_window_stages_only_its_last_successful_block`
+    proves a failing window stages only the last valid block before the error and never
+    the failing block (`RCV-02`).
 - `crates/chainstate/src/connect.rs` and
   `crates/chainstate/src/disconnect.rs`: run the `RCV-02` tail —
   sync, one atomic batch, derived journal emission, then publication — and
@@ -570,6 +611,19 @@ durable.
 - `crates/node/tests/overhaul_fee_history.rs` (existing):
   - `restart_adopts_persisted_estimator_history`,
     `corrupt_history_file_degrades_to_insufficient_data` (`RCV-11`);
+- `crates/node/tests/mining/coordination.rs`:
+  - `staged_preparation_does_not_publish_before_commit` proves that while the
+    body sync is held, applied tip and templates reference the old parent, and
+    pool spends remain uncommitted (`RCV-02`);
+  - `prepared_candidate_installs_on_commit_with_arc_reuse` proves that after
+    the durable commit lands, the first template on the new tip installs the
+    prepared candidate `Arc` with exact removal survivors (`RCV-02`);
+  - `fee_priority_race_discards_stale_preparation` proves that a fee-priority
+    mutation during held sync discards the stale prepared candidate and serves
+    the updated priority (`RCV-02`);
+  - `shutdown_with_staged_work_installs_nothing_and_answers_unavailable`
+    proves shutdown with staged work never installs or publishes speculative
+    templates and returns unavailable (`RCV-02`).
 
 ## Vocabulary
 

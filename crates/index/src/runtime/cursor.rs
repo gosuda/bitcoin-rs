@@ -78,6 +78,9 @@ impl Worker {
         }
         if let Some(store) = self.body_store.as_ref() {
             store.sync().map_err(DerivedIndexWorkerError::Storage)?;
+            store
+                .flush_index()
+                .map_err(DerivedIndexWorkerError::Storage)?;
         }
         if self.runtime.should_stop() {
             return Ok(None);

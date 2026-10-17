@@ -51,34 +51,34 @@ impl PacketReader {
         }
     }
 
-    /// Reads the next packet that is not a decoy and returns its contents.
+    /// Reads at most one packet and returns its contents: `None` for a decoy.
     ///
     /// A contents length above [`MAX_RECV_CONTENTS_LEN`] is refused before
     /// any byte of its body is read.
+    ///
+    /// POST: on `Ok(None)` every packet byte is consumed and its cipher
+    /// advanced; the next call reads a fresh packet.
     pub(crate) fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
-    ) -> Result<Bytes, TransportError> {
-        loop {
-            let mut body = if let Some(body) = self.body.take() {
-                body
-            } else {
-                self.read_length(reader)?
-            };
-            if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
-                if recv::is_poll_timeout(&error) {
-                    self.body = Some(body);
-                }
-                return Err(error.into());
+    ) -> Result<Option<Bytes>, TransportError> {
+        let mut body = match self.body.take() {
+            Some(body) => body,
+            None => self.read_length(reader)?,
+        };
+        if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
+            if recv::is_poll_timeout(&error) {
+                self.body = Some(body);
             }
-            let aad = core::mem::take(&mut self.aad);
-            let opened = self.cipher.open(&aad, &mut body.bytes)?;
-            if opened.ignore {
-                continue;
-            }
-            let contents_len = opened.contents.len();
-            return Ok(Bytes::from(body.bytes).slice(HEADER_LEN..HEADER_LEN + contents_len));
+            return Err(error.into());
         }
+        let aad = core::mem::take(&mut self.aad);
+        let opened = self.cipher.open(&aad, &mut body.bytes)?;
+        if opened.ignore {
+            return Ok(None);
+        }
+        let end = HEADER_LEN + opened.contents.len();
+        Ok(Some(Bytes::from(body.bytes).slice(HEADER_LEN..end)))
     }
 
     /// Completes and decrypts the next length field. The cipher advances only
@@ -149,7 +149,59 @@ mod tests {
         let stalled = reader.read_contents(&mut stream);
         assert!(stalled.as_ref().is_err_and(is_poll_timeout), "{stalled:?}");
         stream.0.extend(&packet[2..]);
-        assert_eq!(reader.read_contents(&mut stream)?.as_ref(), b"contents");
+        assert_eq!(
+            reader
+                .read_contents(&mut stream)?
+                .ok_or_else(|| io::Error::other("a real packet"))?
+                .as_ref(),
+            b"contents"
+        );
+        Ok(())
+    }
+
+    /// A decoy yields `None` for exactly one packet; the next packet still
+    /// arrives, and a stalled decoy keeps its body for the retry.
+    #[test]
+    fn a_decoy_packet_yields_none_and_the_next_packet_still_arrives() -> TestResult {
+        let (mut sender, mut reader) = pair();
+        let decoy = sender.seal(&[0; 100], &[], true)?;
+        let real = sender.seal(b"payload", &[], false)?;
+        let mut stream = Dribble(decoy[..103].iter().copied().collect());
+        let stalled = reader.read_contents(&mut stream);
+        assert!(stalled.as_ref().is_err_and(is_poll_timeout), "{stalled:?}");
+        stream.0.extend(&decoy[103..]);
+        assert_eq!(reader.read_contents(&mut stream)?, None);
+        stream.0.extend(real);
+        assert_eq!(
+            reader
+                .read_contents(&mut stream)?
+                .ok_or_else(|| io::Error::other("a real packet"))?
+                .as_ref(),
+            b"payload"
+        );
+        Ok(())
+    }
+
+    /// Three decoys then one packet: `None, None, None, Some(..)`.
+    #[test]
+    fn three_decoys_then_one_packet() -> TestResult {
+        let (mut sender, mut reader) = pair();
+        let mut stream = Vec::new();
+        for size in [0_usize, 7, 100] {
+            stream.extend(&sender.seal(&vec![0; size], &[], true)?);
+        }
+        stream.extend(sender.seal(b"payload", &[], false)?);
+        let mut stream = Dribble(stream.into_iter().collect());
+        assert_eq!(reader.read_contents(&mut stream)?, None);
+        assert_eq!(reader.read_contents(&mut stream)?, None);
+        assert_eq!(reader.read_contents(&mut stream)?, None);
+        assert_eq!(
+            reader
+                .read_contents(&mut stream)?
+                .ok_or_else(|| io::Error::other("a real packet"))?
+                .as_ref(),
+            b"payload"
+        );
         Ok(())
     }
 
@@ -168,7 +220,10 @@ mod tests {
 
         stream.0.extend(&packet[103..]);
         assert_eq!(
-            reader.read_contents(&mut stream)?.len(),
+            reader
+                .read_contents(&mut stream)?
+                .ok_or_else(|| io::Error::other("a real packet"))?
+                .len(),
             MAX_RECV_CONTENTS_LEN
         );
         Ok(())

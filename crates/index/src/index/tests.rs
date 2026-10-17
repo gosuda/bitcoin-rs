@@ -429,7 +429,7 @@ fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::
         commit_rollback_one(&mut writer, None, &body),
         Err(IndexError::NonContiguousPrepared { watermark: None })
     ));
-    assert!(stored_rows(writer.indexer())?.is_empty());
+    assert_eq!(stored_rows(writer.indexer())?, Vec::new());
     Ok(())
 }
 

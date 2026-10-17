@@ -28,6 +28,7 @@ usdt = ["dep:usdt", "dep:tracing"]
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-script.workspace = true
 hashbrown.workspace = true
+parking_lot.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 bitcoinkernel = { workspace = true, optional = true }

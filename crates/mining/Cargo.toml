@@ -21,6 +21,7 @@ hashbrown.workspace = true
 compact_str.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [features]
 default = []

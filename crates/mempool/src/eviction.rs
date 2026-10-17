@@ -1,101 +1,147 @@
+//! Package eviction policy.
+//!
+//! Eviction reads the maintained chunk index from the cheapest end under the
+//! caller's pool guard: whole chunks go out cheapest first, each
+//! chunk indivisible, until the pool fits. The selection is captured first
+//! and validated before any mutation occurs. Each evicted chunk also earns
+//! Core's rolling-floor bump (`TrimToSize`), read from the chunk's facts at
+//! capture and applied when the plan commits.
+
 use alloc::vec::Vec;
 
-use crate::Mempool;
-use crate::mutation::{MutationChange, RemovalReason};
+use hashbrown::HashMap;
 
+use crate::mutation::{MutationChange, RemovalReason};
+use crate::{EntryId, Mempool};
+
+/// Capture of one eviction pass over the maintained chunk index.
+///
+/// `capture_eviction` walks the index from the low end and topologically
+/// orders the selection while the guard is held; `verify` turns the ordered
+/// capture into a removal plan with no guard held.
 pub(crate) struct EvictionInputs {
     stamp: crate::pool::fee_policy::PolicyStamp,
-    data: Option<(crate::MempoolMiningSnapshot, Vec<crate::EntryId>)>,
-    size: u64,
-    target: u64,
+    /// Selected entry ids in eviction order: cheapest chunks first, whole
+    /// chunk, topologically ordered across the selection so a parent always
+    /// precedes its child.
+    selected: Option<Vec<EntryId>>,
+    /// Highest [`crate::rbf::trim_bump`] over the evicted chunks, taken from
+    /// each chunk's modified fee and charged weight while the guard held them.
+    rolling_fee_bump: Option<u64>,
 }
 
 impl EvictionInputs {
-    pub(crate) fn verify(self) -> Result<crate::rbf::PreparedPoolChange, crate::MempoolError> {
-        let mut removals = Vec::new();
-        if let Some((snapshot, ids)) = self.data {
-            let chunks = snapshot.fee_chunks()?;
-            let mut size = self.size;
-            let mut selected = vec![false; snapshot.entries.len()];
-            for chunk in chunks.iter().rev() {
-                if size <= self.target {
-                    break;
-                }
-                for &index in &chunk.indices {
-                    selected[index] = true;
-                    size = size
-                        .checked_sub(u64::from(snapshot.entries[index].vsize))
-                        .ok_or(crate::FeeDiagramError::Arithmetic)?;
-                }
-            }
-            if size > self.target {
-                return Err(crate::FeeDiagramError::Dependencies.into());
-            }
-            let priority: Vec<_> = chunks
-                .iter()
-                .rev()
-                .flat_map(|chunk| chunk.indices.iter().copied())
-                .filter(|&index| selected[index])
-                .collect();
-            let parents = snapshot
-                .entries
-                .iter()
-                .map(|entry| {
-                    entry
-                        .ancestors
-                        .iter()
-                        .map(|&index| {
-                            usize::try_from(index).map_err(|_| crate::FeeDiagramError::Dependencies)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            removals.extend(
-                crate::fee_diagram::topological(&parents, &priority)?
-                    .into_iter()
-                    .map(|index| (ids[index], RemovalReason::PolicyEviction)),
-            );
-        }
-        Ok(crate::rbf::PreparedPoolChange {
+    /// Turns the ordered capture into a removal plan. The capture already
+    /// holds every check eviction needs, so this cannot fail.
+    pub(crate) fn verify(self) -> crate::rbf::PreparedPoolChange {
+        let removals = self
+            .selected
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| (id, RemovalReason::PolicyEviction))
+            .collect();
+        crate::rbf::PreparedPoolChange {
             stamp: self.stamp,
             #[cfg(any(test, feature = "test-seam"))]
             evicted: Vec::new(),
             removals,
             entry: None,
             fee_estimation: crate::rbf::FeeEstimation::Estimate,
-        })
+            rolling_fee_bump: self.rolling_fee_bump,
+        }
     }
 }
 
 impl Mempool {
+    /// Captures the eviction selection for a pool above `target`: the
+    /// maintained chunks from the cheapest, whole chunk, until the projected
+    /// size fits. The walk shares the caller's read guard and copies only
+    /// entry ids; the captured order is topological across the whole
+    /// selection, so removal changes publish parents before children.
     pub(crate) fn capture_eviction(
         &self,
         target: u64,
     ) -> Result<EvictionInputs, crate::MempoolError> {
         let size = self.total_vsize();
-        let data = if size <= target {
-            None
-        } else {
-            let snapshot = self.mining_snapshot();
-            let ids = snapshot
-                .entries
-                .iter()
-                .map(|entry| {
-                    self.entry_id_by_txid(&entry.txid)
-                        .ok_or(crate::MempoolError::FeeDiagram(
-                            crate::FeeDiagramError::Dependencies,
-                        ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some((snapshot, ids))
-        };
+        if size <= target {
+            return Ok(EvictionInputs {
+                stamp: self.policy_stamp(),
+                selected: None,
+                rolling_fee_bump: None,
+            });
+        }
+        let incremental = self.policy_snapshot().incremental_relay_fee_sat_per_kvb;
+        // The chunks are a partition of the live entries: one pass, no
+        // membership checks, no quadratic scan.
+        let mut projected = size;
+        let mut selected = Vec::new();
+        let mut bump = None;
+        for chunk in self.chunks_by_feerate().rev() {
+            if projected <= target {
+                break;
+            }
+            // Core's `TrimToSize` bumps the floor for each worst chunk it
+            // removes. The chunk's aggregate facts exist only under this
+            // guard, so the bump is read here and carried, not recomputed.
+            bump = bump.max(crate::rbf::trim_bump(
+                chunk.modified_fee,
+                chunk.charged_weight,
+                incremental,
+            ));
+            for &member in chunk.members {
+                let entry = self.entry(member).ok_or(crate::MempoolError::FeeDiagram(
+                    crate::FeeDiagramError::Dependencies,
+                ))?;
+                selected.push(member);
+                projected = projected
+                    .checked_sub(u64::from(entry.vsize))
+                    .ok_or(crate::FeeDiagramError::Arithmetic)?;
+            }
+        }
+        if projected > target {
+            return Err(crate::FeeDiagramError::Dependencies.into());
+        }
+        // The ascending walk visits a child chunk before its parent chunk, so
+        // the capture is re-sorted into dependency order before it leaves the
+        // guard: the cheapest chunk still comes first, but a parent always
+        // precedes its child.
+        let parents = |id: EntryId| self.parents_of(id);
+        let selected = order_removals(&selected, &parents)?;
         Ok(EvictionInputs {
             stamp: self.policy_stamp(),
-            data,
-            size,
-            target,
+            selected: Some(selected),
+            rolling_fee_bump: bump,
         })
     }
+}
+
+/// Orders eviction ids so every selected parent precedes its child. Only
+/// parents that are themselves selected constrain the order; the walk order
+/// breaks the rest, keeping the cheapest chunk first.
+fn order_removals<'a>(
+    selected: &[EntryId],
+    parents: &dyn Fn(EntryId) -> &'a [EntryId],
+) -> Result<Vec<EntryId>, crate::MempoolError> {
+    let positions: HashMap<EntryId, usize> = selected
+        .iter()
+        .enumerate()
+        .map(|(position, &id)| (id, position))
+        .collect();
+    let graph: Vec<Vec<usize>> = selected
+        .iter()
+        .map(|&id| {
+            parents(id)
+                .iter()
+                .filter_map(|parent| positions.get(parent).copied())
+                .collect()
+        })
+        .collect();
+    let priority: Vec<usize> = (0..selected.len()).collect();
+    let ordered = crate::fee_diagram::topological(&graph, &priority)?;
+    Ok(ordered
+        .into_iter()
+        .map(|position| selected[position])
+        .collect())
 }
 
 /// Evicts the lowest-fee dependency chunks until the pool fits.
@@ -104,27 +150,10 @@ pub(crate) fn evict_lowest_fee_packages(
     pool: &mut Mempool,
     target_size_bytes: u64,
 ) -> Result<Vec<MutationChange>, crate::MempoolError> {
-    let plan = pool.capture_eviction(target_size_bytes)?.verify()?;
+    let plan = pool.capture_eviction(target_size_bytes)?.verify();
     pool.commit_pool_change(plan)
         .map(|result| result.changes)
         .map_err(crate::RbfError::into_pool_error)
-}
-
-/// Local pressure-floor heuristic projected by `getmempoolinfo`.
-///
-/// With a nonzero byte limit, at least half full uses the lowest live rate plus
-/// incremental relay fee, floored at min-relay. Otherwise it returns min-relay.
-#[must_use]
-pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per_kvb: u64) -> u64 {
-    let maxmempool = pool.limits.max_total_bytes;
-    let live_min_relay = pool.min_relay_fee_sat_per_kvb();
-    if maxmempool > 0
-        && pool.total_vsize().saturating_mul(2) >= maxmempool
-        && let Some(lowest) = pool.lowest_fee_rate()
-    {
-        return live_min_relay.max(lowest.saturating_add(incremental_relay_fee_sat_per_kvb));
-    }
-    live_min_relay
 }
 
 #[cfg(test)]
@@ -135,31 +164,9 @@ mod tests {
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
 
-    use super::{evict_lowest_fee_packages, mempool_min_fee_sat_per_kvb};
+    use super::evict_lowest_fee_packages;
     use crate::mutation::{MutationChange, MutationOutcome, RemovalReason};
     use crate::{Mempool, MempoolEntry, MempoolLimits};
-
-    #[test]
-    fn mempool_min_fee_equals_min_relay_below_half_full() {
-        let pool = Mempool::new(MempoolLimits {
-            max_total_bytes: 1_000,
-            min_relay_fee_sat_per_kvb: 1_000,
-            ..MempoolLimits::default()
-        });
-        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 1_000);
-    }
-
-    #[test]
-    fn mempool_min_fee_rises_above_cheapest_when_at_least_half_full() {
-        let mut pool = Mempool::new(MempoolLimits {
-            max_total_bytes: 400,
-            min_relay_fee_sat_per_kvb: 1_000,
-            ..MempoolLimits::default()
-        });
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0))
-            .expect("insert");
-        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);
-    }
 
     #[test]
     fn eviction_removes_lowest_descendant_package_first() {
@@ -241,23 +248,81 @@ mod tests {
     }
 
     #[test]
-    fn eviction_raises_lowest_fee_rate_and_mempool_min_fee() {
+    fn eviction_bumps_rolling_min_fee() {
         let mut pool = Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 1_000,
             max_total_bytes: 400,
             ..MempoolLimits::default()
         });
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0))
+        let low = tx(1);
+        let low_txid = low.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 200, 400, 1, 1, 0))
             .expect("low");
         pool.insert_entry(MempoolEntry::new(Arc::new(tx(2)), 200, 800, 1, 1, 0))
             .expect("high");
-        assert_eq!(pool.lowest_fee_rate(), Some(2_000));
-        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);
+        // No eviction yet: the rolling rate is zero, so the floor is min relay.
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 1_000);
 
         let evicted = evict_lowest_fee_packages(&mut pool, 200).expect("eviction policy");
         assert_eq!(evicted.len(), 1);
-        assert_eq!(pool.lowest_fee_rate(), Some(4_000));
-        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 5_000);
+        assert_eq!(
+            evicted[0].txid,
+            Hash256::from(low_txid),
+            "the lowest-fee package leaves first"
+        );
+        assert_eq!(
+            evicted[0].outcome,
+            MutationOutcome::Removed(RemovalReason::PolicyEviction),
+            "eviction reports its PolicyEviction reason"
+        );
+        // Evicted chunk rate 2_000 sat/kvB plus the 1_000 incremental margin.
+        // No block has connected, so the bump holds at any later clock.
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 3_000);
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 3_000);
+    }
+
+    #[test]
+    fn eviction_of_a_negative_rate_chunk_leaves_the_floor() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes: 6,
+            ..MempoolLimits::default()
+        });
+        let low = tx(11);
+        let low_txid = low.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 3, 100, 1, 1, 0))
+            .expect("low");
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(12)), 3, 10_000, 1, 1, 0))
+            .expect("high");
+        pool.prioritise(low_txid, -1_100).expect("delta applies");
+        // Modified fee -1_000 over 3 vB floors to -333_334; plus incremental
+        // 1_000 stays far below zero, so the bump is empty.
+        let evicted = evict_lowest_fee_packages(&mut pool, 3).expect("eviction policy");
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 0);
+    }
+
+    #[test]
+    fn stale_eviction_plan_neither_commits_nor_bumps() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes: 400,
+            ..MempoolLimits::default()
+        });
+        let low = tx(21);
+        let low_txid = low.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 200, 400, 1, 1, 0))
+            .expect("low");
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(22)), 200, 800, 1, 1, 0))
+            .expect("high");
+        let plan = pool.capture_eviction(200).expect("capture").verify();
+        pool.prioritise(low_txid, 1).expect("delta moves the stamp");
+        assert!(matches!(
+            pool.commit_pool_change(plan),
+            Err(crate::RbfError::StalePlan)
+        ));
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 0);
     }
 
     fn tx(label: u8) -> Tx {

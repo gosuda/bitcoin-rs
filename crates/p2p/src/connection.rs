@@ -3,10 +3,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Process-unique identity for one peer connection.
@@ -129,7 +129,23 @@ impl Drop for BlockForwardCredit {
 /// Saturation disconnects only this peer. `PeerLease::send` cancels the lease
 /// and returns the refused message; no message is silently dropped while the
 /// connection remains live. Producer pacing may shrink the cap later, but the
-/// pre-load block-production gate is what bounds materialization.
+/// pre-load block-production gate is what bounds materialization. A `getdata`
+/// session checks [`OutboundBudget::has_block_production_headroom`] (a free
+/// item slot and room for a worst-case block) before each load and pauses on
+/// [`OutboundBudget::wait_for_release`] until the writer drains, so a queue
+/// that fills by item count or by bytes parks it instead of reaching a
+/// refusal. Only a concurrent sender can still lose the race for the last
+/// slot, and that send cancels the lease.
+///
+/// # Waiting for the writer
+///
+/// A paused session sleeps on `drained`, guarded by `drained_lock`. The
+/// predicate it waits for (`writer_dead` or block-production headroom) lives
+/// in the atomics, and every writer of that state (`release`,
+/// `mark_writer_dead`) takes `drained_lock` after the update and before it
+/// notifies. A waiter therefore either sees the new state in its predicate
+/// check, or is already parked in `wait_for` when the notification fires, so
+/// no wake is lost.
 #[derive(Debug)]
 pub(crate) struct OutboundBudget {
     max_messages: usize,
@@ -137,6 +153,12 @@ pub(crate) struct OutboundBudget {
     block_reserve: usize,
     pending_messages: AtomicUsize,
     pending_bytes: AtomicUsize,
+    /// Signalled when the writer releases a frame or exits.
+    drained: Condvar,
+    /// Orders state updates against a waiter's predicate check; guards no data.
+    drained_lock: Mutex<()>,
+    /// Set once the connection writer has returned and will release nothing more.
+    writer_dead: AtomicBool,
 }
 
 impl OutboundBudget {
@@ -153,6 +175,9 @@ impl OutboundBudget {
             block_reserve,
             pending_messages: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
+            drained: Condvar::new(),
+            drained_lock: Mutex::new(()),
+            writer_dead: AtomicBool::new(false),
         }
     }
 
@@ -200,6 +225,54 @@ impl OutboundBudget {
         ) {
             bytes = actual;
         }
+        self.wake_waiters();
+    }
+
+    /// Notifies every session paused in [`OutboundBudget::wait_for_release`].
+    ///
+    /// PRE: the state a waiter's predicate reads was updated before the call.
+    /// POST: a waiter either observed that update or is woken by this call.
+    /// INVARIANT: the empty critical section orders the update before any
+    /// waiter's next predicate check; it never holds the lock across the
+    /// notification's effects, so a woken waiter does not contend with it.
+    fn wake_waiters(&self) {
+        drop(self.drained_lock.lock());
+        self.drained.notify_all();
+    }
+
+    /// Records that the connection writer has returned and releases nothing
+    /// more, then wakes every waiting session.
+    pub(crate) fn mark_writer_dead(&self) {
+        self.writer_dead.store(true, Ordering::Release);
+        self.wake_waiters();
+    }
+
+    /// Returns whether the connection writer has returned.
+    #[must_use]
+    pub(crate) fn writer_dead(&self) -> bool {
+        self.writer_dead.load(Ordering::Acquire)
+    }
+
+    /// Blocks the calling session until the writer drains a frame, exits, or
+    /// `timeout` elapses.
+    ///
+    /// PRE: the caller holds no lock another thread needs to release the
+    /// budget (the pool, the socket).
+    /// POST: returns at once when the writer is dead or the queue already has
+    /// block-production headroom; otherwise returns once either holds or
+    /// `timeout` has elapsed on the monotonic clock. Spurious wakeups re-enter
+    /// the wait. The return promises nothing: the headroom it announced can
+    /// be taken by another sender before the caller looks, so the caller
+    /// rechecks [`OutboundBudget::has_block_production_headroom`],
+    /// [`OutboundBudget::writer_dead`], and its own cancellation.
+    pub(crate) fn wait_for_release(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.drained_lock.lock();
+        while !(self.writer_dead() || self.has_block_production_headroom()) {
+            if self.drained.wait_until(&mut guard, deadline).timed_out() {
+                return;
+            }
+        }
     }
 
     /// Returns the charged `(messages, full wire bytes)` awaiting release.
@@ -212,15 +285,43 @@ impl OutboundBudget {
         )
     }
 
-    /// Returns whether one more worst-case block body may be loaded.
+    /// Returns whether one more worst-case block body may be loaded and
+    /// queued: the item cap has a free slot and the byte cap has room for a
+    /// worst-case block behind everything pending. An empty queue always
+    /// qualifies, as `admit` takes one oversized message into it.
+    ///
+    /// This is the load gate of every producer (`getdata`, `getblocktxn`,
+    /// compact filters) and of the keepalive probe, so a queue that is full
+    /// by item count stops them exactly as one that is full by bytes does.
     #[must_use]
     pub(crate) fn has_block_production_headroom(&self) -> bool {
-        self.pending_messages.load(Ordering::Acquire) == 0
-            || self
-                .pending_bytes
-                .load(Ordering::Acquire)
-                .saturating_add(self.block_reserve)
-                <= self.max_bytes
+        let messages = self.pending_messages.load(Ordering::Acquire);
+        messages == 0
+            || (messages < self.max_messages
+                && self
+                    .pending_bytes
+                    .load(Ordering::Acquire)
+                    .saturating_add(self.block_reserve)
+                    <= self.max_bytes)
+    }
+
+    /// Returns whether `admit` would take one more small message right now:
+    /// both caps are below their high-water marks, with no reserve held back.
+    ///
+    /// With a nonzero block reserve (always, in production) headroom implies
+    /// capacity: it needs a free slot and the bytes to spare behind a
+    /// worst-case block. The converse does not hold, so a queue can refuse
+    /// another body load yet still take a short control message. A caller
+    /// must check this predicate before it sends, not infer it from headroom:
+    /// with a zero reserve (tests only) headroom stays true at the byte cap,
+    /// where `admit` refuses.
+    /// The answer is a snapshot: another sender can fill the queue before the
+    /// caller's send, and that send then cancels the lease as every refused
+    /// send does.
+    #[must_use]
+    pub(crate) fn has_send_capacity(&self) -> bool {
+        self.pending_messages.load(Ordering::Acquire) < self.max_messages
+            && self.pending_bytes.load(Ordering::Acquire) < self.max_bytes
     }
 }
 
@@ -752,6 +853,56 @@ mod tests {
     }
 
     #[test]
+    fn headroom_needs_a_free_item_slot_as_well_as_the_byte_reserve() {
+        // Bytes are abundant: only the item cap can close the gate.
+        let budget = super::OutboundBudget::with_block_reserve(2, 1_000_000, 100);
+        assert!(budget.has_block_production_headroom(), "empty queue");
+        assert!(budget.admit(10));
+        assert!(budget.has_block_production_headroom(), "one slot is free");
+        assert!(budget.admit(10));
+        assert!(
+            !budget.has_block_production_headroom(),
+            "no item slot is free, however few bytes are queued"
+        );
+        budget.release(10);
+        assert!(budget.has_block_production_headroom());
+        budget.release(10);
+        assert!(
+            budget.has_block_production_headroom(),
+            "an empty queue admits one oversized message"
+        );
+    }
+
+    #[test]
+    fn send_capacity_is_the_admit_condition_without_the_reserve() {
+        let reserve = 100;
+        let budget = super::OutboundBudget::with_block_reserve(3, 3 * reserve, reserve);
+        assert!(budget.has_send_capacity());
+        // 250 queued bytes plus the 100-byte reserve exceed the 300-byte cap.
+        assert!(budget.admit(2 * reserve + 50));
+        assert!(
+            !budget.has_block_production_headroom(),
+            "no room left for a worst-case block"
+        );
+        assert!(
+            budget.has_send_capacity(),
+            "a short control message still fits below both caps"
+        );
+        assert!(budget.admit(2 * reserve));
+        assert!(
+            !budget.has_send_capacity(),
+            "the byte cap is reached: admit would refuse"
+        );
+        budget.release(2 * reserve);
+        assert!(budget.admit(10));
+        assert!(budget.admit(10));
+        assert!(
+            !budget.has_send_capacity(),
+            "the item cap is reached: admit would refuse"
+        );
+    }
+
+    #[test]
     fn outbound_budget_refuses_at_exact_item_cap_and_byte_cap() {
         let ping_len = wire_len_of(&crate::Message::Ping(1));
 
@@ -882,6 +1033,136 @@ mod tests {
         let (independent_tx, _independent_rx) = crossbeam_channel::unbounded();
         let independent = PeerLease::new(independent_tx);
         assert!(independent.send(crate::Message::Ping(1)).is_ok());
+    }
+
+    /// Runs `wait_for_release` on a thread and reports when it returned.
+    fn spawn_waiter(
+        budget: &std::sync::Arc<super::OutboundBudget>,
+        timeout: std::time::Duration,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        crossbeam_channel::Receiver<std::time::Instant>,
+    ) {
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let waiter = std::sync::Arc::clone(budget);
+        let handle = std::thread::spawn(move || {
+            waiter.wait_for_release(timeout);
+            let _ = done_tx.send(std::time::Instant::now());
+        });
+        (handle, done_rx)
+    }
+
+    /// A saturated budget with one worst-case message pending: no headroom
+    /// until the writer releases it.
+    fn saturated_budget() -> (std::sync::Arc<super::OutboundBudget>, usize) {
+        let reserve = 100;
+        let budget = std::sync::Arc::new(super::OutboundBudget::with_block_reserve(
+            10,
+            2 * reserve,
+            reserve,
+        ));
+        assert!(budget.admit(reserve + 1));
+        assert!(!budget.has_block_production_headroom());
+        (budget, reserve + 1)
+    }
+
+    const WAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    #[test]
+    fn release_wakes_a_waiter_long_before_its_timeout() {
+        let (budget, charged) = saturated_budget();
+        let (waiter, done) = spawn_waiter(&budget, std::time::Duration::from_secs(60));
+
+        // The waiter may not have parked yet; the protocol must hold either way.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        budget.release(charged);
+
+        let woke = done.recv_timeout(WAKE_DEADLINE);
+        // Unblock the waiter on failure so the join below cannot hang.
+        budget.mark_writer_dead();
+        waiter.join().unwrap_or_else(|_| panic!("waiter panicked"));
+        assert!(woke.is_ok(), "a release must wake the waiter");
+        assert!(budget.has_block_production_headroom());
+    }
+
+    #[test]
+    fn writer_death_wakes_a_waiter_that_no_release_will_reach() {
+        let (budget, _charged) = saturated_budget();
+        let (waiter, done) = spawn_waiter(&budget, std::time::Duration::from_secs(60));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!budget.writer_dead());
+        budget.mark_writer_dead();
+
+        let woke = done.recv_timeout(WAKE_DEADLINE);
+        waiter.join().unwrap_or_else(|_| panic!("waiter panicked"));
+        assert!(woke.is_ok(), "writer death must wake the waiter");
+        assert!(budget.writer_dead());
+        assert!(
+            !budget.has_block_production_headroom(),
+            "death releases nothing; the queue stays saturated"
+        );
+    }
+
+    #[test]
+    fn wait_returns_at_once_when_headroom_or_death_already_holds() {
+        let open = super::OutboundBudget::with_block_reserve(10, 1_000, 100);
+        let started = std::time::Instant::now();
+        open.wait_for_release(std::time::Duration::from_secs(60));
+        assert!(started.elapsed() < WAKE_DEADLINE);
+
+        let (dead, _charged) = saturated_budget();
+        dead.mark_writer_dead();
+        let started = std::time::Instant::now();
+        dead.wait_for_release(std::time::Duration::from_secs(60));
+        assert!(started.elapsed() < WAKE_DEADLINE);
+    }
+
+    #[test]
+    fn wait_times_out_without_a_wake() {
+        let (budget, _charged) = saturated_budget();
+        let timeout = std::time::Duration::from_millis(100);
+        let started = std::time::Instant::now();
+
+        budget.wait_for_release(timeout);
+
+        assert!(
+            started.elapsed() >= timeout,
+            "no wake, so the wait runs to its timeout"
+        );
+        assert!(!budget.has_block_production_headroom());
+        assert!(!budget.writer_dead());
+    }
+
+    #[test]
+    fn a_release_that_leaves_the_queue_saturated_does_not_end_the_wait() {
+        let reserve = 100;
+        let budget = std::sync::Arc::new(super::OutboundBudget::with_block_reserve(
+            10,
+            2 * reserve,
+            reserve,
+        ));
+        for _ in 0..3 {
+            assert!(budget.admit(90));
+        }
+        assert!(!budget.has_block_production_headroom());
+        let (waiter, done) = spawn_waiter(&budget, std::time::Duration::from_secs(60));
+
+        // 180 pending plus the 100 reserve still exceeds the 200 cap: the
+        // wake finds no headroom and the waiter must keep waiting.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        budget.release(90);
+        let early = done.recv_timeout(std::time::Duration::from_millis(300));
+        // 90 + 100 <= 200: this release opens the gate.
+        budget.release(90);
+        let woke = done.recv_timeout(WAKE_DEADLINE);
+        budget.mark_writer_dead();
+        waiter.join().unwrap_or_else(|_| panic!("waiter panicked"));
+        assert!(
+            early.is_err(),
+            "a still-saturated queue keeps the waiter parked"
+        );
+        assert!(woke.is_ok(), "the release that opens the gate wakes it");
     }
 
     fn wire_len_of(message: &crate::Message) -> usize {

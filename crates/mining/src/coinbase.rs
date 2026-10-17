@@ -14,15 +14,9 @@ pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 /// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum MiningError {
-    /// The mempool owner's fee graph could not be evaluated.
-    #[error(transparent)]
-    FeeDiagram(#[from] bitcoin_rs_mempool::FeeDiagramError),
     /// Coinbase subsidy plus fees exceeded the satoshi range.
     #[error("coinbase value overflows satoshi range")]
     CoinbaseValueOverflow,
-    /// The immutable snapshot contains an invalid ancestor position.
-    #[error("snapshot entry {entry} names missing ancestor {ancestor}")]
-    MissingAncestor { entry: usize, ancestor: u32 },
     /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
     FeeOverflow,

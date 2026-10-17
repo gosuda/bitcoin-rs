@@ -3,8 +3,9 @@
   legacy and P2SH through `eval::eval_script`, SegWit v0 through BIP143,
   Taproot key-path and script-path through local BIP341/BIP342.
 - `crates/consensus/src/verify_tx.rs` routes that path through
-  `verify_input_script_native`, which is compiled in every build — including
-  `kernel` builds, where `validation.engine = "native"` still reaches it.
+  `verify_input_script_native(prepared, input_index, flags, signature_cache)`.
+  This function is compiled in every build, including `kernel` builds where
+  `validation.engine = "native"` still reaches it.
 - Block and transaction verification retain one native sighash cache and ordered
   prevout set per prepared transaction. Transaction aggregates initialize once
   across parallel input checks; script, input index, hash mode, annex and
@@ -59,6 +60,36 @@
   Block proposals isolate consensus from annex relay policy. Fixture keys exist only in test targets; no performance claim
   or production signing capability follows from these checks.
 
+### Admission signature cache
+
+- `PreparedAdmission::verify_scripts` constructs a local `SignatureCache`.
+  Native verification shares this cache across the `STANDARD` pass and the next-block script pass.
+  This reuses positive cryptographic signature results for one transaction across both passes.
+- `PreparedTransaction::verify_input` accepts an optional `&SignatureCache` argument.
+  The prepared transaction does not store the cache reference.
+  It remains `Sync` and shareable across parallel block input checks.
+  Block verification and uncached callers pass `None`.
+- The cache has a hard capacity limit of 64 entries.
+  This limit is an independent resource bound, not a configuration setting or policy rule.
+  At capacity, existing entries remain valid and continue to hit.
+  The cache refuses new distinct entries at capacity and never evicts entries.
+- The trust boundary is strictly positive-only.
+  The cache stores only keys for successful signature verifications.
+  Verification failures are never stored.
+  A cache hit skips only the `secp256k1` group operation.
+  Every check still executes all flag-dependent rules, signature and public key encodings, sighash calculations, script evaluation steps, and `NULLFAIL` requirements.
+  Keys use unambiguous 32-byte digests with domain tags, algorithm prefixes, length-prefixed bytes, and sighash messages to prevent aliasing.
+  `ValidationEngine::Kernel` ignores the signature cache and verifies scripts independently.
+- The cache is serial admission-local state wrapped in a `RefCell`.
+  The cache exists only for the duration of `PreparedAdmission::verify_scripts`.
+  The runtime drops the cache immediately when admission verification completes.
+  Entries never persist into mempool storage, blocks, or chain state.
+- `ScriptExecutionCache` remains the sole owner of admission-to-block reuse.
+  `ScriptExecutionCache` is a long-lived, thread-safe cache shared between the mempool gateway and block connect.
+  It stores whole transaction execution outcomes keyed by witness transaction id and verify flags.
+  In contrast, `SignatureCache` is temporary and single-threaded.
+  It reuses individual signature operations only between the two admission passes of a single transaction.
+
 ### `VAL-03`: Default binary stays kernel-free
 
 - `bin/bitcoin-rs` default features are `fjall`, `redb`, and `zmq`. They
@@ -85,9 +116,10 @@
 - `crates/script/tests/core_vectors.rs`: `script_tests_native_column`,
   `tx_valid_native_column`, `tx_invalid_native_column`
   (`NATIVE_*_FAILURES = 0`, pinned skip counts and skip-reason allow-lists).
-- `crates/consensus/tests/shared_sighash.rs`: concurrent transaction aggregates
-  against independent digests, independently signed mixed-input checks through
-  transaction and block preparation, and typed count/index failure precedence.
+- `crates/consensus/tests/shared_sighash.rs`: concurrent transaction aggregates,
+  independently signed checks, failure precedence, and signature cache reuse.
+- `crates/script/src/signature_cache.rs`: unit tests for domain separation,
+  algorithm tags, alias prevention, and capacity refusal without eviction.
 - `crates/consensus/tests/kernel_block_parity.rs`:
   `script_verdict_parity` (Taproot key-path differential),
   `differential_is_non_vacuous` (script-path non-vacuity).

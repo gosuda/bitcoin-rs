@@ -63,10 +63,22 @@ use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_index::BlockSource;
 pub mod evidence;
 
+use bitcoin_rs_mempool::{LocalOrigin, MutationResult};
+use bitcoin_rs_mining::{
+    BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
+    BlockValidationResult, GenerateRequest, GeneratedBlock, MiningControl, MiningControlError,
+    MiningInfo,
+};
+use bitcoin_rs_primitives::unix_time_secs;
+use bitcoin_rs_rpc::Handler;
+use bitcoin_rs_rpc::context::{
+    ChainAdmissionView, Context, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB,
+};
+
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
 use bitcoin_rs_node::{
-    BlockSync, DerivedIndexRuntime, Network, NodeConfig, state::NodeState,
+    BlockSync, DerivedIndexRuntime, MiningCoordinator, Network, NodeConfig, state::NodeState,
     sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
@@ -78,6 +90,7 @@ use crossbeam_channel::unbounded;
 use evidence::{Cell, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample};
 use parking_lot::Mutex as ParkingMutex;
 use parking_lot::RwLock;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 use tempfile::TempDir;
 
 const PROXY_BLOCKS: u32 = 32;
@@ -109,6 +122,12 @@ const SPEND_PROXY_FANOUT: u32 = 64;
 const SPEND_PROXY_COINBASE_OUTPUT_VALUE: u64 = 78_125_000;
 
 const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
+
+/// Signed-spend output value: the 501-sat fee (`78_125_000 - 78_124_499`) clears the
+/// mempool's 1,000 sat/kvB minimum-relay floor in every spend class, so the
+/// same transactions the connect arms apply are also admissible through the
+/// gateway.
+const SIGNED_SPEND_OUTPUT_VALUE: u64 = 78_124_499;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
@@ -197,7 +216,7 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 /// collects per-sweep durations and prints the percentile table; Criterion
 /// keeps the headline median for comparability with the existing docs.
 fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
-    let blocks = signed_spend_proxy_blocks();
+    let blocks = legacy_signed_spend_proxy_blocks();
     print_signed_spend_proxy_summary(&blocks);
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
@@ -1496,7 +1515,9 @@ fn secret_key(byte: u8) -> SecretKey {
 ///
 /// Heights 1..100: fanout coinbase blocks funding 64 outputs split across P2PKH,
 /// P2WPKH, and P2WSH script classes. Heights 101..116: spend blocks that consume
-/// the coinbase outputs from 100 blocks back, each carrying a real ECDSA signature.
+/// the coinbase outputs from 100 blocks back, each carrying a real ECDSA signature
+/// and paying a 501-sat fee to a standard bare-multisig output (mempool-
+/// admissible; see `build_signed_spend_tx`).
 /// Witness-bearing blocks carry a BIP141 commitment output on the coinbase.
 fn signed_spend_proxy_blocks() -> Vec<Block> {
     let keys = SigningKeys::new();
@@ -1636,30 +1657,23 @@ fn witness_commitment_script_pubkey(commitment: &Hash256) -> Vec<u8> {
     script
 }
 
-/// Spend block consuming 64 coinbase outputs from 100 blocks back, each with a
-/// real signature. The spend transactions are built as rust-bitcoin oracle
-/// transactions, signed, then converted to native `Tx` via consensus
-/// serialization.
-fn child_signed_spend_fanout_block(
+/// Target block: funding-style coinbase plus a caller-supplied spend list.
+///
+/// The assembly shape is exactly the spend-fanout block's below (BIP34
+/// coinbase, witness commitment recomputed over the full tx set, merkle
+/// recompute, trivial-PoW mining); parameterizing the spend set lets every
+/// measured sample connect a distinct block. The coinbase is the same
+/// 64-output funding coinbase the step-4 corpus uses, so its shape is proven.
+fn child_signed_target_block(
     parent: &Block,
     height: u32,
-    source_block: &Block,
     keys: &SigningKeys,
+    spends: Vec<Tx>,
 ) -> Block {
-    let source_coinbase = source_block
-        .txs
-        .first()
-        .unwrap_or_else(|| panic!("signed-spend source block missing coinbase"));
-    let source_txid = source_coinbase.txid();
-    let mut txs = Vec::with_capacity(SPEND_PROXY_FANOUT as usize + 1);
-    // Coinbase for this spend block (witness-bearing, with commitment).
+    let mut txs = Vec::with_capacity(spends.len().saturating_add(1));
+    // Coinbase for this target block (witness-bearing, with commitment).
     txs.push(signed_fanout_coinbase_transaction(height, keys));
-    // 64 spend transactions, one per funded output.
-    for vout in 0..SPEND_PROXY_FANOUT {
-        let prevout_value = SPEND_PROXY_COINBASE_OUTPUT_VALUE;
-        let spend_tx = build_signed_spend_tx(source_txid, vout, prevout_value, keys);
-        txs.push(spend_tx);
-    }
+    txs.extend(spends);
     let mut block = Block {
         header: Header {
             version: 4,
@@ -1679,13 +1693,44 @@ fn child_signed_spend_fanout_block(
     let last = coinbase
         .outputs
         .last_mut()
-        .unwrap_or_else(|| panic!("coinbase missing commitment output"));
+        .unwrap_or_else(|| panic!("target coinbase missing commitment output"));
     last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
     // Recompute merkle root after updating the commitment.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
+        .unwrap_or_else(|error| panic!("mining target block failed: {error}"));
     block
+}
+
+/// Spend block consuming 64 coinbase outputs from 100 blocks back, each with a
+/// real signature. The spend transactions are built as rust-bitcoin oracle
+/// transactions, signed, then converted to native `Tx` via consensus
+/// serialization.
+fn child_signed_spend_fanout_block(
+    parent: &Block,
+    height: u32,
+    source_block: &Block,
+    keys: &SigningKeys,
+) -> Block {
+    let source_coinbase = source_block
+        .txs
+        .first()
+        .unwrap_or_else(|| panic!("signed-spend source block missing coinbase"));
+    let source_txid = source_coinbase.txid();
+    // 64 spend transactions, one per funded output.
+    let mut spends = Vec::with_capacity(SPEND_PROXY_FANOUT as usize);
+    for vout in 0..SPEND_PROXY_FANOUT {
+        let prevout_value = SPEND_PROXY_COINBASE_OUTPUT_VALUE;
+        spends.push(build_signed_spend_tx(
+            source_txid,
+            vout,
+            prevout_value,
+            keys,
+        ));
+    }
+    // Same bytes as before: identical coinbase, spends, header, commitment,
+    // and mining sequence as the inlined assembly above.
+    child_signed_target_block(parent, height, keys, spends)
 }
 
 /// Computes the BIP141 witness commitment for a block's transaction set.
@@ -1711,7 +1756,12 @@ fn block_witness_commitment(txs: &[Tx]) -> Hash256 {
 
 /// Builds and signs a single spend transaction for output `vout` of
 /// `source_txid`. The spend class is determined by the output index:
-/// 0..22 = P2PKH, 22..44 = P2WPKH, 44..64 = P2WSH 2-of-3.
+/// 0..22 = P2PKH, 22..44 = P2WPKH, 44..64 = P2WSH 2-of-3. Every spend pays a
+/// 501-sat fee to a standard bare 2-of-3 multisig output so the same
+/// transactions the connect arms apply also pass mempool admission
+/// (`min_relay_fee_sat_per_kvb` 1,000 sat/kvB and the standard-output
+/// whitelist in `crates/mempool/src/standardness.rs`); the block-connect
+/// fixture alone never required either.
 fn build_signed_spend_tx(
     source_txid: Txid,
     vout: u32,
@@ -1726,6 +1776,7 @@ fn build_signed_spend_tx(
             prevout_value,
             keys,
             usize::try_from(vout).unwrap(),
+            SIGNED_SPEND_OUTPUT_VALUE,
         )
     } else if vout < 44 {
         build_signed_p2wpkh_spend(
@@ -1734,9 +1785,16 @@ fn build_signed_spend_tx(
             prevout_value,
             keys,
             usize::try_from(vout - 22).unwrap(),
+            SIGNED_SPEND_OUTPUT_VALUE,
         )
     } else {
-        build_signed_p2wsh_spend(oracle_txid, vout, prevout_value, keys)
+        build_signed_p2wsh_spend(
+            oracle_txid,
+            vout,
+            prevout_value,
+            keys,
+            SIGNED_SPEND_OUTPUT_VALUE,
+        )
     }
 }
 
@@ -1747,6 +1805,7 @@ fn build_signed_p2pkh_spend(
     _prevout_value: u64,
     keys: &SigningKeys,
     key_index: usize,
+    output_value: u64,
 ) -> Tx {
     let pubkey = keys.p2pkh[key_index];
     let pkh = pubkey.pubkey_hash();
@@ -1764,8 +1823,8 @@ fn build_signed_p2pkh_spend(
             witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
-            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+            value: OracleAmount::from_sat(output_value),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
         }],
     };
     let cache = SighashCache::new(&tx);
@@ -1795,6 +1854,7 @@ fn build_signed_p2wpkh_spend(
     prevout_value: u64,
     keys: &SigningKeys,
     key_index: usize,
+    output_value: u64,
 ) -> Tx {
     let pubkey = keys.p2wpkh[key_index];
     let wpkh = pubkey.wpubkey_hash().unwrap();
@@ -1812,8 +1872,8 @@ fn build_signed_p2wpkh_spend(
             witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
-            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+            value: OracleAmount::from_sat(output_value),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1843,6 +1903,7 @@ fn build_signed_p2wsh_spend(
     vout: u32,
     prevout_value: u64,
     keys: &SigningKeys,
+    output_value: u64,
 ) -> Tx {
     let redeem = p2wsh_2of3_redeem_script(keys, 0);
     let script_hash = redeem.wscript_hash();
@@ -1860,8 +1921,8 @@ fn build_signed_p2wsh_spend(
             witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
-            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+            value: OracleAmount::from_sat(output_value),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1923,6 +1984,444 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
+/// Standard output script for the signed spend set's own outputs.
+///
+/// Bare 2-of-3 multisig over the fixture's P2WSH key set: the mempool's
+/// `is_standard_output_script` whitelist accepts bare multisig of at most
+/// three pubkeys, and the 501-sat output is far above the dust threshold. The
+/// previous `push_int(1)` output was consensus-valid but fails mempool
+/// standardness, so the admitted arm would have panicked on sample one.
+fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
+    OracleBuilder::new()
+        .push_int(2)
+        .push_key(&keys.p2wsh[0])
+        .push_key(&keys.p2wsh[1])
+        .push_key(&keys.p2wsh[2])
+        .push_int(3)
+        .push_opcode(opcodes::all::OP_CHECKMULTISIG)
+        .into_script()
+        .to_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// Legacy signed-spend corpus: byte-identical to the pre-step-4 bench.
+// ---------------------------------------------------------------------------
+
+/// Builds the legacy 117-block signed-spend corpus this bench measured
+/// before the step-4 harness: 1-sat fees (`SPEND_PROXY_SPEND_OUTPUT_VALUE`)
+/// and `push_int(1)` spend outputs. Consensus-valid and block-connectable,
+/// but not mempool-admissible (fee floor, standard-output whitelist), so the
+/// step-4 connect arms use `signed_spend_proxy_blocks` instead. Only
+/// `sync_pipeline_apply_signed_spend_proxy` uses this corpus, keeping its
+/// history comparable; the step-4 arms stay byte-identical to the accepted
+/// baseline.
+fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
+    let keys = SigningKeys::new();
+    let spend_start = SPEND_PROXY_COINBASE_MATURITY.saturating_add(1);
+    let spend_end = spend_start
+        .saturating_add(SPEND_PROXY_SPEND_BLOCKS)
+        .saturating_sub(1);
+    let capacity = usize::try_from(spend_end.saturating_add(1))
+        .unwrap_or_else(|e| panic!("invalid spend capacity: {e}"));
+    let genesis = Network::Regtest.genesis_block();
+    let mut blocks = Vec::with_capacity(capacity);
+    blocks.push(genesis.clone());
+    let mut parent = genesis;
+    for height in 1..=spend_end {
+        let block = if height < spend_start {
+            child_signed_fanout_coinbase_block(&parent, height, &keys)
+        } else {
+            let source_height = height.saturating_sub(SPEND_PROXY_COINBASE_MATURITY);
+            let source_index = usize::try_from(source_height)
+                .unwrap_or_else(|e| panic!("invalid source height: {e}"));
+            legacy_child_signed_spend_fanout_block(&parent, height, &blocks[source_index], &keys)
+        };
+        parent = block.clone();
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// Legacy spend block: the pre-step-4 fanout shape with 1-sat, `push_int(1)`
+/// spends. Funding coinbases are shared with the step-4 corpus, so sighashes
+/// match the historical bodies exactly.
+fn legacy_child_signed_spend_fanout_block(
+    parent: &Block,
+    height: u32,
+    source_block: &Block,
+    keys: &SigningKeys,
+) -> Block {
+    let source_coinbase = source_block
+        .txs
+        .first()
+        .unwrap_or_else(|| panic!("signed-spend source block missing coinbase"));
+    let source_txid = source_coinbase.txid();
+    let mut txs = Vec::with_capacity(SPEND_PROXY_FANOUT as usize + 1);
+    txs.push(signed_fanout_coinbase_transaction(height, keys));
+    for vout in 0..SPEND_PROXY_FANOUT {
+        let prevout_value = SPEND_PROXY_COINBASE_OUTPUT_VALUE;
+        let spend_tx = legacy_build_signed_spend_tx(source_txid, vout, prevout_value, keys);
+        txs.push(spend_tx);
+    }
+    let mut block = Block {
+        header: Header {
+            version: 4,
+            prev_blockhash: parent.block_hash(),
+            merkle_root: Hash256::default(),
+            time: parent.header.time.saturating_add(1),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
+            nonce: 0,
+        },
+        txs,
+    };
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    let commitment = block_witness_commitment(&block.txs);
+    let coinbase = &mut block.txs[0];
+    let last = coinbase
+        .outputs
+        .last_mut()
+        .unwrap_or_else(|| panic!("coinbase missing commitment output"));
+    last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
+    block
+}
+
+/// Legacy spend dispatcher: same classes as `build_signed_spend_tx`, with
+/// the pre-step-4 outputs.
+fn legacy_build_signed_spend_tx(
+    source_txid: Txid,
+    vout: u32,
+    prevout_value: u64,
+    keys: &SigningKeys,
+) -> Tx {
+    let oracle_txid = OracleTxid::from_byte_array(*source_txid.as_bytes());
+    if vout < 22 {
+        legacy_build_signed_p2pkh_spend(
+            oracle_txid,
+            vout,
+            prevout_value,
+            keys,
+            usize::try_from(vout).unwrap(),
+        )
+    } else if vout < 44 {
+        legacy_build_signed_p2wpkh_spend(
+            oracle_txid,
+            vout,
+            prevout_value,
+            keys,
+            usize::try_from(vout - 22).unwrap(),
+        )
+    } else {
+        legacy_build_signed_p2wsh_spend(oracle_txid, vout, prevout_value, keys)
+    }
+}
+
+/// Legacy P2PKH spend: 1-sat fee to `push_int(1)`, legacy sighash.
+fn legacy_build_signed_p2pkh_spend(
+    source_txid: OracleTxid,
+    vout: u32,
+    _prevout_value: u64,
+    keys: &SigningKeys,
+    key_index: usize,
+) -> Tx {
+    let pubkey = keys.p2pkh[key_index];
+    let pkh = pubkey.pubkey_hash();
+    let script_pubkey = OracleScriptBuf::new_p2pkh(&pkh);
+    let mut tx = OracleTx {
+        version: transaction::Version(2),
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![OracleTxIn {
+            previous_output: OracleOutPoint {
+                txid: source_txid,
+                vout,
+            },
+            script_sig: OracleScriptBuf::new(),
+            sequence: OracleSequence::MAX,
+            witness: OracleWitness::new(),
+        }],
+        output: vec![OracleTxOut {
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+        }],
+    };
+    let cache = SighashCache::new(&tx);
+    let sighash = cache
+        .legacy_signature_hash(0, &script_pubkey, EcdsaSighashType::All as u32)
+        .unwrap_or_else(|e| panic!("p2pkh sighash: {e}"));
+    let secret = secret_key(0xA0 + key_index as u8);
+    let message = SecpMessage::from_digest(*sighash.as_byte_array());
+    let mut sig = keys.secp.sign_ecdsa(&message, &secret);
+    sig.normalize_s();
+    let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
+    sig_bytes.push(EcdsaSighashType::All as u8);
+    let mut script_sig = Vec::with_capacity(sig_bytes.len() + 35);
+    script_sig.push(sig_bytes.len() as u8);
+    script_sig.extend_from_slice(&sig_bytes);
+    let pubkey_bytes = pubkey.inner.serialize();
+    script_sig.push(pubkey_bytes.len() as u8);
+    script_sig.extend_from_slice(&pubkey_bytes);
+    tx.input[0].script_sig = OracleScriptBuf::from_bytes(script_sig);
+    to_native_tx(&tx)
+}
+
+/// Legacy P2WPKH spend: 1-sat fee to `push_int(1)`, BIP143.
+fn legacy_build_signed_p2wpkh_spend(
+    source_txid: OracleTxid,
+    vout: u32,
+    prevout_value: u64,
+    keys: &SigningKeys,
+    key_index: usize,
+) -> Tx {
+    let pubkey = keys.p2wpkh[key_index];
+    let wpkh = pubkey.wpubkey_hash().unwrap();
+    let script_pubkey = OracleScriptBuf::new_p2wpkh(&wpkh);
+    let mut tx = OracleTx {
+        version: transaction::Version(2),
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![OracleTxIn {
+            previous_output: OracleOutPoint {
+                txid: source_txid,
+                vout,
+            },
+            script_sig: OracleScriptBuf::new(),
+            sequence: OracleSequence::MAX,
+            witness: OracleWitness::new(),
+        }],
+        output: vec![OracleTxOut {
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+        }],
+    };
+    let mut cache = SighashCache::new(&tx);
+    let sighash = cache
+        .p2wpkh_signature_hash(
+            0,
+            &script_pubkey,
+            OracleAmount::from_sat(prevout_value),
+            EcdsaSighashType::All,
+        )
+        .unwrap_or_else(|e| panic!("p2wpkh sighash: {e}"));
+    let secret = secret_key(0xB0 + key_index as u8);
+    let message = SecpMessage::from_digest(*sighash.as_byte_array());
+    let mut sig = keys.secp.sign_ecdsa(&message, &secret);
+    sig.normalize_s();
+    let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
+    sig_bytes.push(EcdsaSighashType::All as u8);
+    tx.input[0].witness =
+        OracleWitness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
+    to_native_tx(&tx)
+}
+
+/// Legacy P2WSH 2-of-3 spend: 1-sat fee to `push_int(1)`, BIP143.
+fn legacy_build_signed_p2wsh_spend(
+    source_txid: OracleTxid,
+    vout: u32,
+    prevout_value: u64,
+    keys: &SigningKeys,
+) -> Tx {
+    let redeem = p2wsh_2of3_redeem_script(keys, 0);
+    let script_hash = redeem.wscript_hash();
+    let _script_pubkey = OracleScriptBuf::new_p2wsh(&script_hash);
+    let mut tx = OracleTx {
+        version: transaction::Version(2),
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![OracleTxIn {
+            previous_output: OracleOutPoint {
+                txid: source_txid,
+                vout,
+            },
+            script_sig: OracleScriptBuf::new(),
+            sequence: OracleSequence::MAX,
+            witness: OracleWitness::new(),
+        }],
+        output: vec![OracleTxOut {
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            script_pubkey: OracleBuilder::new().push_int(1).into_script(),
+        }],
+    };
+    let mut cache = SighashCache::new(&tx);
+    let sighash = cache
+        .p2wsh_signature_hash(
+            0,
+            &redeem,
+            OracleAmount::from_sat(prevout_value),
+            EcdsaSighashType::All,
+        )
+        .unwrap_or_else(|e| panic!("p2wsh sighash: {e}"));
+    let mut sigs = Vec::with_capacity(2);
+    for &key_byte in &[0xC0u8, 0xC1] {
+        let secret = secret_key(key_byte);
+        let message = SecpMessage::from_digest(*sighash.as_byte_array());
+        let mut sig = keys.secp.sign_ecdsa(&message, &secret);
+        sig.normalize_s();
+        let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
+        sig_bytes.push(EcdsaSighashType::All as u8);
+        sigs.push(sig_bytes);
+    }
+    let witness_items: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        sigs[0].clone(),
+        sigs[1].clone(),
+        redeem.as_bytes().to_vec(),
+    ];
+    tx.input[0].witness = OracleWitness::from_slice(&witness_items);
+    to_native_tx(&tx)
+}
+
+/// Step-4 measurement gate (`script-execution-cache`): connect of a block
+/// whose non-coinbase transactions were admitted through the real mempool
+/// gateway, timed as last-apply only.
+///
+/// Per sample: a fresh `NodeState`, every block but the last applied untimed,
+/// every non-coinbase transaction of the last block admitted through
+/// `MempoolGateway::submit_local_transaction` (the production
+/// `sendrawtransaction` path, real `ChainAdmissionView`, no seams) untimed,
+/// then only `apply_block(last)` is timed. Criterion receives the accumulated
+/// per-iteration timed spans, so its reported time is apply-only; the
+/// companion `connect_unseen_signed_spend_block` skips admission and is the
+/// miss control.
+fn connect_admitted_signed_spend_block(c: &mut Criterion) {
+    let blocks = signed_spend_proxy_blocks();
+    let last_index = blocks.len().saturating_sub(1);
+    let last_block = blocks[last_index].clone();
+    let admission_txs: Vec<Arc<Tx>> = last_block.txs[1..]
+        .iter()
+        .map(|tx| Arc::new(tx.clone()))
+        .collect();
+
+    c.bench_function("connect_admitted_signed_spend_block", |b| {
+        b.iter_custom(|iters| {
+            let mut timed_total = Duration::ZERO;
+            for _ in 0..iters {
+                let (_dir, state) = open_regtest_state();
+                // Untimed prefix: every block but the last reaches the tip the
+                // final block builds on.
+                for block in &blocks[..last_index] {
+                    state
+                        .apply_block(block)
+                        .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
+                }
+                // Untimed real admission of the final block's spend set.
+                admit_signed_spends(&state, &admission_txs);
+                assert_admission_residency(&state, &admission_txs);
+                // Timed: only the connect of the admitted block.
+                let timed = Instant::now();
+                state
+                    .apply_block(black_box(&last_block))
+                    .unwrap_or_else(|error| panic!("admitted connect failed: {error}"));
+                timed_total += timed.elapsed();
+            }
+            timed_total
+        })
+    });
+}
+
+/// Step-4 miss control: the identical block connected without any mempool
+/// admission, so its script checks always run.
+fn connect_unseen_signed_spend_block(c: &mut Criterion) {
+    let blocks = signed_spend_proxy_blocks();
+    let last_index = blocks.len().saturating_sub(1);
+    let last_block = blocks[last_index].clone();
+
+    c.bench_function("connect_unseen_signed_spend_block", |b| {
+        b.iter_custom(|iters| {
+            let mut timed_total = Duration::ZERO;
+            for _ in 0..iters {
+                let (_dir, state) = open_regtest_state();
+                for block in &blocks[..last_index] {
+                    state
+                        .apply_block(block)
+                        .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
+                }
+                let timed = Instant::now();
+                state
+                    .apply_block(black_box(&last_block))
+                    .unwrap_or_else(|error| panic!("unseen connect failed: {error}"));
+                timed_total += timed.elapsed();
+            }
+            timed_total
+        })
+    });
+}
+
+/// Admits the signed spend set through the production gateway. Never timed.
+///
+/// A submission that does not commit means the fixture drifted; the connect
+/// arm would then measure a different block than the throughput arm admits.
+/// Residency is asserted by the caller after admission, outside any timed
+/// span.
+fn admit_signed_spends(state: &NodeState, txs: &[Arc<Tx>]) {
+    let gateway = state.mempool_gateway();
+    let chainstate = state.chainstate();
+    let chain = ChainAdmissionView::new(
+        chainstate.utxo_reader(),
+        chainstate.applied_tip_reader(),
+        chainstate.block_tree_reader(),
+        chainstate.network(),
+    );
+    let max_feerate = Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB);
+    for tx in txs {
+        let result = gateway.submit_local_transaction(
+            Arc::clone(tx),
+            LocalOrigin::Rpc,
+            max_feerate,
+            unix_time_secs(),
+            &chain,
+        );
+        match result {
+            Ok(MutationResult { .. }) => {}
+            other => panic!("fixture admission failed: {other:?}"),
+        }
+    }
+}
+
+/// Asserts every spend is pool-resident. Called once outside timed spans.
+fn assert_admission_residency(state: &NodeState, txs: &[Arc<Tx>]) {
+    let reader = state.mempool_reader();
+    let pool = reader.read();
+    for tx in txs {
+        assert!(
+            pool.contains_txid(&tx.txid()),
+            "fixture admission did not insert txid {}",
+            tx.txid(),
+        );
+    }
+}
+
+/// Step-4 throughput arm: the same signed spend set through the production
+/// gateway, timed as gateway submits only, so the second verification pass's
+/// cost is visible before and after the cache lands. One residency check per
+/// iteration runs after the timed span closes.
+fn connect_admission_throughput(c: &mut Criterion) {
+    let blocks = signed_spend_proxy_blocks();
+    let last_index = blocks.len().saturating_sub(1);
+    let admission_txs: Vec<Arc<Tx>> = blocks[last_index].txs[1..]
+        .iter()
+        .map(|tx| Arc::new(tx.clone()))
+        .collect();
+
+    c.bench_function("connect_admission_throughput", |b| {
+        b.iter_custom(|iters| {
+            let mut timed_total = Duration::ZERO;
+            for _ in 0..iters {
+                let (_dir, state) = open_regtest_state();
+                for block in &blocks[..last_index] {
+                    state
+                        .apply_block(block)
+                        .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
+                }
+                let timed = Instant::now();
+                admit_signed_spends(&state, &admission_txs);
+                timed_total += timed.elapsed();
+                assert_admission_residency(&state, &admission_txs);
+            }
+            timed_total
+        })
+    });
+}
+
 /// Prints p50/p95/p99/max from the collected per-sweep durations.
 fn print_percentiles(label: &str, samples: &[Duration]) {
     if samples.is_empty() {
@@ -1953,11 +2452,1351 @@ fn print_percentiles(label: &str, samples: &[Duration]) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Step-21 block-to-template baseline: admitted 100k pool, coinbase-plus-2000
+// target blocks, connect tail through the first new-tip template.
+// ---------------------------------------------------------------------------
+
+/// Step-21 live pool before connect: 98,000 background spends plus one sample's
+/// 2,000 target spends, all admitted through the production gateway path at the
+/// current wall-clock time, never direct inserts.
+const BLOCK_TEMPLATE_POOL_TXS: usize = 100_000;
+/// Step-21 background fill: admitted once per sample; the sample's target
+/// spends bring the live pool to exactly `BLOCK_TEMPLATE_POOL_TXS` before
+/// connect, and connect removes exactly the targets afterwards.
+const BLOCK_TEMPLATE_BACKGROUND_TXS: usize = 98_000;
+/// Step-21 non-coinbase spends per measured target block (2001 txs total).
+const BLOCK_TEMPLATE_TARGET_SPENDS: usize = 2_000;
+/// Step-21 warmup connects: same path, reported, excluded from totals.
+const BLOCK_TEMPLATE_WARMUPS: usize = 3;
+/// Step-21 measured independent connect/reply samples.
+const BLOCK_TEMPLATE_SAMPLES: usize = 10;
+/// Step-21 funded outputs per funding coinbase (P2PKH/P2WPKH/P2WSH cycling).
+const BLOCK_TEMPLATE_FANOUT_WIDTH: u32 = 4_096;
+/// Step-21 funding fanout blocks: 32 x 4096 = `131_072` funded outputs cover the
+/// 98k background fill plus 13 x 2000 target spends; the rest stays unspent.
+const BLOCK_TEMPLATE_FANOUT_BLOCKS: u32 = 32;
+/// Step-21 coinbase-only maturation fillers: every funding output is mature at
+/// the prefix tip (latest funding height 32 + 100 <= tip height 132), and every
+/// block stays below the regtest subsidy halving at height 150, so all
+/// coinbases claim against the 50 BTC subsidy.
+const BLOCK_TEMPLATE_FILLER_BLOCKS: u32 = 100;
+/// Step-21 funding output value: 4096 outputs must fit the 50 BTC subsidy.
+const BLOCK_TEMPLATE_FUND_VALUE_SAT: u64 = 1_000_000;
+/// Step-21 spend output value: the same 501-sat fee as the proven spend corpus,
+/// so fee rates (and gateway admission) match the step-4 arms exactly.
+const BLOCK_TEMPLATE_SPEND_VALUE_SAT: u64 = BLOCK_TEMPLATE_FUND_VALUE_SAT - 501;
+/// Step-21 key slots: each signing key funds many outputs; output `j` funds
+/// class `j % 3` from slot `(j / 3) % 22`.
+const BLOCK_TEMPLATE_KEY_SLOTS: u32 = 22;
+
+/// Funding coinbase with `BLOCK_TEMPLATE_FANOUT_WIDTH` spendable outputs.
+///
+/// Output `j` funds class `j % 3` (0 = P2PKH, 1 = P2WPKH, 2 = P2WSH) from key
+/// slot `(j / 3) % 22`; `build_wide_signed_spend_tx` of output `j` signs with
+/// the matching key. Scripts reuse the exact constructors the per-class spend
+/// builders verify against; only the outpoint differs per spend.
+fn wide_signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
+    let width = usize::try_from(BLOCK_TEMPLATE_FANOUT_WIDTH)
+        .unwrap_or_else(|error| panic!("invalid wide fanout width: {error}"));
+    let mut outputs = Vec::with_capacity(width.saturating_add(1));
+    for j in 0..BLOCK_TEMPLATE_FANOUT_WIDTH {
+        let slot = usize::try_from(j / 3 % BLOCK_TEMPLATE_KEY_SLOTS)
+            .unwrap_or_else(|error| panic!("invalid wide key slot: {error}"));
+        let script = match j % 3 {
+            0 => OracleScriptBuf::new_p2pkh(&keys.p2pkh[slot].pubkey_hash()),
+            1 => {
+                let wpubkey_hash = keys.p2wpkh[slot]
+                    .wpubkey_hash()
+                    .unwrap_or_else(|error| panic!("wide p2wpkh key is uncompressed: {error:?}"));
+                OracleScriptBuf::new_p2wpkh(&wpubkey_hash)
+            }
+            _ => {
+                let redeem = p2wsh_2of3_redeem_script(keys, 0);
+                OracleScriptBuf::new_p2wsh(&redeem.wscript_hash())
+            }
+        };
+        outputs.push(TxOut {
+            value: Amount::from_sat(BLOCK_TEMPLATE_FUND_VALUE_SAT),
+            script_pubkey: script.as_bytes().to_vec().into(),
+        });
+    }
+    // BIP141 witness commitment output (the spending blocks carry witnesses).
+    let commitment = witness_commitment_for_coinbase(&outputs);
+    outputs.push(TxOut {
+        value: Amount::from_sat(0),
+        script_pubkey: witness_commitment_script_pubkey(&commitment).into(),
+    });
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: vec![WITNESS_RESERVED_VALUE.to_vec()].into(),
+        }],
+        outputs,
+    }
+}
+
+/// Funding block: wide coinbase only. The placeholder commitment is already
+/// correct for a coinbase-only block, as in `child_signed_fanout_coinbase_block`.
+fn child_wide_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningKeys) -> Block {
+    let mut block = Block {
+        header: Header {
+            version: 4,
+            prev_blockhash: parent.block_hash(),
+            merkle_root: Hash256::default(),
+            time: parent.header.time.saturating_add(1),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
+            nonce: 0,
+        },
+        txs: vec![wide_signed_fanout_coinbase_transaction(height, keys)],
+    };
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining wide fanout block failed: {error}"));
+    block
+}
+
+/// Builds the spend of wide-funding output `vout` of `source_txid`, dispatching
+/// on the same class/slot rule the funding coinbase funds with. Signatures are
+/// fresh per outpoint, so every spend is a distinct valid transaction.
+fn build_wide_signed_spend_tx(source_txid: Txid, vout: u32, keys: &SigningKeys) -> Tx {
+    let oracle_txid = OracleTxid::from_byte_array(*source_txid.as_bytes());
+    let slot = usize::try_from(vout / 3 % BLOCK_TEMPLATE_KEY_SLOTS)
+        .unwrap_or_else(|error| panic!("invalid wide spend slot: {error}"));
+    match vout % 3 {
+        0 => build_signed_p2pkh_spend(
+            oracle_txid,
+            vout,
+            BLOCK_TEMPLATE_FUND_VALUE_SAT,
+            keys,
+            slot,
+            BLOCK_TEMPLATE_SPEND_VALUE_SAT,
+        ),
+        1 => build_signed_p2wpkh_spend(
+            oracle_txid,
+            vout,
+            BLOCK_TEMPLATE_FUND_VALUE_SAT,
+            keys,
+            slot,
+            BLOCK_TEMPLATE_SPEND_VALUE_SAT,
+        ),
+        _ => build_signed_p2wsh_spend(
+            oracle_txid,
+            vout,
+            BLOCK_TEMPLATE_FUND_VALUE_SAT,
+            keys,
+            BLOCK_TEMPLATE_SPEND_VALUE_SAT,
+        ),
+    }
+}
+
+/// Frozen step-21 corpus: one deterministic prefix, one 98k background spend
+/// set, and 13 disjoint 2000-spend target sets with their distinct blocks.
+/// Built once, shared across samples; every sample replays it in a fresh state.
+struct BlockTemplateCorpus {
+    prefix: Vec<Block>,
+    background: Vec<Arc<Tx>>,
+    target_spends: Vec<Vec<Arc<Tx>>>,
+    target_blocks: Vec<Block>,
+    target_height: u32,
+}
+
+/// Spends wide-funding output `global` with the class and key the funding
+/// coinbase assigned it, signing fresh so every spend is distinct.
+fn wide_spend_at(funding: &[Txid], width: usize, keys: &SigningKeys, global: usize) -> Arc<Tx> {
+    let source = funding[global / width];
+    let vout =
+        u32::try_from(global % width).unwrap_or_else(|error| panic!("invalid wide vout: {error}"));
+    Arc::new(build_wide_signed_spend_tx(source, vout, keys))
+}
+
+/// Builds the per-run target spend sets with their distinct blocks, verifying
+/// each block carries coinbase plus 2000 spends and hashes distinctly.
+fn build_corpus_targets(
+    parent: &Block,
+    target_height: u32,
+    keys: &SigningKeys,
+    funding: &[Txid],
+    width: usize,
+    runs: usize,
+) -> (Vec<Vec<Arc<Tx>>>, Vec<Block>) {
+    let mut target_spends = Vec::with_capacity(runs);
+    let mut target_blocks = Vec::with_capacity(runs);
+    for run in 0..runs {
+        let mut spends = Vec::with_capacity(BLOCK_TEMPLATE_TARGET_SPENDS);
+        for k in 0..BLOCK_TEMPLATE_TARGET_SPENDS {
+            spends.push(wide_spend_at(
+                funding,
+                width,
+                keys,
+                BLOCK_TEMPLATE_BACKGROUND_TXS
+                    .saturating_add(run.saturating_mul(BLOCK_TEMPLATE_TARGET_SPENDS))
+                    .saturating_add(k),
+            ));
+        }
+        let mut plain = Vec::with_capacity(spends.len());
+        for spend in &spends {
+            plain.push(Tx::clone(spend));
+        }
+        target_blocks.push(child_signed_target_block(
+            parent,
+            target_height,
+            keys,
+            plain,
+        ));
+        target_spends.push(spends);
+    }
+    for (run, block) in target_blocks.iter().enumerate() {
+        assert_eq!(
+            block.txs.len(),
+            BLOCK_TEMPLATE_TARGET_SPENDS.saturating_add(1),
+            "target {run} must carry coinbase plus 2000 spends"
+        );
+    }
+    for (index, block) in target_blocks.iter().enumerate() {
+        for earlier in &target_blocks[..index] {
+            assert_ne!(
+                block.block_hash(),
+                earlier.block_hash(),
+                "target blocks must be distinct"
+            );
+        }
+    }
+    (target_spends, target_blocks)
+}
+fn build_block_template_corpus() -> BlockTemplateCorpus {
+    let runs = BLOCK_TEMPLATE_WARMUPS.saturating_add(BLOCK_TEMPLATE_SAMPLES);
+    let funded =
+        usize::try_from(BLOCK_TEMPLATE_FANOUT_BLOCKS.saturating_mul(BLOCK_TEMPLATE_FANOUT_WIDTH))
+            .unwrap_or_else(|error| panic!("invalid funding count: {error}"));
+    let needed = BLOCK_TEMPLATE_BACKGROUND_TXS
+        .saturating_add(runs.saturating_mul(BLOCK_TEMPLATE_TARGET_SPENDS));
+    assert!(
+        funded >= needed,
+        "wide funding funds {funded} outputs, need {needed}"
+    );
+    assert!(
+        u64::from(BLOCK_TEMPLATE_FANOUT_WIDTH).saturating_mul(BLOCK_TEMPLATE_FUND_VALUE_SAT)
+            <= 5_000_000_000,
+        "wide funding exceeds the regtest subsidy"
+    );
+    let keys = SigningKeys::new();
+    let genesis = Network::Regtest.genesis_block();
+    let prefix_capacity = usize::try_from(
+        BLOCK_TEMPLATE_FANOUT_BLOCKS
+            .saturating_add(BLOCK_TEMPLATE_FILLER_BLOCKS)
+            .saturating_add(1),
+    )
+    .unwrap_or_else(|error| panic!("invalid prefix capacity: {error}"));
+    let mut prefix = Vec::with_capacity(prefix_capacity);
+    prefix.push(genesis.clone());
+    let mut funding = Vec::with_capacity(
+        usize::try_from(BLOCK_TEMPLATE_FANOUT_BLOCKS)
+            .unwrap_or_else(|error| panic!("invalid funding blocks: {error}")),
+    );
+    let mut parent = genesis;
+    for height in 1..=BLOCK_TEMPLATE_FANOUT_BLOCKS {
+        let block = child_wide_fanout_coinbase_block(&parent, height, &keys);
+        funding.push(
+            block
+                .txs
+                .first()
+                .unwrap_or_else(|| panic!("wide fanout missing coinbase"))
+                .txid(),
+        );
+        parent = block.clone();
+        prefix.push(block);
+    }
+    let filler_start = BLOCK_TEMPLATE_FANOUT_BLOCKS.saturating_add(1);
+    let filler_end = BLOCK_TEMPLATE_FANOUT_BLOCKS.saturating_add(BLOCK_TEMPLATE_FILLER_BLOCKS);
+    for height in filler_start..=filler_end {
+        let block = child_coinbase_block(&parent, height);
+        parent = block.clone();
+        prefix.push(block);
+    }
+    let target_height = filler_end.saturating_add(1);
+    assert!(
+        target_height < 150,
+        "target height {target_height} must stay below the regtest subsidy halving at 150"
+    );
+    let width = usize::try_from(BLOCK_TEMPLATE_FANOUT_WIDTH)
+        .unwrap_or_else(|error| panic!("invalid wide fanout width: {error}"));
+    let mut background = Vec::with_capacity(BLOCK_TEMPLATE_BACKGROUND_TXS);
+    for global in 0..BLOCK_TEMPLATE_BACKGROUND_TXS {
+        background.push(wide_spend_at(&funding, width, &keys, global));
+    }
+    let (target_spends, target_blocks) =
+        build_corpus_targets(&parent, target_height, &keys, &funding, width, runs);
+    BlockTemplateCorpus {
+        prefix,
+        background,
+        target_spends,
+        target_blocks,
+        target_height,
+    }
+}
+
+/// Prints the frozen corpus identity: counts only, no applies (the protocol run
+/// below applies the prefix once per sample).
+fn print_block_template_corpus_summary(corpus: &BlockTemplateCorpus) {
+    println!(
+        "block_to_template corpus: prefix_blocks={} tip_height={} funded_outputs={} background={} targets={}x{} total_txs_per_target={}",
+        corpus.prefix.len(),
+        corpus.target_height.saturating_sub(1),
+        BLOCK_TEMPLATE_FANOUT_BLOCKS.saturating_mul(BLOCK_TEMPLATE_FANOUT_WIDTH),
+        corpus.background.len(),
+        corpus.target_blocks.len(),
+        BLOCK_TEMPLATE_TARGET_SPENDS,
+        BLOCK_TEMPLATE_TARGET_SPENDS.saturating_add(1),
+    );
+}
+
+/// Production span fields captured for one measured sample. The whole protocol
+/// runs on the bench thread; the static is drained per sample, so prefix
+/// applies never leak into a measurement.
+#[derive(Default)]
+struct TailCapture {
+    t0: Option<quanta::Instant>,
+    tail_begins: u64,
+    durable_sync_us: Option<u128>,
+    durable_commit_us: Option<u128>,
+    publish_profiles: u64,
+    on_connect_us: Option<u128>,
+    on_connects: u64,
+}
+
+impl TailCapture {
+    const fn new() -> Self {
+        Self {
+            t0: None,
+            tail_begins: 0,
+            durable_sync_us: None,
+            durable_commit_us: None,
+            publish_profiles: 0,
+            on_connect_us: None,
+            on_connects: 0,
+        }
+    }
+}
+
+static TAIL_CAPTURE: ParkingMutex<TailCapture> = ParkingMutex::new(TailCapture::new());
+
+/// Bench-side tracing subscriber: records only the step-21 profile events by
+/// their message literal and micros fields. Everything else is ignored.
+struct ProfileSubscriber;
+
+impl tracing::Subscriber for ProfileSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visitor {
+            message: Option<String>,
+            sync_us: Option<u128>,
+            commit_us: Option<u128>,
+            on_connect_us: Option<u128>,
+        }
+
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = Some(format!("{value:?}"));
+                }
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = Some(value.to_owned());
+                }
+            }
+
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                self.record_u128(field, u128::from(value));
+            }
+
+            fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+                match field.name() {
+                    "durable_sync_us" => self.sync_us = Some(value),
+                    "durable_commit_us" => self.commit_us = Some(value),
+                    "on_connect_us" => self.on_connect_us = Some(value),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut visitor = Visitor {
+            message: None,
+            sync_us: None,
+            commit_us: None,
+            on_connect_us: None,
+        };
+        event.record(&mut visitor);
+        let Some(message) = visitor.message else {
+            return;
+        };
+        let mut capture = TAIL_CAPTURE.lock();
+        if message.contains("apply_block: tail begin") {
+            capture.tail_begins = capture.tail_begins.saturating_add(1);
+            capture.t0 = Some(quanta::Instant::now());
+        } else if message.contains("apply_block: publish profile") {
+            capture.publish_profiles = capture.publish_profiles.saturating_add(1);
+            capture.durable_sync_us = visitor.sync_us;
+            capture.durable_commit_us = visitor.commit_us;
+        } else if message.contains("chain_effects: on_connect profile") {
+            capture.on_connects = capture.on_connects.saturating_add(1);
+            capture.on_connect_us = visitor.on_connect_us;
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn reset_tail_capture() {
+    *TAIL_CAPTURE.lock() = TailCapture::new();
+}
+
+fn take_tail_capture() -> TailCapture {
+    std::mem::replace(&mut *TAIL_CAPTURE.lock(), TailCapture::new())
+}
+
+/// Bench-local measured `MiningControl`: forwards every call to the real
+/// per-sample coordinator and records the wall time plus candidate facts of
+/// each `get_block_template` call. No fake service: every other trait method
+/// forwards unchanged, and the default `submit_block_with_bytes` fallback is
+/// left alone.
+struct MeasuredMiningControl {
+    inner: Arc<MiningCoordinator>,
+    calls: ParkingMutex<Vec<MeasuredTemplateCall>>,
+}
+
+/// Facts recorded for one `get_block_template` call.
+struct MeasuredTemplateCall {
+    elapsed: Duration,
+    transactions: usize,
+    previous_block_hash: Hash256,
+}
+
+impl MeasuredMiningControl {
+    fn new(inner: Arc<MiningCoordinator>) -> Self {
+        Self {
+            inner,
+            calls: ParkingMutex::new(Vec::new()),
+        }
+    }
+
+    /// Recorded service calls, oldest first. Drained once per sample after the
+    /// handler reply lands, outside the measured interval.
+    fn take_calls(&self) -> Vec<MeasuredTemplateCall> {
+        std::mem::take(&mut *self.calls.lock())
+    }
+}
+
+impl MiningControl for MeasuredMiningControl {
+    fn get_block_template(
+        &self,
+        request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        let started = quanta::Instant::now();
+        let result = self.inner.get_block_template(request);
+        let elapsed = started.elapsed();
+        if let Ok(BlockTemplateResult::Template(template)) = &result {
+            self.calls.lock().push(MeasuredTemplateCall {
+                elapsed,
+                transactions: template.candidate.transactions.len(),
+                previous_block_hash: template.candidate.previous_block_hash,
+            });
+        }
+        result
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        self.inner.mining_info()
+    }
+
+    fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+        self.inner.network_hash_ps(lookup, height)
+    }
+
+    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
+        self.inner.submit_block(block)
+    }
+
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+        self.inner.submit_header(header)
+    }
+
+    fn publish_generation(&self) {
+        self.inner.publish_generation();
+    }
+
+    fn publish_fee_delta_generation(&self, fee_delta_sequence: u64) {
+        self.inner.publish_fee_delta_generation(fee_delta_sequence);
+    }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        self.inner.generate(request)
+    }
+}
+
+/// Untimed serving stack, prefix, and admission for one Step-21 sample.
+///
+/// Builds the production stack as node birth does, replays the corpus prefix,
+/// and admits the background plus the run's target spends (100k live). The
+/// measured connect tail runs in `run_block_template_sample`.
+struct BlockTemplateSetup {
+    measured: Arc<MeasuredMiningControl>,
+    handler: Handler,
+    params: sonic_rs::Value,
+    pool_live: usize,
+    background_len: usize,
+}
+
+fn setup_block_template_sample(
+    state: &NodeState,
+    corpus: &BlockTemplateCorpus,
+    run: usize,
+) -> BlockTemplateSetup {
+    // The coordinator attaches to the node's generation signal, so connect
+    // publishes through the production wake path. The decorator records the
+    // wall time and candidate facts of the single service call the measured
+    // dispatch below performs.
+    let coordinator = Arc::new(MiningCoordinator::new(
+        state.mempool_reader(),
+        state.chainstate(),
+        state.stable_read(),
+        state.chain_followers(),
+        Vec::new(),
+    ));
+    state.attach_mining_coordinator(&coordinator);
+    let measured = Arc::new(MeasuredMiningControl::new(Arc::clone(&coordinator)));
+    let control: Arc<dyn MiningControl> = measured.clone();
+    let mut rpc_context = Context::new();
+    rpc_context.chain.chain_network = Network::Regtest;
+    let handler = Handler::new(Arc::new(rpc_context.with_mining_control(control)));
+    let params = json!([{"rules": ["segwit"]}]);
+    for block in &corpus.prefix {
+        state
+            .apply_block(block)
+            .unwrap_or_else(|error| panic!("template prefix apply failed: {error}"));
+    }
+    // Untimed: 98k background admissions at the current wall-clock time.
+    admit_signed_spends(state, &corpus.background);
+    let background_len = state.mempool_reader().read().len();
+    assert_eq!(
+        background_len, BLOCK_TEMPLATE_BACKGROUND_TXS,
+        "background admitted {background_len} transactions"
+    );
+    assert_admission_residency(state, &corpus.background);
+    // Untimed: this sample's 2000 target spends on the same clock, bringing
+    // the live pool to exactly 100k before connect.
+    admit_signed_spends(state, &corpus.target_spends[run]);
+    let pool_live = state.mempool_reader().read().len();
+    assert_eq!(
+        pool_live, BLOCK_TEMPLATE_POOL_TXS,
+        "target admission left {pool_live} live transactions"
+    );
+    assert_admission_residency(state, &corpus.target_spends[run]);
+    BlockTemplateSetup {
+        measured,
+        handler,
+        params,
+        pool_live,
+        background_len,
+    }
+}
+/// Runs one independent sample: fresh state, untimed serving stack plus prefix
+/// plus admission, then the measured connect tail through the first new-tip
+/// template response.
+///
+/// Setup asserts fail closed: 98k background plus 2000 targets (100k live)
+/// before connect with every target spend resident, 98k after connect, the new
+/// tip equals the target hash, and both the recorded service call and the
+/// handler response name the new tip with a non-empty selection. Span capture
+/// asserts exactly one tail-begin, publish-profile, and on-connect event per
+/// sample, and the decorator asserts exactly one service call per reply.
+fn run_block_template_sample(corpus: &BlockTemplateCorpus, run: usize, warmup: bool) -> Duration {
+    let (_dir, state) = open_regtest_state();
+    let BlockTemplateSetup {
+        measured,
+        handler,
+        params,
+        pool_live,
+        background_len,
+    } = setup_block_template_sample(&state, corpus, run);
+    // Measured: connect tail through the first new-tip template reply.
+    reset_tail_capture();
+    let target = &corpus.target_blocks[run];
+    let call_started = quanta::Instant::now();
+    let tip = state
+        .apply_block(target)
+        .unwrap_or_else(|error| panic!("target connect failed: {error}"));
+    assert_eq!(
+        tip.hash,
+        target.block_hash().0,
+        "connect must publish the target block as the new tip"
+    );
+    // Protocol endpoint: the first real in-process RPC handler response,
+    // covering request parsing, readiness, rule negotiation, the single
+    // measured service assembly, mandatory-rule checks, and JSON rendering.
+    // Exactly one dispatch runs per sample: no prewarming call fills the
+    // cache first, so the recorded service call is the reply's own assembly.
+    let response = handler.dispatch("getblocktemplate", &params);
+    let reply_at = quanta::Instant::now();
+    let response =
+        response.unwrap_or_else(|error| panic!("getblocktemplate dispatch failed: {error}"));
+    let previous = response
+        .get("previousblockhash")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("template response lacks previousblockhash"));
+    assert_eq!(
+        previous,
+        tip.hash.to_string_be().as_str(),
+        "template response must name the new tip"
+    );
+    let pool_at_template = state.mempool_reader().read().len();
+    assert_eq!(
+        pool_at_template, BLOCK_TEMPLATE_BACKGROUND_TXS,
+        "connect must remove exactly the target spends"
+    );
+    let calls = measured.take_calls();
+    assert_eq!(calls.len(), 1, "exactly one service call per handler reply");
+    let call = &calls[0];
+    assert_ne!(
+        call.transactions, 0,
+        "assembled candidate must select transactions"
+    );
+    assert_eq!(
+        call.previous_block_hash, tip.hash,
+        "assembled candidate must name the new tip"
+    );
+    let assembly_us = call.elapsed.as_micros();
+    let capture = take_tail_capture();
+    assert_eq!(capture.tail_begins, 1, "one connect tail per sample");
+    assert_eq!(capture.publish_profiles, 1, "one head commit per sample");
+    assert_eq!(capture.on_connects, 1, "one on-connect per sample");
+    let durable_sync_us = capture
+        .durable_sync_us
+        .unwrap_or_else(|| panic!("missing durable_sync_us"));
+    let durable_commit_us = capture
+        .durable_commit_us
+        .unwrap_or_else(|| panic!("missing durable_commit_us"));
+    let on_connect_us = capture
+        .on_connect_us
+        .unwrap_or_else(|| panic!("missing on_connect_us"));
+    let t0 = capture
+        .t0
+        .unwrap_or_else(|| panic!("missing tail-begin edge"));
+    let tail_to_reply_us = reply_at.duration_since(t0).as_micros();
+    let apply_call_us = reply_at.duration_since(call_started).as_micros();
+    // Remainder inside the total: journal emission, head publication
+    // (`publish_applied`), handler negotiation and JSON rendering above the
+    // timed assembly, and bench overhead. Attributed nowhere; reported for
+    // the split to close.
+    let remainder_us = tail_to_reply_us.saturating_sub(
+        durable_sync_us
+            .saturating_add(durable_commit_us)
+            .saturating_add(on_connect_us)
+            .saturating_add(assembly_us),
+    );
+    let tip_hash_be = tip.hash.to_string_be();
+    let report = BlockTemplateReport {
+        pool_live,
+        background_len,
+        pool_at_template,
+        target,
+        tip_hash_be: &tip_hash_be,
+        tail_to_reply_us,
+        apply_call_us,
+        durable_sync_us,
+        durable_commit_us,
+        on_connect_us,
+        assembly_us,
+        remainder_us,
+        run,
+        warmup,
+    };
+    report_block_template_sample(&report);
+    reply_at.duration_since(t0)
+}
+
+/// Ledger inputs for one Step-21 sample line. Borrows the connected block and
+/// the tip hash; every other field is a copied scalar.
+struct BlockTemplateReport<'a> {
+    pool_live: usize,
+    background_len: usize,
+    pool_at_template: usize,
+    target: &'a Block,
+    tip_hash_be: &'a str,
+    tail_to_reply_us: u128,
+    apply_call_us: u128,
+    durable_sync_us: u128,
+    durable_commit_us: u128,
+    on_connect_us: u128,
+    assembly_us: u128,
+    remainder_us: u128,
+    run: usize,
+    warmup: bool,
+}
+/// Prints the per-sample JSONL ledger line for one Step-21 sample.
+///
+/// Carries the measured split and pool facts; the boundary excludes HTTP
+/// transport and JSON-RPC framing/auth only.
+fn report_block_template_sample(report: &BlockTemplateReport) {
+    let &BlockTemplateReport {
+        pool_live,
+        background_len,
+        pool_at_template,
+        target,
+        tip_hash_be,
+        tail_to_reply_us,
+        apply_call_us,
+        durable_sync_us,
+        durable_commit_us,
+        on_connect_us,
+        assembly_us,
+        remainder_us,
+        run,
+        warmup,
+    } = report;
+    let micros = |us: u128| u64::try_from(us).unwrap_or(u64::MAX);
+    let line = sonic_rs::to_string(&json!({
+        "bench": "block_to_template_baseline",
+        "sample": run,
+        "warmup": warmup,
+        "engine": std::env::var("BITCOIN_RS_VALIDATION_ENGINE").unwrap_or_else(|_| "native".into()),
+        "pool_txs": pool_live,
+        "background_txs": background_len,
+        "pool_at_template": pool_at_template,
+        "block_txs": target.txs.len(),
+        "block_noncoinbase": target.txs.len().saturating_sub(1),
+        "tip": tip_hash_be,
+        "tail_to_reply_us": micros(tail_to_reply_us),
+        "apply_call_to_reply_us": micros(apply_call_us),
+        "durable_sync_us": micros(durable_sync_us),
+        "durable_commit_us": micros(durable_commit_us),
+        "on_connect_us": micros(on_connect_us),
+        "assembly_us": micros(assembly_us),
+        "remainder_us": micros(remainder_us),
+        "boundary": "in-process RPC Handler::dispatch getblocktemplate response on a per-sample coordinator (parse, readiness, rule negotiation, one service assembly, mandatory-rule checks, JSON render); assembly_us is the single service call the dispatch performs; excludes HTTP transport and JSON-RPC framing/auth only",
+    }))
+    .unwrap_or_else(|error| panic!("render block-to-template sample: {error}"));
+    println!("{line}");
+}
+/// Step-21 block-to-template baseline: connect tail through the first new-tip
+/// template response on a 100k live pool.
+///
+/// Workload: real native regtest `NodeState`, 98,000 background spends plus one
+/// sample's 2,000 target spends (100,000 live) admitted through the production
+/// `sendrawtransaction` gateway path at the current wall-clock time with
+/// validated spendable prevouts; each sample connects a distinct valid block
+/// (coinbase + 2000 admitted spends, 2001 txs) in a fresh state, then takes the
+/// first response from the real in-process RPC handler
+/// (`Handler::dispatch("getblocktemplate", …)` on a `Context` carrying the
+/// per-sample `MiningCoordinator`, regtest network) with
+/// `[{"rules": ["segwit"]}]`.
+///
+/// Measured interval: the production `apply_block: tail begin` event
+/// (`PublishMode::Now` arm entry) through the handler response, split into the
+/// existing `durable_sync_us` / `durable_commit_us` spans, the new
+/// `on_connect_us` span, and decorator-measured `assembly_us` (the single
+/// service call the dispatch performs: selection plus finish plus projection
+/// on a cold cache). The remainder inside the
+/// total covers journal emission, head publication (`publish_applied`), handler
+/// negotiation and JSON rendering above the timed assembly, and bench overhead.
+/// Outside the boundary by construction: HTTP transport and JSON-RPC
+/// framing/auth only.
+///
+/// Protocol: standalone and explicitly selected. This function builds the
+/// corpus and runs 3 warmups plus 10 measured samples exactly once, and only
+/// when the bench binary receives the exact `block_to_template_baseline`
+/// argument; otherwise it returns before any workload or registration.
+/// Nothing is registered with criterion and no criterion measurement is
+/// reported: per-sample JSON lines plus the p50/p95/p99/max summary on stdout
+/// are the ledger.
+/// Invocation: `cargo bench -p bitcoin-rs-node --bench sync_pipeline
+/// block_to_template_baseline -- --nocapture` (default features: fjall).
+fn block_to_template_baseline(_c: &mut Criterion) {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--list" || arg == "--help") {
+        return;
+    }
+    if !args.iter().any(|arg| arg == "block_to_template_baseline") {
+        return;
+    }
+    let corpus = build_block_template_corpus();
+    print_block_template_corpus_summary(&corpus);
+    assert_eq!(
+        corpus.target_blocks.len(),
+        BLOCK_TEMPLATE_WARMUPS.saturating_add(BLOCK_TEMPLATE_SAMPLES),
+        "one distinct target block per warmup and measured sample"
+    );
+    tracing::subscriber::set_global_default(ProfileSubscriber)
+        .unwrap_or_else(|error| panic!("profile subscriber install failed: {error}"));
+    let mut tail_to_reply = Vec::with_capacity(BLOCK_TEMPLATE_SAMPLES);
+    for run in 0..corpus.target_blocks.len() {
+        let sample = run_block_template_sample(&corpus, run, run < BLOCK_TEMPLATE_WARMUPS);
+        if run >= BLOCK_TEMPLATE_WARMUPS {
+            tail_to_reply.push(sample);
+        }
+    }
+    print_percentiles("block_to_template_tail_to_reply", &tail_to_reply);
+}
+
+// ---------------------------------------------------------------------------
+// Step-8 template-render baseline: repeated same-generation service and RPC
+// hits on a fixed 100k resident pool, plus a cold-miss control.
+// ---------------------------------------------------------------------------
+
+/// Step-8 warmup replies: same path, reported, excluded from summaries.
+const TEMPLATE_RENDER_WARMUPS: usize = 3;
+/// Step-8 measured warm-cache samples.
+const TEMPLATE_RENDER_SAMPLES: usize = 10;
+
+/// Transport-neutral template request the warm-cache arms repeat.
+///
+/// Mode `Template` with no capabilities, no caller rules, and no long-poll id.
+/// The RPC arms pass the equivalent `[{"rules": ["segwit"]}]` params through
+/// `Handler::dispatch`, which parses to the same mode; caller rules gate the
+/// mandatory-rule check, not assembly.
+fn template_render_request() -> BlockTemplateRequest {
+    BlockTemplateRequest {
+        mode: BlockTemplateMode::Template,
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    }
+}
+
+/// Untimed serving stack, prefix, and admission for one Step-8 sample.
+///
+/// Builds the production stack as node birth does, replays the corpus prefix,
+/// and admits the background plus the run's target spends (100k live, nothing
+/// connects). The concrete coordinator moves into the trait object, so the
+/// handler and control share its single strong owner while the generation
+/// signal keeps only weak references. The measured arms run in
+/// `run_template_render_sample`.
+struct TemplateRenderSetup {
+    control: Arc<dyn MiningControl>,
+    handler: Handler,
+    params: sonic_rs::Value,
+    pool_live: usize,
+    background_len: usize,
+    tip: Arc<TipSnapshot>,
+}
+
+fn setup_template_render_sample(
+    state: &NodeState,
+    corpus: &BlockTemplateCorpus,
+    run: usize,
+) -> TemplateRenderSetup {
+    let coordinator = Arc::new(MiningCoordinator::new(
+        state.mempool_reader(),
+        state.chainstate(),
+        state.stable_read(),
+        state.chain_followers(),
+        Vec::new(),
+    ));
+    state.attach_mining_coordinator(&coordinator);
+    let control: Arc<dyn MiningControl> = coordinator;
+    let mut rpc_context = Context::new();
+    rpc_context.chain.chain_network = Network::Regtest;
+    let handler = Handler::new(Arc::new(
+        rpc_context.with_mining_control(Arc::clone(&control)),
+    ));
+    let params = json!([{"rules": ["segwit"]}]);
+    for block in &corpus.prefix {
+        state
+            .apply_block(block)
+            .unwrap_or_else(|error| panic!("render prefix apply failed: {error}"));
+    }
+    // Untimed: 98k background admissions at the current wall-clock time.
+    admit_signed_spends(state, &corpus.background);
+    let background_len = state.mempool_reader().read().len();
+    assert_eq!(
+        background_len, BLOCK_TEMPLATE_BACKGROUND_TXS,
+        "render background admitted {background_len} transactions"
+    );
+    assert_admission_residency(state, &corpus.background);
+    // Untimed: this sample's 2000 target spends on the same clock, bringing the
+    // live pool to exactly 100k. Nothing connects: the tip stays the prefix
+    // tip and the pool stays resident for every measured arm.
+    admit_signed_spends(state, &corpus.target_spends[run]);
+    let pool_live = state.mempool_reader().read().len();
+    assert_eq!(
+        pool_live, BLOCK_TEMPLATE_POOL_TXS,
+        "render admission left {pool_live} live transactions"
+    );
+    assert_admission_residency(state, &corpus.target_spends[run]);
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .unwrap_or_else(|| panic!("render sample published no tip"));
+    TemplateRenderSetup {
+        control,
+        handler,
+        params,
+        pool_live,
+        background_len,
+        tip,
+    }
+}
+/// Runs one independent warm-cache sample: fresh state, untimed serving stack
+/// plus prefix plus admission, then one cold-miss dispatch, two warm service
+/// calls, and one warm dispatch.
+///
+/// Setup asserts fail closed: 98k background plus the run's 2000 target spends
+/// (100k live, every spend resident) on the prefix tip with no connect, so all
+/// measured arms serve one fixed generation. Identity asserts fail closed: the
+/// two service calls reuse one cached `Arc<Candidate>` with an unchanged
+/// generation, and the warm RPC reply matches the cold reply on every
+/// deterministic field while `curtime` is checked for permitted evolution,
+/// never strict equality. Returns the four arm timings in order
+/// `(rpc_miss, service_hit, service_hit2, rpc_hit)`.
+fn run_template_render_sample(
+    corpus: &BlockTemplateCorpus,
+    run: usize,
+    warmup: bool,
+) -> (Duration, Duration, Duration, Duration) {
+    let (_dir, state) = open_regtest_state();
+    let TemplateRenderSetup {
+        control,
+        handler,
+        params,
+        pool_live,
+        background_len,
+        tip,
+    } = setup_template_render_sample(&state, corpus, run);
+    let tip_hash_be = tip.hash.to_string_be();
+    let tip_height = tip.height;
+    // Arm 1, cold-miss control: the first dispatch assembles on a cold cache
+    // (selection plus finish plus projection including `signalling_rules`) and
+    // renders the full JSON reply. This warms the generation cache.
+    let cold_started = quanta::Instant::now();
+    let cold_rpc = handler
+        .dispatch("getblocktemplate", &params)
+        .unwrap_or_else(|error| panic!("render cold dispatch failed: {error:?}"));
+    let rpc_miss = cold_started.elapsed();
+    // Arm 2, service hit: the first trait call after the miss. Assembly is
+    // done; this times `signalling_rules` plus `template_from_candidate`
+    // projection only, with no JSON serialization.
+    let svc_started = quanta::Instant::now();
+    let svc_a = control
+        .get_block_template(template_render_request())
+        .unwrap_or_else(|error| panic!("render service hit failed: {error:?}"));
+    let service_hit = svc_started.elapsed();
+    let BlockTemplateResult::Template(template_a) = svc_a else {
+        panic!("render service hit returned a proposal result");
+    };
+    // Arm 3, service-hit proof: the second trait call must reuse the cached
+    // candidate `Arc` with an unchanged generation, proving the timed call in
+    // arm 2 was a pure hit.
+    let svc2_started = quanta::Instant::now();
+    let svc_b = control
+        .get_block_template(template_render_request())
+        .unwrap_or_else(|error| panic!("render service proof call failed: {error:?}"));
+    let service_hit2 = svc2_started.elapsed();
+    let BlockTemplateResult::Template(template_b) = svc_b else {
+        panic!("render service proof call returned a proposal result");
+    };
+    assert_render_service_reuse(&template_a, &template_b, &tip.hash);
+    // Arm 4, RPC warm hit: the second dispatch renders the same generation.
+    // No assembly runs; this times parse, readiness, rule negotiation, the
+    // cache-hit projection, mandatory-rule checks, and JSON render
+    // (`consensus_bytes` plus hex per transaction).
+    let hit_started = quanta::Instant::now();
+    let hit_rpc = handler
+        .dispatch("getblocktemplate", &params)
+        .unwrap_or_else(|error| panic!("render warm dispatch failed: {error:?}"));
+    let rpc_hit = hit_started.elapsed();
+    assert_render_deterministic_fields(&cold_rpc, &hit_rpc);
+    let (cold_curtime, hit_curtime, mintime, cold_lp) = assert_render_reply_identity(
+        &cold_rpc,
+        &hit_rpc,
+        &tip_hash_be,
+        template_a.candidate.template_id.as_str(),
+    );
+    let selected_txs = template_a.candidate.transactions.len();
+    let selected_weight = template_a.candidate.weight;
+    let report = TemplateRenderReport {
+        pool_live,
+        background_len,
+        tip_hash_be: &tip_hash_be,
+        tip_height,
+        cold_lp,
+        selected_txs,
+        selected_weight,
+        hit_rpc: &hit_rpc,
+        cold_curtime,
+        hit_curtime,
+        mintime,
+        rpc_miss,
+        service_hit,
+        service_hit2,
+        rpc_hit,
+        run,
+        warmup,
+    };
+    report_render_sample(&report);
+    (rpc_miss, service_hit, service_hit2, rpc_hit)
+}
+
+/// Proves the two warm service calls shared one cached candidate.
+///
+/// Asserts `Arc` pointer reuse plus unchanged generation identity, tip, and
+/// height, and that the candidate extends the sample tip with a non-empty
+/// selection.
+fn assert_render_service_reuse(
+    template_a: &BlockTemplate,
+    template_b: &BlockTemplate,
+    tip_hash: &Hash256,
+) {
+    assert!(
+        Arc::ptr_eq(&template_a.candidate, &template_b.candidate),
+        "warm service calls must reuse the cached candidate Arc"
+    );
+    assert_eq!(
+        template_a.candidate.template_id.as_str(),
+        template_b.candidate.template_id.as_str(),
+        "warm service calls must keep the generation identity"
+    );
+    assert_eq!(
+        template_a.candidate.previous_block_hash, template_b.candidate.previous_block_hash,
+        "warm service calls must name the same tip"
+    );
+    assert_eq!(
+        template_a.candidate.mempool_sequence, template_b.candidate.mempool_sequence,
+        "warm service calls must keep the mempool sequence"
+    );
+    assert_eq!(
+        template_a.candidate.height, template_b.candidate.height,
+        "warm service calls must keep the candidate height"
+    );
+    assert_eq!(
+        template_a.candidate.previous_block_hash, *tip_hash,
+        "render candidate must extend the prefix tip"
+    );
+    assert_ne!(
+        template_a.candidate.transactions.len(),
+        0,
+        "render candidate must select transactions from the 100k pool"
+    );
+}
+
+/// Asserts every deterministic field matches between the cold and warm
+/// replies, including the full `transactions` array whose `data` hex a
+/// precomputed-hex field must preserve. `curtime` is excluded here and
+/// checked separately for permitted evolution.
+fn assert_render_deterministic_fields(cold_rpc: &sonic_rs::Value, hit_rpc: &sonic_rs::Value) {
+    for key in [
+        "version",
+        "rules",
+        "vbavailable",
+        "capabilities",
+        "vbrequired",
+        "previousblockhash",
+        "transactions",
+        "coinbaseaux",
+        "coinbasevalue",
+        "longpollid",
+        "target",
+        "mintime",
+        "mutable",
+        "noncerange",
+        "sigoplimit",
+        "sizelimit",
+        "weightlimit",
+        "bits",
+        "height",
+        "signet_challenge",
+        "default_witness_commitment",
+    ] {
+        assert_eq!(
+            cold_rpc.get(key),
+            hit_rpc.get(key),
+            "warm RPC hit changed deterministic field {key}"
+        );
+    }
+}
+
+/// Checks warm-hit time evolution and generation identity, returning the
+/// stamped times and the cold generation id for the ledger.
+///
+/// `curtime` is never strictly equated: the candidate clock reads the wall
+/// clock at assembly with no injection point, so a same-generation hit only
+/// promises monotonicity (`hit >= cold`) with both stamps at or above the
+/// chain-determined `mintime`.
+fn assert_render_reply_identity<'a>(
+    cold_rpc: &'a sonic_rs::Value,
+    hit_rpc: &sonic_rs::Value,
+    tip_hash_be: &str,
+    template_id: &str,
+) -> (u64, u64, u64, &'a str) {
+    let cold_curtime = cold_rpc
+        .get("curtime")
+        .and_then(JsonValueTrait::as_u64)
+        .unwrap_or_else(|| panic!("cold render reply lacks curtime"));
+    let hit_curtime = hit_rpc
+        .get("curtime")
+        .and_then(JsonValueTrait::as_u64)
+        .unwrap_or_else(|| panic!("warm render reply lacks curtime"));
+    let cold_mintime = cold_rpc
+        .get("mintime")
+        .and_then(JsonValueTrait::as_u64)
+        .unwrap_or_else(|| panic!("cold render reply lacks mintime"));
+    let hit_mintime = hit_rpc
+        .get("mintime")
+        .and_then(JsonValueTrait::as_u64)
+        .unwrap_or_else(|| panic!("warm render reply lacks mintime"));
+    assert_eq!(
+        cold_mintime, hit_mintime,
+        "mintime is chain-determined and must not move on a warm hit"
+    );
+    assert!(
+        hit_curtime >= cold_curtime,
+        "warm-hit curtime {hit_curtime} must not go below cold {cold_curtime}"
+    );
+    assert!(
+        hit_curtime >= hit_mintime,
+        "warm-hit curtime {hit_curtime} must sit at or above mintime {hit_mintime}"
+    );
+    assert!(
+        cold_curtime >= cold_mintime,
+        "cold curtime {cold_curtime} must sit at or above mintime {cold_mintime}"
+    );
+    let cold_prev = cold_rpc
+        .get("previousblockhash")
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or_else(|| panic!("cold render reply lacks previousblockhash"));
+    let hit_prev = hit_rpc
+        .get("previousblockhash")
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or_else(|| panic!("warm render reply lacks previousblockhash"));
+    assert_eq!(
+        cold_prev, tip_hash_be,
+        "cold render reply must name the prefix tip"
+    );
+    assert_eq!(
+        hit_prev, tip_hash_be,
+        "warm render reply must name the prefix tip"
+    );
+    let cold_lp = cold_rpc
+        .get("longpollid")
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or_else(|| panic!("cold render reply lacks longpollid"));
+    let hit_lp = hit_rpc
+        .get("longpollid")
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or_else(|| panic!("warm render reply lacks longpollid"));
+    assert_eq!(
+        cold_lp, hit_lp,
+        "warm hit must keep the cold reply's generation identity"
+    );
+    assert_eq!(
+        cold_lp, template_id,
+        "RPC longpollid must equal the served candidate generation"
+    );
+    (cold_curtime, hit_curtime, hit_mintime, cold_lp)
+}
+
+/// Ledger inputs for one Step-8 sample line. Borrows the rendered reply and
+/// the generation id; every other field is a copied scalar.
+struct TemplateRenderReport<'a> {
+    pool_live: usize,
+    background_len: usize,
+    tip_hash_be: &'a str,
+    tip_height: u32,
+    cold_lp: &'a str,
+    selected_txs: usize,
+    selected_weight: u64,
+    hit_rpc: &'a sonic_rs::Value,
+    cold_curtime: u64,
+    hit_curtime: u64,
+    mintime: u64,
+    rpc_miss: Duration,
+    service_hit: Duration,
+    service_hit2: Duration,
+    rpc_hit: Duration,
+    run: usize,
+    warmup: bool,
+}
+/// Records selection facts and prints the per-sample JSONL ledger line.
+///
+/// The rendered transaction count must equal the semantic selection, and the
+/// `data` byte total bounds the serialization work Step 8.1 targets.
+fn report_render_sample(report: &TemplateRenderReport) {
+    let &TemplateRenderReport {
+        pool_live,
+        background_len,
+        tip_hash_be,
+        tip_height,
+        cold_lp,
+        selected_txs,
+        selected_weight,
+        hit_rpc,
+        cold_curtime,
+        hit_curtime,
+        mintime,
+        rpc_miss,
+        service_hit,
+        service_hit2,
+        rpc_hit,
+        run,
+        warmup,
+    } = report;
+    let rpc_array = hit_rpc
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .unwrap_or_else(|| panic!("warm render reply lacks transactions array"));
+    let rpc_txs = rpc_array.len();
+    assert_eq!(
+        rpc_txs, selected_txs,
+        "RPC transactions must render every selected candidate transaction"
+    );
+    let mut rpc_data_bytes: usize = 0;
+    for index in 0..rpc_array.len() {
+        let data_len = rpc_array[index]
+            .get("data")
+            .and_then(JsonValueTrait::as_str)
+            .unwrap_or_else(|| panic!("warm render transaction lacks data"))
+            .len();
+        rpc_data_bytes = rpc_data_bytes.saturating_add(data_len / 2);
+    }
+    let micros = |us: u128| u64::try_from(us).unwrap_or(u64::MAX);
+    let line = sonic_rs::to_string(&json!({
+        "bench": "template_render_baseline",
+        "sample": run,
+        "warmup": warmup,
+        "engine": std::env::var("BITCOIN_RS_VALIDATION_ENGINE").unwrap_or_else(|_| "native".into()),
+        "pool_txs": pool_live,
+        "background_txs": background_len,
+        "pool_at_template": pool_live,
+        "selected_txs": selected_txs,
+        "selected_weight": selected_weight,
+        "rpc_txs": rpc_txs,
+        "rpc_data_bytes": rpc_data_bytes,
+        "tip": tip_hash_be,
+        "tip_height": tip_height,
+        "longpollid": cold_lp,
+        "rpc_miss_us": micros(rpc_miss.as_micros()),
+        "service_hit_us": micros(service_hit.as_micros()),
+        "service_hit2_us": micros(service_hit2.as_micros()),
+        "rpc_hit_us": micros(rpc_hit.as_micros()),
+        "cold_curtime": cold_curtime,
+        "hit_curtime": hit_curtime,
+        "mintime": mintime,
+        "arc_reuse": true,
+        "boundary_rpc_miss": "in-process Handler::dispatch cold miss: parse, readiness, rule negotiation, one service assembly (selection plus finish plus projection including signalling_rules), mandatory-rule checks, JSON render (consensus_bytes plus hex per tx); warms the generation cache; excludes HTTP transport and JSON-RPC framing/auth only",
+        "boundary_service_hit": "MiningControl::get_block_template hit on the warm generation: signalling_rules plus template_from_candidate projection only; no assembly, no JSON",
+        "boundary_rpc_hit": "in-process Handler::dispatch warm hit on the same generation: parse, readiness, rule negotiation, cache-hit projection, mandatory-rule checks, JSON render; no assembly; excludes HTTP transport and JSON-RPC framing/auth only",
+        "time_note": "candidate_context reads the wall clock (current_unix_seconds, no injection); the warm hit reuses the cached Arc so curtime matches today; asserted as hit >= cold and both >= mintime, never strict equality",
+    }))
+    .unwrap_or_else(|error| panic!("render template_render sample: {error}"));
+    println!("{line}");
+}
+/// Step-8 template-render baseline: repeated same-generation hits on a 100k
+/// resident pool.
+///
+/// Workload: real native regtest `NodeState`, 98,000 background spends plus one
+/// sample's 2,000 target spends (100,000 live) admitted through the production
+/// `sendrawtransaction` gateway path at the current wall-clock time with
+/// validated spendable prevouts, on the shared frozen Step-21 corpus
+/// (`build_block_template_corpus`; prefix tip 132, heights below the regtest
+/// halving at 150). Nothing connects: the tip stays the prefix tip and the
+/// pool stays resident, so every measured arm serves one fixed generation
+/// through the real production `MiningCoordinator` (via the `MiningControl`
+/// trait) and the real in-process RPC `Handler::dispatch("getblocktemplate",
+/// [{"rules": ["segwit"]}])`.
+///
+/// Arms per sample, timed separately with `quanta` and reported as distinct
+/// JSONL fields: `rpc_miss_us` (first dispatch, cold: assembly plus render),
+/// `service_hit_us` (first trait call after the miss: projection only),
+/// `service_hit2_us` (second trait call: `Arc` reuse proof and hit stability),
+/// `rpc_hit_us` (second dispatch: render on the warm cache). The service-hit
+/// versus RPC-hit difference isolates the per-reply serialization cost Step
+/// 8.1 targets (`consensus_bytes` plus hex per transaction in
+/// `render_template_transactions`); the signalling skip lives inside the
+/// service-hit projection. Identity: `Arc::ptr_eq` plus unchanged
+/// `template_id`, tip hash, mempool sequence, and height for the service hits;
+/// strict equality on every deterministic RPC field (including the full
+/// `transactions` array) with `curtime` checked for permitted evolution
+/// (`hit >= cold`, both `>= mintime`), never strict equality, because the
+/// candidate clock has no injection point. Counts recorded per sample:
+/// resident pool, selected transactions and candidate weight, rendered
+/// transactions and `data` byte total.
+///
+/// Protocol: standalone and explicitly selected. This function builds the
+/// corpus and runs 3 warmups plus 10 measured samples exactly once, and only
+/// when the bench binary receives the exact `template_render_baseline`
+/// argument; otherwise it returns before any workload or registration.
+/// Nothing is registered with criterion and no criterion measurement is
+/// reported: per-sample JSON lines plus per-arm p50/p95/p99/max summaries on
+/// stdout are the ledger. The same command runs the baseline and the
+/// candidate trees; the parent labels the runs.
+/// Invocation: `cargo bench -p bitcoin-rs-node --bench sync_pipeline
+/// template_render_baseline -- --nocapture` (default features: fjall).
+fn template_render_baseline(_c: &mut Criterion) {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--list" || arg == "--help") {
+        return;
+    }
+    if !args.iter().any(|arg| arg == "template_render_baseline") {
+        return;
+    }
+    let corpus = build_block_template_corpus();
+    print_block_template_corpus_summary(&corpus);
+    assert_eq!(
+        corpus.target_spends.len(),
+        TEMPLATE_RENDER_WARMUPS.saturating_add(TEMPLATE_RENDER_SAMPLES),
+        "one distinct resident pool per warmup and measured sample"
+    );
+    let mut rpc_miss = Vec::with_capacity(TEMPLATE_RENDER_SAMPLES);
+    let mut service_hit = Vec::with_capacity(TEMPLATE_RENDER_SAMPLES);
+    let mut service_hit2 = Vec::with_capacity(TEMPLATE_RENDER_SAMPLES);
+    let mut rpc_hit = Vec::with_capacity(TEMPLATE_RENDER_SAMPLES);
+    for run in 0..corpus.target_spends.len() {
+        let (miss, hit, hit2, rhit) =
+            run_template_render_sample(&corpus, run, run < TEMPLATE_RENDER_WARMUPS);
+        if run >= TEMPLATE_RENDER_WARMUPS {
+            rpc_miss.push(miss);
+            service_hit.push(hit);
+            service_hit2.push(hit2);
+            rpc_hit.push(rhit);
+        }
+    }
+    print_percentiles("template_render_rpc_miss", &rpc_miss);
+    print_percentiles("template_render_service_hit", &service_hit);
+    print_percentiles("template_render_service_hit2", &service_hit2);
+    print_percentiles("template_render_rpc_hit", &rpc_hit);
+}
+
 criterion_group!(
     benches,
     sync_pipeline_apply_proxy,
     sync_pipeline_apply_signed_spend_proxy,
     deterministic_initial_sync_proxy,
-    block_source_height_lookup
+    block_source_height_lookup,
+    connect_admitted_signed_spend_block,
+    connect_unseen_signed_spend_block,
+    connect_admission_throughput,
+    block_to_template_baseline,
+    template_render_baseline
 );
 criterion_main!(benches);

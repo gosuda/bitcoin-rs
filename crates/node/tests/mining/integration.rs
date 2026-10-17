@@ -11,11 +11,12 @@ use parking_lot::Mutex;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use super::support::{
-    MEMPOOL_TX_FEE_SATS, REGTEST_SUBSIDY_SATS, SEED_BLOCKS, WITNESS_RESERVED, admit_to_mempool,
-    apply_genesis, assemble_from_template, assemble_regtest_block, compute_witness_merkle_root,
-    current_tip, mine_regtest_block, mining_handler, open_regtest, p2sh_true_output,
-    p2sh_true_spend_script_sig, required_str, required_u64, seed_chain, seed_coinbase_spend,
-    seed_coinbase_spend_with_fee,
+    LongPollId, MEMPOOL_TX_FEE_SATS, PRIORITY_DELTA_SATS, REGTEST_SUBSIDY_SATS, SEED_BLOCKS,
+    WITNESS_RESERVED, admit_to_mempool, apply_genesis, assemble_from_template,
+    assemble_regtest_block, compute_witness_merkle_root, current_tip, gbt_view, live_long_poll_id,
+    mine_regtest_block, mining_handler, open_regtest, p2sh_true_output, p2sh_true_spend_script_sig,
+    priority_fixture, required_str, required_u64, seed_chain, seed_coinbase_spend,
+    seed_coinbase_spend_with_fee, txid_strings,
 };
 
 #[test]
@@ -105,10 +106,16 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
     // 5. BIP141 witness commitment derivation and longpollid.
     assert_template_witness_commitment(&template, &mempool_tx)?;
     let long_poll_id = required_str(&template, "longpollid")?;
-    assert!(long_poll_id.len() > 64 && long_poll_id.starts_with(&seed_tip_hash.to_string_be()));
-    long_poll_id[64..]
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("invalid longpollid sequence"))?;
+    assert_eq!(
+        LongPollId::parse(&long_poll_id)?.tip,
+        seed_tip_hash.to_string_be(),
+        "longpollid starts with the applied tip hash"
+    );
+    assert_eq!(
+        long_poll_id,
+        live_long_poll_id(&state)?,
+        "longpollid is {{tip}}{{mempool_sequence}}[:{{fee_delta_sequence}}] of the live pool"
+    );
 
     // A fee-only RPC change refreshes the cached identity without moving membership.
     let sequence = state.mempool().read().sequence_number();
@@ -598,5 +605,82 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
         "one-block conf target estimates within one block"
     );
 
+    Ok(())
+}
+
+/// The miner's view through the real RPC dispatcher: `prioritisetransaction`
+/// reorders the next `getblocktemplate`, leaves the fees the coinbase claims
+/// alone, and moves only the fee-priority component of `longpollid`. Undoing
+/// the delta restores the order under a third, distinct generation.
+#[test]
+fn prioritisetransaction_reorders_the_rpc_template_and_moves_only_the_fee_component() -> Result<()>
+{
+    let fx = priority_fixture()?;
+    let before = fx.template()?;
+    assert_eq!(before.txids, txid_strings(&[&fx.high, &fx.low]));
+
+    fx.prioritise(&fx.low, PRIORITY_DELTA_SATS)?;
+    let raised = fx.template()?;
+    assert_eq!(
+        raised.txids,
+        txid_strings(&[&fx.low, &fx.high]),
+        "the prioritised transaction must lead the next template"
+    );
+    assert_eq!(
+        raised.fees.iter().rev().copied().collect::<Vec<_>>(),
+        before.fees,
+        "prioritisation reorders; it never changes the fee a transaction pays"
+    );
+    assert_eq!(raised.coinbase_value, before.coinbase_value);
+    let (before_id, raised_id) = (before.id()?, raised.id()?);
+    assert_eq!(raised_id.tip, before_id.tip);
+    assert_eq!(raised_id.mempool_sequence, before_id.mempool_sequence);
+    assert_ne!(raised_id.fee_delta_sequence, before_id.fee_delta_sequence);
+    assert_eq!(raised.long_poll_id, live_long_poll_id(&fx.state)?);
+
+    fx.prioritise(&fx.low, -PRIORITY_DELTA_SATS)?;
+    let restored = fx.template()?;
+    assert_eq!(
+        restored.txids, before.txids,
+        "removing the delta restores the order"
+    );
+    assert_ne!(
+        restored.long_poll_id, raised.long_poll_id,
+        "the fee component only moves forward; a generation never repeats"
+    );
+    assert_ne!(restored.long_poll_id, before.long_poll_id);
+    Ok(())
+}
+
+/// A miner that still sends the legacy `longpollid` shape without a fee
+/// component is answered through the real RPC dispatcher: the id parses as
+/// fee revision zero.
+#[test]
+fn getblocktemplate_accepts_the_legacy_longpollid_shape_as_fee_zero() -> Result<()> {
+    let fx = priority_fixture()?;
+    let current = fx.template()?;
+    // No prioritisation has run, so the live fee revision is zero and the
+    // live id already carries no suffix: it is the legacy shape.
+    assert!(
+        !current.long_poll_id.contains(':'),
+        "precondition: the live id {:?} carries no fee suffix",
+        current.long_poll_id
+    );
+    // A prioritisation moves only the fee component, so the previous legacy
+    // id is stale and must resolve at once instead of failing as malformed.
+    // No wait is involved, so the check is synchronous.
+    fx.prioritise(&fx.low, PRIORITY_DELTA_SATS)?;
+    let handler = Arc::clone(&fx.wired.handler);
+    let legacy = current.long_poll_id;
+    let answered = gbt_view(&handler, Some(&legacy))?;
+    assert_ne!(
+        answered.long_poll_id, legacy,
+        "a legacy id must resolve against the fee-zero generation, not fail as malformed"
+    );
+    assert_eq!(
+        answered.txids,
+        txid_strings(&[&fx.low, &fx.high]),
+        "the stale legacy id must be answered with the reordered template"
+    );
     Ok(())
 }

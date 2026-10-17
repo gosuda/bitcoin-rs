@@ -32,8 +32,8 @@ pub struct TxOut {
 /// A Bitcoin transaction in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tx {
-    /// Transaction version.
-    pub version: i32,
+    /// Transaction version (the unsigned wire value).
+    pub version: u32,
     /// Inputs in consensus order.
     pub inputs: Vec<TxIn>,
     /// Outputs in consensus order.

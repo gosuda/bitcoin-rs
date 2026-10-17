@@ -12,11 +12,11 @@ use bitcoin::secp256k1::rand::rngs::StdRng;
 
 use super::configure_peer_stream;
 use super::{
-    ConnectionShared, bind_listener, run_outbound_handshake, serve,
+    ConnectionShared, bind_listener, run_message_loop, run_outbound_handshake, serve,
     spawn_pinned_outbound_connection, test_shared,
 };
 use crate::bip324::Handshake;
-use crate::transport::{Negotiated, TransportProtocol, establish};
+use crate::transport::{Negotiated, SendTransport, TransportProtocol, establish};
 use crate::{Message, Peer, PeerError, PeerLease, PeerRole, PeerTable};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -66,7 +66,8 @@ fn connect(addr: SocketAddr) -> Result<TcpStream, Box<dyn std::error::Error>> {
     Ok(stream)
 }
 
-/// Reads until `wanted` arrives, skipping other messages and poll timeouts.
+/// Reads until `wanted` arrives, skipping other messages, decoy/undefined v2
+/// packets, and poll timeouts.
 fn read_until(
     peer: &mut Peer<TcpStream>,
     wanted: &Message,
@@ -74,7 +75,7 @@ fn read_until(
     let deadline = deadline();
     while Instant::now() < deadline {
         match peer.read_message() {
-            Ok((message, _)) if &message == wanted => return Ok(()),
+            Ok(Some((message, _))) if &message == wanted => return Ok(()),
             Ok(_) => {}
             Err(PeerError::Io(error))
                 if matches!(
@@ -265,3 +266,126 @@ fn a_silent_responder_ends_at_the_handshake_deadline() -> TestResult {
     assert!(started.elapsed() < Duration::from_secs(10));
     Ok(())
 }
+
+/// A peer that seals one decoy every 10 ms pins no session: after the
+/// handshake, cancelling the lease ends `run_message_loop` promptly even
+/// though the peer never sends a message packet.
+#[test]
+fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
+    let server = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let addr = server.local_addr()?;
+    // A nonblocking accept keeps a failed test from pinning the writer in
+    // `accept` past cleanup.
+    server.set_nonblocking(true)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_lease = lease();
+    let cancel_writer = writer_lease.clone();
+    let writer_stop = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || -> Result<(), String> {
+        let (stream, _) = loop {
+            match server.accept() {
+                Ok(pair) => break pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if writer_stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        configure_peer_stream(&stream).map_err(|error| error.to_string())?;
+        let mut stream = stream;
+        let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(4));
+        let negotiated = establish(
+            &mut stream,
+            &mut handshake,
+            MAGIC,
+            &cancel_writer,
+            deadline(),
+        )
+        .map_err(|error| error.to_string())?;
+        if !matches!(negotiated.protocol, TransportProtocol::V2 { .. }) {
+            return Err("expected a v2 transport".into());
+        }
+        // A real version handshake, as the file's outbound-dial test shows;
+        // only afterwards does the peer turn into a decoy-only sender.
+        let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+        crate::handshake::run_inbound_handshake(
+            &mut peer,
+            9,
+            0,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            &cancel_writer,
+            deadline(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut cipher = match peer.take_send_transport() {
+            Some(SendTransport::V2(cipher)) => cipher,
+            _ => return Err("expected a v2 send transport".into()),
+        };
+        // One decoy packet every 10 ms until the test stops us; the peer
+        // never sends a message packet. A write that fails after `stop` is
+        // the loop side closing under us, not a test failure.
+        while !writer_stop.load(Ordering::Relaxed) {
+            let decoy = cipher
+                .seal(&[0; 16], &[], true)
+                .map_err(|error| error.to_string())?;
+            match std::io::Write::write_all(&mut peer.stream, &decoy) {
+                Ok(()) => {}
+                Err(_) if writer_stop.load(Ordering::Relaxed) => return Ok(()),
+                Err(error) => return Err(error.to_string()),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    });
+
+    // The fallible body runs first so the writer is always stopped and joined,
+    // even when the handshake or the loop fails.
+    let result = (|| -> Result<(Result<(), PeerError>, Duration), Box<dyn std::error::Error>> {
+        let mut stream = connect(addr)?;
+        let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(5));
+        let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
+        if !matches!(negotiated.protocol, TransportProtocol::V2 { .. }) {
+            return Err("expected a v2 transport".into());
+        }
+
+        // Drive the session loop like the live connection: version handshake,
+        // then `run_message_loop` over the decoy flood. A second lease clone
+        // cancels from the outside while the loop sits in its read.
+        let (client, _) = shared(false);
+        let lease = lease();
+        let cancel_handle = lease.clone();
+        let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+        run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
+        let loop_handle =
+            std::thread::spawn(move || run_message_loop(&mut peer, addr, &lease, &client, None));
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        cancel_handle.cancel();
+        let outcome = loop_handle
+            .join()
+            .map_err(|_| -> Box<dyn std::error::Error> { "loop panicked".into() })?;
+        Ok((outcome, started.elapsed()))
+    })();
+    stop.store(true, Ordering::Relaxed);
+    writer_lease.cancel();
+    writer
+        .join()
+        .map_err(|_| -> Box<dyn std::error::Error> { "decoy writer panicked".into() })?
+        .map_err(|error| format!("decoy writer failed: {error}"))?;
+    let (outcome, elapsed) = result?;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "lease cancel must end a decoy-only session promptly"
+    );
+    Ok(())
+}
+
+// The pre-version decoy deadline case lives beside the handshake it feeds, as
+// `bip324::handshake::tests::decoys_never_hold_the_handshake_past_the_deadline`:
+// sealing a pre-version decoy stream needs the initiator session, which only
+// that module can reach. A socket-level writer here could only send
+// post-handshake decoys, which `establish` never waits on.

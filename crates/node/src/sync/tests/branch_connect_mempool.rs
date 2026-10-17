@@ -171,6 +171,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Some(stream.clone()),
         ValidationEngine::Native,
+        None,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
         Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
@@ -275,6 +276,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
+            script_cache: None,
             journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,
@@ -321,7 +323,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Arc::new(nonfinal),
         bitcoin_rs_mempool::AdmissionOrigin::Rpc,
         None,
-        1,
+        bitcoin_rs_primitives::unix_time_secs(),
         &view,
     );
     assert!(

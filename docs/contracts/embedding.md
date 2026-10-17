@@ -78,6 +78,12 @@ the first embedder — there is one lifecycle implementation, not two.
   started on the same data dir afterwards resumes from that checkpoint.
   Dropping a node without `shutdown` runs the same teardown in
   `StartupAbort` mode — services joined, storage released, no checkpoint.
+  The data directory stays locked until the last handle to any of the node's
+  stores is dropped, not until `shutdown` returns: every store carries the
+  `.lock` guard and drops it after its own handle closes, so a detached
+  consumer (an idle keep-alive RPC connection until it closes or the RPC idle
+  timeout) keeps the directory locked, and a start meanwhile fails with
+  `DataDirLockError::InUse`, never with a backend store-lock error.
 - **EMB-08 — Mutations wake the template coordinator.** The
   `bitcoin_rs_mining::MiningGenerationSignal` (crates/mining/src/generation_signal.rs),
   constructed and wired by node, fans every
@@ -186,6 +192,16 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
 - `crates/node/tests/embed.rs::dropped_node_releases_services_and_datadir_for_reopen`
   and `startup_failure_after_state_open_rolls_back_releases_state` exercise
   abandoned-run cleanup and startup rollback.
+- `crates/node/tests/unit/state/tests/data_dir_lock.rs`
+  (`idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown`,
+  `retained_chainstate_handle_keeps_the_directory_locked_until_dropped`,
+  `retained_block_body_store_keeps_the_directory_locked_until_dropped`,
+  `block_files_alone_keep_the_directory_locked_until_dropped`,
+  `retained_index_query_adapter_keeps_the_directory_locked_until_dropped`,
+  `index_open_spec_and_opened_store_each_keep_the_directory_locked`) prove the
+  lock lifetime against a retained RPC connection, chainstate handle,
+  block-body store, block files, index query adapter, and the index open spec
+  and store opened on a worker thread.
 - `crates/node/tests/unit/lifecycle/tests.rs` contains checkpoint failure,
   worker join failure, daemon/embedded identity, repeated teardown, rollback,
   queued-wake, and owned-startup-result regressions.

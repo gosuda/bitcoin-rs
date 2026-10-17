@@ -7,6 +7,8 @@ extern crate alloc;
 mod accounting;
 /// Shared transaction preparation, retries, and gateway lifecycle queries.
 mod admission;
+/// Maintained per-cluster chunk order and the one global chunk index.
+mod chunk_index;
 /// Mempool entry metadata.
 mod entry;
 /// Package eviction policy.
@@ -25,8 +27,6 @@ mod mutation;
 mod orphan;
 /// Package shape and ephemeral-spend policy.
 mod package;
-/// Pareto-front transaction priority ordering.
-mod pareto;
 /// Mempool policy limits.
 mod policy;
 /// Mempool indexes and mutation API.
@@ -35,6 +35,8 @@ mod pool;
 mod rbf;
 /// Cloneable read-only capability over the mempool.
 mod reader;
+/// Core rolling minimum fee state machine.
+mod rolling_min_fee;
 /// Transaction relay standardness policy.
 pub mod standardness;
 mod submit_package;
@@ -44,6 +46,7 @@ mod truc;
 pub use admission::{
     AdmissionChain, ChainAdmissionSnapshot, OrphanRetry, PrevoutMeta, SubmitError, SubmitOutcome,
 };
+pub use chunk_index::{ChunkView, ProjectedChunks};
 pub use entry::{EntryId, MempoolEntry};
 pub(crate) use eviction::evict_lowest_fee_packages;
 pub use fee_diagram::FeeDiagramError;
@@ -58,10 +61,9 @@ pub use mutation::{
     AdmissionOrigin, LocalOrigin, MutationChange, MutationEnvelope, MutationOutcome,
     MutationResult, PeerToken, RemovalReason,
 };
-pub(crate) use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};
 pub use pool::{
-    Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats, OutpointSpender,
+    BlockRemovalPlan, Mempool, MempoolError, MempoolMiningSnapshot, MempoolStats, OutpointSpender,
     PrioritiseError, PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
 pub use rbf::{RbfError, required_fee};

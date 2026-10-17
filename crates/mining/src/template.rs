@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
-use bitcoin_rs_mempool::MempoolMiningSnapshot;
+use bitcoin_rs_mempool::{BlockRemovalPlan, Mempool, MempoolMiningSnapshot};
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
-    encode::double_sha256, varint,
+    encode::{consensus_bytes, double_sha256, hex_encode},
+    varint,
 };
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashMap;
@@ -51,7 +52,8 @@ pub struct CandidateContext {
 pub struct TemplateId(String);
 
 impl TemplateId {
-    /// Builds the identity for `previous_block_hash` and `mempool_sequence`.
+    /// Builds the identity for `previous_block_hash` and `mempool_sequence`,
+    /// implying fee revision zero.
     #[must_use]
     pub fn new(previous_block_hash: &Hash256, mempool_sequence: u64) -> Self {
         Self::with_fee_revision(previous_block_hash, mempool_sequence, 0)
@@ -96,12 +98,17 @@ pub struct CandidateTransaction {
     pub weight: u64,
     /// One-based indexes of in-candidate ancestors.
     pub depends: Vec<u32>,
+    /// Canonical consensus serialization as lowercase hex, precomputed once in
+    /// `finish_candidate` after the pool read guard is released and reused by
+    /// RPC rendering so a cache hit never re-serializes. `Arc<Tx>` is retained
+    /// for block submission.
+    pub data_hex: String,
 }
 
 /// Transport-neutral assembled block candidate.
 #[derive(Debug)]
 pub struct Candidate {
-    /// Generation identity for this tip and mempool sequence.
+    /// Generation identity for this tip, mempool sequence, and fee-delta sequence.
     pub template_id: TemplateId,
     /// Parent tip hash.
     pub previous_block_hash: Hash256,
@@ -184,19 +191,73 @@ pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError>
     Err(MiningError::Unsolved { tries: max_tries })
 }
 
-/// Assembles one transport-neutral candidate from a chain context and snapshot.
+/// Assembles one transport-neutral candidate from a chain context and the live
+/// pool.
 ///
-/// Selection is package-atomic, topologically ordered, final under
+/// Selection walks the pool's maintained chunk index under the caller's read
+/// guard and copies only the selected transactions; the reservation, coinbase,
+/// Merkle roots, and witness commitment finish from the owned body. Selection
+/// is package-atomic, topologically ordered, final under
 /// `context.locktime_cutoff`, and bounded by weight, serialized size, and
 /// sigop cost. Modified fees rank packages; actual fees fund the coinbase.
 pub fn assemble_candidate(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
+    pool: &Mempool,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
+    let body = select_template_body(pool, context, payout)?;
+    finish_candidate(context, &body, payout)
+}
+
+/// Selects the template body from the live pool under the caller's read guard.
+///
+/// Reserves the header and coinbase, walks the maintained chunk index, and
+/// copies only the selected transactions into the returned body.
+pub fn select_template_body(
+    pool: &Mempool,
+    context: &CandidateContext,
+    payout: &[u8],
+) -> Result<SelectedBody, MiningError> {
     let reservation = fixed_reservation(context, payout)?;
-    let body = select_packages(context, snapshot, reservation)?;
-    finish_candidate(context, snapshot, payout, &body, reservation)
+    let sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
+    let body = select_packages(
+        context,
+        pool,
+        pool.chunks_by_feerate(),
+        sequences,
+        reservation,
+    )?;
+    Ok(body)
+}
+
+/// Selects the template body as if `plan` had applied, without mutating the pool.
+///
+/// Builds the projection owner for `plan`, walks its borrowed iteration
+/// through the same selection engine the live path uses, and returns the owned
+/// body. The body carries the predicted post-removal generation: the source
+/// membership sequence wrapping past exactly the planned removals, and the
+/// source fee-delta sequence wrapping past the fee overlays the block lifecycle
+/// clears. Unrelated prioritisation still invalidates the prediction at
+/// install. The projection owner lives only for the selection; the returned
+/// body owns its transactions.
+pub fn select_template_body_after(
+    pool: &Mempool,
+    plan: &BlockRemovalPlan,
+    context: &CandidateContext,
+    payout: &[u8],
+) -> Result<SelectedBody, MiningError> {
+    let reservation = fixed_reservation(context, payout)?;
+    let projected = pool.chunks_after(plan);
+    let removals =
+        u64::try_from(plan.removals.len()).map_err(|_| MiningError::CandidateScalarOverflow {
+            field: "transaction count",
+        })?;
+    let sequences = (
+        pool.sequence_number().wrapping_add(removals),
+        pool.fee_delta_sequence_number()
+            .wrapping_add(plan.fee_deltas_cleared),
+    );
+    select_packages(context, pool, projected.iter(), sequences, reservation)
 }
 
 /// Assembles a candidate whose non-coinbase body is `snapshot.entries` in order.
@@ -210,32 +271,54 @@ pub fn assemble_ordered_candidate(
 ) -> Result<Candidate, MiningError> {
     let reservation = fixed_reservation(context, payout)?;
     let body = exact_order(context, snapshot, reservation)?;
-    finish_candidate(context, snapshot, payout, &body, reservation)
+    finish_candidate(context, &body, payout)
 }
 
 // The fixed block header and coinbase are reserved before selecting the body.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct FixedReservation {
     pub(crate) weight: u64,
     pub(crate) size: u64,
     pub(crate) sigops: u64,
 }
 
-#[cfg(test)]
-impl FixedReservation {
-    /// Zero reservation for callers that select without a header or coinbase.
-    pub(crate) const EMPTY: Self = Self {
-        weight: 0,
-        size: 0,
-        sigops: 0,
-    };
+/// One non-coinbase transaction copied out of the pool under the read guard.
+#[derive(Debug)]
+pub struct SelectedTx {
+    /// Transaction payload shared with the pool entry by `Arc`.
+    pub tx: Arc<Tx>,
+    /// Transaction id.
+    pub txid: Txid,
+    /// Witness transaction id.
+    pub wtxid: Wtxid,
+    /// Actual fee in satoshis.
+    pub fee: u64,
+    /// Consensus sigop cost.
+    pub sigop_cost: u32,
+    /// Consensus transaction weight.
+    pub weight: u64,
 }
 
-pub(crate) struct SelectedBody {
-    pub(crate) ordered: Vec<usize>,
-    pub(crate) fees: u64,
+/// Dependency-closed body selected under the pool read guard.
+///
+/// Holds the selected transactions in topological order, with both pool
+/// sequences they were read at and the reservation they were checked against.
+/// The guard is released before the candidate finishes from this owned body.
+#[derive(Debug)]
+pub struct SelectedBody {
+    /// Pool mempool sequence captured with the selection.
+    pub sequence: u64,
+    /// Pool fee-delta sequence captured with the selection, under the same
+    /// read guard as `sequence`.
+    pub fee_delta_sequence: u64,
+    /// Selected transactions in topological order.
+    pub transactions: Vec<SelectedTx>,
+    /// Sum of actual fees funding the coinbase.
+    pub fees: u64,
     // Include the exact CompactSize transaction count as well as body transactions.
-    pub(crate) weight: u64,
+    pub weight: u64,
+    /// Header and coinbase reservation the selection was checked against.
+    pub(crate) reservation: FixedReservation,
 }
 
 /// Size of the block transaction count, including its reserved coinbase.
@@ -332,23 +415,36 @@ fn exact_order(
     if reservation.sigops.saturating_add(sigops) > context.max_sigops {
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
+    let transactions = snapshot
+        .entries
+        .iter()
+        .map(|entry| SelectedTx {
+            tx: Arc::clone(&entry.tx),
+            txid: entry.txid,
+            wtxid: entry.wtxid,
+            fee: entry.fee,
+            sigop_cost: entry.sigop_cost,
+            weight: entry.weight,
+        })
+        .collect();
     Ok(SelectedBody {
-        ordered: (0..snapshot.entries.len()).collect(),
+        sequence: snapshot.sequence,
+        fee_delta_sequence: snapshot.fee_delta_sequence,
+        transactions,
         fees: 0,
         weight,
+        reservation,
     })
 }
 
 /// Builds commitments and adds the fixed reservation to the selected body totals.
-fn finish_candidate(
+pub(crate) fn finish_candidate(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
-    payout: &[u8],
     body: &SelectedBody,
-    reservation: FixedReservation,
+    payout: &[u8],
 ) -> Result<Candidate, MiningError> {
     let witness_commitment = if context.segwit_active {
-        let root = witness_merkle_root(snapshot, &body.ordered)?;
+        let root = witness_merkle_root(&body.transactions)?;
         Some(witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE))
     } else {
         None
@@ -366,9 +462,10 @@ fn finish_candidate(
     // fixed-width hash, so the reserved and final coinbase have the same
     // weight, serialized size, and sigop cost.
 
-    let transactions = candidate_transactions(snapshot, &body.ordered)?;
+    let transactions = candidate_transactions(&body.transactions)?;
 
-    let weight = reservation
+    let weight = body
+        .reservation
         .weight
         .checked_add(body.weight)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
@@ -376,8 +473,8 @@ fn finish_candidate(
     Ok(Candidate {
         template_id: TemplateId::with_fee_revision(
             &context.previous_block_hash,
-            snapshot.sequence,
-            snapshot.fee_delta_sequence,
+            body.sequence,
+            body.fee_delta_sequence,
         ),
         previous_block_hash: context.previous_block_hash,
         height: context.height,
@@ -390,7 +487,7 @@ fn finish_candidate(
         max_weight: context.max_weight,
         max_size: context.max_size,
         max_sigops: context.max_sigops,
-        mempool_sequence: snapshot.sequence,
+        mempool_sequence: body.sequence,
         coinbase,
         coinbase_value,
         weight,
@@ -400,22 +497,21 @@ fn finish_candidate(
 }
 
 fn candidate_transactions(
-    snapshot: &MempoolMiningSnapshot,
-    ordered: &[usize],
+    selected: &[SelectedTx],
 ) -> Result<Vec<CandidateTransaction>, MiningError> {
-    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(ordered.len());
-    for (offset, &index) in ordered.iter().enumerate() {
+    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(selected.len());
+    for (offset, entry) in selected.iter().enumerate() {
         let position = u32::try_from(offset.saturating_add(1)).map_err(|_| {
             MiningError::CandidateScalarOverflow {
                 field: "transaction index",
             }
         })?;
-        tx_positions.insert(snapshot.entries[index].txid, position);
+        tx_positions.insert(entry.txid, position);
     }
 
-    let mut transactions = Vec::with_capacity(ordered.len());
-    for &index in ordered {
-        let entry = &snapshot.entries[index];
+    let mut transactions = Vec::with_capacity(selected.len());
+    for entry in selected {
+        let data_hex = hex_encode(&consensus_bytes(entry.tx.as_ref()));
         transactions.push(CandidateTransaction {
             tx: Arc::clone(&entry.tx),
             txid: entry.txid,
@@ -424,6 +520,7 @@ fn candidate_transactions(
             sigop_cost: entry.sigop_cost,
             weight: entry.weight,
             depends: depends(&entry.tx, &tx_positions),
+            data_hex,
         });
     }
     Ok(transactions)
@@ -441,15 +538,12 @@ fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
 }
 
 /// BIP141 witness merkle root. The coinbase contributes the all-zero wtxid leaf.
-fn witness_merkle_root(
-    snapshot: &MempoolMiningSnapshot,
-    ordered: &[usize],
-) -> Result<Hash256, MiningError> {
-    let mut leaves = Vec::with_capacity(ordered.len().saturating_add(1));
+fn witness_merkle_root(selected: &[SelectedTx]) -> Result<Hash256, MiningError> {
+    let mut leaves = Vec::with_capacity(selected.len().saturating_add(1));
     // BIP141: the coinbase wtxid leaf is the all-zero hash, not the real wtxid.
     leaves.push([0_u8; 32]);
-    for &index in ordered {
-        leaves.push(*snapshot.entries[index].wtxid.as_bytes());
+    for entry in selected {
+        leaves.push(*entry.wtxid.as_bytes());
     }
     merkle_root_from_leaves(&mut leaves)
 }

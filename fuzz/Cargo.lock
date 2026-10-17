@@ -217,6 +217,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "sha2",
+ "smallvec",
  "thiserror",
  "tracing",
 ]

@@ -100,7 +100,7 @@ impl WitnessFixture {
             .map(|(_, coin)| Some(coin.clone()))
             .collect();
         view.set_resolved(vec![resolved]);
-        prepare_block_script_checks(&mut view, 0, 0, flags, block)
+        prepare_block_script_checks(&mut view, 0, 0, flags, block, None)
     }
 }
 
@@ -143,7 +143,7 @@ fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), C
                 u32::from(witness_active),
             );
             let unit = fixture.prepare(flags, &block)?;
-            let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine);
+            let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine, None);
             let batched = verify_prepared_units(core::slice::from_ref(&unit))
                 .map_err(|failure| failure.error);
             for verdict in [single, batched] {
@@ -197,7 +197,7 @@ fn valid_witness_scripts_enforce_the_inclusive_sigop_limit() -> Result<(), Conse
                     expected,
                 );
                 assert_eq!(
-                    verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine),
+                    verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine, None),
                     expected,
                 );
                 let unit = fixture.prepare(flags, &block)?;

@@ -24,6 +24,24 @@ fn basic_auth_accepts_and_rejects_requests() -> Result<(), Box<dyn std::error::E
 
     let rejected = request(address, "YWxpY2U6YmFk", body)?;
     assert!(rejected.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert_eq!(
+        rejected
+            .lines()
+            .find_map(|line| line.strip_prefix("WWW-Authenticate: ")),
+        Some("Basic realm=\"jsonrpc\""),
+        "the 401 must carry Core's challenge: {rejected}"
+    );
+    assert_eq!(
+        rejected
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Type: ")),
+        Some("text/html; charset=ISO-8859-1"),
+        "the 401 must carry Core's default error type: {rejected}"
+    );
+    assert!(
+        rejected.lines().any(|line| line == "Content-Length: 0"),
+        "the 401 body must be empty: {rejected}"
+    );
     Ok(())
 }
 
@@ -283,6 +301,109 @@ fn constant_time_compare_checks_length_and_content() {
     assert!(!constant_time_eq(b"same", b"diff"));
     assert!(!constant_time_eq(b"same", b"same-but-longer"));
     assert!(!constant_time_eq(b"same-but-longer", b"same"));
+}
+
+/// Declares a 16 MiB body on a fresh connection, sends only the head, and
+/// reads to the server's close. Returns the response and the time it took.
+/// The client never sends a body byte and never closes: a response that
+/// arrives proves the server answered from the head, and a read that times
+/// out (5 s) means it neither answered nor closed.
+fn withheld_body_request(
+    address: std::net::SocketAddr,
+    credentials: Option<&str>,
+) -> Result<(String, Duration), Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let authorization = credentials
+        .map(|value| format!("Authorization: Basic {value}\r\n"))
+        .unwrap_or_default();
+    let started = std::time::Instant::now();
+    write!(
+        stream,
+        "POST / HTTP/1.1\r\nHost: localhost\r\n{authorization}\
+         Content-Length: 16777216\r\n\r\n"
+    )?;
+    stream.flush()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok((response, started.elapsed()))
+}
+
+/// An unauthenticated JSON-RPC request whose 16 MiB body is withheld gets
+/// Core's full 401 tuple within 2 s, and the connection is then closed.
+#[test]
+fn unauthorized_request_is_answered_before_its_body_is_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    for credentials in [None, Some("YWxpY2U6YmFk")] {
+        let (response, elapsed) = withheld_body_request(address, credentials)?;
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "{credentials:?} took {elapsed:?}"
+        );
+        // Exact equality covers the status, the challenge, the content type,
+        // the empty body, the close, and the absence of a `Date` header.
+        assert_eq!(
+            response,
+            "HTTP/1.1 401 Unauthorized\r\n\
+             WWW-Authenticate: Basic realm=\"jsonrpc\"\r\n\
+             Content-Type: text/html; charset=ISO-8859-1\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\r\n",
+            "{credentials:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A request that fails HTTP framing is a 400 before authentication is
+/// consulted; framing keeps its old precedence.
+#[test]
+fn framing_errors_precede_authentication() -> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    // No Authorization header: a 401 would be the answer if the gate ran
+    // before the framing checks. Nothing follows the head, so the server's
+    // close carries no unread bytes that could reset the connection under
+    // the 400.
+    for head in [
+        "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16777217\r\n\r\n",
+    ] {
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(head.as_bytes())?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{head:?}: {response}"
+        );
+    }
+    Ok(())
+}
+
+/// Valid credentials pass the gate and the body is then read: a body cut
+/// short is a framing error, not a 401.
+#[test]
+fn authorized_request_with_a_truncated_body_is_a_framing_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let mut stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\n\
+         Content-Length: 16\r\n\r\n{{}}"
+    )?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    Ok(())
 }
 
 fn spawn(auth: Auth) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {

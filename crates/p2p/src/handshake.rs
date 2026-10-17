@@ -213,7 +213,8 @@ pub(crate) fn next_handshake_step<S: Read>(
     }
 }
 
-/// Reads one handshake message, retrying transient poll timeouts.
+/// Reads one handshake message, retrying transient poll timeouts and v2
+/// decoy/undefined-type packets.
 ///
 /// PRE: `deadline` bounds the whole handshake phase.
 /// POST: Return the first complete message, or the error that ended the
@@ -239,7 +240,7 @@ fn read_handshake_message<S: Read>(
                 tracing::debug!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
                 continue;
             }
-            Ok((message, raw)) => {
+            Ok(Some((message, raw))) => {
                 if matches!(message, Message::Version(_)) {
                     peer.version_received_time = Some(
                         SystemTime::now()
@@ -249,6 +250,7 @@ fn read_handshake_message<S: Read>(
                 }
                 return Ok((message, raw));
             }
+            Ok(None) => continue,
             Err(PeerError::Io(error))
                 if matches!(
                     error.kind(),
