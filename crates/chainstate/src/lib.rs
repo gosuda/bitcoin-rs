@@ -1549,7 +1549,7 @@ enum ProvenApply<'b> {
 /// Everything a block's application needs that depends only on the block and
 /// the outputs it spends, not on the chain state the commit will mutate.
 struct PreparedApply<'b> {
-    parsed: bitcoin_rs_consensus::kernel::BlockParse,
+    script_source: bitcoin_rs_consensus::kernel::BlockScriptSource,
     /// Parse-once transaction state: identities computed once in
     /// [`parse_block_for_apply`], witness IDs on demand, and the prevout
     /// matrix installed once right before script verification.

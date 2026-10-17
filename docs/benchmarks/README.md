@@ -35,6 +35,7 @@ its end-state tables is a required contract value, not a measurement, and its
 | Page | Cell or record |
 | --- | --- |
 | [end-to-end-sync.md](end-to-end-sync.md) | End-to-end sync performance cells |
+| [block-dataflow.md](block-dataflow.md) | Block-body, prevout and fact allocation audit; bounded native workloads |
 | [muhash-rpc.md](muhash-rpc.md) | MuHash/gettxoutsetinfo RPC cells |
 | [native-validation-default.md](native-validation-default.md) | Native-validation promotion record (verdict historical since #1117) |
 | [offline-full-validation.md](offline-full-validation.md) | Offline full-validation campaign |

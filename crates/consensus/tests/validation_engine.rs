@@ -3,7 +3,7 @@
 
 use bitcoin_rs_consensus::kernel::BlockParse;
 #[cfg(feature = "kernel")]
-use bitcoin_rs_consensus::{BlockFacts, BlockView, ScriptStageTimings, verify_block_input_scripts};
+use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
@@ -102,10 +102,10 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
     let block = single_tx_block(&tx);
     let parsed = BlockParse::parse(&consensus_bytes(&block), ValidationEngine::Native)
         .unwrap_or_else(|error| panic!("native parse: {error}"));
-    let mut view = BlockView::from_facts(
-        &block.txs,
-        BlockFacts::from_txids(&block.txs, vec![tx.txid()]),
-    );
+    let (parsed, facts) = parsed
+        .into_parts(&block.txs)
+        .unwrap_or_else(|error| panic!("native facts: {error}"));
+    let mut view = BlockView::from_facts(&block.txs, facts);
     view.set_resolved(vec![vec![coins.lookup(&tx.inputs[0].previous_output)]]);
     let native_block = verify_block_input_scripts(
         &mut view,

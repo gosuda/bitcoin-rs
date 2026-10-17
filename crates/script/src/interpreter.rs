@@ -432,6 +432,24 @@ impl<'tx> PreparedTransaction<'tx> {
         })
     }
 
+    /// Validates and takes ownership of resolved prevouts for parallel checks.
+    /// Script buffers move into the retained outputs without being cloned.
+    ///
+    /// # Errors
+    /// Returns [`PrevoutError`] if the count or ordered outpoint identities differ.
+    pub fn from_owned(tx: &'tx Tx, prevouts: Vec<(OutPoint, TxOut)>) -> Result<Self, PrevoutError> {
+        validate_prevouts(tx, &prevouts)?;
+        let mut prevouts: Vec<TxOut> = prevouts.into_iter().map(|(_, output)| output).collect();
+        // In-place collection may reuse the larger tuple allocation. Do not
+        // retain that spare outpoint capacity for the parallel-check lifetime.
+        prevouts.shrink_to_fit();
+        Ok(Self {
+            tx,
+            prevouts,
+            cache: SighashCache::new(tx),
+        })
+    }
+
     /// Verifies an input using this transaction's bytes and resolved prevout.
     ///
     /// # Errors

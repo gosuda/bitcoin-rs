@@ -290,10 +290,10 @@ pub fn verify_block_input_scripts(
     locktime_cutoff: u32,
     flags: VerifyFlags,
     timings: &mut ScriptStageTimings,
-    parsed: &crate::kernel::BlockParse,
+    script_source: &crate::kernel::BlockScriptSource,
 ) -> Result<(), ConsensusError> {
     let prepare_started = Instant::now();
-    let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, parsed)?;
+    let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, script_source)?;
     timings.prepare_seconds = prepare_started.elapsed().as_secs_f64();
 
     let unit_slice = core::slice::from_ref(&unit);
@@ -326,7 +326,7 @@ pub fn prepare_block_script_checks<'tx, 'checks>(
     height: u32,
     locktime_cutoff: u32,
     flags: VerifyFlags,
-    parsed: &'checks crate::kernel::BlockParse,
+    script_source: &'checks crate::kernel::BlockScriptSource,
 ) -> Result<BlockScriptChecks<'checks>, ConsensusError>
 where
     'tx: 'checks,
@@ -339,7 +339,7 @@ where
         });
     }
     let (prepared, checks) =
-        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, flags, parsed);
+        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, flags, script_source);
     Ok(BlockScriptChecks {
         prepared,
         checks,
@@ -449,7 +449,7 @@ fn prepare_block_input_checks<'b>(
     height: u32,
     locktime_cutoff: u32,
     flags: VerifyFlags,
-    parsed: &'b crate::kernel::BlockParse,
+    script_source: &'b crate::kernel::BlockScriptSource,
 ) -> (Vec<PreparedTx<'b>>, Vec<InputCheck>) {
     let mut prepared = Vec::with_capacity(txs.len());
     let mut checks = Vec::new();
@@ -481,7 +481,11 @@ fn prepare_block_input_checks<'b>(
             }
         };
 
-        let script_state = match parsed.prepare_tx(tx_index, tx, &prep.prevouts) {
+        // Compute, but do not publish, the post-script verdict before moving
+        // prevouts into the backend. Setup errors still win here, and the
+        // ordered result scan still reports scripts before this post-error.
+        let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
+        let script_state = match script_source.prepare_tx(tx_index, tx, prep.prevouts) {
             Ok(state) => state,
             Err(setup_error) => {
                 prepared.push(PreparedTx {
@@ -505,7 +509,6 @@ fn prepare_block_input_checks<'b>(
         }
         let checks_len = tx.inputs.len();
 
-        let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
             pre_error: None,
@@ -563,7 +566,7 @@ mod tests {
     };
     use crate::ValidationEngine;
 
-    fn parsed_block_for(txs: &[Tx], engine: ValidationEngine) -> crate::kernel::BlockParse {
+    fn parsed_block_for(txs: &[Tx], engine: ValidationEngine) -> crate::kernel::BlockScriptSource {
         let block = Block {
             header: Header {
                 version: 1,
@@ -574,6 +577,9 @@ mod tests {
         };
         crate::kernel::BlockParse::parse(&consensus_bytes(&block), engine)
             .unwrap_or_else(|error| panic!("synthetic block must parse: {error}"))
+            .into_parts(txs)
+            .unwrap_or_else(|error| panic!("synthetic facts: {error}"))
+            .0
     }
 
     #[cfg(feature = "kernel")]
@@ -581,7 +587,7 @@ mod tests {
     #[cfg(not(feature = "kernel"))]
     const TEST_ENGINE: ValidationEngine = ValidationEngine::Native;
 
-    fn test_block_parse(txs: &[Tx]) -> crate::kernel::BlockParse {
+    fn test_block_parse(txs: &[Tx]) -> crate::kernel::BlockScriptSource {
         parsed_block_for(txs, TEST_ENGINE)
     }
 
@@ -1065,7 +1071,7 @@ mod tests {
     fn prepared_unit<'b>(
         txs: &'b [Tx],
         resolved: Vec<Vec<Option<TxOut>>>,
-        block: &'b crate::kernel::BlockParse,
+        block: &'b crate::kernel::BlockScriptSource,
         flags: VerifyFlags,
     ) -> super::BlockScriptChecks<'b> {
         let mut view = block_view_for(txs, resolved);

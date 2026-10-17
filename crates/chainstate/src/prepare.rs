@@ -29,7 +29,13 @@ pub(super) fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
     engine: bitcoin_rs_consensus::ValidationEngine,
-) -> core::result::Result<(bitcoin_rs_consensus::kernel::BlockParse, Vec<Txid>), ApplyError> {
+) -> core::result::Result<
+    (
+        bitcoin_rs_consensus::kernel::BlockScriptSource,
+        bitcoin_rs_consensus::BlockFacts,
+    ),
+    ApplyError,
+> {
     // Preserved bytes must BE this block, not merely agree with it on
     // transaction count. The parse below drives the txids and the transactions
     // that script verification runs, while the witness commitment check and
@@ -63,8 +69,7 @@ pub(super) fn parse_block_for_apply(
             txids: parsed.transaction_count(),
         });
     }
-    let txids = parsed.txids().map_err(ApplyError::Consensus)?;
-    Ok((parsed, txids))
+    parsed.into_parts(&block.txs).map_err(ApplyError::Consensus)
 }
 
 /// Parses a block and resolves the outputs it spends.
@@ -74,13 +79,12 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Si
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let (parsed, txids) = parse_block_for_apply(block, provided_serialized, engine)?;
-    let tx_plan = plan_block_transactions(block, &txids);
-    let facts = parsed.derive_facts(&block.txs, &txids);
+    let (script_source, facts) = parse_block_for_apply(block, provided_serialized, engine)?;
+    let tx_plan = plan_block_transactions(block, facts.txids());
     let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
-        parsed,
+        script_source,
         view,
         tx_plan,
         resolved,
@@ -288,7 +292,7 @@ pub(super) fn verify_block_transactions(
     resolved: Arc<ResolvedUtxoView>,
     context: &BlockValidationContext,
     provenance: BlockProvenance,
-    parsed: &bitcoin_rs_consensus::kernel::BlockParse,
+    script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txs.len(), view.txids().len());
     if tx_plan.only_coinbase {
@@ -340,7 +344,7 @@ pub(super) fn verify_block_transactions(
         context.locktime_cutoff,
         context.flags,
         &mut script_timings,
-        parsed,
+        script_source,
     );
     tracing::debug!(
         height = context.height,

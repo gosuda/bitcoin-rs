@@ -1,0 +1,34 @@
+{
+    "date_utc":  "2026-10-17T09:30:03.1517500Z",
+    "baseline_commit":  "fafae0dc0e665152c57d9c8f902d1ee9f1f940b6",
+    "candidate_commit":  "6d8d90bd028072093204657588545e8c5c0ad7b6",
+    "baseline_sha256":  "862af808c241afdffc49ab25d68e868e77dc40d666c9820f05f3138a972f8e5b",
+    "candidate_sha256":  "adcfbc1c700def52d3ed1e57e69590057c03b6357254f3b57bd348d26e94d6d4",
+    "harness_sha256":  "90f400e18fc8630d3e3c127ccb51a9ba874df3ed7e0ad8f97612f5d84deaa31f",
+    "toolchain":  "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1",
+    "profile":  "quickstart: opt-level=3, lto=false, codegen-units=16, debug-assertions=false",
+    "features":  "bitcoin-rs-node --no-default-features --features fjall; native validation",
+    "allocator":  "instrumented std::alloc::System; global all-thread event and requested-byte counters",
+    "cpu":  {
+                "Name":  "Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz",
+                "NumberOfCores":  6,
+                "NumberOfLogicalProcessors":  12
+            },
+    "os":  {
+               "Caption":  "Microsoft Windows 11 Pro",
+               "Version":  "10.0.26200",
+               "BuildNumber":  "26200",
+               "TotalVisibleMemorySize":  66965176
+           },
+    "storage":  {
+                    "FriendlyName":  "NVMe SAMSUNG MZVLB1T0",
+                    "BusType":  "NVMe"
+                },
+    "data_directory":  "C:/workspace/bitcoin-rs/target/metadata-transfer/temp: fresh per-sample temporary databases",
+    "affinity":  "logical processors 0,1,2,3 (mask 0xF); RAYON_NUM_THREADS=4",
+    "configuration":  "default regtest; listen=[]; dbcache_mb=32; Full; assume_valid_height=0; unique temporary data_dir; per-corpus JSONL config digest excludes unique data_dir",
+    "durability":  "fjall defaults; journal:500b/5s; body index write_deferred; body/index sync before write_durable_if head receipt with SyncAll; direct per-block receipts, production BlockSync grouped publication; teardown outside timing",
+    "order":  "baseline-1,candidate-1,baseline-2,candidate-2,baseline-3,candidate-3",
+    "samples_per_run":  6,
+    "warmups_per_corpus_mode_run":  1
+}

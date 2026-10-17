@@ -1,6 +1,6 @@
 //! Block parse backends and runtime-selected script preparation.
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 
 use crate::ConsensusError;
@@ -28,46 +28,6 @@ impl From<bitcoin_rs_script::PrevoutError> for ConsensusError {
 fn kernel_not_compiled() -> ConsensusError {
     ConsensusError::UnsupportedEngine {
         engine: ValidationEngine::Kernel,
-    }
-}
-
-mod native {
-    use bitcoin_rs_primitives::{Tx, Txid};
-
-    use crate::ConsensusError;
-
-    #[derive(Debug, Clone)]
-    pub struct NativeBlock {
-        facts: crate::block_view::BlockFacts,
-    }
-
-    impl NativeBlock {
-        pub fn parse(raw_block: &[u8]) -> Result<Self, ConsensusError> {
-            // Reject trailing bytes without materializing a transaction tree.
-            let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
-                .map_err(|error| ConsensusError::Encoding(error.to_string()))?;
-            Ok(Self {
-                facts: crate::block_view::BlockFacts::from_parsed(&parsed),
-            })
-        }
-
-        #[expect(
-            clippy::unnecessary_wraps,
-            reason = "shape parity with the fallible kernel backend"
-        )]
-        pub fn txids(&self) -> Result<Vec<Txid>, ConsensusError> {
-            Ok(self.facts.txids().to_vec())
-        }
-
-        #[must_use]
-        pub fn transaction_count(&self) -> usize {
-            self.facts.tx_count()
-        }
-
-        #[must_use]
-        pub fn derive_facts(&self, _txs: &[Tx], _txids: &[Txid]) -> crate::block_view::BlockFacts {
-            self.facts.clone()
-        }
     }
 }
 
@@ -135,25 +95,20 @@ mod kernel_backend {
         pub(super) fn prepare_tx(
             &self,
             index: usize,
-            spent_outputs: &[(OutPoint, TxOut)],
+            spent_outputs: Vec<(OutPoint, TxOut)>,
         ) -> Result<super::PreparedTx<'_>, ConsensusError> {
             let kernel_tx = self.block.transaction(index).map_err(map_kernel_error)?;
+            let state = prepare_kernel_tx(kernel_tx, &spent_outputs)?;
+            let mut spent_outputs: Vec<TxOut> = spent_outputs
+                .into_iter()
+                .map(|(_, output)| output)
+                .collect();
+            // Collection may reuse tuple capacity; retain only the output set.
+            spent_outputs.shrink_to_fit();
             Ok(super::PreparedTx::Kernel {
-                state: prepare_kernel_tx(kernel_tx, spent_outputs)?,
-                spent_outputs: spent_outputs
-                    .iter()
-                    .map(|(_, output)| output.clone())
-                    .collect(),
+                state,
+                spent_outputs,
             })
-        }
-
-        #[expect(
-            clippy::unused_self,
-            reason = "shape parity with the native backend's derive_facts"
-        )]
-        #[must_use]
-        pub fn derive_facts(&self, txs: &[Tx], txids: &[Txid]) -> crate::block_view::BlockFacts {
-            crate::block_view::BlockFacts::from_txids(txs, txids.to_vec())
         }
     }
 
@@ -232,7 +187,7 @@ mod kernel_backend {
 #[derive(Debug)]
 pub enum BlockParse {
     /// Checked borrowed layout, available in every build.
-    Native(native::NativeBlock),
+    Native(crate::block_view::BlockFacts),
     #[cfg(feature = "kernel")]
     /// Bitcoin Core's kernel parse.
     Kernel(kernel_backend::KernelBlock),
@@ -244,56 +199,75 @@ impl BlockParse {
     /// Unavailable engines return `UnsupportedEngine`.
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
         match engine {
-            ValidationEngine::Native => native::NativeBlock::parse(raw_block).map(Self::Native),
+            ValidationEngine::Native => {
+                // Reject trailing bytes without materializing another tree.
+                let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
+                    .map_err(|error| ConsensusError::Encoding(error.to_string()))?;
+                Ok(Self::Native(crate::block_view::BlockFacts::from_parsed(
+                    &parsed,
+                )))
+            }
             ValidationEngine::Kernel => kernel_block_parse(raw_block),
-        }
-    }
-
-    /// Transaction IDs in block order.
-    pub fn txids(&self) -> Result<Vec<Txid>, ConsensusError> {
-        match self {
-            Self::Native(block) => block.txids(),
-            #[cfg(feature = "kernel")]
-            Self::Kernel(block) => block.txids(),
         }
     }
 
     #[must_use]
     pub fn transaction_count(&self) -> usize {
         match self {
-            Self::Native(block) => block.transaction_count(),
+            Self::Native(facts) => facts.tx_count(),
             #[cfg(feature = "kernel")]
             Self::Kernel(block) => block.transaction_count(),
         }
     }
 
-    /// Prepares resolved prevouts for this parse's engine.
+    /// Consumes the parse, transferring facts and retaining only script backend state.
+    /// Callers must check the transaction count against `txs` before this handoff.
+    /// Kernel transaction-ID extraction errors retain their original mapping.
+    pub fn into_parts(
+        self,
+        #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] txs: &[Tx],
+    ) -> Result<(BlockScriptSource, crate::block_view::BlockFacts), ConsensusError> {
+        match self {
+            Self::Native(facts) => Ok((BlockScriptSource::Native, facts)),
+            #[cfg(feature = "kernel")]
+            Self::Kernel(block) => {
+                let txids = block.txids()?;
+                let facts = crate::block_view::BlockFacts::from_txids(txs, txids);
+                Ok((BlockScriptSource::Kernel(block), facts))
+            }
+        }
+    }
+}
+
+/// Backend state retained after block facts move into the validation view.
+/// Native checks use the bound decoded transactions; kernel checks retain the parse.
+#[derive(Debug)]
+pub enum BlockScriptSource {
+    /// Native checks need no second owner for parsed block facts.
+    Native,
+    #[cfg(feature = "kernel")]
+    /// Kernel transactions borrow this independently parsed block.
+    Kernel(kernel_backend::KernelBlock),
+}
+
+impl BlockScriptSource {
+    /// Prepares resolved prevouts for this block's engine.
     /// `PrevoutCount`/`PrevoutMismatch` precede backend work; setup errors map to `Kernel`.
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
         tx: &'b Tx,
-        spent_outputs: &[(OutPoint, TxOut)],
+        spent_outputs: Vec<(OutPoint, TxOut)>,
     ) -> Result<PreparedTx<'b>, ConsensusError> {
         match self {
-            Self::Native(_) => Ok(PreparedTx::Native(
-                bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?,
+            Self::Native => Ok(PreparedTx::Native(
+                bitcoin_rs_script::PreparedTransaction::from_owned(tx, spent_outputs)?,
             )),
             #[cfg(feature = "kernel")]
             Self::Kernel(block) => {
-                bitcoin_rs_script::validate_prevouts(tx, spent_outputs)?;
+                bitcoin_rs_script::validate_prevouts(tx, &spent_outputs)?;
                 block.prepare_tx(index, spent_outputs)
             }
-        }
-    }
-
-    #[must_use]
-    /// Block facts shared with decoded transactions.
-    pub fn derive_facts(&self, txs: &[Tx], txids: &[Txid]) -> crate::block_view::BlockFacts {
-        match self {
-            Self::Native(block) => block.derive_facts(txs, txids),
-            #[cfg(feature = "kernel")]
-            Self::Kernel(block) => block.derive_facts(txs, txids),
         }
     }
 }
@@ -421,9 +395,12 @@ mod tests {
         {
             let parsed = BlockParse::parse(&consensus_bytes(&block), engine)
                 .unwrap_or_else(|error| panic!("fixture parse: {error}"));
-            assert!(parsed.prepare_tx(0, tx, &rows).is_ok());
+            let (parsed, _) = parsed
+                .into_parts(&block.txs)
+                .unwrap_or_else(|error| panic!("fixture facts: {error}"));
+            assert!(parsed.prepare_tx(0, tx, rows.clone()).is_ok());
             assert!(matches!(
-                parsed.prepare_tx(0, tx, &swapped),
+                parsed.prepare_tx(0, tx, swapped.clone()),
                 Err(ConsensusError::PrevoutMismatch { input_index: 0 })
             ));
         }

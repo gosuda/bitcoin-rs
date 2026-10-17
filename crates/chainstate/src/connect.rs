@@ -16,11 +16,14 @@ use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
-use bitcoin_rs_primitives::{Block, Hash256, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, ConsensusEncode, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
 use hashbrown::HashMap;
 use std::sync::Arc;
+
+#[cfg(test)]
+mod tests;
 
 struct ApplyScratch {
     txids: Vec<Txid>,
@@ -259,7 +262,7 @@ pub(super) fn apply_block_admitted<'b>(
         ),
     };
     let PreparedApply {
-        parsed,
+        script_source,
         mut view,
         tx_plan,
         resolved,
@@ -307,7 +310,7 @@ pub(super) fn apply_block_admitted<'b>(
             Arc::clone(&resolved),
             &validation_context,
             provenance,
-            &parsed,
+            &script_source,
         )
     };
     let script_verify_dur = script_verify_started.elapsed();
@@ -431,15 +434,12 @@ pub(super) fn apply_block_admitted<'b>(
     let block_bytes: bytes::Bytes = {
         let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
         if needs_body {
-            // The preserved P2P wire payload is byte-identical to the canonical
-            // block serialization: the decoder rejects every non-canonical
-            // encoding, so a decoded block always re-serializes to its wire
-            // bytes. The length guard keeps that invariant release-observable and
-            // self-heals to a fresh serialize if it ever fails to hold, so a
-            // future decoder change can never admit non-canonical bytes into the
-            // block body store.
+            // Preparation already bound these exact bytes to the decoded block,
+            // including its witness. Retain the release length guard without
+            // allocating and writing another full block merely to count bytes.
+            // The debug assertion remains an independent serialization check.
             match provided_serialized {
-                Some(provided) if provided.len() == consensus_bytes(block).len() => {
+                Some(provided) if provided.len() == block.consensus_size() => {
                     #[cfg(debug_assertions)]
                     {
                         debug_assert_eq!(provided.as_ref(), consensus_bytes(block).as_slice(),);

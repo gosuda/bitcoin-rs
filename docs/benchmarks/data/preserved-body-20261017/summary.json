@@ -1,0 +1,1130 @@
+[
+    {
+        "kind":  "early_coinbase",
+        "mode":  "commit",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  40800,
+                                                           "p95":  70900,
+                                                           "p99":  70900,
+                                                           "max":  70900,
+                                                           "min":  35900
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  289,
+                                                                                 "p95":  289,
+                                                                                 "p99":  289,
+                                                                                 "max":  289,
+                                                                                 "min":  289
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  41024,
+                                                                   "p95":  41024,
+                                                                   "p99":  41024,
+                                                                   "max":  41024,
+                                                                   "min":  41024
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  32,
+                                                                                  "p95":  32,
+                                                                                  "p99":  32,
+                                                                                  "max":  32,
+                                                                                  "min":  32
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4592,
+                                                                            "p95":  4592,
+                                                                            "p99":  4592,
+                                                                            "max":  4592,
+                                                                            "min":  4592
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  152014050,
+                                      "p95":  190256500,
+                                      "p99":  190256500,
+                                      "max":  190256500,
+                                      "min":  132939900
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  3578,
+                                                            "p95":  3578,
+                                                            "p99":  3578,
+                                                            "max":  3578,
+                                                            "min":  3578
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  2401022,
+                                              "p95":  2401022,
+                                              "p99":  2401022,
+                                              "max":  2401022,
+                                              "min":  2401022
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  64,
+                                                             "p95":  64,
+                                                             "p99":  64,
+                                                             "max":  64,
+                                                             "min":  64
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  9200,
+                                                       "p95":  9200,
+                                                       "p99":  9200,
+                                                       "max":  9200,
+                                                       "min":  9200
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          141058050,
+                                          154026050,
+                                          153601250
+                                      ]
+    },
+    {
+        "kind":  "early_coinbase",
+        "mode":  "commit",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  41550,
+                                                           "p95":  66200,
+                                                           "p99":  66200,
+                                                           "max":  66200,
+                                                           "min":  36100
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  289,
+                                                                                 "p95":  289,
+                                                                                 "p99":  289,
+                                                                                 "max":  289,
+                                                                                 "min":  289
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  41024,
+                                                                   "p95":  41024,
+                                                                   "p99":  41024,
+                                                                   "max":  41024,
+                                                                   "min":  41024
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  32,
+                                                                                  "p95":  32,
+                                                                                  "p99":  32,
+                                                                                  "max":  32,
+                                                                                  "min":  32
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4592,
+                                                                            "p95":  4592,
+                                                                            "p99":  4592,
+                                                                            "max":  4592,
+                                                                            "min":  4592
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  149282450,
+                                      "p95":  194659800,
+                                      "p99":  194659800,
+                                      "max":  194659800,
+                                      "min":  139821000
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  3546,
+                                                            "p95":  3546,
+                                                            "p99":  3546,
+                                                            "max":  3546,
+                                                            "min":  3546
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  2396430,
+                                              "p95":  2396430,
+                                              "p99":  2396430,
+                                              "max":  2396430,
+                                              "min":  2396430
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  32,
+                                                             "p95":  32,
+                                                             "p99":  32,
+                                                             "max":  32,
+                                                             "min":  32
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  4608,
+                                                       "p95":  4608,
+                                                       "p99":  4608,
+                                                       "max":  4608,
+                                                       "min":  4608
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          153367700,
+                                          146325550,
+                                          146861300
+                                      ]
+    },
+    {
+        "kind":  "early_coinbase",
+        "mode":  "sync",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  47000,
+                                                           "p95":  92400,
+                                                           "p99":  92400,
+                                                           "max":  92400,
+                                                           "min":  36000
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  289,
+                                                                                 "p95":  289,
+                                                                                 "p99":  289,
+                                                                                 "max":  289,
+                                                                                 "min":  289
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  41024,
+                                                                   "p95":  41024,
+                                                                   "p99":  41024,
+                                                                   "max":  41024,
+                                                                   "min":  41024
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  32,
+                                                                                  "p95":  32,
+                                                                                  "p99":  32,
+                                                                                  "max":  32,
+                                                                                  "min":  32
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4592,
+                                                                            "p95":  4592,
+                                                                            "p99":  4592,
+                                                                            "max":  4592,
+                                                                            "min":  4592
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  19843700,
+                                      "p95":  49069100,
+                                      "p99":  49069100,
+                                      "max":  49069100,
+                                      "min":  17019800
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  2976,
+                                                            "p95":  2976,
+                                                            "p99":  2976,
+                                                            "max":  2976,
+                                                            "min":  2976
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  2540678,
+                                              "p95":  2540678,
+                                              "p99":  2540678,
+                                              "max":  2540678,
+                                              "min":  2540678
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  64,
+                                                             "p95":  64,
+                                                             "p99":  64,
+                                                             "max":  64,
+                                                             "min":  64
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  9200,
+                                                       "p95":  9200,
+                                                       "p99":  9200,
+                                                       "max":  9200,
+                                                       "min":  9200
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          19075350,
+                                          23254000,
+                                          19648350
+                                      ]
+    },
+    {
+        "kind":  "early_coinbase",
+        "mode":  "sync",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  47450,
+                                                           "p95":  232200,
+                                                           "p99":  232200,
+                                                           "max":  232200,
+                                                           "min":  34900
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  289,
+                                                                                 "p95":  289,
+                                                                                 "p99":  289,
+                                                                                 "max":  289,
+                                                                                 "min":  289
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  41024,
+                                                                   "p95":  41024,
+                                                                   "p99":  41024,
+                                                                   "max":  41024,
+                                                                   "min":  41024
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  32,
+                                                                                  "p95":  32,
+                                                                                  "p99":  32,
+                                                                                  "max":  32,
+                                                                                  "min":  32
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4592,
+                                                                            "p95":  4592,
+                                                                            "p99":  4592,
+                                                                            "max":  4592,
+                                                                            "min":  4592
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  21599350,
+                                      "p95":  28574300,
+                                      "p99":  28574300,
+                                      "max":  28574300,
+                                      "min":  17936600
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  2944,
+                                                            "p95":  2944,
+                                                            "p99":  2944,
+                                                            "max":  2944,
+                                                            "min":  2944
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  2536086,
+                                              "p95":  2536086,
+                                              "p99":  2536086,
+                                              "max":  2536086,
+                                              "min":  2536086
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  32,
+                                                             "p95":  32,
+                                                             "p99":  32,
+                                                             "max":  32,
+                                                             "min":  32
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  4608,
+                                                       "p95":  4608,
+                                                       "p99":  4608,
+                                                       "max":  4608,
+                                                       "min":  4608
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          22836700,
+                                          22253800,
+                                          19905600
+                                      ]
+    },
+    {
+        "kind":  "legacy_512_inputs",
+        "mode":  "commit",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  794700,
+                                                           "p95":  1214000,
+                                                           "p99":  1214000,
+                                                           "max":  1214000,
+                                                           "min":  716100
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  337,
+                                                                                 "p95":  337,
+                                                                                 "p99":  337,
+                                                                                 "max":  337,
+                                                                                 "min":  337
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  1602336,
+                                                                   "p95":  1602336,
+                                                                   "p99":  1602336,
+                                                                   "max":  1602336,
+                                                                   "min":  1602336
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  338528,
+                                                                            "p95":  338528,
+                                                                            "p99":  338528,
+                                                                            "max":  338528,
+                                                                            "min":  338528
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  249895500,
+                                      "p95":  345441000,
+                                      "p99":  345441000,
+                                      "max":  345441000,
+                                      "min":  229838400
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  78052,
+                                                            "p95":  78053,
+                                                            "p99":  78053,
+                                                            "max":  78053,
+                                                            "min":  78052
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  22662652,
+                                              "p95":  22664172,
+                                              "p99":  22664172,
+                                              "max":  22664172,
+                                              "min":  22662652
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  16,
+                                                             "p95":  16,
+                                                             "p99":  16,
+                                                             "max":  16,
+                                                             "min":  16
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  338528,
+                                                       "p95":  338528,
+                                                       "p99":  338528,
+                                                       "max":  338528,
+                                                       "min":  338528
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          248831300,
+                                          244422850,
+                                          283032550
+                                      ]
+    },
+    {
+        "kind":  "legacy_512_inputs",
+        "mode":  "commit",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  846300,
+                                                           "p95":  1512200,
+                                                           "p99":  1512200,
+                                                           "max":  1512200,
+                                                           "min":  703400
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  337,
+                                                                                 "p95":  337,
+                                                                                 "p99":  337,
+                                                                                 "max":  337,
+                                                                                 "min":  337
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  1602336,
+                                                                   "p95":  1602336,
+                                                                   "p99":  1602336,
+                                                                   "max":  1602336,
+                                                                   "min":  1602336
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  338528,
+                                                                            "p95":  338528,
+                                                                            "p99":  338528,
+                                                                            "max":  338528,
+                                                                            "min":  338528
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  260760900,
+                                      "p95":  2872230900,
+                                      "p99":  2872230900,
+                                      "max":  2872230900,
+                                      "min":  237208800
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  78036,
+                                                            "p95":  78037,
+                                                            "p99":  78037,
+                                                            "max":  78037,
+                                                            "min":  78036
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  22324124,
+                                              "p95":  22325644,
+                                              "p99":  22325644,
+                                              "max":  22325644,
+                                              "min":  22324124
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  0,
+                                                             "p95":  0,
+                                                             "p99":  0,
+                                                             "max":  0,
+                                                             "min":  0
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  0,
+                                                       "p95":  0,
+                                                       "p99":  0,
+                                                       "max":  0,
+                                                       "min":  0
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          249109050,
+                                          467484700,
+                                          255406700
+                                      ]
+    },
+    {
+        "kind":  "legacy_512_inputs",
+        "mode":  "sync",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  764950,
+                                                           "p95":  1221200,
+                                                           "p99":  1221200,
+                                                           "max":  1221200,
+                                                           "min":  687700
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  337,
+                                                                                 "p95":  337,
+                                                                                 "p99":  337,
+                                                                                 "max":  337,
+                                                                                 "min":  337
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  1602336,
+                                                                   "p95":  1602336,
+                                                                   "p99":  1602336,
+                                                                   "max":  1602336,
+                                                                   "min":  1602336
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  338528,
+                                                                            "p95":  338528,
+                                                                            "p99":  338528,
+                                                                            "max":  338528,
+                                                                            "min":  338528
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  183792450,
+                                      "p95":  226394000,
+                                      "p99":  226394000,
+                                      "max":  226394000,
+                                      "min":  174242900
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  77890.5,
+                                                            "p95":  77891,
+                                                            "p99":  77891,
+                                                            "max":  77891,
+                                                            "min":  77890
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  26832950,
+                                              "p95":  26833710,
+                                              "p99":  26833710,
+                                              "max":  26833710,
+                                              "min":  26832190
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  16,
+                                                             "p95":  16,
+                                                             "p99":  16,
+                                                             "max":  16,
+                                                             "min":  16
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  338528,
+                                                       "p95":  338528,
+                                                       "p99":  338528,
+                                                       "max":  338528,
+                                                       "min":  338528
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          179483550,
+                                          184143200,
+                                          191352550
+                                      ]
+    },
+    {
+        "kind":  "legacy_512_inputs",
+        "mode":  "sync",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  817950,
+                                                           "p95":  1769700,
+                                                           "p99":  1769700,
+                                                           "max":  1769700,
+                                                           "min":  709300
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  337,
+                                                                                 "p95":  337,
+                                                                                 "p99":  337,
+                                                                                 "max":  337,
+                                                                                 "min":  337
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  1602336,
+                                                                   "p95":  1602336,
+                                                                   "p99":  1602336,
+                                                                   "max":  1602336,
+                                                                   "min":  1602336
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  338528,
+                                                                            "p95":  338528,
+                                                                            "p99":  338528,
+                                                                            "max":  338528,
+                                                                            "min":  338528
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  187779000,
+                                      "p95":  661306700,
+                                      "p99":  661306700,
+                                      "max":  661306700,
+                                      "min":  171700100
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  77874.5,
+                                                            "p95":  77875,
+                                                            "p99":  77875,
+                                                            "max":  77875,
+                                                            "min":  77874
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  26494422,
+                                              "p95":  26495182,
+                                              "p99":  26495182,
+                                              "max":  26495182,
+                                              "min":  26493662
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  0,
+                                                             "p95":  0,
+                                                             "p99":  0,
+                                                             "max":  0,
+                                                             "min":  0
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  0,
+                                                       "p95":  0,
+                                                       "p99":  0,
+                                                       "max":  0,
+                                                       "min":  0
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          179277000,
+                                          206349450,
+                                          183885850
+                                      ]
+    },
+    {
+        "kind":  "witness_512_inputs",
+        "mode":  "commit",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  5774650,
+                                                           "p95":  8038700,
+                                                           "p99":  8038700,
+                                                           "max":  8038700,
+                                                           "min":  5096100
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  25121,
+                                                                                 "p95":  25121,
+                                                                                 "p99":  25121,
+                                                                                 "max":  25121,
+                                                                                 "min":  25121
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  10854480,
+                                                                   "p95":  10854480,
+                                                                   "p99":  10854480,
+                                                                   "max":  10854480,
+                                                                   "min":  10854480
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4657072,
+                                                                            "p95":  4657072,
+                                                                            "p99":  4657072,
+                                                                            "max":  4657072,
+                                                                            "min":  4657072
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  354131200,
+                                      "p95":  604434200,
+                                      "p99":  604434200,
+                                      "max":  604434200,
+                                      "min":  330910000
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  95174.5,
+                                                            "p95":  95176,
+                                                            "p99":  95176,
+                                                            "max":  95176,
+                                                            "min":  95174
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  41193424,
+                                              "p95":  41195704,
+                                              "p99":  41195704,
+                                              "max":  41195704,
+                                              "min":  41192664
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  16,
+                                                             "p95":  16,
+                                                             "p99":  16,
+                                                             "max":  16,
+                                                             "min":  16
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  4657072,
+                                                       "p95":  4657072,
+                                                       "p99":  4657072,
+                                                       "max":  4657072,
+                                                       "min":  4657072
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          363457450,
+                                          349993050,
+                                          368533800
+                                      ]
+    },
+    {
+        "kind":  "witness_512_inputs",
+        "mode":  "commit",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  6548150,
+                                                           "p95":  9355300,
+                                                           "p99":  9355300,
+                                                           "max":  9355300,
+                                                           "min":  3908100
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  25121,
+                                                                                 "p95":  25121,
+                                                                                 "p99":  25121,
+                                                                                 "max":  25121,
+                                                                                 "min":  25121
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  10854480,
+                                                                   "p95":  10854480,
+                                                                   "p99":  10854480,
+                                                                   "max":  10854480,
+                                                                   "min":  10854480
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4657072,
+                                                                            "p95":  4657072,
+                                                                            "p99":  4657072,
+                                                                            "max":  4657072,
+                                                                            "min":  4657072
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  339320650,
+                                      "p95":  1343464900,
+                                      "p99":  1343464900,
+                                      "max":  1343464900,
+                                      "min":  318170700
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  95158.5,
+                                                            "p95":  95160,
+                                                            "p99":  95160,
+                                                            "max":  95160,
+                                                            "min":  95158
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  36536352,
+                                              "p95":  36538632,
+                                              "p99":  36538632,
+                                              "max":  36538632,
+                                              "min":  36535592
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  0,
+                                                             "p95":  0,
+                                                             "p99":  0,
+                                                             "max":  0,
+                                                             "min":  0
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  0,
+                                                       "p95":  0,
+                                                       "p99":  0,
+                                                       "max":  0,
+                                                       "min":  0
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          332526650,
+                                          903982200,
+                                          322051400
+                                      ]
+    },
+    {
+        "kind":  "witness_512_inputs",
+        "mode":  "sync",
+        "arm":  "baseline",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  6489100,
+                                                           "p95":  9911100,
+                                                           "p99":  9911100,
+                                                           "max":  9911100,
+                                                           "min":  5341800
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  25121,
+                                                                                 "p95":  25121,
+                                                                                 "p99":  25121,
+                                                                                 "max":  25121,
+                                                                                 "min":  25121
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  10854480,
+                                                                   "p95":  10854480,
+                                                                   "p99":  10854480,
+                                                                   "max":  10854480,
+                                                                   "min":  10854480
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4657072,
+                                                                            "p95":  4657072,
+                                                                            "p99":  4657072,
+                                                                            "max":  4657072,
+                                                                            "min":  4657072
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  279728400,
+                                      "p95":  351789200,
+                                      "p99":  351789200,
+                                      "max":  351789200,
+                                      "min":  267354200
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  95060,
+                                                            "p95":  95060,
+                                                            "p99":  95060,
+                                                            "max":  95060,
+                                                            "min":  95060
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  45365274,
+                                              "p95":  45365274,
+                                              "p99":  45365274,
+                                              "max":  45365274,
+                                              "min":  45365274
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  16,
+                                                             "p95":  16,
+                                                             "p99":  16,
+                                                             "max":  16,
+                                                             "min":  16
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  4657072,
+                                                       "p95":  4657072,
+                                                       "p99":  4657072,
+                                                       "max":  4657072,
+                                                       "min":  4657072
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          286671800,
+                                          284618250,
+                                          278738150
+                                      ]
+    },
+    {
+        "kind":  "witness_512_inputs",
+        "mode":  "sync",
+        "arm":  "candidate",
+        "decode_and_ingress_fixture":  {
+                                           "wall_ns":  {
+                                                           "n":  18,
+                                                           "p50":  6580700,
+                                                           "p95":  10669900,
+                                                           "p99":  10669900,
+                                                           "max":  10669900,
+                                                           "min":  5240000
+                                                       },
+                                           "allocations_and_reallocations":  {
+                                                                                 "n":  18,
+                                                                                 "p50":  25121,
+                                                                                 "p95":  25121,
+                                                                                 "p99":  25121,
+                                                                                 "max":  25121,
+                                                                                 "min":  25121
+                                                                             },
+                                           "requested_bytes":  {
+                                                                   "n":  18,
+                                                                   "p50":  10854480,
+                                                                   "p95":  10854480,
+                                                                   "p99":  10854480,
+                                                                   "max":  10854480,
+                                                                   "min":  10854480
+                                                               },
+                                           "body_length_bucket_allocations":  {
+                                                                                  "n":  18,
+                                                                                  "p50":  16,
+                                                                                  "p95":  16,
+                                                                                  "p99":  16,
+                                                                                  "max":  16,
+                                                                                  "min":  16
+                                                                              },
+                                           "body_length_bucket_bytes":  {
+                                                                            "n":  18,
+                                                                            "p50":  4657072,
+                                                                            "p95":  4657072,
+                                                                            "p99":  4657072,
+                                                                            "max":  4657072,
+                                                                            "min":  4657072
+                                                                        }
+                                       },
+        "apply":  {
+                      "wall_ns":  {
+                                      "n":  18,
+                                      "p50":  290467900,
+                                      "p95":  900758200,
+                                      "p99":  900758200,
+                                      "max":  900758200,
+                                      "min":  264276000
+                                  },
+                      "allocations_and_reallocations":  {
+                                                            "n":  18,
+                                                            "p50":  95044,
+                                                            "p95":  95044,
+                                                            "p99":  95044,
+                                                            "max":  95044,
+                                                            "min":  95044
+                                                        },
+                      "requested_bytes":  {
+                                              "n":  18,
+                                              "p50":  40708202,
+                                              "p95":  40708202,
+                                              "p99":  40708202,
+                                              "max":  40708202,
+                                              "min":  40708202
+                                          },
+                      "body_length_bucket_allocations":  {
+                                                             "n":  18,
+                                                             "p50":  0,
+                                                             "p95":  0,
+                                                             "p99":  0,
+                                                             "max":  0,
+                                                             "min":  0
+                                                         },
+                      "body_length_bucket_bytes":  {
+                                                       "n":  18,
+                                                       "p50":  0,
+                                                       "p95":  0,
+                                                       "p99":  0,
+                                                       "max":  0,
+                                                       "min":  0
+                                                   }
+                  },
+        "per_run_apply_wall_p50_ns":  [
+                                          279530200,
+                                          617437350,
+                                          278788250
+                                      ]
+    }
+]

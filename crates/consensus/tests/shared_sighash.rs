@@ -10,8 +10,7 @@ use bitcoin::sighash::{
 };
 use bitcoin_rs_consensus::kernel::{BlockParse, verify_tx_scripts};
 use bitcoin_rs_consensus::{
-    BlockFacts, BlockView, ConsensusError, ScriptStageTimings, ValidationEngine,
-    verify_block_input_scripts,
+    BlockView, ConsensusError, ScriptStageTimings, ValidationEngine, verify_block_input_scripts,
 };
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Sighash, SighashCache,
@@ -310,10 +309,8 @@ fn verify_block(
     let mut block = Network::Regtest.genesis_block();
     block.txs = vec![tx.clone()];
     let parsed = BlockParse::parse(&consensus_bytes(&block), engine)?;
-    let mut view = BlockView::from_facts(
-        &block.txs,
-        BlockFacts::from_txids(&block.txs, vec![tx.txid()]),
-    );
+    let (parsed, facts) = parsed.into_parts(&block.txs)?;
+    let mut view = BlockView::from_facts(&block.txs, facts);
     view.set_resolved(vec![prevouts.iter().cloned().map(Some).collect()]);
     verify_block_input_scripts(
         &mut view,
@@ -384,23 +381,33 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
 #[test]
 fn prepared_input_preserves_typed_bounds_and_count_precedence() {
     let (tx, prevouts) = fixture(3, 2);
-    let wrong_count = PreparedTransaction::new(&tx, &[]);
-    assert_eq!(
-        wrong_count.err(),
-        Some(PrevoutError::Count {
-            input_count: 3,
-            prevout_count: 0
-        })
-    );
-    let prepared = PreparedTransaction::new(&tx, &resolved_prevouts(&tx, &prevouts))
-        .expect("ordered prevouts");
-    assert_eq!(
-        prepared.verify_input(999, VerifyFlags::MANDATORY),
-        Err(ScriptError::InputIndexOutOfRange {
-            index: 999,
-            inputs: 3
-        })
-    );
+    for wrong_count in [
+        PreparedTransaction::new(&tx, &[]),
+        PreparedTransaction::from_owned(&tx, vec![]),
+    ] {
+        assert_eq!(
+            wrong_count.err(),
+            Some(PrevoutError::Count {
+                input_count: 3,
+                prevout_count: 0
+            })
+        );
+    }
+    let rows = resolved_prevouts(&tx, &prevouts);
+    for prepared in [
+        PreparedTransaction::new(&tx, &rows),
+        PreparedTransaction::from_owned(&tx, rows),
+    ] {
+        assert_eq!(
+            prepared
+                .expect("ordered prevouts")
+                .verify_input(999, VerifyFlags::MANDATORY),
+            Err(ScriptError::InputIndexOutOfRange {
+                index: 999,
+                inputs: 3
+            })
+        );
+    }
 }
 
 #[test]
@@ -415,9 +422,14 @@ fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
         };
     }
     let rows = resolved_prevouts(&tx, &outputs);
-    let prepared = PreparedTransaction::new(&tx, &rows).expect("ordered identities");
-    for index in 0..tx.inputs.len() {
-        assert_eq!(prepared.verify_input(index, VerifyFlags::NONE), Ok(true));
+    for prepared in [
+        PreparedTransaction::new(&tx, &rows),
+        PreparedTransaction::from_owned(&tx, rows.clone()),
+    ] {
+        let prepared = prepared.expect("ordered identities");
+        for index in 0..tx.inputs.len() {
+            assert_eq!(prepared.verify_input(index, VerifyFlags::NONE), Ok(true));
+        }
     }
     let mut swapped = rows.clone();
     swapped.swap(0, 1);
@@ -426,6 +438,10 @@ fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
     for (bad_rows, input_index) in [(swapped, 0), (foreign, 1)] {
         assert_eq!(
             PreparedTransaction::new(&tx, &bad_rows).err(),
+            Some(PrevoutError::Mismatch { input_index })
+        );
+        assert_eq!(
+            PreparedTransaction::from_owned(&tx, bad_rows.clone()).err(),
             Some(PrevoutError::Mismatch { input_index })
         );
         // Even an unavailable backend rejects caller wiring before dispatch.
@@ -441,6 +457,13 @@ fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
     short.pop();
     assert_eq!(
         PreparedTransaction::new(&tx, &short).err(),
+        Some(PrevoutError::Count {
+            input_count: 3,
+            prevout_count: 2
+        })
+    );
+    assert_eq!(
+        PreparedTransaction::from_owned(&tx, short).err(),
         Some(PrevoutError::Count {
             input_count: 3,
             prevout_count: 2
