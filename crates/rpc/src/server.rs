@@ -2361,12 +2361,12 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(-32600)
         );
-        assert!(
+        assert_eq!(
             body.get("error")
                 .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.contains("jsonrpc field must be a string")),
-            "Core's message for a non-string version: {body:?}"
+                .and_then(Value::as_str),
+            Some("jsonrpc field must be a string"),
+            "Core's exact message for a non-string version: {body:?}"
         );
         assert!(
             body.get("result").is_none_or(Value::is_null),
@@ -2394,12 +2394,12 @@ mod tests {
                 Some(-32600),
                 "version {version} must be refused"
             );
-            assert!(
+            assert_eq!(
                 body.get("error")
                     .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|message| message.contains("JSON-RPC version not supported")),
-                "Core's message for an unsupported version: {body:?}"
+                    .and_then(Value::as_str),
+                Some("JSON-RPC version not supported"),
+                "Core's exact message for an unsupported version: {body:?}"
             );
         }
     }
@@ -2436,14 +2436,70 @@ mod tests {
                 Some(-32600),
                 "params {params} must be refused before dispatch"
             );
-            assert!(
+            assert_eq!(
                 body.get("error")
                     .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|message| message.contains("Params must be an array or object")),
-                "Core's message for a malformed params field: {body:?}"
+                    .and_then(Value::as_str),
+                Some("Params must be an array or object"),
+                "Core's exact message for a malformed params field: {body:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_rejected_envelope_never_dispatches_the_method() {
+        // Observable dispatch probe: `getrpcinfo` fails with an internal
+        // error when no debug log path is configured, so a successful-looking
+        // reply would prove execution. A malformed envelope must produce the
+        // envelope error instead.
+        let handler = Handler::new(Arc::new(Context::new()));
+        let executed = handle_json(
+            &handler,
+            br#"{"jsonrpc":"2.0","id":1,"method":"getrpcinfo","params":[]}"#,
+        );
+        let executed_body = executed.body.expect("valid request replies");
+        assert_eq!(
+            executed_body
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32603),
+            "fixture: the probe method is dispatched and fails on its own: {executed_body:?}"
+        );
+
+        for request in [
+            br#"{"jsonrpc":"9.0","id":1,"method":"getrpcinfo","params":[]}"#.as_slice(),
+            br#"{"jsonrpc":2,"id":1,"method":"getrpcinfo","params":[]}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":1,"method":"getrpcinfo","params":7}"#.as_slice(),
+        ] {
+            let rejected = handle_json(&handler, request);
+            let body = rejected.body.expect("rejected envelope replies");
+            assert_eq!(
+                body.get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_i64),
+                Some(-32600),
+                "the envelope error must replace the method's own outcome: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_batch_is_rejected_as_an_invalid_request() {
+        // Core rejects `[]` before the batch loop (the top-level value is an
+        // array with no members, so no member can carry a version), and the
+        // local server answers the legacy -32600 envelope.
+        let handler = Handler::new(Arc::new(Context::new()));
+        let response = handle_json(&handler, b"[]");
+        let body = response.body.expect("empty batch replies");
+
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            body.get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32600)
+        );
     }
 
     #[test]
