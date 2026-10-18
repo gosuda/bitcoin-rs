@@ -69,7 +69,7 @@ pub enum RpcError {
 
 impl RpcError {
     const PARSE_ERROR: i64 = -32_700;
-    const INVALID_REQUEST: i64 = -32_600;
+    pub const INVALID_REQUEST: i64 = -32_600;
     pub const METHOD_NOT_FOUND: i64 = -32_601;
     pub const INVALID_PARAMS: i64 = -32_602;
     pub const INTERNAL_ERROR: i64 = -32_603;

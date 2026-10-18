@@ -49,6 +49,20 @@ scanning and wallet interoperability remain unverified.
   declared JSON-RPC 1 and 2 envelopes, batches, notifications,
   authentication, and error ordering follow the pinned Core 31.1
   contract.
+- The envelope is validated before any method dispatch
+  (`crates/rpc/src/server.rs::handle_single_json`), mirroring Core's
+  `JSONRPCRequest::parse` (`src/rpc/request.cpp:206-260`): a present
+  `jsonrpc` field must be a string and must be `"1.0"` (accepted as legacy
+  for compatibility) or `"2.0"`; a present `params` field must be an array,
+  an object, or `null`; and `method` must be present and a string. A
+  violation is `-32600` and the method never runs.
+- HTTP status follows Core's legacy mapping (`src/httprpc.cpp:41-56`).
+  A legacy request answers errors with an HTTP error status — `-32600` is
+  400, `-32601` is 404, and every other code is 500 — while a v2 request
+  answers with HTTP 200. An envelope violation is detected before the
+  claimed version is trusted, so it takes the legacy mapping in either
+  dialect. A batch always answers HTTP 200 and carries per-member errors in
+  its array; an all-notification batch answers 204.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
   JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-1`
   (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
@@ -356,6 +370,24 @@ scanning and wallet interoperability remain unverified.
   JSON-only format and 400 malformed/unknown-hash responses. Excess argument
   counts retain the local JSON-RPC parameter-shape error instead of Core's
   method-help message.
+
+Proof: `crates/rpc/src/server.rs` tests
+`non_string_jsonrpc_version_is_an_invalid_request`,
+`unsupported_jsonrpc_version_is_an_invalid_request`,
+`json_rpc_1_0_remains_accepted_as_legacy`,
+`non_array_or_object_params_are_an_invalid_request`,
+`legacy_invalid_request_maps_to_http_400`,
+`legacy_method_not_found_maps_to_http_404`,
+`legacy_other_errors_keep_http_500`,
+`json_rpc_2_dispatch_errors_still_answer_http_200`,
+`json_rpc_2_envelope_error_uses_the_legacy_status`,
+`batch_members_keep_per_member_envelope_dialect`, and
+`notification_with_a_malformed_envelope_is_not_executed` pin the envelope
+rules and the Core status mapping; `crates/rpc/tests/auth.rs`
+`legacy_error_has_core_envelope_and_http_error` pins them through a real
+listener. The pinned Core 31.1 sources are `src/rpc/request.cpp:206-260` and
+`src/httprpc.cpp:41-56` (no Core binary was run; the rules are read from the
+pinned source).
 
 ### `API-03`: REST dialect
 
