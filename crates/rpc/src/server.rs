@@ -2486,9 +2486,9 @@ mod tests {
 
     #[test]
     fn an_empty_batch_is_rejected_as_an_invalid_request() {
-        // Core rejects `[]` before the batch loop (the top-level value is an
-        // array with no members, so no member can carry a version), and the
-        // local server answers the legacy -32600 envelope.
+        // Local behavior, not a Core rule: the pinned Core source does not
+        // specify an empty batch, so this server answers the legacy -32600
+        // envelope. API-02 records the case as local for the same reason.
         let handler = Handler::new(Arc::new(Context::new()));
         let response = handle_json(&handler, b"[]");
         let body = response.body.expect("empty batch replies");
@@ -2500,6 +2500,23 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(-32600)
         );
+    }
+
+    #[test]
+    fn an_all_notification_batch_answers_204() {
+        // A non-empty batch whose members are all valid v2 notifications has
+        // no reply rows, so Core answers HTTP 204 (`httprpc.cpp:219-227`).
+        let handler = Handler::new(Arc::new(Context::new()));
+        let response = handle_json(
+            &handler,
+            br#"[
+                {"jsonrpc":"2.0","method":"getblockcount","params":[]},
+                {"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}
+            ]"#,
+        );
+
+        assert_eq!(response.status, 204);
+        assert!(response.body.is_none(), "204 carries no body");
     }
 
     #[test]

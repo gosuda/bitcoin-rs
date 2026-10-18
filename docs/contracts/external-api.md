@@ -389,8 +389,9 @@ Proof: `crates/rpc/src/server.rs` tests
 `batch_members_keep_per_member_envelope_dialect`,
 `notification_with_a_malformed_envelope_is_not_executed`, and
 `a_rejected_envelope_never_dispatches_the_method`, and
-`an_empty_batch_is_rejected_as_an_invalid_request` pin the envelope rules,
-the Core status mapping, and execution prevention; `crates/rpc/tests/auth.rs`
+`an_empty_batch_is_rejected_as_an_invalid_request`, and
+`an_all_notification_batch_answers_204` pin the envelope rules, the Core
+status mapping, execution prevention, and the batch reply shape; `crates/rpc/tests/auth.rs`
 `legacy_error_has_core_envelope_and_http_error` pins them through a real
 listener. The pinned Core 31.1 sources are `src/rpc/request.cpp:206-260` and
 `src/httprpc.cpp:41-56` (no Core binary was run; the rules are read from the
