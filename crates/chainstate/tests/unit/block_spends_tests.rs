@@ -375,6 +375,85 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Re
 }
 
 #[test]
+fn block_with_mainnet_972097_aggregate_shape_returns_complete_inputs() -> Result {
+    // Mainnet block 972097 has 3,190 transactions, 7,815 spent prevouts and
+    // 9,283 outputs. A removed verbose-JSON size estimate refused it, so this
+    // block meets or exceeds each of those counts with 34-byte scripts.
+    const SPENDS: usize = 3_189;
+    const PER_TX: usize = 3;
+    let f = fixture(101)?;
+    // Anyone-can-spend: push 31 bytes, drop them, push true.
+    let script = || Script::from_bytes([&[0x1f][..], &[0xaa; 31], &[0x75, 0x51]].concat());
+    let output = |value| TxOut {
+        value: Amount::from_sat(value),
+        script_pubkey: script(),
+    };
+    let fan_out = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(f.blocks[1].txs[0].txid(), 0),
+            // The coinbase output has an empty script, so the input supplies true.
+            script_sig: Script::from_bytes(vec![0x51]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: (0..SPENDS * PER_TX).map(|_| output(100_000)).collect(),
+    };
+    let fan_out_txid = fan_out.txid();
+    let funding = mined_block_with_prev_hash(
+        f.blocks[101].block_hash(),
+        102,
+        vec![coinbase(102), fan_out],
+    )?;
+    f.chain.apply_block(&funding, None)?;
+
+    let mut txs = vec![coinbase(103)];
+    for spend in 0..SPENDS {
+        let inputs = (0..PER_TX)
+            .map(|input| {
+                Ok(TxIn {
+                    previous_output: OutPoint::new(
+                        fan_out_txid,
+                        u32::try_from(spend * PER_TX + input)?,
+                    ),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+            })
+            .collect::<std::result::Result<_, std::num::TryFromIntError>>()?;
+        txs.push(Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs,
+            outputs: (0..PER_TX).map(|_| output(90_000)).collect(),
+        });
+    }
+    assert!(txs.len() >= 3_190);
+    assert!(txs.iter().skip(1).map(|tx| tx.inputs.len()).sum::<usize>() >= 7_815);
+    assert!(txs.iter().map(|tx| tx.outputs.len()).sum::<usize>() >= 9_283);
+    let block = mined_block_with_prev_hash(funding.block_hash(), 103, txs)?;
+    f.chain.apply_block(&block, None)?;
+
+    let record = f.chain.block_spends(hash(&block), tip(&f.chain)?)?;
+    assert_eq!(record.block, block);
+    let rows = record.spent?;
+    assert_eq!(rows.len(), block.txs.len());
+    assert_eq!(rows[0], Vec::<bitcoin_rs_utxo::UtxoCoin>::new());
+    for (row, tx) in rows.iter().zip(&block.txs).skip(1) {
+        assert_eq!(row.len(), PER_TX);
+        for (coin, input) in row.iter().zip(&tx.inputs) {
+            assert_eq!(coin.outpoint, input.previous_output);
+            assert_eq!(coin.txout.script_pubkey.len(), 34);
+            assert_eq!(coin.height, 102);
+            assert!(!coin.coinbase);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Result {
     let f = fixture(1)?;
     let original = &f.blocks[1];
