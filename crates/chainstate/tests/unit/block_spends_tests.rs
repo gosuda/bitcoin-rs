@@ -445,7 +445,7 @@ fn block_with_mainnet_972097_aggregate_shape_returns_complete_inputs() -> Result
         assert_eq!(row.len(), PER_TX);
         for (coin, input) in row.iter().zip(&tx.inputs) {
             assert_eq!(coin.outpoint, input.previous_output);
-            assert_eq!(coin.txout.script_pubkey.len(), 34);
+            assert_eq!(coin.txout, output(100_000));
             assert_eq!(coin.height, 102);
             assert!(!coin.coinbase);
         }
