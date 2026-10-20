@@ -539,15 +539,13 @@ fn block_size(block: &Block) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{
-        Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-        Witness, consensus_bytes,
-    };
+    use bitcoin_rs_primitives::{Block, Hash256, Network, consensus_bytes};
     use std::time::{Duration, Instant};
 
     use super::{BlockStager, block_size};
     use crate::default_sync_budget;
     use crate::download_window::SyncBudget;
+    use crate::test_support::padded_regtest_block_with_script;
 
     #[test]
     fn block_size_matches_consensus_serialized_len() {
@@ -932,32 +930,12 @@ mod tests {
         assert!(stager.contains(&incoming));
     }
     fn block_with_total_size(target: usize) -> Block {
-        let probe = padded_block(target);
+        let probe = padded_regtest_block_with_script(target);
         let probe_size = block_size(&probe);
         let padding = target.saturating_mul(2).saturating_sub(probe_size);
-        let block = padded_block(padding);
+        let block = padded_regtest_block_with_script(padding);
         assert_eq!(block_size(&block), target);
         block
-    }
-
-    fn padded_block(script_len: usize) -> Block {
-        Block {
-            header: Network::Regtest.genesis_block().header,
-            txs: vec![Tx {
-                version: 2,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::default(),
-                    script_sig: vec![0_u8; script_len].into(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(0),
-                    script_pubkey: Script::new(),
-                }],
-                lock_time: LockTime::ZERO,
-            }],
-        }
     }
 
     #[test]

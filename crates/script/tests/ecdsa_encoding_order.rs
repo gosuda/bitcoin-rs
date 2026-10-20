@@ -17,20 +17,10 @@ use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
 
-const TX_HEX: &str = concat!(
-    "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f",
-    "0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57",
-    "b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85",
-    "c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2",
-    "f0167faa815988ac11000000",
-);
-const TEST_KEY: &str = "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9";
-const VALUE: u64 = 600_000_000;
-const INPUT: usize = 1;
+#[path = "support/two_input_vector.rs"]
+mod vector;
 
-fn hex(text: &str) -> Vec<u8> {
-    bitcoin::hex::FromHex::from_hex(text).expect("valid fixture hex")
-}
+use vector::{INPUT, TEST_KEY, TX_HEX, VALUE, hex, verify_witness};
 
 fn fixture() -> Tx {
     deserialize(&hex(TX_HEX)).expect("native fixture decode")
@@ -38,25 +28,6 @@ fn fixture() -> Tx {
 
 fn test_key() -> SecretKey {
     SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
-}
-
-fn verify_witness(
-    tx: &Tx,
-    prevout: &TxOut,
-    witness: &[Vec<u8>],
-    flags: VerifyFlags,
-) -> Result<bool, ScriptError> {
-    // These legacy/v0 checks read only the selected input's prevout.
-    let prevouts = vec![prevout.clone(); tx.inputs.len()];
-    Interpreter.execute_with_prevouts(
-        &prevout.script_pubkey,
-        &[],
-        witness,
-        flags,
-        &prevouts,
-        tx,
-        INPUT,
-    )
 }
 
 /// The script context a signature check runs under: a bare `scriptPubKey`

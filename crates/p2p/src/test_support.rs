@@ -2,6 +2,10 @@
 
 use core::fmt::Display;
 
+use bitcoin_rs_primitives::{
+    Amount, Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+};
+
 pub(crate) trait OrFail<T> {
     #[track_caller]
     fn or_fail(self, context: &str) -> T;
@@ -80,5 +84,27 @@ impl std::io::Write for StallingStream {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// A regtest block carrying one coinbase whose `script_sig` is `script_len`
+/// bytes of zero padding; used to build blocks of a chosen serialized size.
+pub(crate) fn padded_regtest_block_with_script(script_len: usize) -> Block {
+    Block {
+        header: Network::Regtest.genesis_block().header,
+        txs: vec![Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::default(),
+                script_sig: vec![0_u8; script_len].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: Script::new(),
+            }],
+            lock_time: LockTime::ZERO,
+        }],
     }
 }

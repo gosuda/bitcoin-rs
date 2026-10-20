@@ -40,6 +40,8 @@ pub mod snapshot;
 /// Transaction relay standardness policy.
 pub mod standardness;
 mod submit_package;
+#[cfg(test)]
+mod test_support;
 /// BIP431 topology policy.
 mod truc;
 

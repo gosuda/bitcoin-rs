@@ -1302,34 +1302,17 @@ fn spend_heavy_proxy_blocks() -> Vec<Block> {
 }
 
 fn child_coinbase_block(parent: &Block, height: u32) -> Block {
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![coinbase_transaction(height)],
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(parent, vec![coinbase_transaction(height)])
 }
 
 fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
+    mined_child_block(parent, vec![fanout_coinbase_transaction(height)])
+}
+
+fn mined_child_block(parent: &Block, txs: Vec<Tx>) -> Block {
     let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![fanout_coinbase_transaction(height)],
+        header: child_header(parent.block_hash(), parent.header.time.saturating_add(1)),
+        txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
@@ -1351,21 +1334,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
     for vout in 0..SPEND_PROXY_FANOUT {
         txs.push(spend_proxy_transaction(source_txid, vout));
     }
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs,
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(parent, txs)
 }
 
 fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
@@ -1532,22 +1501,10 @@ fn signed_spend_proxy_blocks() -> Vec<Block> {
 /// witness-paying outputs, the coinbase includes a BIP141 witness commitment
 /// output and a 32-byte reserved witness element.
 fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningKeys) -> Block {
-    let coinbase = signed_fanout_coinbase_transaction(height, keys);
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(
+        parent,
+        vec![signed_fanout_coinbase_transaction(height, keys)],
+    )
 }
 
 fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
@@ -1661,14 +1618,7 @@ fn child_signed_spend_fanout_block(
         txs.push(spend_tx);
     }
     let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
+        header: child_header(parent.block_hash(), parent.header.time.saturating_add(1)),
         txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();

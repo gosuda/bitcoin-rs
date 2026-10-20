@@ -7,7 +7,7 @@
 //! bytes are the pool's capacity-based estimates at operation endpoints. A vsize limit is not an RSS
 //! limit. These samples do not certify unrelated resources or performance.
 
-use bitcoin_rs_consensus::{ValidationEngine, transaction_sigop_cost};
+use bitcoin_rs_consensus::ValidationEngine;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,11 +19,10 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry, MempoolGateway,
     MempoolLimits, PolicyError, ReplacementCandidate, SubmitError, SubmitOutcome,
 };
-use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
+use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 
@@ -190,7 +189,7 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
             let context = context();
             let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
             assert_eq!(candidate.transactions.len(), snapshot.entries.len());
-            let sigops = total_sigop_cost(&candidate);
+            let sigops = common::total_sigop_cost(&candidate);
             assert!(candidate.weight <= context.max_weight && sigops <= context.max_sigops);
             Ok(
                 json!({"selected": candidate.transactions.len(), "weight": candidate.weight,
@@ -421,16 +420,4 @@ fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
     println!("RESOURCE_EVIDENCE {report}");
     println!("resource evidence: {}", path.display());
     Ok(())
-}
-
-fn total_sigop_cost(candidate: &Candidate) -> u64 {
-    u64::from(transaction_sigop_cost(
-        &candidate.coinbase,
-        &[],
-        VerifyFlags::NONE,
-    )) + candidate
-        .transactions
-        .iter()
-        .map(|tx| u64::from(tx.sigop_cost))
-        .sum::<u64>()
 }

@@ -1,9 +1,8 @@
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Witness, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, Hash256, Network, consensus_bytes};
+
+use crate::test_support::padded_regtest_block_with_script;
 
 use super::{
     BlameReason, BlockStager, BlockedContext, BlockedDecision, DownloadWindow,
@@ -64,26 +63,6 @@ fn padded_regtest_block(total_bytes: usize) -> Block {
     let block = padded_regtest_block_with_script(script_len);
     assert_eq!(block.total_size(), total_bytes);
     block
-}
-
-fn padded_regtest_block_with_script(script_len: usize) -> Block {
-    Block {
-        header: Network::Regtest.genesis_block().header,
-        txs: vec![Tx {
-            version: 2,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::default(),
-                script_sig: vec![0_u8; script_len].into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: Script::new(),
-            }],
-            lock_time: LockTime::ZERO,
-        }],
-    }
 }
 
 /// Stages one `total_bytes`-long body into `stager`.
