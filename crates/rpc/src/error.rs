@@ -13,6 +13,13 @@ pub enum RpcError {
     /// comparison checks the exact string.
     #[error("{0}")]
     InvalidRequest(&'static str),
+    /// A top-level JSON value that is neither an object nor an array.
+    ///
+    /// Bitcoin Core answers `RPC_PARSE_ERROR` (-32700) with its own message
+    /// for this case (`src/httprpc.cpp`: "Top-level object parse error").
+    /// The payload is rendered verbatim.
+    #[error("{0}")]
+    TopLevelParse(&'static str),
     /// Method name is not supported.
     #[error("method not found: {0}")]
     MethodNotFound(String),
@@ -90,7 +97,7 @@ impl RpcError {
     #[must_use]
     pub const fn code(&self) -> i64 {
         match self {
-            Self::Parse(_) => Self::PARSE_ERROR,
+            Self::Parse(_) | Self::TopLevelParse(_) => Self::PARSE_ERROR,
             Self::Misc(_) => -1,
             Self::InvalidRequest(_) => Self::INVALID_REQUEST,
             Self::MethodNotFound(_) => Self::METHOD_NOT_FOUND,

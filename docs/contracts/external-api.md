@@ -54,20 +54,25 @@ scanning and wallet interoperability remain unverified.
   `JSONRPCRequest::parse` (`src/rpc/request.cpp:206-260`): a **non-null**
   `jsonrpc` field must be a string and must be `"1.0"` (accepted as legacy
   for compatibility) or `"2.0"`; a present `params` field must be an array,
-  an object, or `null`; and `method` must be present and a string. An
-  absent or explicit-null `jsonrpc` is the legacy dialect, as in Core. A
-  violation is `-32600` carrying Core's exact message, and the method never
-  runs.
-- HTTP status follows Core's legacy mapping (`src/httprpc.cpp:41-56`).
-  A legacy request answers errors with an HTTP error status — `-32600` is
-  400, `-32601` is 404, and every other code is 500 — while a v2 request
-  answers with HTTP 200. An envelope violation is detected before the
-  claimed version is trusted, so it takes the legacy mapping in either
-  dialect. A non-empty batch answers HTTP 200 and carries per-member errors
-  in its array; an empty batch is `-32600` at the legacy 400 status (pinned
-  by `an_empty_batch_is_rejected_as_an_invalid_request`; the pinned Core
-  source does not specify an empty batch, so this is the local behavior, not
-  a Core-parity claim), and an all-notification batch answers 204.
+  an object, or `null`; and `method` must be present and a string. Core
+  checks `isNull()` before `isStr()`, so an explicit `null` method is
+  "Missing method", not "Method must be a string". An absent or
+  explicit-null `jsonrpc` is the legacy dialect, as in Core. A violation
+  is `-32600` carrying Core's exact message, and the method never runs.
+  A top-level JSON value that is neither an object nor an array is
+  `-32700` "Top-level object parse error" (`src/httprpc.cpp`, the final
+  `else` of `HTTPReq_JSONRPC`).
+- HTTP status follows Core's mapping (`src/httprpc.cpp:41-56`). An
+  envelope refusal — an error raised while `parse()` runs — is `-32600`
+  at HTTP 400 whatever dialect the request claimed. Only the reply's
+  envelope depends on how far parsing got: a rejected `jsonrpc` field
+  falls back to the legacy envelope, while a `method`/`params` refusal
+  after a clean `"2.0"` keeps the v2 envelope. Dispatch errors then
+  follow the dialect: a legacy request answers with an HTTP error status
+  (`-32600` → 400, `-32601` → 404, every other code → 500), and a v2
+  request stays inside HTTP 200. Every batch answers HTTP 200: a
+  non-empty batch carries per-member errors in its array, an empty batch
+  answers `[]`, and an all-notification batch answers 204.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
   JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-1`
   (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
@@ -304,10 +309,12 @@ Proof: `crates/rpc/src/server.rs` tests
 `legacy_other_errors_keep_http_500`,
 `json_rpc_2_dispatch_errors_still_answer_http_200`,
 `json_rpc_2_envelope_error_uses_the_legacy_status`,
+`json_rpc_2_method_and_params_envelope_errors_answer_400`,
+`a_top_level_scalar_is_a_parse_error`,
 `batch_members_keep_per_member_envelope_dialect`,
 `notification_with_a_malformed_envelope_is_not_executed`, and
 `a_rejected_envelope_never_dispatches_the_method`, and
-`an_empty_batch_is_rejected_as_an_invalid_request`, and
+`an_empty_batch_answers_an_empty_ok_batch`, and
 `an_all_notification_batch_answers_204` pin the envelope rules, the Core
 status mapping, execution prevention, and the batch reply shape; `crates/rpc/tests/auth.rs`
 `legacy_error_has_core_envelope_and_http_error` pins them through a real
