@@ -176,9 +176,19 @@ Distinguish, and never conflate:
 
 - **Invalid header** — rejected by header admission (`P2P-10`); the peer's
   ancestry is not admitted.
-- **Invalid body** — rejected by the chain transition. An otherwise valid
-  header branch is not invalidated because a peer delivered a bad body; the
-  body gate clears and another peer may serve it (`P2P-05`).
+- **Invalid body** — classified by `WindowApplyDisposition`
+  (`crates/chainstate/src/lib.rs`): `BodyMutated` (body/header binding
+  failure — the delivery is discarded and the header stays retryable),
+  `Permanent` (consensus-invalid block — the block and its descendants are
+  marked invalid and that branch is **not** retried), `Operational`
+  (transient failure — no subtree invalidation), and `Fatal` (in-process
+  admission stops pending recovery). Ingress also runs
+  `check_body_binding` in
+  `crates/p2p/src/sync/receive.rs::buffer_received_block_chunk` **before**
+  staging, so a mutated body is refused without reaching the chain
+  transition at all. A peer-delivered bad body never invalidates a valid
+  header branch on its own; only the `Permanent` classification marks the
+  branch.
 - **Transient delivery failure** — strike/retry/handover under the existing
   header-request and window rules; no chain-state change.
 - **Unavailable history** — missing or pruned bodies; reported as unavailable
@@ -270,14 +280,17 @@ verdict, or extra state machine is implied.
 
 - Cross-crate composition proof:
   `crates/node/tests/sync_smoke.rs::tick_recovers_rejected_frontier_without_publishing_unapplied_blocks`
-  feeds admitted headers and a malformed frontier body through the real
-  delivery channels and asserts applied progress, the durable chain snapshot,
-  UTXO/CoinStats, the RPC block log and both tree nodes stay unchanged, then
-  that resending only the correct parent applies its already-staged
-  successor. It proves the channel-fed, in-memory composition across
-  `SYNC-01`/`SYNC-02`/`SYNC-05`; it does **not** prove live peer sockets,
-  durable crash recovery, or eventual progress under real index contention
-  (those keep their owning deep lanes).
+  is a **pre-staging binding rejection** (`check_body_binding` refuses the
+  mutated body before staging) plus an **in-memory cross-crate
+  apply/publication after a valid replacement**: it asserts applied
+  progress, the in-memory chain snapshot, UTXO/CoinStats, and the RPC
+  block log stay untouched, the tree status is not `Invalid`, and a later
+  manually injected valid parent applies its already-staged successor. It
+  does **not** exercise `WindowApplyDisposition`, an automatic peer retry,
+  disk durability, or live-socket convergence; the `Permanent`/
+  `Operational`/`Fatal` classifications and real recovery keep their owning
+  Chainstate invalidation/settlement and recovery suites (`SYNC-04` proof
+  list), not this test.
 - Proof: `crates/p2p/src/sync/tests/transitions_*.rs` (tick fetch/handover
   regressions — the driver actually sends; `cold_start_stall_hedges_front_without_reassigning_owner`);
   `crates/index/src/runtime/reconciliation.rs` quiet-wait/timeout tests
@@ -320,6 +333,59 @@ currently required synchronization/recovery operation still depends on them.
 Use this to decide which obligations a feature PR can disturb and which
 existing evidence to run. It is review guidance, not a demand to add a test
 per hypothetical feature.
+
+### Feature non-interference rule
+
+For optional read/index/observer features, enabling, disabling, delaying, or
+failing the feature must not change authoritative validity,
+applied-chain/UTXO/durable commit results, required-history ownership, or the
+ability of the existing sync driver to recover and progress under stated
+availability/resource assumptions. The optional feature may lag, become
+unavailable, or produce additional derived output; it may not become a
+prerequisite for canonical apply.
+
+The other two feature classes differ:
+
+- **Transport/relay/compact-block BIPs** may change requests, candidate
+  delivery, and timing, but must not take authority over canonical
+  frontier/validation/commit, strand owned work, or remove the existing
+  fallback/retry path.
+- **Sync/validation/storage performance changes** are *sync-critical
+  refinements*, not "no sync impact": they must preserve consensus outcomes,
+  committed/recovery semantics, and conditional progress. A genuinely
+  consensus-changing BIP requires its own activation/parity evidence, not the
+  optional-feature equivalence promise.
+
+A paired feature OFF/ON run (including lag/failure where relevant) is a
+useful targeted proof pattern — not a blanket request for dual full-IBD
+runs. Clearly mark unproven comparisons as gaps.
+
+### Capability/effect boundaries
+
+An optional feature cannot introduce an unbounded hold, synchronous wait,
+blocking callback, or new sync-state writer on the authoritative path
+without being classified as sync-critical and supplying specific evidence.
+"Read-only" and "different crate/thread" do not prove non-interference. The
+boundaries that make the rule enforceable:
+
+- **Canonical mutation / scheduling authority**:
+  `Chainstate::begin_transition`, `SyncChain::commit_window`/`BlockSync`
+  download ownership, and applied-tip publication. Optional observers must
+  not create a second path to these decisions.
+- **Shared blocking dependencies**:
+  `crates/index/src/runtime/rollback.rs::seed_live_from_utxo` holds
+  `utxo.lock_stable_view()` through a full scan and index persistence while
+  `crates/utxo/src/set.rs` commits need its write lock — the concrete
+  present-day counterexample, recorded as an open gap above (`SYNC-03`), not
+  something this contract asks a docs PR to fix.
+- **Synchronous post-commit extension point**:
+  `crates/node/src/p2p_chain_adapter.rs::commit_window` invokes
+  `ChainFollowers::on_connect` before `settle_window_success` while the
+  transition/mempool fence is still held; `ChainFollowers` calls the
+  optional index wake and ZMQ publisher alongside required mempool work (the
+  current ZMQ send uses `DONTWAIT`). A future optional callback that waits
+  on I/O, locks, or a worker here joins the authoritative critical path
+  despite holding no state-mutation authority.
 
 - **Optional read/index BIP**: its own worker, failure, stale/readiness state
   and backpressure must not block authoritative apply; a disabled or

@@ -81,12 +81,13 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 ///
 /// This is the smallest proof that spans inbound delivery -> authoritative
 /// apply/commit -> consumer publication: `SYNC-02` (a rejected frontier body
-/// leaves applied progress and the durable chain snapshot untouched),
+/// leaves applied progress and the in-memory chain snapshot untouched),
 /// `SYNC-01` (admitted headers and applied state are separate authorities),
-/// and `SYNC-05` (consumers observe only committed outcomes). It is a
-/// channel-fed, in-memory composition; it does **not** exercise live peer
-/// sockets, durable crash recovery, or eventual progress under real index
-/// contention.
+/// and `SYNC-05` (consumers observe only committed outcomes). The mutated
+/// body is refused by the pre-staging `check_body_binding` ingress gate, so
+/// this is a channel-fed, in-memory composition; it does **not** exercise
+/// `WindowApplyDisposition`, live peer sockets, durable crash recovery, or
+/// eventual progress under real index contention.
 #[test]
 #[expect(
     clippy::too_many_lines,
