@@ -151,12 +151,25 @@ impl DerivedIndexQueryEngine {
                 if occurrence.flags & ScriptHistoryOccurrence::FUNDING == 0 {
                     continue;
                 }
-                let Some(transaction) =
+                // `block_body_range` may be absent on a source; `None` asks
+                // for the whole-body read, never a hard miss (`block_body.rs`).
+                let transaction = if let Some(transaction) =
                     self.resolve_positioned_transaction(tip, budget, height, occurrence.position)?
-                else {
-                    return Err(TxQueryError::Unavailable(
-                        "script-history transaction body unavailable".into(),
-                    ));
+                {
+                    transaction
+                } else {
+                    let hash = self.resolve_hash_at_height(height, tip)?;
+                    let block = self.resolve_block(budget, height, hash)?;
+                    let Some(transaction) = block
+                        .txs
+                        .into_iter()
+                        .find(|candidate| candidate.txid() == txid)
+                    else {
+                        return Err(TxQueryError::Unavailable(
+                            "script-history transaction body unavailable".into(),
+                        ));
+                    };
+                    transaction
                 };
                 if transaction.txid() != txid
                     || !Self::collect_funding_outputs(

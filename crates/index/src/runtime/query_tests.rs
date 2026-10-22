@@ -189,6 +189,7 @@ impl IndexReader for QueryReader {
 struct FixtureConfig {
     block: Block,
     retain_body: bool,
+    ranged_body: bool,
     scans: Vec<ScanResponse>,
     watermark: Option<IndexWatermark>,
 }
@@ -204,6 +205,7 @@ pub(super) struct SingleBlockBody {
     pub(super) height: u32,
     pub(super) hash: BlockHash,
     pub(super) body: Vec<u8>,
+    pub(super) ranged: bool,
     pub(super) full_reads: AtomicUsize,
 }
 
@@ -222,7 +224,7 @@ impl BlockBodySource for SingleBlockBody {
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
-        if height != self.height || hash != self.hash {
+        if !self.ranged || height != self.height || hash != self.hash {
             return None;
         }
         let start = usize::try_from(offset).ok()?;
@@ -274,6 +276,7 @@ impl QueryFixture {
                 height: tip.height,
                 hash: config.block.block_hash(),
                 body: consensus_bytes(&config.block),
+                ranged: config.ranged_body,
                 full_reads: AtomicUsize::new(0),
             })
         });
@@ -324,6 +327,7 @@ fn unusable_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error:
         let fixture = QueryFixture::new(FixtureConfig {
             block,
             retain_body: true,
+            ranged_body: true,
             scans: Vec::new(),
             watermark: None,
         })?;
@@ -352,6 +356,7 @@ fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries(
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: true,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::TxConfirmed,
             TxidRow::scan_prefix(&txid),
@@ -469,6 +474,7 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::err
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: true,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::TxConfirmed,
             prefix,
@@ -497,6 +503,7 @@ fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: true,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::TxConfirmed,
             prefix,
@@ -523,6 +530,7 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: false,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::TxConfirmed,
             prefix,
@@ -546,6 +554,7 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
     let fixture = QueryFixture::new(FixtureConfig {
         block: block.clone(),
         retain_body: true,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::Spending,
             SpendingPrefixRow::scan_prefix(&outpoint),
@@ -587,6 +596,7 @@ fn complete_history_and_funding_share_one_durable_scan() -> Result<(), Box<dyn s
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: true,
+        ranged_body: true,
         scans: vec![scan_response(
             ColumnFamily::Funding,
             ScriptHashRow::scan_prefix(script),
@@ -613,5 +623,52 @@ fn complete_history_and_funding_share_one_durable_scan() -> Result<(), Box<dyn s
         }]
     );
     assert_eq!(fixture.funding_scans.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+
+#[test]
+fn history_snapshot_falls_back_to_full_block_when_ranged_read_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A body source may leave `block_body_range` unimplemented; `None` asks
+    // for the whole-body read rather than reporting the body missing.
+    let block = Network::Regtest.genesis_block();
+    let transaction = &block.txs[0];
+    let txid = transaction.txid();
+    let script = crate::ScriptHash::new(&transaction.outputs[0].script_pubkey);
+    let value = transaction.outputs[0].value.to_sat();
+    let position = position_of_transaction(&block, 0)?;
+    let row = HashPrefixRow::new(script.prefix(), 0);
+    let occurrence = crate::types::ScriptHistoryOccurrence {
+        scripthash: script,
+        txid: *txid.as_bytes(),
+        position,
+        flags: crate::types::ScriptHistoryOccurrence::FUNDING,
+    };
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        ranged_body: false,
+        scans: vec![scan_response(
+            ColumnFamily::Funding,
+            ScriptHashRow::scan_prefix(script),
+            vec![(
+                zerocopy::IntoBytes::as_bytes(&row).to_vec(),
+                crate::types::ScriptHistoryOccurrence::encode_all(&[occurrence]),
+            )],
+            true,
+        )],
+        watermark: None,
+    })?;
+    let snapshot = fixture.engine.history_snapshot(script)?;
+    assert_eq!(
+        snapshot.funding,
+        vec![crate::ScriptIndexRecord {
+            txid,
+            height: 0,
+            value,
+            vout: 0
+        }]
+    );
+    assert_eq!(fixture.full_reads()?, 1);
     Ok(())
 }
