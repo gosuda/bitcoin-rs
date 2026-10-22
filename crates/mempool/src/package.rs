@@ -182,6 +182,14 @@ pub(crate) fn finish_package(
     };
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
         job.verify_policy(request);
+        if let crate::gateway::AdmissionMode::PackageRpcSubmit(maximum) = mode
+            // Core's singleton PreChecks applies its own floor before the
+            // client cap. Multi-transaction caps precede aggregate fee checks.
+            && (txs.len() > 1
+                || aggregate_error != Some(AcceptanceRejectReason::MinRelayFeeNotMet))
+        {
+            job.check_package_max_feerate(maximum);
+        }
         if job.fact.allowed == Some(false) {
             facts.results[index] = job.fact.clone();
             return facts;
@@ -208,11 +216,17 @@ pub(crate) fn finish_package(
         Err(error) => {
             // Preserve the existing preview error surface. Native submission
             // reports pool/graph failures without pretending to run replacement.
-            facts.package_error = Some(if mode == crate::gateway::AdmissionMode::PackageSubmit {
-                AcceptanceRejectReason::Mempool(error.into_pool_error())
-            } else {
-                AcceptanceRejectReason::Replacement(error)
-            });
+            facts.package_error = Some(
+                if matches!(
+                    mode,
+                    crate::gateway::AdmissionMode::PackageSubmit
+                        | crate::gateway::AdmissionMode::PackageRpcSubmit(_)
+                ) {
+                    AcceptanceRejectReason::Mempool(error.into_pool_error())
+                } else {
+                    AcceptanceRejectReason::Replacement(error)
+                },
+            );
             return facts;
         }
     }

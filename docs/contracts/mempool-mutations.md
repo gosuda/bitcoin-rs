@@ -209,7 +209,11 @@ state (`crates/mempool/src/orphan.rs`).
   Submission preserves the prepared consensus or policy error class; preview
   keeps its existing rejection facts. Refusal changes no membership, sequence,
   fee overlay, estimator or observer output. Four attempts bound stale facts.
-  It neither implements package RBF nor changes RPC/REST wire behavior.
+  It does not implement package RBF. RPC `submitpackage` uses this same atomic
+  owner for singletons and 1p1c, preserving independently accepted members
+  before reconsidering a fee-dependent pair. It captures resident/modified-fee
+  response facts under the same stamp and applies the RPC modified-feerate cap
+  before scripts; preview and native caller-cap semantics are unchanged.
 - Proof: `gateway::tests::chain_generation_starts_even_at_zero`,
   `gateway::tests::explicit_finish_restores_even_generation`, and
   `gateway::tests::chain_generation_overflow_fails_closed` in

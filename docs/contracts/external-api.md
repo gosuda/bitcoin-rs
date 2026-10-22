@@ -540,11 +540,14 @@ scanning and wallet interoperability remain unverified.
 ### `API-10`: Broadcast and preview through the admission gateway
 
 
-- `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, and P2P
+- `sendrawtransaction`, `submitpackage`, `testmempoolaccept`, Esplora `POST /tx`, and P2P
   ingress reach the single `MempoolGateway` (`mempool-policy.md` `POL-02`).
   Each committing producer carries an explicit `AdmissionOrigin` and its
-  own request fee limits. Aggregate package submission remains unsupported
-  (`POL-05`); its future producer must use this same admission owner.
+  own request fee limits. Scoped `submitpackage` admits singletons and 1p1c
+  through the existing atomic package owner, with Core's individual-first
+  partial results (`POL-05`). Wider shapes and replacement are explicitly
+  refused. Named or positional `package`, `maxfeerate`, and `maxburnamount`
+  parameters feed the same owner; burn guards run before any mutation.
 - Esplora `POST /tx` is implemented on both `/api` and `/esplora` with
   `AdmissionOrigin::Esplora` and an explicit, fixed 10,000,000 sat/kvB
   request ceiling. Its hex body provides no fee override. RPC keeps its
