@@ -357,7 +357,7 @@ impl MempoolGateway {
                 .iter()
                 .map(|request| (*request.tx).clone())
                 .collect();
-            let (mut prepared, checks, plan, rate) = {
+            let (mut prepared, checks, plan, entry_fees) = {
                 let pool = self.read();
                 if self
                     .check_admission_state(
@@ -392,19 +392,23 @@ impl MempoolGateway {
                     })
                     .collect();
                 let entries = crate::package::package_entries(&requests, &prepared);
-                let fee = entries.iter().try_fold(0_i128, |sum, entry| {
-                    sum.checked_add(pool.modified_fee_for(entry.txid, entry.fee).ok()?)
-                });
-                let size: u64 = entries.iter().map(|entry| u64::from(entry.vsize)).sum();
-                let rate = fee
-                    .and_then(|fee| (size != 0).then(|| fee * 1_000 / i128::from(size)))
-                    .and_then(|rate| u64::try_from(rate).ok());
+                // Modified fees decide effective rates; base fees miss the
+                // deltas the pool applies (standardness.rs). A failed lookup
+                // nulls the rates rather than reporting a base-fee quote.
+                let entry_fees: Option<Vec<_>> = entries
+                    .iter()
+                    .map(|entry| {
+                        pool.modified_fee_for(entry.txid, entry.fee)
+                            .ok()
+                            .map(|fee| (entry.txid, fee, entry.vsize))
+                    })
+                    .collect();
                 let checks = crate::package::capture_package_checks(&pool, &pending, &entries);
                 (
                     prepared,
                     checks,
                     pool.prepare_package(entries, unix_time_secs()),
-                    rate,
+                    entry_fees,
                 )
             };
             // Unlike a single preview, even one new package member must use
@@ -440,7 +444,11 @@ impl MempoolGateway {
                 .iter()
                 .filter_map(|job| job.script_cache_key)
                 .collect();
-            let includes: Vec<Vec<_>> = pending
+            // A member's effective set is itself plus every member whose
+            // fees flow to it through the package spend graph (its
+            // descendants): Core reports the bumped parent's package rate
+            // and the paying child's own rate.
+            let subpackages: Vec<hashbrown::HashSet<_>> = pending
                 .iter()
                 .map(|tx| {
                     let mut descendants = hashbrown::HashSet::new();
@@ -459,6 +467,12 @@ impl MempoolGateway {
                             }
                         }
                     }
+                    descendants
+                })
+                .collect();
+            let includes: Vec<Vec<_>> = subpackages
+                .iter()
+                .map(|descendants| {
                     pending
                         .iter()
                         .filter(|candidate| descendants.contains(&candidate.txid()))
@@ -466,6 +480,22 @@ impl MempoolGateway {
                         .collect()
                 })
                 .collect();
+            let effective_rates: Vec<_> = match &entry_fees {
+                Some(entry_fees) => subpackages
+                    .iter()
+                    .map(|descendants| {
+                        let (fee, size): (i128, u64) = entry_fees
+                            .iter()
+                            .filter(|(txid, _, _)| descendants.contains(txid))
+                            .map(|(_, fee, vsize)| (*fee, u64::from(*vsize)))
+                            .fold((0, 0), |(fee, size), (f, s)| (fee + f, size + s));
+                        fee.checked_mul(1_000)
+                            .and_then(|total| (size != 0).then(|| total / i128::from(size)))
+                            .and_then(|rate| u64::try_from(rate).ok())
+                    })
+                    .collect(),
+                None => vec![None; subpackages.len()],
+            };
             for (pending_index, ((tx, row), job)) in pending
                 .iter()
                 .zip(&facts.results)
@@ -482,7 +512,7 @@ impl MempoolGateway {
                         PackageTxResult::Accepted {
                             vsize: row.vsize,
                             base_fee: row.base_fee.unwrap_or(0),
-                            effective_fee_rate: rate,
+                            effective_fee_rate: effective_rates[pending_index],
                             effective_includes: includes[pending_index].clone(),
                         }
                     } else {
