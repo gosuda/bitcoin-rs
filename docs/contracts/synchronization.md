@@ -271,10 +271,11 @@ verdict, or extra state machine is implied.
 - Cross-crate composition proof:
   `crates/node/tests/sync_smoke.rs::tick_recovers_rejected_frontier_without_publishing_unapplied_blocks`
   feeds admitted headers and a malformed frontier body through the real
-  delivery channels and asserts applied progress, the durable chain snapshot,
-  UTXO/CoinStats, the RPC block log and both tree nodes stay unchanged, then
-  that resending only the correct parent applies its already-staged
-  successor. It proves the channel-fed, in-memory composition across
+  delivery channels and asserts applied progress and the in-memory chain-event
+  snapshot, UTXO/CoinStats and RPC block log stay unchanged; both admitted
+  tree nodes remain non-invalid. Resending only the correct parent applies
+  its already-staged successor. It proves the channel-fed, in-memory
+  composition across
   `SYNC-01`/`SYNC-02`/`SYNC-05`; it does **not** prove live peer sockets,
   durable crash recovery, or eventual progress under real index contention
   (those keep their owning deep lanes).

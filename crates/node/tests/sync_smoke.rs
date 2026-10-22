@@ -80,13 +80,15 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 /// the correct frontier body later must also apply its already-staged child.
 ///
 /// This is the smallest proof that spans inbound delivery -> authoritative
-/// apply/commit -> consumer publication: `SYNC-02` (a rejected frontier body
-/// leaves applied progress and the durable chain snapshot untouched),
-/// `SYNC-01` (admitted headers and applied state are separate authorities),
-/// and `SYNC-05` (consumers observe only committed outcomes). It is a
-/// channel-fed, in-memory composition; it does **not** exercise live peer
-/// sockets, durable crash recovery, or eventual progress under real index
-/// contention.
+/// apply/commit -> consumer publication: `SYNC-02` (a frontier body rejected
+/// during pre-staging body/header binding leaves applied progress and the
+/// in-memory chain snapshot untouched), `SYNC-01` (admitted headers and
+/// applied state are separate authorities), and `SYNC-05` (consumers observe
+/// only committed outcomes). The rejection is exercised at the binding
+/// stage, so a failed authoritative apply and its publication behavior are
+/// not covered here. It is a channel-fed, in-memory composition; it does
+/// **not** exercise live peer sockets, durable crash recovery, or eventual
+/// progress under real index contention.
 #[test]
 #[expect(
     clippy::too_many_lines,
