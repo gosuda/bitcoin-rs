@@ -163,7 +163,9 @@ the block-tree owner without requiring a retained body. `broadcast_package`
 routes bounded native child-with-independent-parents CPFP through
 `MempoolGateway::submit_local_package` with the ordinary fee cap. RPC
 `submitpackage` uses the same atomic owner with its scoped individual-first
-contract in `POL-05`; neither interface implements package RBF. Settled polling, opaque
+contract in [POL-02](mempool-policy.md#pol-02-one-admission-owner-and-admission-mode)
+and [POL-05](mempool-policy.md#pol-05-replacement-cluster-and-package-policy);
+neither interface implements package RBF. Settled polling, opaque
 replay targets, positional steps, gap/restart recovery and work bounds are
 owned by `EVT-06` in [chain-events.md](chain-events.md). `snapshot()` retains its
 live applied-tip semantics; callers needing follower settlement use

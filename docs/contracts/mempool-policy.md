@@ -43,6 +43,10 @@ holds the reference pins and the admission-profile evidence.
   pinned Core `AcceptPackage`, it first admits individually eligible members
   and then retries fee/missing-input failures together. An independently
   accepted parent survives child refusal; a fee-dependent pair commits together.
+- Proof: `package::tests::rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview`
+  and `package::tests::rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice`
+  in `crates/mempool/src/package/tests.rs` cover RPC package admission,
+  individual-first partial acceptance and resident fee exclusion.
 - Chain reads, script execution and fee-diagram solving run outside write locks.
   Callbacks run after pool/lifecycle locks are released.
 
@@ -57,7 +61,9 @@ holds the reference pins and the admission-profile evidence.
   finality and graph policy precede scripts. The caller maximum fee guard runs
   only after successful admission verification, comparing the base fee to
   `CFeeRate::GetFee(vsize)` rather than a rounded rate quote. An invalid transaction cannot
-  select a more convenient maximum-fee error.
+  select a more convenient maximum-fee error. The `submit_rpc_package`
+  pre-script `check_package_max_feerate` is an explicit exception: for over-cap
+  members, `MaxFeeExceeded` precedes script-failure reporting.
 - A verified plan carries prepared insertion and ordered removals. The writer
   rechecks its stamp before any mutation. Capacity refusal, stale preparation
   or a rejected replacement changes no pool membership, fee overlay, estimator
@@ -122,6 +128,10 @@ holds the reference pins and the admission-profile evidence.
   before scripts. Native submission retains its existing base-fee guard and
   confirmed-member deduplication; RPC treats confirmed transactions as new
   input-resolution attempts. No package RBF or capacity eviction is implied.
+- Proof: `package::tests::rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing`
+  and `package::tests::rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state`
+  in `crates/mempool/src/package/tests.rs` cover package cap,
+  unsupported-shape, capacity and replacement outcomes.
 - TRUC requires matching unconfirmed versions, at most one ancestor/descendant,
   10,000 adjusted vB for a root and 1,000 for a child. An eligible sole sibling
   joins single-transaction RBF and remains subject to its fees and diagrams.
