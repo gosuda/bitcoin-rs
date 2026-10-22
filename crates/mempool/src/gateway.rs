@@ -201,6 +201,7 @@ pub(crate) enum AdmissionMode {
     Single,
     PackageTest,
     PackageSubmit,
+    PackageRpcSubmit(Option<u64>),
 }
 
 #[allow(
@@ -215,6 +216,18 @@ enum ReplacementStage {
 }
 
 impl PreparedAdmission {
+    pub(crate) fn check_package_max_feerate(&mut self, maximum: Option<u64>) {
+        if self.rejection.is_none()
+            && maximum
+                .is_some_and(|max| self.fact.effective_fee_rate.is_some_and(|rate| rate > max))
+        {
+            self.reject(
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MaxFeeExceeded),
+                RejectScope::Transaction,
+            );
+        }
+    }
+
     fn reject(&mut self, error: AdmitError, scope: RejectScope) {
         self.replacement = ReplacementStage::Rejected;
         self.fact.allowed = Some(false);
@@ -1115,7 +1128,11 @@ impl MempoolGateway {
             _ => LimitEnforcement::Full,
         };
         let deferred = enforcement == LimitEnforcement::Deferred;
-        let floor = if deferred || mode == AdmissionMode::PackageSubmit {
+        let floor = if deferred
+            || matches!(
+                mode,
+                AdmissionMode::PackageSubmit | AdmissionMode::PackageRpcSubmit(_)
+            ) {
             None
         } else {
             Some(pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs()))
@@ -1170,7 +1187,9 @@ impl MempoolGateway {
         }
         if matches!(
             mode,
-            AdmissionMode::PackageTest | AdmissionMode::PackageSubmit
+            AdmissionMode::PackageTest
+                | AdmissionMode::PackageSubmit
+                | AdmissionMode::PackageRpcSubmit(_)
         ) {
             // Package previews and native submissions forbid replacement;
             // an already resident tx retains its duplicate result here.

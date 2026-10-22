@@ -1,4 +1,4 @@
-//! Native child-with-parents submission. RPC package wire compatibility is separate.
+//! Package submission through the existing stamped admission and mutation owner.
 use crate::admission::{
     AdmissionFence, MAX_ADMISSION_RETRIES, batch_requests, resolve_mempool_inputs,
 };
@@ -8,7 +8,45 @@ use crate::{
     AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, SubmitError,
 };
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::{Tx, unix_time_secs};
+use bitcoin_rs_primitives::{Tx, Wtxid, unix_time_secs};
+
+/// One submitted transaction's result. Identities follow the submitted order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackageTxResult {
+    /// Accepted or already resident. Resident entries have no effective rate.
+    Accepted {
+        /// Sigop-adjusted virtual size.
+        vsize: u32,
+        /// Actual transaction fee, without operator deltas.
+        base_fee: u64,
+        /// Modified fee rate of the newly accepted subpackage, in sat/kvB.
+        effective_fee_rate: Option<u64>,
+        /// Exact witnesses whose fees paid for this admission.
+        effective_includes: Vec<Wtxid>,
+    },
+    /// The resident transaction has the same txid and another witness.
+    DifferentWitness(Wtxid),
+    /// No membership was committed for this transaction by this attempt.
+    Rejected(SubmitError),
+    /// Package-wide validation stopped before this transaction was evaluated.
+    Unvalidated,
+}
+
+/// Scoped submitpackage results, including independently accepted members.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageSubmission {
+    /// A structural or combined-policy failure, if any.
+    pub package_error: Option<AcceptanceRejectReason>,
+    /// One result per submitted transaction, in input order.
+    pub tx_results: Vec<PackageTxResult>,
+}
+
+struct PackageAttempt {
+    mutation: MutationResult,
+    results: Vec<PackageTxResult>,
+    error: Option<SubmitError>,
+    package_error: Option<AcceptanceRejectReason>,
+}
 
 fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     if txs.is_empty() || txs.len() > crate::standardness::MAX_PACKAGE_COUNT {
@@ -47,10 +85,140 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
 }
 
 impl MempoolGateway {
+    /// Core's individual-then-aggregate submission for a singleton or 1p1c.
+    /// Wider packages and replacement are explicitly unsupported. The atomic
+    /// native operation remains the sole owner of preparation and commit.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep Core's individual pass, atomic reconsideration and final membership results in one auditable sequence"
+    )]
+    pub fn submit_rpc_package(
+        &self,
+        txs: &[Tx],
+        max_rate: Option<u64>,
+        time: u64,
+        chain: &dyn AdmissionChain,
+    ) -> Result<PackageSubmission, SubmitError> {
+        if txs.len() > 2 {
+            return Err(AcceptanceRejectReason::PackageUnsupported.into());
+        }
+        if txs.len() == 2
+            && (!txs[1]
+                .inputs
+                .iter()
+                .any(|input| input.previous_output.txid == txs[0].txid())
+                || txs[0]
+                    .inputs
+                    .iter()
+                    .any(|input| input.previous_output.txid == txs[1].txid()))
+        {
+            return Err(AcceptanceRejectReason::PackageTopology.into());
+        }
+        if let Err(reason) = crate::package::check_structure(txs) {
+            return Ok(PackageSubmission {
+                package_error: Some(reason),
+                tx_results: vec![PackageTxResult::Unvalidated; txs.len()],
+            });
+        }
+        let mode = AdmissionMode::PackageRpcSubmit(max_rate.filter(|rate| *rate != 0));
+        let mut result = PackageSubmission {
+            package_error: None,
+            tx_results: Vec::with_capacity(txs.len()),
+        };
+        let mut reconsider = Vec::new();
+        let mut quit_early = false;
+        // Pinned Core AcceptPackage first commits individually admissible
+        // members. A valid parent survives a child's rejection; a low-fee
+        // parent remains absent until its paying child passes the atomic plan.
+        for (index, tx) in txs.iter().enumerate() {
+            let row = match self.submit_package_attempt(
+                core::slice::from_ref(tx),
+                LocalOrigin::Rpc,
+                None,
+                |_| time,
+                chain,
+                mode,
+            ) {
+                Ok(attempt) => attempt
+                    .results
+                    .into_iter()
+                    .next()
+                    .unwrap_or(PackageTxResult::Unvalidated),
+                Err(error) => PackageTxResult::Rejected(error),
+            };
+            if let PackageTxResult::Rejected(error) = row {
+                if matches!(
+                    error,
+                    SubmitError::Policy(
+                        AcceptanceRejectReason::MinRelayFeeNotMet
+                            | AcceptanceRejectReason::MissingInputs
+                    )
+                ) {
+                    reconsider.push(index);
+                } else {
+                    quit_early = true;
+                }
+            }
+            result.tx_results.push(row);
+        }
+        if !quit_early && reconsider.len() > 1 {
+            let pending: Vec<_> = reconsider.iter().map(|&index| txs[index].clone()).collect();
+            match self.submit_package_attempt(
+                &pending,
+                LocalOrigin::Rpc,
+                None,
+                |_| time,
+                chain,
+                mode,
+            ) {
+                Ok(attempt) => {
+                    result.package_error = attempt.package_error;
+                    if attempt.results.iter().any(|row| {
+                        matches!(
+                            row,
+                            PackageTxResult::Rejected(SubmitError::Policy(
+                                AcceptanceRejectReason::MissingEphemeralSpends
+                            ))
+                        )
+                    }) {
+                        result.package_error = Some(AcceptanceRejectReason::MissingEphemeralSpends);
+                    }
+                    for (index, row) in reconsider.into_iter().zip(attempt.results) {
+                        // Core retains the individual error for unfinished rows.
+                        if row != PackageTxResult::Unvalidated {
+                            result.tx_results[index] = row;
+                        }
+                    }
+                }
+                Err(error) => {
+                    for index in reconsider {
+                        result.tx_results[index] = PackageTxResult::Rejected(error);
+                    }
+                }
+            }
+        }
+        // Concurrent admissions may have evicted an earlier independent
+        // success. Never report it as currently resident after it disappeared.
+        let pool = self.read();
+        for (tx, row) in txs.iter().zip(&mut result.tx_results) {
+            if matches!(
+                row,
+                PackageTxResult::Accepted { .. } | PackageTxResult::DifferentWitness(_)
+            ) && !pool.contains_txid(&tx.txid())
+            {
+                *row = PackageTxResult::Rejected(
+                    AcceptanceRejectReason::Mempool(crate::MempoolError::Full).into(),
+                );
+            }
+        }
+        Ok(result)
+    }
+
     /// Atomically submits a native child-with-independent-parents package,
     /// accepting arbitrary input order. No replacement or capacity eviction;
     /// new members pay the aggregate relay/pressure floor. Resident and
-    /// positively confirmed members contribute no fees. RPC/REST is unchanged.
+    /// positively confirmed members contribute no fees. The RPC instead uses
+    /// `submit_rpc_package`'s individual-first result contract.
     pub fn submit_local_package(
         &self,
         txs: Vec<Tx>,
@@ -63,10 +231,6 @@ impl MempoolGateway {
         self.submit_package_with_times(&txs, origin, max_rate, |_| time, chain)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep package capture, verification, stamp revalidation and atomic commit in one auditable owner"
-    )]
     pub(crate) fn submit_package_with_times(
         &self,
         txs: &[Tx],
@@ -75,13 +239,40 @@ impl MempoolGateway {
         time: impl Fn(&Tx) -> u64,
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
+        let attempt = self.submit_package_attempt(
+            txs,
+            origin,
+            max_rate,
+            time,
+            chain,
+            AdmissionMode::PackageSubmit,
+        )?;
+        if let Some(error) = attempt.error {
+            return Err(error);
+        }
+        Ok(attempt.mutation)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stamped package preparation/commit owner serves native and RPC submission"
+    )]
+    fn submit_package_attempt(
+        &self,
+        txs: &[Tx],
+        origin: LocalOrigin,
+        max_rate: Option<u64>,
+        time: impl Fn(&Tx) -> u64,
+        chain: &dyn AdmissionChain,
+        mode: AdmissionMode,
+    ) -> Result<PackageAttempt, SubmitError> {
         crate::package::check_structure(txs)?;
         let origin = AdmissionOrigin::from(origin);
         'attempt: for _ in 0..MAX_ADMISSION_RETRIES {
             let Some(generation) = self.stable_generation() else {
                 continue;
             };
-            let (pending, sequence, stamp, inputs) = {
+            let (pending, sequence, stamp, inputs, mut results) = {
                 let pool = self.read();
                 let pending: Vec<_> = txs
                     .iter()
@@ -101,14 +292,39 @@ impl MempoolGateway {
                 {
                     continue;
                 }
+                let results = txs
+                    .iter()
+                    .map(|tx| {
+                        pool.entry_by_txid(&tx.txid()).map_or(
+                            PackageTxResult::Unvalidated,
+                            |entry| {
+                                if entry.wtxid == tx.wtxid() {
+                                    PackageTxResult::Accepted {
+                                        vsize: entry.vsize,
+                                        base_fee: entry.fee,
+                                        effective_fee_rate: None,
+                                        effective_includes: Vec::new(),
+                                    }
+                                } else {
+                                    PackageTxResult::DifferentWitness(entry.wtxid)
+                                }
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 if pending.is_empty() {
-                    return Ok(MutationResult::empty());
+                    return Ok(PackageAttempt {
+                        mutation: MutationResult::empty(),
+                        results,
+                        error: None,
+                        package_error: None,
+                    });
                 }
                 let inputs = pending
                     .iter()
                     .map(|tx| resolve_mempool_inputs(&pool, tx))
                     .collect();
-                (pending, sequence, pool.policy_stamp(), inputs)
+                (pending, sequence, pool.policy_stamp(), inputs, results)
             };
             let Some(mut requests) = batch_requests(
                 &pending,
@@ -118,7 +334,7 @@ impl MempoolGateway {
                 0,
                 origin,
                 (generation, sequence),
-                AdmissionMode::PackageSubmit,
+                mode,
             ) else {
                 continue;
             };
@@ -131,7 +347,7 @@ impl MempoolGateway {
                 .iter()
                 .map(|request| (*request.tx).clone())
                 .collect();
-            let (mut prepared, checks, plan) = {
+            let (mut prepared, checks, plan, rate) = {
                 let pool = self.read();
                 if self
                     .check_admission_state(
@@ -146,7 +362,12 @@ impl MempoolGateway {
                     continue;
                 }
                 if pending.is_empty() {
-                    return Ok(MutationResult::empty());
+                    return Ok(PackageAttempt {
+                        mutation: MutationResult::empty(),
+                        results,
+                        error: None,
+                        package_error: None,
+                    });
                 }
                 let prepared: Vec<_> = requests
                     .iter()
@@ -154,18 +375,26 @@ impl MempoolGateway {
                         Self::prepare_admission(
                             &pool,
                             request,
-                            AdmissionMode::PackageSubmit,
+                            mode,
                             AdmissionFence::Stable,
                             self.engine(),
                         )
                     })
                     .collect();
                 let entries = crate::package::package_entries(&requests, &prepared);
+                let fee = entries.iter().try_fold(0_i128, |sum, entry| {
+                    sum.checked_add(pool.modified_fee_for(entry.txid, entry.fee).ok()?)
+                });
+                let size: u64 = entries.iter().map(|entry| u64::from(entry.vsize)).sum();
+                let rate = fee
+                    .and_then(|fee| (size != 0).then(|| fee * 1_000 / i128::from(size)))
+                    .and_then(|rate| u64::try_from(rate).ok());
                 let checks = crate::package::capture_package_checks(&pool, &pending, &entries);
                 (
                     prepared,
                     checks,
                     pool.prepare_package(entries, unix_time_secs()),
+                    rate,
                 )
             };
             // Unlike a single preview, even one new package member must use
@@ -177,7 +406,7 @@ impl MempoolGateway {
                 &mut prepared,
                 Some(checks),
                 aggregate_error,
-                AdmissionMode::PackageSubmit,
+                mode,
                 self.script_cache(),
             );
             let verdict = facts
@@ -201,6 +430,26 @@ impl MempoolGateway {
                 .iter()
                 .filter_map(|job| job.script_cache_key)
                 .collect();
+            let includes: Vec<_> = pending.iter().map(Tx::wtxid).collect();
+            for ((tx, row), job) in pending.iter().zip(&facts.results).zip(&prepared) {
+                if let Some(index) = txs.iter().position(|original| original.txid() == tx.txid()) {
+                    results[index] = if let Some(reason) = row.reject_reason {
+                        PackageTxResult::Rejected(match job.rejection {
+                            Some((crate::AdmitError::Consensus, _)) => SubmitError::Consensus,
+                            _ => SubmitError::Policy(reason),
+                        })
+                    } else if verdict.is_none() {
+                        PackageTxResult::Accepted {
+                            vsize: row.vsize,
+                            base_fee: row.base_fee.unwrap_or(0),
+                            effective_fee_rate: rate,
+                            effective_includes: includes.clone(),
+                        }
+                    } else {
+                        PackageTxResult::Unvalidated
+                    };
+                }
+            }
             let result = self.commit(
                 origin,
                 |pool| {
@@ -239,13 +488,41 @@ impl MempoolGateway {
                         &admitted,
                         pending.iter().map(&time).max().unwrap_or(0),
                     )?;
-                    return Ok(result);
+                    return Ok(PackageAttempt {
+                        mutation: result,
+                        results,
+                        error: None,
+                        package_error: None,
+                    });
                 }
                 Err(crate::AdmitError::GenerationChanged | crate::AdmitError::MempoolChanged) => {
                     continue 'attempt;
                 }
-                Err(crate::AdmitError::Policy(reason)) => return Err(reason.into()),
-                Err(crate::AdmitError::Consensus) => return Err(SubmitError::Consensus),
+                Err(error) => {
+                    let error = match error {
+                        crate::AdmitError::Policy(reason) => SubmitError::Policy(reason),
+                        _ => SubmitError::Consensus,
+                    };
+                    // A package floor failure is attributed to the paying child.
+                    if facts.package_error == Some(AcceptanceRejectReason::MinRelayFeeNotMet) {
+                        if let Some(index) = txs.iter().position(|tx| {
+                            pending.last().is_some_and(|last| last.txid() == tx.txid())
+                        }) {
+                            results[index] = PackageTxResult::Rejected(error);
+                        }
+                    }
+                    // A singleton always has an individual refusal, even when
+                    // the atomic package planner supplies the reason.
+                    if txs.len() == 1 {
+                        results[0] = PackageTxResult::Rejected(error);
+                    }
+                    return Ok(PackageAttempt {
+                        mutation: MutationResult::empty(),
+                        results,
+                        error: Some(error),
+                        package_error: facts.package_error,
+                    });
+                }
             }
         }
         Err(SubmitError::RetryExhausted)

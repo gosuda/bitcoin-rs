@@ -166,9 +166,8 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
             }
         }
         // `/txs/package` is in this namespace so it cannot fall through to
-        // JSON-RPC. API.md makes package relay conditional on a
-        // package-admission backend; 404 is preferable to sequential
-        // sendrawtransaction calls pretending to be atomic.
+        // JSON-RPC. This endpoint remains unsupported until its Esplora wire
+        // contract is implemented over the gateway's package operation.
         _ => not_found(),
     }
 }
