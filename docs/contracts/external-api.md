@@ -61,11 +61,16 @@ scanning and wallet interoperability remain unverified.
 - HTTP status follows Core's legacy mapping (`src/httprpc.cpp:41-56`).
   A legacy request answers errors with an HTTP error status — `-32600` is
   400, `-32601` is 404, and every other code is 500 — while a v2 request
-  answers with HTTP 200. An envelope violation is detected before the
-  claimed version is trusted, so it takes the legacy mapping in either
-  dialect. A non-empty batch answers HTTP 200 and carries per-member errors
-  in its array; an empty batch is `-32600` at the legacy 400 status (pinned
-  by `an_empty_batch_is_rejected_as_an_invalid_request`; the pinned Core
+  answers dispatch errors with HTTP 200. An envelope violation is answered
+  by Core's outer error path, which maps `-32600` to HTTP 400 in either
+  dialect: a violation while classifying the `jsonrpc` field itself takes
+  the legacy envelope, while a later violation — a missing or non-string
+  `method` or a scalar `params` on a `"2.0"` request — keeps the v2
+  envelope the parser already assigned (`src/httprpc.cpp:189-194`,
+  `src/rpc/request.cpp:211-224`). A non-empty batch answers HTTP 200 and
+  carries per-member errors in its array; an empty batch is `-32600` at
+  the legacy 400 status (pinned by
+  `an_empty_batch_is_rejected_as_an_invalid_request`; the pinned Core
   source does not specify an empty batch, so this is the local behavior, not
   a Core-parity claim), and an all-notification batch answers 204.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
