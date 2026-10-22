@@ -25,6 +25,11 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .map(parse_btc_amount)
         .transpose()?
         .unwrap_or(0);
+    if max_burn > Amount::MAX_MONEY.to_sat() {
+        return Err(RpcError::InvalidParameter(
+            "maxburnamount is out of range".to_owned(),
+        ));
+    }
     let mut txs = Vec::with_capacity(raws.len());
     for raw in raws {
         let raw = raw
@@ -32,7 +37,7 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             .ok_or_else(|| RpcError::InvalidType("raw transaction must be a string".to_owned()))?;
         let tx = decode_tx(
             raw,
-            format!("TX decode failed: {raw} Make sure the tx has at least one input."),
+            "TX decode failed. Make sure the tx has at least one input.".to_owned(),
         )?;
         for output in &tx.outputs {
             let script = output.script_pubkey.as_bytes();
@@ -51,11 +56,25 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         }
         txs.push(tx);
     }
-    let facts = ctx.mempool.gateway.submit_rpc_package(&txs, max_rate, unix_time_secs(), &ctx.chain.admission_chain())
+    let facts = ctx
+        .mempool
+        .gateway
+        .submit_rpc_package(
+            &txs,
+            max_rate,
+            unix_time_secs(),
+            &ctx.chain.admission_chain(),
+        )
         .map_err(|error| match error {
-            SubmitError::Policy(AcceptanceRejectReason::PackageTopology) => RpcError::TxVerifyError(
-                "package topology disallowed. not child-with-parents or parents depend on each other.".to_owned()),
-            SubmitError::Policy(AcceptanceRejectReason::PackageUnsupported) => RpcError::TxVerifyError(error.to_string()),
+            SubmitError::Policy(AcceptanceRejectReason::PackageTopology) => {
+                RpcError::TxVerifyError(
+                    "package topology disallowed. not child-with-parents or parents depend on each other."
+                        .to_owned(),
+                )
+            }
+            SubmitError::Policy(AcceptanceRejectReason::PackageUnsupported) => {
+                RpcError::TxVerifyError(error.to_string())
+            }
             other => submit_error_to_rpc_error(other),
         })?;
     render_submission(&txs, facts)

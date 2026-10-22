@@ -101,6 +101,13 @@ impl MempoolGateway {
         if txs.len() > 2 {
             return Err(AcceptanceRejectReason::PackageUnsupported.into());
         }
+        let structure_error = crate::package::check_structure(txs).err();
+        if structure_error == Some(AcceptanceRejectReason::PackageDuplicates) {
+            return Ok(PackageSubmission {
+                package_error: structure_error,
+                tx_results: vec![PackageTxResult::Unvalidated; txs.len()],
+            });
+        }
         if txs.len() == 2
             && (!txs[1]
                 .inputs
@@ -113,7 +120,7 @@ impl MempoolGateway {
         {
             return Err(AcceptanceRejectReason::PackageTopology.into());
         }
-        if let Err(reason) = crate::package::check_structure(txs) {
+        if let Some(reason) = structure_error {
             return Ok(PackageSubmission {
                 package_error: Some(reason),
                 tx_results: vec![PackageTxResult::Unvalidated; txs.len()],
@@ -200,14 +207,18 @@ impl MempoolGateway {
         // success. Never report it as currently resident after it disappeared.
         let pool = self.read();
         for (tx, row) in txs.iter().zip(&mut result.tx_results) {
-            if matches!(
+            if !matches!(
                 row,
                 PackageTxResult::Accepted { .. } | PackageTxResult::DifferentWitness(_)
-            ) && !pool.contains_txid(&tx.txid())
-            {
-                *row = PackageTxResult::Rejected(
-                    AcceptanceRejectReason::Mempool(crate::MempoolError::Full).into(),
-                );
+            ) {
+                continue;
+            }
+            match pool.entry_by_txid(&tx.txid()) {
+                Some(entry) if entry.wtxid == tx.wtxid() => {}
+                Some(entry) => *row = PackageTxResult::DifferentWitness(entry.wtxid),
+                None => {
+                    *row = PackageTxResult::Rejected(AcceptanceRejectReason::MissingInputs.into());
+                }
             }
         }
         Ok(result)
@@ -429,8 +440,38 @@ impl MempoolGateway {
                 .iter()
                 .filter_map(|job| job.script_cache_key)
                 .collect();
-            let includes: Vec<_> = pending.iter().map(Tx::wtxid).collect();
-            for ((tx, row), job) in pending.iter().zip(&facts.results).zip(&prepared) {
+            let includes: Vec<Vec<_>> = pending
+                .iter()
+                .map(|tx| {
+                    let mut descendants = hashbrown::HashSet::new();
+                    descendants.insert(tx.txid());
+                    let mut changed = true;
+                    while changed {
+                        changed = false;
+                        for candidate in &pending {
+                            if candidate
+                                .inputs
+                                .iter()
+                                .any(|input| descendants.contains(&input.previous_output.txid))
+                                && descendants.insert(candidate.txid())
+                            {
+                                changed = true;
+                            }
+                        }
+                    }
+                    pending
+                        .iter()
+                        .filter(|candidate| descendants.contains(&candidate.txid()))
+                        .map(Tx::wtxid)
+                        .collect()
+                })
+                .collect();
+            for (pending_index, ((tx, row), job)) in pending
+                .iter()
+                .zip(&facts.results)
+                .zip(&prepared)
+                .enumerate()
+            {
                 if let Some(index) = txs.iter().position(|original| original.txid() == tx.txid()) {
                     results[index] = if let Some(reason) = row.reject_reason {
                         PackageTxResult::Rejected(match job.rejection {
@@ -442,7 +483,7 @@ impl MempoolGateway {
                             vsize: row.vsize,
                             base_fee: row.base_fee.unwrap_or(0),
                             effective_fee_rate: rate,
-                            effective_includes: includes.clone(),
+                            effective_includes: includes[pending_index].clone(),
                         }
                     } else {
                         PackageTxResult::Unvalidated

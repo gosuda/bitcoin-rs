@@ -569,10 +569,12 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
             *base_fee,
             if tx.txid() == txs[0].txid() { 0 } else { 2_000 }
         );
-        assert_eq!(
-            effective_includes,
-            &txs.iter().map(Tx::wtxid).collect::<Vec<_>>()
-        );
+        let expected_includes = if tx.txid() == txs[0].txid() {
+            txs.iter().map(Tx::wtxid).collect()
+        } else {
+            vec![tx.wtxid()]
+        };
+        assert_eq!(effective_includes, &expected_includes);
     }
     for row in &submitted.tx_results {
         let PackageTxResult::Accepted {
@@ -680,6 +682,22 @@ fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing()
     assert_eq!(
         gateway.submit_rpc_package(&[child, parent.clone()], None, 0, &chain),
         Err(AcceptanceRejectReason::PackageTopology.into())
+    );
+    assert_eq!(
+        gateway.submit_rpc_package(&[parent.clone(), parent.clone()], None, 0, &chain),
+        Ok(crate::PackageSubmission {
+            package_error: Some(AcceptanceRejectReason::PackageDuplicates),
+            tx_results: vec![crate::PackageTxResult::Unvalidated; 2],
+        })
+    );
+    assert_eq!(
+        gateway.submit_rpc_package(
+            &[parent.clone(), parent.clone(), parent.clone()],
+            None,
+            0,
+            &chain
+        ),
+        Err(AcceptanceRejectReason::PackageUnsupported.into())
     );
     assert_eq!(
         gateway.submit_rpc_package(
