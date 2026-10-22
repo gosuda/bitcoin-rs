@@ -576,14 +576,23 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
         };
         assert_eq!(effective_includes, &expected_includes);
     }
-    for row in &submitted.tx_results {
+    for (tx, row) in txs.iter().zip(&submitted.tx_results) {
         let PackageTxResult::Accepted {
-            effective_fee_rate, ..
+            vsize,
+            effective_fee_rate,
+            ..
         } = row
         else {
             unreachable!()
         };
-        assert_eq!(*effective_fee_rate, Some(2_000_000 / u64::from(total_size)));
+        // Each row's rate covers only the entries it reports: the bumped
+        // parent sees the package rate, the paying child its own.
+        let expected = if tx.txid() == txs[0].txid() {
+            Some(2_000_000 / u64::from(total_size))
+        } else {
+            Some(2_000_000 / u64::from(*vsize))
+        };
+        assert_eq!(*effective_fee_rate, expected);
     }
     let batches = seen.0.lock();
     assert_eq!(batches.len(), 1);
