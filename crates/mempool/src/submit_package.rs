@@ -21,7 +21,7 @@ pub enum PackageTxResult {
         base_fee: u64,
         /// Modified fee rate of the newly accepted subpackage, in sat/kvB.
         effective_fee_rate: Option<u64>,
-        /// Exact witnesses whose fees paid for this admission.
+        /// Witnesses of the subpackage this admission committed with.
         effective_includes: Vec<Wtxid>,
     },
     /// The resident transaction has the same txid and another witness.
@@ -103,12 +103,8 @@ impl MempoolGateway {
             return Err(AcceptanceRejectReason::PackageUnsupported.into());
         }
         let structure_error = crate::package::check_structure(txs).err();
-        if structure_error == Some(AcceptanceRejectReason::PackageDuplicates) {
-            return Ok(PackageSubmission {
-                package_error: structure_error,
-                tx_results: vec![PackageTxResult::Unvalidated; txs.len()],
-            });
-        }
+        // Core classifies every unordered pair — duplicates included — as a
+        // topology violation; run this check before the structural verdicts.
         if txs.len() == 2
             && (!txs[1]
                 .inputs
@@ -445,64 +441,21 @@ impl MempoolGateway {
                 .iter()
                 .filter_map(|job| job.script_cache_key)
                 .collect();
-            // A member's effective set is itself plus every member whose
-            // fees flow to it through the package spend graph (its
-            // descendants): Core reports the bumped parent's package rate
-            // and the paying child's own rate.
-            let subpackages: Vec<hashbrown::HashSet<_>> = pending
-                .iter()
-                .map(|tx| {
-                    let mut descendants = hashbrown::HashSet::new();
-                    descendants.insert(tx.txid());
-                    let mut changed = true;
-                    while changed {
-                        changed = false;
-                        for candidate in &pending {
-                            if candidate
-                                .inputs
-                                .iter()
-                                .any(|input| descendants.contains(&input.previous_output.txid))
-                                && descendants.insert(candidate.txid())
-                            {
-                                changed = true;
-                            }
-                        }
-                    }
-                    descendants
-                })
-                .collect();
-            let includes: Vec<Vec<_>> = subpackages
-                .iter()
-                .map(|descendants| {
-                    pending
-                        .iter()
-                        .filter(|candidate| descendants.contains(&candidate.txid()))
-                        .map(Tx::wtxid)
-                        .collect()
-                })
-                .collect();
-            let effective_rates: Vec<_> = match &entry_fees {
-                Some(entry_fees) => subpackages
-                    .iter()
-                    .map(|descendants| {
-                        let (fee, size): (i128, u64) = entry_fees
-                            .iter()
-                            .filter(|(txid, _, _)| descendants.contains(txid))
-                            .map(|(_, fee, vsize)| (*fee, u64::from(*vsize)))
-                            .fold((0, 0), |(fee, size), (f, s)| (fee + f, size + s));
-                        fee.checked_mul(1_000)
-                            .and_then(|total| (size != 0).then(|| total / i128::from(size)))
-                            .and_then(|rate| u64::try_from(rate).ok())
-                    })
-                    .collect(),
-                None => vec![None; subpackages.len()],
-            };
-            for (pending_index, ((tx, row), job)) in pending
-                .iter()
-                .zip(&facts.results)
-                .zip(&prepared)
-                .enumerate()
-            {
+            // One atomic commit enters the pool as a single subpackage: Core
+            // reports every committed member at the package's aggregate rate
+            // and lists the whole package in `effective-includes`.
+            let effective_rate = entry_fees.as_ref().and_then(|fees| {
+                let (fee, size): (i128, u64) =
+                    fees.iter()
+                        .fold((0, 0), |(fee, size), (_, member_fee, vsize)| {
+                            (fee + member_fee, size + u64::from(*vsize))
+                        });
+                fee.checked_mul(1_000)
+                    .and_then(|total| (size != 0).then(|| total / i128::from(size)))
+                    .and_then(|rate| u64::try_from(rate).ok())
+            });
+            let includes: Vec<_> = pending.iter().map(Tx::wtxid).collect();
+            for ((tx, row), job) in pending.iter().zip(&facts.results).zip(&prepared) {
                 if let Some(index) = txs.iter().position(|original| original.txid() == tx.txid()) {
                     results[index] = if let Some(reason) = row.reject_reason {
                         PackageTxResult::Rejected(match job.rejection {
@@ -513,8 +466,8 @@ impl MempoolGateway {
                         PackageTxResult::Accepted {
                             vsize: row.vsize,
                             base_fee: row.base_fee.unwrap_or(0),
-                            effective_fee_rate: effective_rates[pending_index],
-                            effective_includes: includes[pending_index].clone(),
+                            effective_fee_rate: effective_rate,
+                            effective_includes: includes.clone(),
                         }
                     } else {
                         PackageTxResult::Unvalidated

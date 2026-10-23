@@ -569,30 +569,19 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
             *base_fee,
             if tx.txid() == txs[0].txid() { 0 } else { 2_000 }
         );
-        let expected_includes = if tx.txid() == txs[0].txid() {
-            txs.iter().map(Tx::wtxid).collect()
-        } else {
-            vec![tx.wtxid()]
-        };
+        let expected_includes: Vec<_> = txs.iter().map(Tx::wtxid).collect();
         assert_eq!(effective_includes, &expected_includes);
     }
-    for (tx, row) in txs.iter().zip(&submitted.tx_results) {
+    for row in &submitted.tx_results {
         let PackageTxResult::Accepted {
-            vsize,
-            effective_fee_rate,
-            ..
+            effective_fee_rate, ..
         } = row
         else {
             unreachable!()
         };
-        // Each row's rate covers only the entries it reports: the bumped
-        // parent sees the package rate, the paying child its own.
-        let expected = if tx.txid() == txs[0].txid() {
-            Some(2_000_000 / u64::from(total_size))
-        } else {
-            Some(2_000_000 / u64::from(*vsize))
-        };
-        assert_eq!(*effective_fee_rate, expected);
+        // Every member committed by the atomic plan reports the package's
+        // aggregate rate over the same full set.
+        assert_eq!(*effective_fee_rate, Some(2_000_000 / u64::from(total_size)));
     }
     let batches = seen.0.lock();
     assert_eq!(batches.len(), 1);
@@ -694,10 +683,7 @@ fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing()
     );
     assert_eq!(
         gateway.submit_rpc_package(&[parent.clone(), parent.clone()], None, 0, &chain),
-        Ok(crate::PackageSubmission {
-            package_error: Some(AcceptanceRejectReason::PackageDuplicates),
-            tx_results: vec![crate::PackageTxResult::Unvalidated; 2],
-        })
+        Err(AcceptanceRejectReason::PackageTopology.into())
     );
     assert_eq!(
         gateway.submit_rpc_package(
