@@ -51,6 +51,19 @@ yet the node never synchronizes. `SYNC-06`'s driver obligation (not
 `SYNC-02`'s discoverability) is the clause that must rule this out, and it
 does so only with the named execution evidence.
 
+### Ownership map
+
+| Work item | Sole authority | Consumers/read capability | Stale when | Permissible failure/recovery | Owning clause/proof |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Header tip | Header admission inside the chainstate transition (`ARCH-07`) | `SyncChain::chain_tip` readers; P2P frontier planning | A newer admitted header supersedes it | Invalid header rejected per `P2P-10`; ancestry not admitted | `SYNC-01` / `P2P-10` |
+| Applied-tip commit | Chainstate transition owning mutation and durability (`EVT-02` steps 1 to 5) | `SyncChain::applied_tip`; status RPC snapshots; generation-fenced readers | A newer durable commit publishes | Commit failure publishes nothing; crash replays via `RCV-04` | `SYNC-02`, `SYNC-05` / `EVT-02`; `crates/node/tests/crash_recovery.rs` |
+| AssumeUTXO historical frontier | `AssumeUtxoManager` historical role (`ARCH-07b`) | `getchainstates` readers (`API-33`) | Historical validation advances or terminates | Terminal validation failure stops the role; never converts into success | `SYNC-01`, `SYNC-04` / `ARCH-07b` |
+| Reorg | Chainstate transition branch switch (`RCV-05`, `RCV-08`) | Chain tip and applied-tip readers observe the new best only after commit | A heavier valid branch commits | Invalid branch poisons the block and descendants; transient failures hand over | `SYNC-04` / `crates/chainstate/src/reorg.rs` |
+| Post-commit followers | Committed chain effects in commit order (`EVT-02` step 7) | Index worker wakes; mining/announce; mempool followers | The next commit supersedes the prior outcome | Settlement failure closes admission for recovery; the committed outcome is retained | `SYNC-06` / `crates/node/src/chain_effects.rs` |
+| Index watermark/backfill | `IndexWriter` atomic commit paths (`IDX-01`–`IDX-10`) | Watermark-gated queries; RPC readiness projections | A new capability commit or rollback moves the watermark | Worker failure renders queries `Unavailable`; backfill resumes and never signals complete when disabled | `SYNC-01`, `SYNC-03`, `SYNC-05`, `SYNC-07` / `crates/index/src/runtime/recovery_tests.rs` |
+| Retained history | Retention/pruning authority (`ARCH-08`) with `RCV-07` rebuild | Sync, reorg, and historical-validation consumers requiring bodies/undo records | Explicitly permitted pruning; otherwise retained until consumed | A missing prerequisite is reported `Unavailable`/recoverable, never empty success | `SYNC-07` / `RCV-07` |
+| Settlement closure | Chainstate commit retains the outcome; `ConnectMutationError::CommittedButSettlementFailed` closes admission | Mining submission and admission callers observe the error, never a retry | Never stale within the process: the committed tip stands and retry is forbidden | No process-level settlement-injection scenario exists; recovery uses only the existing restart/replay lanes | `SYNC-04` / `crates/node/src/chain_effects.rs::committed_connect_settlement_failure_retains_outcome_and_forbids_retry` |
+
 ## Existing authoritative contracts
 
 These remain authoritative. This page adds no second source of truth for
@@ -89,9 +102,9 @@ the owning authority:
 
 - Header tip: published by header admission inside the chainstate transition
   (`ARCH-07`), read through `SyncChain::chain_tip`.
-- Applied tip: published only by the chainstate post-durable-commit step
-  (`EVT-02` step 5; `P2P-05` owns the commit itself), read through
-  `SyncChain::applied_tip`.
+- Applied tip: published only by the chainstate transition, which owns mutation
+  and durability through `EVT-02` steps 1 to 5 (`P2P-05` owns only selection
+  of the next required body), read through `SyncChain::applied_tip`.
 - Historical validation frontier: owned by the `AssumeUtxoManager` historical
   role (`ARCH-07b`), reported through `getchainstates` (`API-33`).
 - Capability watermark: `IndexWriter`'s atomic commit paths own publication —
@@ -158,13 +171,12 @@ therefore stall authoritative chain commits for the full seed duration, and
 the cited tick/fencing tests do **not** prove foreground progress during
 seeding. Follow-up: bound the hold at the existing owner (capture a bounded
 immutable view or hand the scan data off the lock), then add a
-process-level contention regression. This implementation fix and its
-foreground-progress proof are tracked outside this documentation contract by
-[#1512](https://github.com/gosuda/bitcoin-rs/issues/1512) (the executable
-AssumeUTXO + seed/backfill workflow that measures the contention) and
-[#1529](https://github.com/gosuda/bitcoin-rs/issues/1529); this clause only
-records the obligation. This is the concrete case this clause records
-instead of claiming isolation is proven.
+process-level contention regression. No open tracker owns the
+`seed_live_from_utxo` hold or its foreground-progress proof; `SYNC-03`
+remains unsatisfied for that path until `crates/index/src/runtime/rollback.rs`
+has a bounded hold and evidence; this clause only records the obligation.
+This is the concrete case this clause records instead of claiming isolation
+is proven.
 
 - Proof (bounded holds only): `EVT-02` step 1–7 fencing tests; the event-loop
   tick tests (`crates/node/src/event_loop.rs`, `EMB-10`). The seeding hold is
@@ -199,9 +211,13 @@ nothing; settlement failure closes admission for recovery and stays an error
 even when the anchor committed (`API-33`).
 
 - Proof: `crates/node/tests/crash_recovery.rs` (`RCV-04` crash points);
-  `e2e/tests/assumeutxo.rs` (settlement failure never converts into
-  success); `crates/index/src/runtime/recovery_tests.rs` (missing-body
-  wait/resume, `RCV-07`); `crates/p2p/src/sync/` body-rejection regressions.
+  `crates/node/src/chain_effects.rs::committed_connect_settlement_failure_retains_outcome_and_forbids_retry`
+  and `crates/node/src/chain_effects.rs::mining_reports_a_committed_settlement_failure_as_accepted`
+  (settlement behavior); `e2e/tests/assumeutxo.rs::invalid_core_snapshots_fail_without_activating`
+  (malformed-import refusal with no activation and untouched input; no
+  process-level settlement-injection scenario exists);
+  `crates/index/src/runtime/recovery_tests.rs` (missing-body wait/resume,
+  `RCV-07`); `crates/p2p/src/sync/` body-rejection regressions.
 
 ### `SYNC-05`: Validated/durable progress and coherent cross-consumer views
 
@@ -282,10 +298,13 @@ verdict, or extra state machine is implied.
   `SYNC-01`/`SYNC-02`/`SYNC-05`; it does **not** prove live peer sockets,
   durable crash recovery, or eventual progress under real index contention
   (those keep their owning deep lanes).
-- Proof: `crates/p2p/src/sync/tests/transitions_*.rs` (tick fetch/handover
-  regressions — the driver actually sends; `cold_start_stall_hedges_front_without_reassigning_owner`);
-  `crates/index/src/runtime/reconciliation.rs` quiet-wait/timeout tests
-  (`IDX-08`); `crates/node/src/event_loop.rs` telemetry test (`EMB-10`);
+- Proof: `crates/p2p/src/sync/tests/header_progress.rs::tick_fetches_new_tip_headers_from_at_tip_peers`;
+  `crates/p2p/src/sync/tests/headroom_throttling.rs::cold_start_stall_hedges_front_without_reassigning_owner`;
+  `crates/p2p/src/sync/tests/download_frontier.rs::tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer`;
+  `crates/p2p/src/sync/tests/peer_fanout.rs::tick_retries_when_all_selected_peers_have_expired_pending`;
+  `crates/index/src/runtime/recovery_tests.rs::run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake`
+  and `shutdown_after_an_absent_body_does_not_run_a_higher_group`;
+  `crates/node/src/event_loop.rs` telemetry test (`EMB-10`);
   observability counters (`docs/observability.md`).
 - Whole-node process evidence for `CONV-1`: the existing deep lanes below.
   A declared TLA+ `ConditionalProgress` is **not** completed proof
@@ -342,7 +361,7 @@ per hypothetical feature.
 | `CONV-1` obligation | Observable end-to-end result | Owner / mechanism | Smallest evidence | Open condition |
 | :--- | :--- | :--- | :--- | :--- |
 | Discovery | A lost/cancelled frontier request becomes requestable again | P2P `BlockSync` sweeps (`P2P-05`) | `crates/p2p/src/sync/tests/` frontier/handover regressions | None recorded |
-| Scheduling/execution | An eligible request is actually sent to a peer, or the tick records why not | Event-loop sync tick → `BlockSync::tick` | `tick_fetches_new_tip_headers_from_at_tip_peers` and the transitions suites | None recorded |
+| Scheduling/execution | An eligible request is actually sent to a peer, or the tick records why not | Event-loop sync tick → `BlockSync::tick` | `crates/p2p/src/sync/tests/header_progress.rs::tick_fetches_new_tip_headers_from_at_tip_peers`, `headroom_throttling.rs::cold_start_stall_hedges_front_without_reassigning_owner`, `download_frontier.rs::tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer`, `peer_fanout.rs::tick_retries_when_all_selected_peers_have_expired_pending` | None recorded |
 | Recovery closure | A peer loss/timeout/failed delivery ends in retry, handover, or terminal outcome without restart | `P2P-05` strike/expiry and peer handover; startup dialing on persisted AddrMan recovery (not `RCV-08`, which covers chainstate reorg disconnect/reconnect) | `crates/p2p/src/sync/tests/` expiry strikes; `bin/bitcoin-rs/tests/addrman_restart_e2e.rs` restart reconnection | Live reorg + expiry combined lane is main-only |
 | Non-starvation | A foreground commit lands while optional work runs, on paths the fences bound | Apply fences (`EVT-02`) — bounded by construction | `EVT-02` fencing tests (fences held only around the mutation window) | **Not proven for seeding:** `EVT-02` fencing tests do not establish foreground isolation for ScriptLive seeding, which holds the stable UTXO view across its scan and batch writes (`crates/index/src/runtime/rollback.rs`), so commits needing that write lock contend. Recorded as an unresolved contention obligation above |
 | Index delay/failure | Queries refuse honestly during index worker failure | `IDX-07` supervision + `SYNC-01` authorities | `unusable_worker_makes_queries_unavailable` (marks the worker failed, asserts `TxQueryError::Unavailable`) | **Not proven for delay or apply isolation:** no test covers queries during index delay/rebuild or applies a block while the index is unusable, so "index failure never blocks apply" is an unproven obligation resting on the `SYNC-03` fences and `EVT-02` evidence |
