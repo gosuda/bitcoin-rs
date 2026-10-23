@@ -66,6 +66,93 @@ fn version_max_spend(sequence: u32, version: u32) -> Tx {
     }
 }
 
+/// One OP_TRUE spend with the push-only `scriptSig` the mature-coinbase
+/// fixture accepts.
+fn op_true_spend(previous_output: OutPoint, value: u64) -> Tx {
+    Tx {
+        version: 1,
+        inputs: vec![TxIn {
+            previous_output,
+            script_sig: Script::from_bytes(vec![0x51]),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+        lock_time: LockTime::ZERO,
+    }
+}
+
+/// `capture_rawtx` only controls whether the commit tail serializes
+/// per-transaction wire bytes into the outcome. The connected state
+/// (UTXO membership, txids, tip, undo-driven disconnect) must be
+/// identical either way, for an external spend and a same-block spend.
+#[test]
+fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
+    let external = op_true_spend(OutPoint::new(coinbase(1).txid(), 0), 1_000);
+    let same_block = op_true_spend(OutPoint::new(external.txid(), 0), 900);
+    let final_outpoint = OutPoint::new(same_block.txid(), 0);
+    let intermediate_outpoint = OutPoint::new(external.txid(), 0);
+    let spent_outpoint = OutPoint::new(coinbase(1).txid(), 0);
+
+    let mut outcomes = Vec::new();
+    for capture_rawtx in [false, true] {
+        let mut handles = handles(
+            Network::Regtest,
+            Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        );
+        seed_genesis(&handles)?;
+        let tip_hash = apply_regtest_chain_to_height(&handles, 500)?;
+        handles.set_capture_flags(capture_rawtx, false);
+        let block = mined_block_with_prev_hash(
+            tip_hash,
+            501,
+            vec![coinbase(501), external.clone(), same_block.clone()],
+        )?;
+        let outcome = handles.apply_block(&block, None)?;
+
+        let utxo = handles.utxo();
+        assert!(utxo.get_entry(&spent_outpoint).is_none(), "external coin spent");
+        assert!(
+            utxo.get_entry(&intermediate_outpoint).is_none(),
+            "same-block coin spent"
+        );
+        let final_coin = utxo
+            .get_entry(&final_outpoint)
+            .ok_or("final same-block output must be live")?;
+        assert_eq!(final_coin.txout.value.to_sat(), 900);
+
+        match (&outcome.raw_txs, capture_rawtx) {
+            (None, false) => {}
+            (Some(raw_txs), true) => {
+                assert_eq!(raw_txs.len(), block.txs.len());
+                for (raw, tx) in raw_txs.iter().zip(&block.txs) {
+                    assert_eq!(*raw, bitcoin_rs_primitives::consensus_bytes(tx));
+                }
+            }
+            (raw, flag) => panic!("raw_txs presence must follow capture_rawtx={flag}: {raw:?}"),
+        }
+
+        // The undo path must restore the pre-block membership identically.
+        handles.disconnect_block(&block)?;
+        let utxo = handles.utxo();
+        assert!(utxo.get_entry(&spent_outpoint).is_some(), "undo restores coin");
+        assert!(utxo.get_entry(&final_outpoint).is_none(), "undo removes output");
+        outcomes.push(outcome);
+    }
+
+    let (without, with) = (&outcomes[0], &outcomes[1]);
+    assert_eq!(without.txids, with.txids);
+    assert_eq!(without.hash, with.hash);
+    assert_eq!(without.tip.height, with.tip.height);
+    assert_eq!(without.tip.hash, with.tip.hash);
+    assert_eq!(without.tip.chain_tx_count, with.tip.chain_tx_count);
+    assert_eq!(without.commit_id, with.commit_id);
+    Ok(())
+}
+
 #[test]
 fn version_max_tx_enforces_bip68_relative_lock() -> TestResult {
     let handles = empty_handles();

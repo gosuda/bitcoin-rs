@@ -25,66 +25,6 @@ use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
-struct ApplyScratch {
-    txids: Vec<Txid>,
-    raw_txs: Option<Vec<Vec<u8>>>,
-    same_block_spent: Option<SameBlockSpentSet>,
-    utxo_add_capacity: usize,
-    utxo_remove_capacity: usize,
-}
-
-impl ApplyScratch {
-    fn from_prepared_parts(
-        block: &Block,
-        include_raw_txs: bool,
-        txids: Vec<Txid>,
-        tx_plan: crate::BlockTxPlan,
-    ) -> Self {
-        debug_assert_eq!(txids.len(), block.txs.len());
-        let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txs.len()));
-
-        if let Some(raw_txs) = &mut raw_txs {
-            for tx in &block.txs {
-                raw_txs.push(consensus_bytes(tx));
-            }
-        }
-        let same_block_spent_len = tx_plan
-            .same_block_spent
-            .as_ref()
-            .map_or(0_usize, SameBlockSpentSet::len);
-        let utxo_add_capacity = tx_plan
-            .created_output_count
-            .saturating_sub(same_block_spent_len);
-        let utxo_remove_capacity = tx_plan
-            .spent_input_count
-            .saturating_sub(tx_plan.same_block_spent_input_count);
-        Self {
-            txids,
-            raw_txs,
-            same_block_spent: tx_plan.same_block_spent,
-            utxo_add_capacity,
-            utxo_remove_capacity,
-        }
-    }
-
-    fn txids(&self) -> &[Txid] {
-        &self.txids
-    }
-
-    /// Takes the derived-consumer payloads out of scratch after the UTXO commit.
-    fn into_payloads(self) -> (Vec<Txid>, Option<Vec<Vec<u8>>>) {
-        (self.txids, self.raw_txs)
-    }
-
-    fn same_block_spent(&self) -> Option<&SameBlockSpentSet> {
-        self.same_block_spent.as_ref()
-    }
-
-    fn utxo_change_capacity(&self) -> (usize, usize) {
-        (self.utxo_add_capacity, self.utxo_remove_capacity)
-    }
-}
-
 /// Commit path. Callers reach this only through an admitted chain transition.
 pub(super) fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,
@@ -411,16 +351,24 @@ pub(super) fn apply_block_admitted<'b>(
         "apply_block: profile"
     );
     bip68_result?;
-    let wants_rawtx = handles.capture_rawtx;
-    let scratch = ApplyScratch::from_prepared_parts(block, wants_rawtx, view.into_txids(), tx_plan);
+    let txids = view.into_txids();
+    let same_block_spent = tx_plan.same_block_spent;
+    let same_block_spent_len = same_block_spent
+        .as_ref()
+        .map_or(0_usize, SameBlockSpentSet::len);
+    let utxo_add_capacity = tx_plan
+        .created_output_count
+        .saturating_sub(same_block_spent_len);
+    let utxo_remove_capacity = tx_plan
+        .spent_input_count
+        .saturating_sub(tx_plan.same_block_spent_input_count);
 
     let utxo_changes_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let (utxo_add_capacity, utxo_remove_capacity) = scratch.utxo_change_capacity();
     let utxo_changes_result = build_block_changes(
         block,
         height,
-        scratch.txids(),
-        scratch.same_block_spent(),
+        &txids,
+        same_block_spent.as_ref(),
         utxo_add_capacity,
         utxo_remove_capacity,
         resolved.as_ref(),
@@ -569,7 +517,7 @@ pub(super) fn apply_block_admitted<'b>(
         block,
         &block_hash,
         height,
-        scratch.txids(),
+        &txids,
         &resolved,
         verify_flags,
         block_connected_dur,
@@ -588,7 +536,9 @@ pub(super) fn apply_block_admitted<'b>(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    let (txids, raw_txs) = scratch.into_payloads();
+    let raw_txs = handles
+        .capture_rawtx
+        .then(|| block.txs.iter().map(consensus_bytes).collect::<Vec<_>>());
     let mut outcome = ConnectOutcome {
         tip,
         commit_id: 0,
