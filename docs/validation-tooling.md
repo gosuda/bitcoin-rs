@@ -264,6 +264,14 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     and mempool restoration (process-test mapping in [`e2e/REORG-COVERAGE.md`](../e2e/REORG-COVERAGE.md)).
 - **Feature requirement**: The AssumeUTXO recovery unit module is gated by
   `fjall`; without it, that filter selects no tests.
+- **Host prerequisite (AssumeUTXO non-UTF-8 snapshot test)**:
+  `e2e/tests/assumeutxo.rs::invalid_core_snapshots_fail_without_activating`
+  requires a filesystem accepting arbitrary non-NUL byte filenames. The RPC
+  argument is UTF-8 `core200.dat`; `core-\xff.dat` is only the symlink target,
+  and `std::fs::rename` fails with `EILSEQ` (92) before RPC on filesystems
+  without that capability, so JSON serialization is not the cause. Run on Linux
+  or with a `TMPDIR` proven capable; record an incapable macOS lane as
+  `BLOCKED` rather than skipping or weakening the scenario.
 - **Reproduce**:
   ```sh
   cargo test --locked -p bitcoin-rs-chainstate --lib recovery_marker_order_tests
