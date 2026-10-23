@@ -188,6 +188,9 @@ pub enum AcceptanceRejectReason {
     /// Native submission requires a child and its independent direct parents.
     #[error("package-not-child-with-parents")]
     PackageTopology,
+    /// Public package submission currently supports singletons and 1p1c only.
+    #[error("package submission supports at most one parent and one child")]
+    PackageUnsupported,
     /// Two package transactions spend the same outpoint.
     #[error("conflict-in-package")]
     PackageConflict,

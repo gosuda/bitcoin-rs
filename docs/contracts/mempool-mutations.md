@@ -209,7 +209,11 @@ state (`crates/mempool/src/orphan.rs`).
   Submission preserves the prepared consensus or policy error class; preview
   keeps its existing rejection facts. Refusal changes no membership, sequence,
   fee overlay, estimator or observer output. Four attempts bound stale facts.
-  It neither implements package RBF nor changes RPC/REST wire behavior.
+  It does not implement package RBF. RPC `submitpackage` uses this same atomic
+  owner for singletons and 1p1c, preserving independently accepted members
+  before reconsidering a fee-dependent pair. It captures resident/modified-fee
+  response facts under the same stamp and applies the RPC modified-feerate cap
+  before scripts; preview and native caller-cap semantics are unchanged.
 - Proof: `gateway::tests::chain_generation_starts_even_at_zero`,
   `gateway::tests::explicit_finish_restores_even_generation`, and
   `gateway::tests::chain_generation_overflow_fails_closed` in
@@ -223,6 +227,11 @@ state (`crates/mempool/src/orphan.rs`).
   `package::tests::native_package_consensus_failures_match_single_submission`
   checks script and overspend error parity for single and multi-member native
   packages, unchanged preview facts and refusal without mutation.
+- Proof: `package::tests::rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview`,
+  `package::tests::rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice`,
+  and `package::tests::rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state`
+  in `crates/mempool/src/package/tests.rs` cover RPC package admission,
+  resident fee exclusion, and refusal without mutation.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,

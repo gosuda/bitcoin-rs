@@ -23,6 +23,8 @@ use crate::handlers::{optional_bool, params_array, parse_txid, required_str, req
 use bitcoin_rs_index::block_log::BlockRecord;
 use corepc_types::v31;
 
+pub(crate) mod submit_package;
+
 /// Decodes a lowercase or uppercase hexadecimal string into bytes.
 ///
 /// A non-hex string is a correctly typed but unacceptable value, so it

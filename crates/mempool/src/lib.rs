@@ -73,4 +73,5 @@ pub use rbf::{RbfError, required_fee};
 pub use rbf::{ReplacementCandidate, ReplacementPlan};
 pub use reader::MempoolReader;
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
+pub use submit_package::{PackageSubmission, PackageTxResult};
 pub use truc::TrucError;
