@@ -199,6 +199,7 @@ pub(crate) struct PreparedAdmission {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AdmissionMode {
     Single,
+    SingleSubmit,
     PackageTest,
     PackageSubmit,
     PackageRpcSubmit(Option<u64>),
@@ -965,7 +966,13 @@ impl MempoolGateway {
                 fence,
                 None,
             )?;
-            Self::prepare_admission(&pool, request, AdmissionMode::Single, fence, self.engine())
+            Self::prepare_admission(
+                &pool,
+                request,
+                AdmissionMode::SingleSubmit,
+                fence,
+                self.engine(),
+            )
         };
         prepared.verify(request, self.script_cache());
 
@@ -1124,6 +1131,12 @@ impl MempoolGateway {
         let enforcement = match (request.origin, fence) {
             (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
                 LimitEnforcement::Deferred
+            }
+            (_, crate::admission::AdmissionFence::Stable)
+                if mode == AdmissionMode::SingleSubmit
+                    && !matches!(request.origin, AdmissionOrigin::Reorg) =>
+            {
+                LimitEnforcement::ExpireBeforeTrim(request.time)
             }
             _ => LimitEnforcement::Full,
         };

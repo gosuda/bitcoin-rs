@@ -33,6 +33,9 @@ impl FeeEstimation {
 pub(crate) enum LimitEnforcement {
     /// Apply all policy limits immediately.
     Full,
+    /// Normal submission: plan capacity after expiry, then commit insertion,
+    /// expiry and any remaining size removals in that publication order.
+    ExpireBeforeTrim(u64),
     /// Skip individual fee/size enforcement: the enclosing reorg settlement
     /// or native package plan enforces the relevant aggregate bounds.
     Deferred,
@@ -281,9 +284,11 @@ pub(crate) struct ReplacementInputs {
     incremental_relay_fee: u64,
     fee_estimation: FeeEstimation,
     enforcement: LimitEnforcement,
+    trim_graph: Option<crate::pool::fee_policy::PolicyGraph>,
 }
 
 pub(crate) struct PreparedPoolChange {
+    pub(crate) expiry_time: Option<u64>,
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) evicted: Vec<EntryId>,
@@ -322,9 +327,18 @@ impl ReplacementInputs {
     /// admission ([`MempoolError::Full`]) and returns the floor bump that
     /// trim earned in the [`Refusal`]; a trim that spares the candidate
     /// returns its highest chunk bump in the plan.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep RBF comparison and post-expiry capacity verification tied to one captured stamp"
+    )]
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, Refusal> {
+        let expiry_time = match self.enforcement {
+            LimitEnforcement::ExpireBeforeTrim(now) => Some(now),
+            _ => None,
+        };
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
+                expiry_time,
                 stamp: self.stamp,
                 #[cfg(any(test, feature = "test-seam"))]
                 evicted: Vec::new(),
@@ -335,10 +349,10 @@ impl ReplacementInputs {
             });
         };
         after_graph.check_limits(self.limits)?;
-        let needs_trim = self.enforcement == LimitEnforcement::Full
+        let needs_trim = self.enforcement != LimitEnforcement::Deferred
             && self.max_vsize > 0
             && self.projected_vsize > self.max_vsize;
-        let after_chunks = if self.direct.is_empty() && !needs_trim {
+        let after_chunks = if self.direct.is_empty() && (!needs_trim || self.trim_graph.is_some()) {
             Vec::new()
         } else {
             after_graph.chunks()?
@@ -359,7 +373,13 @@ impl ReplacementInputs {
         let mut size = self.projected_vsize;
         let mut bump = None;
         if needs_trim {
-            for chunk in after_chunks.iter().rev() {
+            let trim_graph = self.trim_graph.as_ref().unwrap_or(&after_graph);
+            let trim_chunks = if self.trim_graph.is_some() {
+                trim_graph.chunks()?
+            } else {
+                after_chunks
+            };
+            for chunk in trim_chunks.iter().rev() {
                 if size <= self.max_vsize {
                     break;
                 }
@@ -375,12 +395,12 @@ impl ReplacementInputs {
                 if chunk
                     .members
                     .iter()
-                    .any(|&member| after_graph.nodes[member].id.is_none())
+                    .any(|&member| trim_graph.nodes[member].id.is_none())
                 {
                     return Err(refuse_full(self.stamp, bump));
                 }
                 for &member in &chunk.members {
-                    let node = &after_graph.nodes[member];
+                    let node = &trim_graph.nodes[member];
                     let id = node.id.ok_or(RbfError::InconsistentGraph)?;
                     if removed.insert(id) {
                         removal_priority.push(id);
@@ -415,6 +435,7 @@ impl ReplacementInputs {
             evicted
         };
         Ok(PreparedPoolChange {
+            expiry_time,
             stamp: self.stamp,
             #[cfg(any(test, feature = "test-seam"))]
             evicted,
@@ -473,6 +494,10 @@ impl Mempool {
     }
 
     /// Captures one admission's graph work outside the writer.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "capture pre-expiry replacement and post-expiry capacity facts under one pool guard"
+    )]
     pub(crate) fn capture_admission(
         &self,
         entry: MempoolEntry,
@@ -529,12 +554,12 @@ impl Mempool {
                 .checked_add(u64::from(entry.vsize))
                 .ok_or(RbfError::ArithmeticOverflow)
         })?;
-        let projected_vsize = self
+        let mut projected_vsize = self
             .total_vsize()
             .checked_sub(removed_vsize)
             .and_then(|size| size.checked_add(u64::from(entry.vsize)))
             .ok_or(RbfError::ArithmeticOverflow)?;
-        let include_all = enforcement == LimitEnforcement::Full
+        let include_all = enforcement != LimitEnforcement::Deferred
             && self.limits.max_total_bytes > 0
             && projected_vsize > self.limits.max_total_bytes;
         let graphs = if conflicts.is_empty() && !include_all {
@@ -543,6 +568,44 @@ impl Mempool {
             Some(self.projected_graphs(core::slice::from_ref(&entry), &evicted, include_all)?)
         };
         let excluded: HashSet<_> = evicted.iter().copied().collect();
+        let trim_graph = if let LimitEnforcement::ExpireBeforeTrim(now) = enforcement {
+            let expired: HashSet<_> = self.expired_entry_ids(now).into_iter().collect();
+            if include_all && !expired.is_empty() {
+                let mut excluded_trim = excluded.clone();
+                for &id in &expired {
+                    if excluded_trim.insert(id) {
+                        projected_vsize = projected_vsize
+                            .checked_sub(u64::from(
+                                self.entry(id).ok_or(RbfError::InconsistentGraph)?.vsize,
+                            ))
+                            .ok_or(RbfError::ArithmeticOverflow)?;
+                    }
+                }
+                let expires = entry
+                    .tx
+                    .inputs
+                    .iter()
+                    .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
+                    .any(|id| expired.contains(&id));
+                if expires {
+                    projected_vsize = projected_vsize
+                        .checked_sub(u64::from(entry.vsize))
+                        .ok_or(RbfError::ArithmeticOverflow)?;
+                }
+                let candidates = if expires {
+                    &[][..]
+                } else {
+                    core::slice::from_ref(&entry)
+                };
+                let mut excluded_trim: Vec<_> = excluded_trim.into_iter().collect();
+                excluded_trim.sort_unstable();
+                Some(self.projected_graphs(candidates, &excluded_trim, true)?.1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let entry = self.validate_insert(entry, &excluded, enforcement)?;
         Ok(ReplacementInputs {
             stamp: self.policy_stamp(),
@@ -556,6 +619,7 @@ impl Mempool {
             incremental_relay_fee: self.policy_snapshot().incremental_relay_fee_sat_per_kvb,
             fee_estimation,
             enforcement,
+            trim_graph,
         })
     }
 
@@ -599,12 +663,11 @@ impl Mempool {
             return Err(RbfError::StalePlan);
         }
         let mut changes = Vec::new();
-        let replacement = prepared.removals.iter().any(|(_, reason)| {
-            matches!(reason, RemovalReason::Replaced | RemovalReason::Descendant)
-        });
-        if replacement {
-            self.remove_entries_with_reasons(&prepared.removals, &mut changes);
-        }
+        let (replacements, remaining): (Vec<_>, Vec<_>) =
+            prepared.removals.into_iter().partition(|(_, reason)| {
+                matches!(reason, RemovalReason::Replaced | RemovalReason::Descendant)
+            });
+        self.remove_entries_with_reasons(&replacements, &mut changes);
         let arrival = prepared
             .entry
             .as_ref()
@@ -613,12 +676,13 @@ impl Mempool {
         if let Some(entry) = prepared.entry {
             changes.extend(self.commit_insert(entry).changes);
         }
-        if !replacement {
-            self.remove_entries_with_reasons(&prepared.removals, &mut changes);
-        }
         if let Some(txid) = arrival {
             self.record_entry_arrival(txid);
         }
+        if let Some(now) = prepared.expiry_time {
+            changes.extend(self.expire(now).changes);
+        }
+        self.remove_entries_with_reasons(&remaining, &mut changes);
         // The stamp matched, so the evictions this bump belongs to just
         // committed against the state it was computed at: raise the floor
         // exactly once, after the removals, as Core's `TrimToSize` does.

@@ -369,6 +369,15 @@ pub fn decode_undo_record_for_block(
     )
 }
 
+/// Bounds the persisted undo copy for a consensus-valid block.
+///
+/// The caller supplies the interpreter's maximum spendable script length; format sizes
+/// and BIP30/removal overhead remain owned by the persisted codec.
+#[must_use]
+pub fn undo_record_size_limit(block: &Block, max_spent_script: usize) -> usize {
+    undo_codec::record_size_limit(block, max_spent_script)
+}
+
 /// Projects rollback facts into transaction/input order without changing their format.
 ///
 /// Same-block outputs are absent from net undo and come from earlier transactions

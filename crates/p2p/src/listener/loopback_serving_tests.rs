@@ -457,6 +457,76 @@ fn saturate(
 }
 
 #[test]
+fn getblocktxn_survives_shared_saturation_without_resending() -> TestResult {
+    use bitcoin::bip152::BlockTransactionsRequest;
+    use bitcoin::p2p::message_compact_blocks::GetBlockTxn;
+    let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
+    let hog_block = child_block(genesis.block_hash(), 1, vec![coinbase(1, HOG_OUTPUTS)])?;
+    let victim_block = child_block(hog_block.block_hash(), 2, vec![coinbase(2, 1), payment(2)])?;
+    let frame_len = wire_len_of(&Message::BlockPayload(consensus_bytes(&hog_block).into()))?;
+    let request = Message::GetBlockTxn(GetBlockTxn {
+        txs_request: BlockTransactionsRequest {
+            block_hash: wire_block_hash(victim_block.block_hash()),
+            indexes: vec![1],
+        },
+    });
+    let hog_item = Inventory::WitnessBlock(wire_block_hash(hog_block.block_hash()));
+    let blocks = [genesis, hog_block, victim_block];
+    let node = Node::start(chain_over(&blocks, RecentBlockSlot::default())?)?;
+    let mut victim = Client::connect(&node)?;
+    let victim_session = session_of(&node, &victim)?;
+    victim.send(&request)?;
+    let nonce = victim.ping()?;
+    let baseline = victim.read_through_pong(nonce)?;
+    assert!(matches!(baseline.as_slice(), [(Message::BlockTxn(_), _)]));
+    let mut hog = Client::connect(&node)?;
+    let hog_session = session_of(&node, &hog)?;
+    wait_until("handshake credits returned", || {
+        node.aggregate.pending() == 0
+    })?;
+    let queued = saturate(
+        &node,
+        &mut hog,
+        &hog_session,
+        &victim_session,
+        frame_len,
+        hog_item,
+    )?;
+    let budget = victim_session.lease.budget_handle();
+    let before_refusals = budget.refusals();
+    let started = Instant::now();
+    victim.send(&request)?;
+    wait_until("getblocktxn deferred on reservation refusal", || {
+        budget.refusals() > before_refusals
+    })?;
+    println!(
+        "C saturated queued={queued:?} shared={} victim_pending={:?} refusals={} elapsed_ms={}",
+        node.aggregate.pending(),
+        budget.pending(),
+        budget.refusals(),
+        started.elapsed().as_millis()
+    );
+    drop(hog);
+    wait_until("hog credit returned", || {
+        hog_session.lease.budget_handle().pending() == (0, 0)
+    })?;
+    let nonce = victim.ping()?;
+    let received = victim.read_through_pong(nonce)?;
+    println!(
+        "C recovered replies={} elapsed_ms={} messages={:?}",
+        received.len(),
+        started.elapsed().as_millis(),
+        messages_of(received.clone())
+    );
+    assert!(
+        matches!(received.as_slice(), [(Message::BlockTxn(_), _)]),
+        "the original request must be answered once after recovery"
+    );
+    drop(victim);
+    node.finish()
+}
+
+#[test]
 fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() -> TestResult {
     let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
     let hog_block = child_block(genesis.block_hash(), 1, vec![coinbase(1, HOG_OUTPUTS)])?;

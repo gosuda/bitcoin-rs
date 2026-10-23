@@ -41,6 +41,7 @@ impl EvictionInputs {
             .map(|id| (id, RemovalReason::PolicyEviction))
             .collect();
         crate::rbf::PreparedPoolChange {
+            expiry_time: None,
             stamp: self.stamp,
             #[cfg(any(test, feature = "test-seam"))]
             evicted: Vec::new(),

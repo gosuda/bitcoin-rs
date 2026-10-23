@@ -1778,7 +1778,7 @@ impl<'a> ProductionSink<'a> {
         if self.lease.is_cancelled() {
             return false;
         }
-        let reserved = match self.production.take() {
+        let reserved = match self.production.take().or_else(|| self.reply.take()) {
             Some(held) => Ok(held),
             None => self.lease.try_reserve_production(),
         };
@@ -1841,15 +1841,21 @@ fn reply_bound(message: &crate::Message, getaddr_answerable: bool) -> Option<usi
             (32 + 9 + 5 * cmpct.compact_block.short_ids.len()).max(1 + 36)
         }
         crate::Message::BlockTxn(_) => 1 + 36,
+        // A shallow answer is blocktxn; a deep answer may be the full block.
+        crate::Message::GetBlockTxn(_) => crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE,
         _ => return None,
     };
     Some(crate::wire::HEADER_LEN + payload.min(crate::wire::MAX_MESSAGE_PAYLOAD))
 }
 
+/// Compact-block reconstruction messages (`CmpctBlock`, `BlockTxn`, `GetBlockTxn`)
+/// defer on local queue saturation rather than disconnecting.
 fn defers_on_local(message: &crate::Message) -> bool {
     matches!(
         message,
-        crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_)
+        crate::Message::CmpctBlock(_)
+            | crate::Message::BlockTxn(_)
+            | crate::Message::GetBlockTxn(_)
     )
 }
 
@@ -1914,7 +1920,20 @@ fn retry_deferred_request<S>(
         *parked_since = None;
         return DeferredStep::Ready(message, None);
     };
-    match lease.try_reserve_reply(bound) {
+    let bulk = matches!(message, crate::Message::GetBlockTxn(_));
+    let reservation = if bulk {
+        lease.try_reserve_production()
+    } else {
+        lease.try_reserve_reply(bound)
+    };
+    let may_reserve = || {
+        if bulk {
+            budget.may_reserve_production()
+        } else {
+            budget.may_charge(bound)
+        }
+    };
+    match reservation {
         Ok(credit) => {
             *parked_since = None;
             DeferredStep::Ready(message, Some(credit))
@@ -1922,7 +1941,7 @@ fn retry_deferred_request<S>(
         Err(crate::connection::Refusal::Local) => {
             if defers_on_local(&message) && !budget.writer_dead() {
                 peer.deferred_inbound = Some(message);
-                budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_charge(bound));
+                budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
                 DeferredStep::Waiting
             } else {
                 lease.cancel();
@@ -1932,7 +1951,7 @@ fn retry_deferred_request<S>(
         Err(refusal) => {
             keepalive.note_refusal(refusal);
             peer.deferred_inbound = Some(message);
-            budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_charge(bound));
+            budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
             DeferredStep::Waiting
         }
     }
@@ -2148,7 +2167,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         &message,
                         getaddr_answerable(lease, shared, answered_getaddr),
                     );
-                    let reply = match bound.map(|bound| lease.try_reserve_reply(bound)) {
+                    let reply = match bound.map(|bound| {
+                        if matches!(message, crate::Message::GetBlockTxn(_)) {
+                            lease.try_reserve_production()
+                        } else {
+                            lease.try_reserve_reply(bound)
+                        }
+                    }) {
                         None => None,
                         Some(Ok(credit)) => Some(credit),
                         Some(Err(crate::connection::Refusal::Local)) => {

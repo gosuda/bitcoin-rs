@@ -4,11 +4,13 @@ use crate::rbf::LimitEnforcement;
 use crate::standardness::AcceptanceRejectReason;
 use crate::{MempoolEntry, MempoolError, MutationResult, PolicyError};
 use alloc::vec::Vec;
+use bitcoin_rs_primitives::Txid;
 use hashbrown::HashSet;
 
 pub(crate) struct PreparedPackage {
     stamp: fee_policy::PolicyStamp,
     inserts: Vec<PreparedInsert>,
+    expiry_time: u64,
 }
 
 impl Mempool {
@@ -19,10 +21,51 @@ impl Mempool {
         entries: Vec<MempoolEntry>,
         now: u64,
     ) -> Result<PreparedPackage, AcceptanceRejectReason> {
+        let expiry_time = entries.iter().map(|entry| entry.time).max().unwrap_or(0);
         let size = entries.iter().try_fold(self.total_vsize(), |sum, entry| {
             sum.checked_add(u64::from(entry.vsize))
                 .ok_or(PolicyError::FeeArithmetic)
         })?;
+        let cutoff = expiry_time.saturating_sub(crate::policy::MEMPOOL_EXPIRY_SECS);
+        let expired_ids = self.expired_entry_ids(expiry_time);
+        let mut expired_txids: HashSet<Txid> = expired_ids
+            .iter()
+            .filter_map(|id| self.entry(*id).map(|e| e.txid))
+            .collect();
+        let mut expired_vsize = expired_ids
+            .iter()
+            .filter_map(|id| self.entry(*id))
+            .map(|entry| u64::from(entry.vsize))
+            .sum::<u64>();
+
+        let mut expired_pending_indices = HashSet::new();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (idx, entry) in entries.iter().enumerate() {
+                if expired_pending_indices.contains(&idx) {
+                    continue;
+                }
+                let is_expired_root = entry.time < cutoff;
+                let spends_expired = entry
+                    .tx
+                    .inputs
+                    .iter()
+                    .any(|input| expired_txids.contains(&input.previous_output.txid));
+                if is_expired_root || spends_expired {
+                    expired_pending_indices.insert(idx);
+                    expired_txids.insert(entry.txid);
+                    expired_vsize = expired_vsize
+                        .checked_add(u64::from(entry.vsize))
+                        .ok_or(PolicyError::FeeArithmetic)?;
+                    changed = true;
+                }
+            }
+        }
+
+        let size = size
+            .checked_sub(expired_vsize)
+            .ok_or(PolicyError::FeeArithmetic)?;
         if self.limits.max_total_bytes != 0 && size > self.limits.max_total_bytes {
             return Err(MempoolError::Full.into());
         }
@@ -64,6 +107,7 @@ impl Mempool {
         Ok(PreparedPackage {
             stamp: self.policy_stamp(),
             inserts,
+            expiry_time,
         })
     }
 
@@ -81,6 +125,7 @@ impl Mempool {
         for entry in prepared.inserts {
             changes.extend(self.commit_insert(entry).changes);
         }
+        changes.extend(self.expire(prepared.expiry_time).changes);
         Ok(self.finish_mutation(changes))
     }
 }

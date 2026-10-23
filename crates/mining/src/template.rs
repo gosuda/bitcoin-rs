@@ -588,8 +588,9 @@ const MIN_TXOUT_SIZE: u32 = 9;
 /// many outputs `additional_size` can buy, so the count width is derived from
 /// that bound instead of assumed at its 9-byte maximum. All of this is
 /// non-witness data, hence weight is four times size. The sigop allowance is
-/// already in BIP141 cost units and carries over unscaled; the owner's own
-/// coinbase sigops stay in the fixed reservation.
+/// already in BIP141 cost units and carries over unscaled. Input growth can
+/// contain CHECKMULTISIG, costing 20 legacy operations (80 cost units) per
+/// added byte; coinbase input scripts are counted even though never executed.
 fn coinbase_growth(coinbase: &Tx, budget: CoinbaseBudget) -> Result<FixedReservation, MiningError> {
     let script_sig_len = coinbase
         .inputs
@@ -612,7 +613,11 @@ fn coinbase_growth(coinbase: &Tx, budget: CoinbaseBudget) -> Result<FixedReserva
     Ok(FixedReservation {
         weight,
         size,
-        sigops: u64::from(budget.additional_sigops),
+        sigops: checked_sum(
+            script_growth * 80,
+            u64::from(budget.additional_sigops),
+            "sigops",
+        )?,
     })
 }
 

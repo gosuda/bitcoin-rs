@@ -120,10 +120,14 @@ struct AnnounceState {
     /// same height (reorg race, duplicate connect) or a stale side branch
     /// never re-announces.
     highest_fast_announce: u32,
-    /// Set when a post-commit announcement was refused by the node's
-    /// aggregate outbound budget while its peer was live. The worker replans
-    /// the committed tip on a later poll ([`BlockAnnouncer::process_tip_retry`]).
+    /// Set when no ready peer could receive a post-commit announcement, or
+    /// the node's aggregate outbound budget refused a live peer. The worker
+    /// replans the committed tip on a later poll ([`BlockAnnouncer::process_tip_retry`]).
     announcement_retry: bool,
+    /// Bumped by the disconnect hook under the state lock. `process_tip`
+    /// compares epochs across its send window, so a disconnect between
+    /// planning and the final write re-arms instead of being erased.
+    announcement_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -223,6 +227,14 @@ impl BlockAnnouncer {
         state
             .high_bandwidth_requested_peers
             .retain(|candidate| *candidate != source);
+        // An enqueued announcement dies with the session that carried it; a
+        // same-address replacement starts with no announced-tip state. Arm
+        // the retry so the next poll replans the committed tip onto whatever
+        // sessions are live then, and bump the epoch: `process_tip` compares
+        // epochs around its send window so a disconnect between planning and
+        // discharge re-arms instead of being erased.
+        state.announcement_retry = true;
+        state.announcement_epoch += 1;
         // Keep the table's `bip152_hb_to` snapshot consistent for the window
         // where the entry outlives the worker's set membership.
         self.peers.note_high_bandwidth_selected(source, false);
@@ -528,13 +540,16 @@ impl BlockAnnouncer {
         sent
     }
 
-    fn planned_announcements(&self, tip: CommittedTip) -> Vec<PlannedAnnouncement> {
+    fn planned_announcements(
+        &self,
+        tip: CommittedTip,
+        live_sessions: &[crate::PeerSession],
+    ) -> Vec<PlannedAnnouncement> {
         let tip_hash = Hash256::from(tip.hash);
-        let live_sessions = self.ready_sessions();
 
         let mut planned = Vec::new();
 
-        for session in &live_sessions {
+        for session in live_sessions {
             let addr = session.addr;
             let (source, peer_state, known_position) = self.peer_anchor(session);
 
@@ -636,7 +651,7 @@ impl BlockAnnouncer {
             return Vec::new();
         };
         let tip_hash = Hash256::from(tip.hash);
-        {
+        let send_epoch = {
             let mut state = self.state.lock();
             // Claim the observation only on the processing path. Planning is
             // side-effect free, while this claim prevents concurrent workers
@@ -645,8 +660,13 @@ impl BlockAnnouncer {
                 return Vec::new();
             }
             state.last_processed_tip = Some(tip_hash);
-        }
-        let planned = self.planned_announcements(tip);
+            state.announcement_epoch
+        };
+        let live_sessions = self.ready_sessions();
+        let no_ready_peers = live_sessions.is_empty();
+        let planned = self.planned_announcements(tip, &live_sessions);
+        let attempted = !planned.is_empty();
+        let planned_sources: Vec<_> = planned.iter().map(|plan| plan.source).collect();
         let mut sent = Vec::with_capacity(planned.len());
         let mut refused_by_node_budget = false;
         for announcement in planned {
@@ -669,21 +689,43 @@ impl BlockAnnouncer {
             }
             sent.push((announcement.source.addr, announcement.message));
         }
-        if refused_by_node_budget {
-            self.state.lock().announcement_retry = true;
-        }
+        // Keep one retry intent across a disconnected interval. Each poll
+        // rereads chainstate, so reconnecting peers receive the current tip
+        // rather than a stored announcement from a superseded branch. A
+        // poll that delivered into a stable session set discharges a stale
+        // flag; refusal, an all-failed send, no ready peers, a delivered
+        // source that already lost its session, or a disconnect inside the
+        // send window keeps it armed. A disconnect after this write leaves
+        // the hook-armed flag standing.
+        let lost_delivery = planned_sources
+            .iter()
+            .any(|source| !self.peers.is_current(*source));
+        let mut state = self.state.lock();
+        let peer_lost_in_window = state.announcement_epoch != send_epoch;
+        state.announcement_retry = refused_by_node_budget
+            || (attempted && sent.is_empty())
+            || no_ready_peers
+            || lost_delivery
+            || peer_lost_in_window;
         sent
     }
 
-    /// Replans the committed tip once after an announcement was refused by the
-    /// node's aggregate outbound budget.
+    /// Replans the committed tip after aggregate-budget refusal, all sends
+    /// failing, or processing with no ready peers.
     ///
     /// PRE: none.
     /// POST: with a retry pending, the pending flag clears and the tip is
-    /// processed again as if it had not been seen: peers that already know it
-    /// are skipped by the planner, and an `inv` fallback may repeat. Without
-    /// one, nothing happens.
+    /// processed again as if it had not been seen. Continued refusal or no
+    /// ready peers rearms the retry. Peers that already know it are skipped
+    /// by the planner, and an `inv` fallback may repeat. Without a pending
+    /// retry, nothing happens.
     pub fn process_tip_retry(&self) -> Vec<(SocketAddr, Message)> {
+        // IBD suppresses announcements entirely; consuming the intent here
+        // would drop a disconnect-armed retry before the first poll that can
+        // act on it. Keep it armed until `process_tip` can run.
+        if self.in_ibd() {
+            return Vec::new();
+        }
         {
             let mut state = self.state.lock();
             if !std::mem::take(&mut state.announcement_retry) {
@@ -1544,8 +1586,9 @@ mod tests {
         mark_known(&table, &announcer, addr, chain.hash_at(0));
 
         let tip = chain.committed_tip().expect("committed tip");
-        assert_eq!(announcer.planned_announcements(tip).len(), 1);
-        assert_eq!(announcer.planned_announcements(tip).len(), 1);
+        let sessions = announcer.ready_sessions();
+        assert_eq!(announcer.planned_announcements(tip, &sessions).len(), 1);
+        assert_eq!(announcer.planned_announcements(tip, &sessions).len(), 1);
 
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
@@ -1619,8 +1662,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_send_does_not_advance_peer_known_tip() {
-        let chain = Arc::new(MockAnnounceChain::new(2));
+    fn failed_sends_retry_latest_committed_tip_after_reconnect() {
+        let chain = Arc::new(MockAnnounceChain::new(3));
+        chain.set_committed_height(1);
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
             Arc::clone(&table),
@@ -1639,6 +1683,144 @@ mod tests {
                 .and_then(|state| state.last_announced_block),
             Some(chain.hash_at(0))
         );
+
+        // #1560: losing every send must retain the committed tip across a
+        // disconnected interval, without requiring another chain wake.
+        assert!(lease.is_cancelled());
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+        chain.set_committed_height(2);
+        let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+        let sent = announcer.process_tip_retry();
+        assert_eq!(sent.len(), 1);
+        let Message::Headers(headers) = replacement_rx.try_recv().unwrap() else {
+            panic!("the replacement must receive the current committed headers");
+        };
+        assert_eq!(
+            headers.last().unwrap().compute_hash(),
+            chain.block_hash_at(2)
+        );
+        assert_eq!(announcer.peer_known_block(addr), Some(chain.hash_at(2)));
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+    }
+
+    #[test]
+    fn a_delivered_tip_clears_the_stale_retry_intent() {
+        let chain = Arc::new(MockAnnounceChain::new(3));
+        chain.set_committed_height(1);
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+        let addr = test_addr(1011);
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+        drop(rx);
+
+        assert_eq!(announcer.process_tip(), Vec::new());
+        assert!(
+            announcer.state.lock().announcement_retry,
+            "an all-failed send arms the retry"
+        );
+
+        let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+        chain.set_committed_height(2);
+        // A fresh committed tip arrives on a direct poll, not the retry path
+        // (which would consume the flag itself).
+        let sent = announcer.process_tip();
+        assert_eq!(sent.len(), 1);
+        assert!(replacement_rx.try_recv().is_ok());
+
+        // The successful delivery must not leave a stale flag that replays
+        // the tip to fallback peers on the next timeout.
+        assert!(
+            !announcer.state.lock().announcement_retry,
+            "a delivered tip discharges the retry intent"
+        );
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+    }
+
+    #[test]
+    fn a_disconnect_inside_the_send_window_keeps_the_retry_armed() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        chain.set_committed_height(1);
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+        let addr = test_addr(1012);
+        let (old_lease, _rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+
+        // The tip enqueues to the session, then the session dies and a
+        // same-address replacement registers before the flag write. The
+        // enqueue is lost with the old session; the replacement has no
+        // announced-tip state.
+        let sent = announcer.process_tip();
+        assert_eq!(sent.len(), 1);
+        let old_source = old_lease.source(addr);
+        table.remove_current(addr, &old_lease);
+        announcer.on_peer_disconnected(old_source);
+        let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+
+        assert!(
+            announcer.state.lock().announcement_retry,
+            "a disconnect after enqueue must re-arm the retry"
+        );
+        let resent = announcer.process_tip_retry();
+        assert_eq!(resent.len(), 1);
+        assert!(
+            replacement_rx.try_recv().is_ok(),
+            "the replacement receives the committed tip on retry"
+        );
+    }
+
+    #[test]
+    fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let table = Arc::new(PeerTable::new());
+        let announcer = Arc::new(BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        ));
+        assert_eq!(announcer.process_tip(), Vec::new());
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+        let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
+        let (queue, worker_rx) = BlockAnnounceQueue::new();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker =
+            spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, Arc::clone(&shutdown))
+                .expect("the announce worker spawns");
+        let _stop = WorkerStop {
+            shutdown,
+            queue: Some(queue),
+            handle: Some(worker),
+        };
+        // No chain wake: the worker must discover the new connection on a poll.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let message = loop {
+            if let Ok(message) = rx.try_recv() {
+                break message;
+            }
+            assert!(std::time::Instant::now() < deadline, "tip was not retried");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            message,
+            Message::Inv(vec![Inventory::Block(bitcoin::BlockHash::from_byte_array(
+                chain.hash_at(1).to_le_bytes()
+            ))])
+        );
+        assert_eq!(announcer.process_tip_retry(), Vec::new());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -2007,6 +2189,70 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "peer must receive nothing during IBD"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_during_ibd_keeps_the_retry_armed_until_delivery() {
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+        let ibd = Arc::new(InitialBlockDownload::new(
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
+        ));
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        chain.set_committed_height(1);
+        let table = Arc::new(PeerTable::new());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        )
+        .with_ibd(Arc::clone(&ibd), Network::Regtest);
+
+        let addr = test_addr(1044);
+        let (old_lease, _rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+        let old_source = old_lease.source(addr);
+        table.remove_current(addr, &old_lease);
+        announcer.on_peer_disconnected(old_source);
+        let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
+        mark_known(&table, &announcer, addr, chain.hash_at(0));
+
+        assert!(announcer.in_ibd());
+        assert_eq!(
+            announcer.process_tip_retry(),
+            Vec::new(),
+            "IBD suppresses announcements"
+        );
+        assert!(
+            announcer.state.lock().announcement_retry,
+            "the IBD poll must not consume the armed retry"
+        );
+
+        // A fresh header younger than the IBD window ends initial download.
+        let genesis = Network::Regtest.genesis_block();
+        let recent = Header {
+            prev_blockhash: genesis.block_hash(),
+            time: u32::try_from(bitcoin_rs_primitives::unix_time_secs()).unwrap_or(u32::MAX),
+            ..genesis.header
+        };
+        {
+            let mut tree = block_tree.write();
+            let genesis_id = tree
+                .insert_node(None, genesis.header, NodeStatus::Active)
+                .expect("insert genesis");
+            tree.insert_node(Some(genesis_id), recent, NodeStatus::Active)
+                .expect("insert recent child");
+        }
+        applied_tip.store(block_tree.read().tip());
+        assert!(!announcer.in_ibd());
+
+        let sent = announcer.process_tip_retry();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            replacement_rx.try_recv().is_ok(),
+            "the replacement receives the committed tip after IBD exits"
         );
     }
 

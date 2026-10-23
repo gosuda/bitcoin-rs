@@ -65,7 +65,8 @@ surface never do.
   output count may need (at least 9 bytes per output bounds how many outputs
   `additional_size` buys, so the width is derived, not assumed). Every grown
   byte is non-witness, so weight growth is four times size growth. The sigop
-  allowance is added to the coinbase's own sigop cost, which stays in the fixed
+  allowance and worst-case input growth (80 cost units per added byte) are
+  added to the coinbase's own sigop cost, which stays in the fixed
   reservation. The header, transaction count, and owner coinbase are counted
   once, and `Candidate.weight` is always the real block weight: the growth is
   held back from the limits, never included in the block. The owner payout

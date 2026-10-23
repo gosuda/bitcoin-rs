@@ -32,6 +32,29 @@ const RESTORE_COUNT_OFFSET: usize = VERSION_BYTES + BLOCK_HASH_BYTES;
 #[cfg(test)]
 const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYTES;
 
+/// Maximum encoded record for a consensus-valid block. Spent scripts are
+/// bounded by the script interpreter; BIP30 overwrite scripts belong to the
+/// same transaction outputs as the block and fit within its serialized body.
+pub(crate) fn record_size_limit(
+    block: &bitcoin_rs_primitives::Block,
+    max_spent_script: usize,
+) -> usize {
+    let inputs = block
+        .txs
+        .iter()
+        .filter(|tx| !tx.is_coinbase())
+        .map(|tx| tx.inputs.len())
+        .sum::<usize>();
+    let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
+    // Version, hash and two u32 counts; each restore has an outpoint, value,
+    // CompactSize, script, coinbase flag and u32 height. Each output may also
+    // supply one BIP30 restore and one 36-byte removal.
+    41_usize
+        .saturating_add(inputs.saturating_mul(52_usize.saturating_add(max_spent_script)))
+        .saturating_add(outputs.saturating_mul(52 + 36))
+        .saturating_add(block.total_size())
+}
+
 /// Errors returned when decoding an undo record.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum UndoCodecError {
@@ -299,6 +322,42 @@ mod tests {
         batch.remove(outpoint(3, 0));
         batch.remove(outpoint(3, 1));
         batch
+    }
+
+    #[test]
+    fn read_bound_covers_spent_scripts_and_bip30_overwrite_bytes() {
+        let mut block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        block.txs[0].outputs[0].script_pubkey = vec![0x51; 20_000].into();
+        let mut spend = block.txs[0].clone();
+        spend.inputs[0].previous_output = outpoint(1, 0);
+        spend.outputs[0].script_pubkey = vec![0x51].into();
+        let mut batch = UndoBatch::empty();
+        batch.restore(UtxoAdd::new(
+            outpoint(1, 0),
+            TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: vec![0x51; 10_000].into(),
+            },
+            false,
+            1,
+        ));
+        batch.restore(UtxoAdd::new(
+            OutPoint::new(block.txs[0].txid(), 0),
+            block.txs[0].outputs[0].clone(),
+            true,
+            1,
+        ));
+        batch.remove(OutPoint::new(spend.txid(), 0));
+        block.txs.push(spend);
+        let actual = encode(&batch, block.block_hash().into()).len();
+        assert!(
+            actual > super::record_size_limit(&block, 0),
+            "spent scripts are not bounded by current output bytes"
+        );
+        assert!(
+            actual <= super::record_size_limit(&block, 10_000),
+            "both restore sources fit the codec bound"
+        );
     }
 
     #[test]

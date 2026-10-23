@@ -19,6 +19,62 @@ use common::{context, insert_with_cost, oracle_sigop_cost, p2pkh, tx, zero_fee_p
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+#[test]
+fn budgeted_coinbase_input_growth_sigop_boundary() -> TestResult {
+    use bitcoin_rs_mining::CoinbaseBudget;
+    let pool = zero_fee_pool();
+    let context = CandidateContext {
+        segwit_active: false,
+        ..context()
+    };
+    let budget = CoinbaseBudget {
+        additional_size: 0,
+        additional_sigops: 0,
+    };
+    let candidate = assemble_candidate(&context, &pool, &vec![0xac; 19_999])?;
+    println!(
+        "A declared_base_sigops=79996 budget_sigops=0 admits={:?} prefix_bytes={}",
+        candidate.admits(budget),
+        candidate.coinbase.inputs[0].script_sig.len()
+    );
+    assert!(matches!(
+        candidate.admits(budget),
+        Err(MiningError::CapacityExhausted { field: "sigops" })
+    ));
+    for (opcode, cost) in [(0xac, 80_000), (0xae, 80_076)] {
+        let mut block = candidate.into_unsolved_block()?;
+        let mut script = block.txs[0].inputs[0].script_sig.as_bytes().to_vec();
+        script.push(opcode);
+        block.txs[0].inputs[0].script_sig = script.into();
+        block.header.merkle_root = Hash256::from_le_bytes(
+            &bitcoin_rs_consensus::compute_merkle_root(&mut vec![*block.txs[0].txid().as_bytes()])
+                .ok_or("merkle")?,
+        );
+        let native = bitcoin_rs_consensus::verify_block::verify_block_non_contextual(&block);
+        println!(
+            "A opcode={opcode:x} final_sigops={} weight={} bytes={} native={native:?}",
+            oracle_sigop_cost(&block.txs[0])?,
+            block.weight(),
+            block.total_size()
+        );
+        assert_eq!(oracle_sigop_cost(&block.txs[0])?, cost);
+        assert_eq!(native.is_ok(), opcode == 0xac);
+    }
+    let mut safe = assemble_candidate(&context, &pool, &vec![0xac; 18_040])?;
+    assert!(safe.admits(budget).is_ok());
+    safe.max_sigops -= 1;
+    assert!(
+        safe.admits(budget).is_err(),
+        "the complete growth reservation is inclusive"
+    );
+    let mut block = safe.into_unsolved_block()?;
+    let mut script = block.txs[0].inputs[0].script_sig.as_bytes().to_vec();
+    script.resize(100, 0xae);
+    block.txs[0].inputs[0].script_sig = script.into();
+    assert_eq!(oracle_sigop_cost(&block.txs[0])?, 80_000);
+    Ok(())
+}
+
 fn sigop_limited(segwit_active: bool, max_sigops: u64) -> CandidateContext {
     CandidateContext {
         segwit_active,

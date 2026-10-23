@@ -255,7 +255,9 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
             (
                 "sigops",
                 Limits {
-                    sigops: sigops + u64::from(BUDGET.additional_sigops),
+                    sigops: sigops
+                        + u64::from(BUDGET.additional_sigops)
+                        + u64::try_from(100 - plain.coinbase.inputs[0].script_sig.len())? * 80,
                     ..GENEROUS
                 },
             ),
@@ -308,7 +310,9 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
 /// The owner coinbase with a pool's scriptSig and outputs, as a pool builds it.
 fn pool_coinbase(candidate: &Candidate, extra: Vec<TxOut>) -> Tx {
     let mut coinbase = candidate.coinbase.clone();
-    coinbase.inputs[0].script_sig = vec![0x51; 100].into();
+    let mut script = coinbase.inputs[0].script_sig.as_bytes().to_vec();
+    script.resize(100, 0xae);
+    coinbase.inputs[0].script_sig = script.into();
     coinbase.outputs.extend(extra);
     coinbase
 }
@@ -357,7 +361,9 @@ fn a_pool_shaped_coinbase_fits_the_derived_envelope_exactly() -> TestResult {
             let exact = Limits {
                 weight: weight + 4 * growth,
                 size: size + growth,
-                sigops: sigops + u64::from(budget.additional_sigops),
+                sigops: sigops
+                    + u64::from(budget.additional_sigops)
+                    + u64::try_from(100 - plain.coinbase.inputs[0].script_sig.len())? * 80,
             };
             let fit = assemble(&context(segwit_active, exact), &pool, Some(*budget))?;
             fit.admits(*budget)?;
