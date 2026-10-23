@@ -42,7 +42,6 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
         txs.sort_by_key(Tx::txid);
         txs.push(child);
     }
-    crate::package::check_structure(&txs)?;
     Ok(txs)
 }
 
