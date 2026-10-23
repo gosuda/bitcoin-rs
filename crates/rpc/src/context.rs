@@ -977,6 +977,40 @@ impl ChainHandles {
         })
     }
 
+    /// Returns the block hash for an applied height.
+    ///
+    /// Once an applied tip exists, its ancestry is authoritative and heights
+    /// above it are absent even when header sync has found a better fork.
+    /// Before the first applied-tip publication, genesis and cache-only test
+    /// records remain available.
+    #[must_use]
+    pub(crate) fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
+        self.block_hash_at_height_in_view(&self.applied_view(), height)
+    }
+
+    /// Returns the applied-chain hash at `height` within a retained view.
+    ///
+    /// PRE: `view` is the response's retained applied publication.
+    /// POST: that branch's hash at `height`; with no applied tip yet, the
+    ///   genesis hash at height 0 or the block-log record's hash, which is the
+    ///   cache-only fallback such contexts use.
+    /// INVARIANT: reads the tree and the log as necessary but never reloads
+    ///   `applied_tip`, so one response cannot straddle two applied branches.
+    #[must_use]
+    pub(crate) fn block_hash_at_height_in_view(
+        &self,
+        view: &AppliedView,
+        height: u32,
+    ) -> Option<Hash256> {
+        if let Some(tip) = view.tip() {
+            return self.hash_at_height_from_tip(tip, height);
+        }
+        if height == 0 {
+            return Some(self.chain_network.genesis_block_hash());
+        }
+        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
+    }
+
     /// Resolves a block record for `hash`.
     ///
     /// The restored header tree is the only identity authority. A hash it does
@@ -984,7 +1018,7 @@ impl ChainHandles {
     /// it. For a tree-resolved `(height, hash)` pair, the log may contribute
     /// matching durable body metadata.
     #[must_use]
-    pub(crate) fn record_for_hash(&self, hash: Hash256) -> Option<BlockRecord> {
+    pub fn block_by_hash(&self, hash: Hash256) -> Option<BlockRecord> {
         // Tree authority resolves identity first; the exact `(height, hash)`
         // record may then enrich its payload fields.
         if let Some(mut record) = self.header_record(hash) {
@@ -1017,52 +1051,6 @@ impl ChainHandles {
         None
     }
 
-    /// Returns the block hash for an applied height.
-    ///
-    /// Once an applied tip exists, its ancestry is authoritative and heights
-    /// above it are absent even when header sync has found a better fork.
-    /// Before the first applied-tip publication, genesis and cache-only test
-    /// records remain available.
-    #[must_use]
-    pub(crate) fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
-        if let Some(tip) = self.applied_tip.load_full() {
-            return self.hash_at_height_from_tip(&tip, height);
-        }
-        if height == 0 {
-            return Some(self.chain_network.genesis_block_hash());
-        }
-        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
-    }
-
-    /// Returns the applied-chain hash at `height` within a retained view.
-    ///
-    /// PRE: `view` is the response's retained applied publication.
-    /// POST: that branch's hash at `height`; with no applied tip yet, the
-    ///   genesis hash at height 0 or the block-log record's hash, which is the
-    ///   cache-only fallback such contexts use.
-    /// INVARIANT: reads the tree and the log as necessary but never reloads
-    ///   `applied_tip`, so one response cannot straddle two applied branches.
-    #[must_use]
-    pub(crate) fn block_hash_at_height_in_view(
-        &self,
-        view: &AppliedView,
-        height: u32,
-    ) -> Option<Hash256> {
-        if let Some(tip) = view.tip() {
-            return self.hash_at_height_from_tip(tip, height);
-        }
-        if height == 0 {
-            return Some(self.chain_network.genesis_block_hash());
-        }
-        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
-    }
-
-    /// Returns a known block by hash.
-    #[must_use]
-    pub fn block_by_hash(&self, hash: Hash256) -> Option<BlockRecord> {
-        self.record_for_hash(hash)
-    }
-
     /// Returns the applied block at a height.
     ///
     /// Once an applied tip exists, its ancestry is authoritative. The session
@@ -1087,7 +1075,7 @@ impl ChainHandles {
     ) -> Option<BlockRecord> {
         if let Some(tip) = view.tip() {
             let hash = self.hash_at_height_from_tip(tip, height)?;
-            return self.record_for_hash(hash);
+            return self.block_by_hash(hash);
         }
         record_at_height(&self.blocks.read(), height).cloned()
     }
@@ -1828,7 +1816,7 @@ mod tests {
     /// used to hold; only where it is produced changed.
     ///
     /// Read through a resolved record now, because that is where a header comes
-    /// from: the tree, via `record_for_hash`. A record built straight from a
+    /// from: the tree, via `block_by_hash`. A record built straight from a
     /// block has none.
     #[test]
     fn header_hex_is_unchanged_by_sourcing_the_header_from_the_tree() {
@@ -1839,7 +1827,7 @@ mod tests {
             let _ = tree.insert_node(None, block.header, bitcoin_rs_chain::NodeStatus::Active);
         }
         let hash = Hash256::from(block.block_hash());
-        let Some(record) = ctx.chain.record_for_hash(hash) else {
+        let Some(record) = ctx.chain.block_by_hash(hash) else {
             panic!("the tree knows this hash");
         };
 
@@ -1855,12 +1843,12 @@ mod tests {
 
     /// The tree's header must reach a caller even when the log has the block.
     ///
-    /// `record_for_hash` returns the cached record for its payload facts — size,
+    /// `block_by_hash` returns the cached record for its payload facts — size,
     /// transaction count — and that record has no header. Returning
     /// it unchanged would answer with none, which is what an earlier revision of
     /// this change did until this test caught it.
     #[test]
-    fn record_for_hash_answers_with_the_tree_header_for_a_cached_record() {
+    fn block_by_hash_answers_with_the_tree_header_for_a_cached_record() {
         let block = Network::Regtest.genesis_block();
         let ctx = Arc::new(Context::new());
         {
@@ -1874,7 +1862,7 @@ mod tests {
         assert!(cached.header_bytes().is_none(), "the log stores no header");
         ctx.chain.add_block(cached);
 
-        let Some(record) = ctx.chain.record_for_hash(hash) else {
+        let Some(record) = ctx.chain.block_by_hash(hash) else {
             panic!("the tree knows this hash");
         };
         assert_eq!(
@@ -1903,7 +1891,6 @@ mod tests {
         ctx.chain
             .add_block(BlockRecord::synthetic(3, BlockHash::from(hash)));
 
-        assert!(ctx.chain.record_for_hash(hash).is_none());
         assert!(ctx.chain.block_by_hash(hash).is_none());
     }
 
@@ -1951,7 +1938,7 @@ mod tests {
         // tree.
         let record = ctx
             .chain
-            .record_for_hash(hash)
+            .block_by_hash(hash)
             .expect("tree resolves the hash");
 
         assert_eq!(

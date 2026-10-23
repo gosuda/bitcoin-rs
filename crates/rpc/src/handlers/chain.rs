@@ -1662,7 +1662,8 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 /// keeps headers ahead of it; a block whose header is known but which has not
 /// been connected is not in it, so it is `-1` rather than `0`.
 pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
-    // Membership and depth come from the response's one captured publication.
+    // Membership comes from the response's one captured publication; depth
+    // comes from the shared render helper so every surface agrees.
     let Some(tip) = view.tip() else {
         return -1;
     };
@@ -1676,12 +1677,8 @@ pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, he
         tree.node_at_height_from(tip.tip_id, height)
             .and_then(|id| tree.node(id).ok().map(|node| node.hash))
     };
-    if active_hash != Some(hash) {
-        return -1;
-    }
-    i64::from(tip.height)
-        .saturating_sub(i64::from(height))
-        .saturating_add(1)
+    let on_active = active_hash == Some(hash);
+    crate::render::confirmations(view.height(), height, on_active)
 }
 
 fn block_verbose_typed(
@@ -1702,8 +1699,14 @@ fn block_verbose_typed(
         .chain_work_hex_for_hash(hash)
         .unwrap_or_else(|| "00".to_owned());
     let next_block_hash = (block_confirmations > 0)
-        .then(|| next_applied_block_hash(ctx, &view, record.height))
-        .flatten();
+        .then(|| {
+            record
+                .height
+                .checked_add(1)
+                .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
+        })
+        .flatten()
+        .map(BlockHash::from);
     if !include_block_fields {
         return typed_to_sonic(&v31::GetBlockHeaderVerbose {
             hash: record.hash.to_string(),
@@ -1867,18 +1870,6 @@ fn render_detailed_block(
     let mut value = typed_to_sonic_omitting_nulls(base)?;
     let _ = value.insert("tx", json!(tx));
     Ok(value)
-}
-
-fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
-    let tip = view.tip()?;
-    let next_height = height.checked_add(1)?;
-    if next_height > tip.height {
-        return None;
-    }
-    let tree = ctx.chain.block_tree.read();
-    let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
-    let node = tree.node(node_id).ok()?;
-    Some(BlockHash::from(node.hash))
 }
 
 fn decode_header(record: &BlockRecord) -> Result<Header, RpcError> {
@@ -2782,7 +2773,7 @@ mod tests {
         ctx.chain.add_block(BlockRecord::from_block(1, &block));
         let record = ctx
             .chain
-            .record_for_hash(Hash256::from(a1_hash))
+            .block_by_hash(Hash256::from(a1_hash))
             .expect("fixture record resolves through the tree");
         ctx.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
 

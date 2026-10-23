@@ -414,8 +414,10 @@ fn block_status(ctx: &Context, text_hash: &str) -> Response {
         height: record.height,
         next_best: in_best_chain
             .then(|| {
-                ctx.chain
-                    .active_hash_in_view(&view, record.height.saturating_add(1))
+                record
+                    .height
+                    .checked_add(1)
+                    .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
             })
             .flatten()
             .map(|hash| hash.to_string_be()),

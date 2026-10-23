@@ -201,7 +201,7 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    let Some(record) = ctx.chain.record_for_hash(hash) else {
+    let Some(record) = ctx.chain.block_by_hash(hash) else {
         return not_found_with(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_block_render() else {
@@ -247,7 +247,7 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    let Some(record) = ctx.chain.record_for_hash(hash) else {
+    let Some(record) = ctx.chain.block_by_hash(hash) else {
         return not_found_with(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_block_render() else {
@@ -987,7 +987,7 @@ fn header_chain_context(
 ) -> BlockChainContext {
     let real = ctx
         .chain
-        .record_for_hash(record.hash)
+        .block_by_hash(record.hash)
         .unwrap_or_else(|| BlockRecord {
             hash: BlockHash::from(record.hash),
             height: record.height,

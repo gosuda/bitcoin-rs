@@ -321,7 +321,7 @@ impl BlockRecord {
     /// The serialized block header, when the record carries one.
     ///
     /// A record read straight out of the log never does. One resolved through
-    /// `Context::record_for_hash` does, because that fills it from the block
+    /// `Context::block_by_hash` does, because that fills it from the block
     /// tree.
     #[must_use]
     pub fn header_bytes(&self) -> Option<&[u8; bitcoin_rs_primitives::Header::LEN]> {
