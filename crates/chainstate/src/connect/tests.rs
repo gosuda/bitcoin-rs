@@ -91,6 +91,7 @@ fn op_true_spend(previous_output: OutPoint, value: u64) -> Tx {
 /// identical either way, for an external spend and a same-block spend.
 #[test]
 fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
+    use crate::UndoStore as _;
     let external = op_true_spend(OutPoint::new(coinbase(1).txid(), 0), 1_000);
     let same_block = op_true_spend(OutPoint::new(external.txid(), 0), 900);
     let final_outpoint = OutPoint::new(same_block.txid(), 0);
@@ -98,6 +99,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
     let spent_outpoint = OutPoint::new(coinbase(1).txid(), 0);
 
     let mut outcomes = Vec::new();
+    let mut undo_records = Vec::new();
     for capture_rawtx in [false, true] {
         let mut handles = handles(
             Network::Regtest,
@@ -135,6 +137,15 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
             (raw, flag) => panic!("raw_txs presence must follow capture_rawtx={flag}: {raw:?}"),
         }
 
+        // The persisted undo record is part of the durable state and must
+        // not depend on the capture flag either.
+        let undo = handles
+            .undo_store
+            .load_undo(501, outcome.hash)?
+            .ok_or("a committed block must persist its undo record")?;
+        assert!(!undo.is_empty(), "undo record must carry the spent coins");
+        undo_records.push(undo);
+
         // The undo path must restore the pre-block membership identically.
         handles.disconnect_block(&block)?;
         let utxo = handles.utxo();
@@ -150,6 +161,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
     assert_eq!(without.tip.hash, with.tip.hash);
     assert_eq!(without.tip.chain_tx_count, with.tip.chain_tx_count);
     assert_eq!(without.commit_id, with.commit_id);
+    assert_eq!(undo_records[0], undo_records[1], "undo bytes must be identical");
     Ok(())
 }
 
