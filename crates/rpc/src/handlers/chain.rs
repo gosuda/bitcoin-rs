@@ -1543,13 +1543,15 @@ fn parse_scan_scripts(
             remaining_script_bytes,
             &cancelled,
         )?;
-        let expanded_count_u64 = u64::try_from(expanded.len())
-            .map_err(|_| RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into()))?;
+        let expanded_count_u64 = u64::try_from(expanded.len()).map_err(|_| {
+            RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into())
+        })?;
         remaining_scripts = remaining_scripts.saturating_sub(expanded_count_u64);
         let mut object_script_bytes = 0_u64;
         for script in expanded {
-            let key_len_u64 = u64::try_from(script.script_pubkey.len())
-                .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
+            let key_len_u64 = u64::try_from(script.script_pubkey.len()).map_err(|_| {
+                RpcError::InvalidParameter("Scan script byte limit exceeded".into())
+            })?;
             object_script_bytes = object_script_bytes.saturating_add(key_len_u64);
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 scripts.entry(script.script_pubkey)
@@ -1568,7 +1570,10 @@ fn parse_scan_scripts(
     Ok(scripts)
 }
 
-#[expect(clippy::type_complexity, reason = "descriptor text and parsed derivation range tuple")]
+#[expect(
+    clippy::type_complexity,
+    reason = "descriptor text and parsed derivation range tuple"
+)]
 fn scanobject_descriptor(scanobject: &Value) -> Result<(&str, Option<(u32, u32)>), RpcError> {
     if let Some(descriptor) = scanobject.as_str() {
         return Ok((descriptor, None));
@@ -6197,8 +6202,9 @@ mod scantxoutset_tests {
         let fixed_1 = format!("wpkh({xpub}/0/1)");
         let fixed_2 = format!("wpkh({xpub}/0/2)");
 
-        let scripts = scan_descriptor_range(&ranged_desc, Network::Mainnet, Some((0, 2)), || Ok(false))
-            .unwrap_or_else(|err| panic!("derive ranged scripts: {err}"));
+        let scripts =
+            scan_descriptor_range(&ranged_desc, Network::Mainnet, Some((0, 2)), || Ok(false))
+                .unwrap_or_else(|err| panic!("derive ranged scripts: {err}"));
         assert_eq!(scripts.len(), 3);
 
         // Also test scan_descriptor on a fixed form
@@ -6224,11 +6230,8 @@ mod scantxoutset_tests {
         )
         .unwrap_or_else(|err| panic!("ranged scan failed: {err}"));
 
-        let fixed_result = scantxoutset(
-            &ctx,
-            &json!(["start", [fixed_0, fixed_1, fixed_2]]),
-        )
-        .unwrap_or_else(|err| panic!("fixed scan failed: {err}"));
+        let fixed_result = scantxoutset(&ctx, &json!(["start", [fixed_0, fixed_1, fixed_2]]))
+            .unwrap_or_else(|err| panic!("fixed scan failed: {err}"));
 
         assert_eq!(ranged_result["txouts"], fixed_result["txouts"]);
         assert_eq!(ranged_result["total_amount"], fixed_result["total_amount"]);
@@ -6256,12 +6259,36 @@ mod scantxoutset_tests {
         // index 1: /0/1, /1/1
         // index 2: /0/2, /1/2
         let descs: Vec<&str> = scripts.iter().map(|s| s.desc.as_str()).collect();
-        assert!(descs[0].contains("/0/0]"), "expected /0/0, got {}", descs[0]);
-        assert!(descs[1].contains("/1/0]"), "expected /1/0, got {}", descs[1]);
-        assert!(descs[2].contains("/0/1]"), "expected /0/1, got {}", descs[2]);
-        assert!(descs[3].contains("/1/1]"), "expected /1/1, got {}", descs[3]);
-        assert!(descs[4].contains("/0/2]"), "expected /0/2, got {}", descs[4]);
-        assert!(descs[5].contains("/1/2]"), "expected /1/2, got {}", descs[5]);
+        assert!(
+            descs[0].contains("/0/0]"),
+            "expected /0/0, got {}",
+            descs[0]
+        );
+        assert!(
+            descs[1].contains("/1/0]"),
+            "expected /1/0, got {}",
+            descs[1]
+        );
+        assert!(
+            descs[2].contains("/0/1]"),
+            "expected /0/1, got {}",
+            descs[2]
+        );
+        assert!(
+            descs[3].contains("/1/1]"),
+            "expected /1/1, got {}",
+            descs[3]
+        );
+        assert!(
+            descs[4].contains("/0/2]"),
+            "expected /0/2, got {}",
+            descs[4]
+        );
+        assert!(
+            descs[5].contains("/1/2]"),
+            "expected /1/2, got {}",
+            descs[5]
+        );
     }
 
     #[test]
@@ -6284,17 +6311,23 @@ mod scantxoutset_tests {
         .err()
         .unwrap_or_else(|| panic!("range [0, 1024] must fail"));
         assert_eq!(err_1024.code(), -8);
-        assert!(err_1024.to_string().contains("At most 1024 scan descriptors are supported"));
+        assert!(
+            err_1024
+                .to_string()
+                .contains("At most 1024 scan descriptors are supported")
+        );
 
         // Omitted range on multipath descriptor defaults to [0, 1000] (1001 indices * 2 paths = 2002 scripts): fails
-        let err_multipath = scantxoutset(
-            &ctx,
-            &json!(["start", [format!("wpkh({xpub}/<0;1>/*)")]]),
-        )
-        .err()
-        .unwrap_or_else(|| panic!("omitted multipath default must fail on 2002 scripts"));
+        let err_multipath =
+            scantxoutset(&ctx, &json!(["start", [format!("wpkh({xpub}/<0;1>/*)")]]))
+                .err()
+                .unwrap_or_else(|| panic!("omitted multipath default must fail on 2002 scripts"));
         assert_eq!(err_multipath.code(), -8);
-        assert!(err_multipath.to_string().contains("At most 1024 scan descriptors are supported"));
+        assert!(
+            err_multipath
+                .to_string()
+                .contains("At most 1024 scan descriptors are supported")
+        );
     }
 
     #[test]

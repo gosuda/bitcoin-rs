@@ -425,7 +425,10 @@ impl NodeServices {
                 // RPC listener thread panic.
                 Err(_) => {
                     tracing::error!("public rpc listener panicked");
-                    set_first_error(first_error, anyhow::anyhow!("public rpc listener thread panicked"));
+                    set_first_error(
+                        first_error,
+                        anyhow::anyhow!("public rpc listener thread panicked"),
+                    );
                 }
             }
         }

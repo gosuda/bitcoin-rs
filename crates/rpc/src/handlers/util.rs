@@ -564,7 +564,13 @@ pub(crate) fn scan_script_at(
 
 /// Evaluates the explicitly supported, non-ranged scan descriptor forms.
 /// Existing checksum/network/derivation rules stay in this descriptor owner.
-#[cfg_attr(not(test), expect(dead_code, reason = "descriptor scanner interface retained for callers and tests"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "descriptor scanner interface retained for callers and tests"
+    )
+)]
 pub(crate) fn scan_descriptor(text: &str, network: Network) -> Result<ScanScript, RpcError> {
     let mut scripts = scan_descriptor_range(text, network, None, || Ok(false))?;
     scripts
@@ -573,25 +579,27 @@ pub(crate) fn scan_descriptor(text: &str, network: Network) -> Result<ScanScript
 }
 
 /// Expands a scan descriptor over an optional derivation range, bounded by script and byte budgets.
-#[cfg_attr(not(test), expect(dead_code, reason = "descriptor scanner interface retained for callers and tests"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "descriptor scanner interface retained for callers and tests"
+    )
+)]
 pub(crate) fn scan_descriptor_range(
     text: &str,
     network: Network,
     range: Option<(u32, u32)>,
     cancelled: impl Fn() -> Result<bool, RpcError>,
 ) -> Result<Vec<ScanScript>, RpcError> {
-    scan_descriptor_range_budgeted(
-        text,
-        network,
-        range,
-        1024_u64,
-        1_048_576_u64,
-        cancelled,
-    )
+    scan_descriptor_range_budgeted(text, network, range, 1024_u64, 1_048_576_u64, cancelled)
 }
 
 /// Expands a scan descriptor over an optional derivation range against remaining caller-supplied budgets.
-#[expect(clippy::too_many_lines, reason = "descriptor range expansion and budget validation")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "descriptor range expansion and budget validation"
+)]
 pub(crate) fn scan_descriptor_range_budgeted(
     text: &str,
     network: Network,
@@ -660,7 +668,10 @@ pub(crate) fn scan_descriptor_range_budgeted(
         (0, 0)
     };
     let paths = if descriptor.is_multipath() {
-        #[expect(clippy::redundant_clone, reason = "explicit clone before into_single_descriptors")]
+        #[expect(
+            clippy::redundant_clone,
+            reason = "explicit clone before into_single_descriptors"
+        )]
         descriptor
             .clone()
             .into_single_descriptors()
@@ -668,10 +679,14 @@ pub(crate) fn scan_descriptor_range_budgeted(
     } else {
         vec![descriptor]
     };
-    let paths_len = u64::try_from(paths.len())
-        .map_err(|_| RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into()))?;
-    let count = paths_len
-        .saturating_mul(u64::from(end).saturating_sub(u64::from(begin)).saturating_add(1));
+    let paths_len = u64::try_from(paths.len()).map_err(|_| {
+        RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into())
+    })?;
+    let count = paths_len.saturating_mul(
+        u64::from(end)
+            .saturating_sub(u64::from(begin))
+            .saturating_add(1),
+    );
     if count > remaining_scripts {
         return Err(RpcError::InvalidParameter(
             "At most 1024 scan descriptors are supported".into(),
@@ -689,8 +704,9 @@ pub(crate) fn scan_descriptor_range_budgeted(
             "Scan script byte limit exceeded".into(),
         ));
     }
-    let count_usize = usize::try_from(count)
-        .map_err(|_| RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into()))?;
+    let count_usize = usize::try_from(count).map_err(|_| {
+        RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into())
+    })?;
     let mut scripts = Vec::with_capacity(count_usize);
     'outer: for index in begin..=end {
         for path in &paths {
@@ -1536,7 +1552,10 @@ mod tests {
                 Some("getblock")
             );
             assert!(
-                command.get("duration").and_then(JsonValueTrait::as_u64).is_some(),
+                command
+                    .get("duration")
+                    .and_then(JsonValueTrait::as_u64)
+                    .is_some(),
                 "duration is elapsed microseconds: {command:?}"
             );
         }

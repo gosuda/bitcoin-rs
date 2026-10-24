@@ -957,6 +957,8 @@ impl PriorityFixture {
     pub(crate) fn poll(&self, id: &str) -> Poll {
         let handler = Arc::clone(&self.wired.handler);
         let id = id.to_owned();
-        PendingPoll::spawn(self.state.chainstate().shutdown_handle(), move || gbt_view(&handler, Some(&id)))
+        PendingPoll::spawn(self.state.chainstate().shutdown_handle(), move || {
+            gbt_view(&handler, Some(&id))
+        })
     }
 }

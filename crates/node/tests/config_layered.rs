@@ -561,7 +561,9 @@ fn rpc_public_bind_defaults_none_and_resolves_across_layers() -> Result<()> {
     ))?;
     let err = resolve(&[&conflicting]);
     assert!(
-        err.is_err_and(|e| e.to_string().contains("public RPC bind must not equal rpc.bind")),
+        err.is_err_and(|e| e
+            .to_string()
+            .contains("public RPC bind must not equal rpc.bind")),
         "conflicting binds must fail validation"
     );
     Ok(())

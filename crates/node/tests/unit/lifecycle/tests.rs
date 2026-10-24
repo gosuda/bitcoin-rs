@@ -995,8 +995,13 @@ fn dual_rpc_listeners_bind_and_join_on_shutdown() -> anyhow::Result<()> {
         state.config().mining.payout_script.clone(),
     ));
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
-    let (context, mgmt_server, rpc_auth) = bind_rpc(&state, &mining_control, state.block_body_source()?)?;
-    let public_bind = state.config().rpc.public_bind.expect("configured public bind");
+    let (context, mgmt_server, rpc_auth) =
+        bind_rpc(&state, &mining_control, state.block_body_source()?)?;
+    let public_bind = state
+        .config()
+        .rpc
+        .public_bind
+        .expect("configured public bind");
     let public_server = bind_public_rpc(public_bind, &context, rpc_auth)?;
 
     assert_eq!(mgmt_server.role, bitcoin_rs_rpc::ListenerRole::Management);
@@ -1032,7 +1037,10 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Resul
     let addr = server.local_addr()?;
 
     gate.arm();
-    let mut witness = ServedWitness::new(state.chainstate().shutdown_handle(), Some(Arc::clone(&gate)));
+    let mut witness = ServedWitness::new(
+        state.chainstate().shutdown_handle(),
+        Some(Arc::clone(&gate)),
+    );
     witness.serve(server, state.shutdown_reader())?;
     witness.send(addr)?;
 

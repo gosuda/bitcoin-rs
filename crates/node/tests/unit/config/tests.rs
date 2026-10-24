@@ -640,7 +640,9 @@ fn rpc_public_bind_rejects_equality_with_rpc_bind() {
         panic!("public RPC bind equal to rpc.bind must fail validation");
     };
     assert!(
-        error.to_string().contains("public RPC bind must not equal rpc.bind"),
+        error
+            .to_string()
+            .contains("public RPC bind must not equal rpc.bind"),
         "{error}"
     );
 

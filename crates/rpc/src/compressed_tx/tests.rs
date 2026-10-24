@@ -232,10 +232,7 @@ fn codec_error_wire_matrix() {
         (CodecError::LimitExceeded(Limit::State), -1),
         (CodecError::Cancelled, -1),
         (
-            CodecError::PrevoutMissing(OutPoint::new(
-                Txid(Hash256::from_le_bytes(&[1_u8; 32])),
-                0,
-            )),
+            CodecError::PrevoutMissing(OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0)),
             -5,
         ),
         (CodecError::BodyMissing(7), -1),
@@ -695,7 +692,11 @@ fn minimum_height_sentinel_and_locktime_only_candidate_roundtrip() {
     )
     .unwrap();
     assert_eq!(compressed[0] & 0x80, 0x80, "locktime candidate must encode");
-    assert_eq!(compressed[0] & 0x40, 0x40, "locktime presence bit must be set");
+    assert_eq!(
+        compressed[0] & 0x40,
+        0x40,
+        "locktime presence bit must be set"
+    );
     let restored = decompress_transaction(&compressed, &mut resolver).unwrap();
     assert_eq!(restored, locked);
 }

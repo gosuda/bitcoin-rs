@@ -101,10 +101,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
     let mut outcomes = Vec::new();
     let mut undo_records = Vec::new();
     for capture_rawtx in [false, true] {
-        let mut handles = handles(
-            Network::Regtest,
-            Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
-        );
+        let mut handles = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         seed_genesis(&handles)?;
         let tip_hash = apply_regtest_chain_to_height(&handles, 500)?;
         handles.set_capture_flags(capture_rawtx, false);
@@ -116,7 +113,10 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         let outcome = handles.apply_block(&block, None)?;
 
         let utxo = handles.utxo();
-        assert!(utxo.get_entry(&spent_outpoint).is_none(), "external coin spent");
+        assert!(
+            utxo.get_entry(&spent_outpoint).is_none(),
+            "external coin spent"
+        );
         assert!(
             utxo.get_entry(&intermediate_outpoint).is_none(),
             "same-block coin spent"
@@ -149,8 +149,14 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         // The undo path must restore the pre-block membership identically.
         handles.disconnect_block(&block)?;
         let utxo = handles.utxo();
-        assert!(utxo.get_entry(&spent_outpoint).is_some(), "undo restores coin");
-        assert!(utxo.get_entry(&final_outpoint).is_none(), "undo removes output");
+        assert!(
+            utxo.get_entry(&spent_outpoint).is_some(),
+            "undo restores coin"
+        );
+        assert!(
+            utxo.get_entry(&final_outpoint).is_none(),
+            "undo removes output"
+        );
         outcomes.push(outcome);
     }
 
@@ -161,7 +167,10 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
     assert_eq!(without.tip.hash, with.tip.hash);
     assert_eq!(without.tip.chain_tx_count, with.tip.chain_tx_count);
     assert_eq!(without.commit_id, with.commit_id);
-    assert_eq!(undo_records[0], undo_records[1], "undo bytes must be identical");
+    assert_eq!(
+        undo_records[0], undo_records[1],
+        "undo bytes must be identical"
+    );
     Ok(())
 }
 

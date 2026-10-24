@@ -167,10 +167,7 @@ fn connection_admission_reserves_slots_for_other_peers() {
         small_pool.admit(source, 4),
         ConnectionAdmission::PerSourceLimit
     );
-    assert_eq!(
-        small_pool.admit(other, 4),
-        ConnectionAdmission::Admitted
-    );
+    assert_eq!(small_pool.admit(other, 4), ConnectionAdmission::Admitted);
 
     // Below four workers no share is kept: one client can hold a blocking
     // call and still reach the ordinary slot the quota leaves it.
@@ -1290,8 +1287,7 @@ fn unauthorized_json_rpc_is_answered_from_the_head_with_core_s_tuple() -> io::Re
 #[test]
 fn unauthorized_request_never_serves_pipelined_bytes() -> io::Result<()> {
     let mut request = json_rpc_head(None, 2);
-    request
-        .extend_from_slice(b"{}GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    request.extend_from_slice(b"{}GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\n\r\n");
     let seen = exchange(&request)?;
     assert_eq!(seen.response, CORE_UNAUTHORIZED);
     assert!(seen.eof);
@@ -1311,8 +1307,7 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
     let mut request = json_rpc_head(None, 1);
     request.extend_from_slice(b"X");
     client.write_all(&request)?;
-    let mut reader =
-        BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(30)));
+    let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(30)));
     let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
         Ok(Some(head)) => head,
         Ok(None) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head")),
@@ -1329,8 +1324,7 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
         "declared byte must be prebuffered before the 401"
     );
     let started = Instant::now();
-    let handled =
-        authenticate_json_rpc_head(&Auth::basic("alice", "secret"), &mut reader, &head)?;
+    let handled = authenticate_json_rpc_head(&Auth::basic("alice", "secret"), &mut reader, &head)?;
     let elapsed = started.elapsed();
     assert!(handled, "unauthorized head must be handled");
     assert!(
@@ -1423,8 +1417,7 @@ fn head_framing_errors_keep_their_400_without_credentials() -> io::Result<()> {
     for (name, request) in [
         (
             "chunked",
-            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"
-                .to_vec(),
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec(),
         ),
         (
             "missing length",
@@ -1512,8 +1505,7 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
         ]);
         #[cfg(target_os = "linux")]
         {
-            let error =
-                io::Error::from_raw_os_error(rustix::io::Errno::OPNOTSUPP.raw_os_error());
+            let error = io::Error::from_raw_os_error(rustix::io::Errno::OPNOTSUPP.raw_os_error());
             assert_eq!(error.kind(), io::ErrorKind::Unsupported);
             errors.push(error);
         }
@@ -1627,56 +1619,80 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
         public_addr,
         b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public POST / without auth must be 404: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "public POST / without auth must be 404: {resp}"
+    );
 
     // Public POST / with valid credentials -> 404 (never dispatch)
     let resp = send_req(
         public_addr,
         b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public POST / with auth must be 404: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "public POST / with auth must be 404: {resp}"
+    );
 
     // Public REST -> 404
     let resp = send_req(
         public_addr,
         b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public REST must be 404: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "public REST must be 404: {resp}"
+    );
 
     // Public Esplora GET -> 200
     let resp = send_req(
         public_addr,
         b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 200 OK"), "public Esplora GET must be 200: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK"),
+        "public Esplora GET must be 200: {resp}"
+    );
 
     // Public Esplora preflight OPTIONS -> 204
     let resp = send_req(
         public_addr,
         b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 204 No Content"), "public preflight must be 204: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 204 No Content"),
+        "public preflight must be 204: {resp}"
+    );
 
     // Management Esplora GET -> 404
     let resp = send_req(
         mgmt_addr,
         b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "management Esplora GET must be 404: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "management Esplora GET must be 404: {resp}"
+    );
 
     // Management Esplora POST -> 404
     let resp = send_req(
         mgmt_addr,
         b"POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "management Esplora POST must be 404: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "management Esplora POST must be 404: {resp}"
+    );
 
     // Management JSON-RPC POST / without auth -> 401
     let resp = send_req(
         mgmt_addr,
         b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 401 Unauthorized"), "management POST / without auth must be 401: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 401 Unauthorized"),
+        "management POST / without auth must be 401: {resp}"
+    );
 
     // Management JSON-RPC POST / with auth -> 200
     let rpc_body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
@@ -1686,14 +1702,20 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
         rpc_body
     );
     let resp = send_req(mgmt_addr, req.as_bytes())?;
-    assert!(resp.starts_with("HTTP/1.1 200 OK"), "management JSON-RPC with auth must be 200: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK"),
+        "management JSON-RPC with auth must be 200: {resp}"
+    );
 
     // Management REST -> 200
     let resp = send_req(
         mgmt_addr,
         b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
-    assert!(resp.starts_with("HTTP/1.1 200 OK"), "management REST must be 200: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK"),
+        "management REST must be 200: {resp}"
+    );
 
     public_shutdown.store(true, Ordering::Release);
     mgmt_shutdown.store(true, Ordering::Release);
@@ -1718,7 +1740,8 @@ fn test_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
 }
 
 #[test]
-fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query() -> io::Result<()> {
+fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query()
+-> io::Result<()> {
     let metrics_handle = test_prometheus_handle();
     let ctx = Arc::new(Context::new());
     let auth = Arc::new(Auth::basic("alice", "secret"));
@@ -1761,10 +1784,7 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
                 rustix::net::SocketFlags::empty(),
                 None,
             )?;
-            rustix::net::bind(
-                &fd,
-                &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, index), 0),
-            )?;
+            rustix::net::bind(&fd, &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, index), 0))?;
             let server_v4 = match server_addr {
                 SocketAddr::V4(v4) => v4,
                 _ => unreachable!(),
@@ -1788,7 +1808,10 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
         let mut buf = [0u8; 512];
         let n = client.read(&mut buf)?;
         let resp = String::from_utf8_lossy(&buf[..n]);
-        assert!(resp.starts_with("HTTP/1.1 200 OK"), "held socket {i} got: {resp}");
+        assert!(
+            resp.starts_with("HTTP/1.1 200 OK"),
+            "held socket {i} got: {resp}"
+        );
         held_sockets.push(client);
     }
 
@@ -1797,7 +1820,10 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     fifth_client.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut fifth_resp = String::new();
     fifth_client.read_to_string(&mut fifth_resp)?;
-    assert!(fifth_resp.starts_with("HTTP/1.1 503 Service Unavailable"), "5th request must be 503: {fifth_resp}");
+    assert!(
+        fifth_resp.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "5th request must be 503: {fifth_resp}"
+    );
     assert!(fifth_resp.contains("busy"), "503 body must be busy");
 
     // Pool-full metric counter is incremented with closed labels surface=esplora_public, reason=pool_full
@@ -1827,7 +1853,10 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     mgmt_client.write_all(req.as_bytes())?;
     let mut mgmt_resp = String::new();
     mgmt_client.read_to_string(&mut mgmt_resp)?;
-    assert!(mgmt_resp.starts_with("HTTP/1.1 200 OK"), "management must be 200: {mgmt_resp}");
+    assert!(
+        mgmt_resp.starts_with("HTTP/1.1 200 OK"),
+        "management must be 200: {mgmt_resp}"
+    );
 
     // Release ONE held public socket
     drop(held_sockets.pop());
@@ -1836,17 +1865,25 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     // Public admission is restored!
     let mut restored_client = connect_distinct(public_addr, 5)?;
     restored_client.set_read_timeout(Some(Duration::from_secs(5)))?;
-    restored_client.write_all(b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    restored_client.write_all(
+        b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
     let mut restored_resp = String::new();
     restored_client.read_to_string(&mut restored_resp)?;
-    assert!(restored_resp.starts_with("HTTP/1.1 200 OK"), "restored public request must be 200: {restored_resp}");
+    assert!(
+        restored_resp.starts_with("HTTP/1.1 200 OK"),
+        "restored public request must be 200: {restored_resp}"
+    );
 
     // Close remaining held sockets
     drop(held_sockets);
 
     // Public /api/tx broadcast is visible via management getrawtransaction
     let (tx, _) = crate::esplora::tests::transaction_with_funded_input(&ctx, 10_000);
-    let raw_hex = bitcoin_rs_primitives::consensus_bytes(&tx).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let raw_hex = bitcoin_rs_primitives::consensus_bytes(&tx)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     let txid = tx.txid();
 
     let mut broadcast_client = TcpStream::connect(public_addr)?;
@@ -1859,8 +1896,14 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     broadcast_client.write_all(post_req.as_bytes())?;
     let mut broadcast_resp = String::new();
     broadcast_client.read_to_string(&mut broadcast_resp)?;
-    assert!(broadcast_resp.starts_with("HTTP/1.1 200 OK"), "broadcast must be 200: {broadcast_resp}");
-    assert!(broadcast_resp.contains(&txid.to_string()), "broadcast response must contain txid");
+    assert!(
+        broadcast_resp.starts_with("HTTP/1.1 200 OK"),
+        "broadcast must be 200: {broadcast_resp}"
+    );
+    assert!(
+        broadcast_resp.contains(&txid.to_string()),
+        "broadcast response must contain txid"
+    );
 
     let mut query_client = TcpStream::connect(mgmt_addr)?;
     query_client.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1876,8 +1919,14 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     query_client.write_all(query_req.as_bytes())?;
     let mut query_resp = String::new();
     query_client.read_to_string(&mut query_resp)?;
-    assert!(query_resp.starts_with("HTTP/1.1 200 OK"), "management getrawtransaction must be 200: {query_resp}");
-    assert!(query_resp.contains(&raw_hex), "management getrawtransaction must return raw tx hex");
+    assert!(
+        query_resp.starts_with("HTTP/1.1 200 OK"),
+        "management getrawtransaction must be 200: {query_resp}"
+    );
+    assert!(
+        query_resp.contains(&raw_hex),
+        "management getrawtransaction must return raw tx hex"
+    );
 
     // Both listeners join on shutdown
     shutdown.store(true, Ordering::Release);

@@ -218,10 +218,7 @@ mod tests {
 
     #[test]
     fn rpc_public_bind_resolves_from_cli_and_conf() {
-        let config = resolved(
-            &["bitcoin-rs", "--rpc-public-bind=127.0.0.1:8336"],
-            &[],
-        );
+        let config = resolved(&["bitcoin-rs", "--rpc-public-bind=127.0.0.1:8336"], &[]);
         assert_eq!(
             config.rpc.public_bind,
             Some(SocketAddr::from(([127, 0, 0, 1], 8336)))

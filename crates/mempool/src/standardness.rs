@@ -309,19 +309,12 @@ pub(crate) fn evaluate_one(
     // its modified fee negative, which bypassing must not do.
     let modified_fee_res = pool.modified_fee_for(txid, context.fee);
     let modified_fee = modified_fee_res.as_ref().ok().copied();
-    let fee_for_max = u64::try_from(
-        modified_fee
-            .unwrap_or(i128::from(context.fee))
-            .max(0),
-    )
-    .unwrap_or(u64::MAX);
+    let fee_for_max =
+        u64::try_from(modified_fee.unwrap_or(i128::from(context.fee)).max(0)).unwrap_or(u64::MAX);
 
     let fee_rejection = match mempool_min_fee_sat_per_kvb {
         None => None,
-        Some(floor) => match (
-            modified_fee_res,
-            crate::rbf::required_fee(floor, vsize),
-        ) {
+        Some(floor) => match (modified_fee_res, crate::rbf::required_fee(floor, vsize)) {
             (Ok(fee), Ok(required)) => {
                 (fee < required).then_some(AcceptanceRejectReason::MinRelayFeeNotMet)
             }
@@ -358,7 +351,11 @@ pub(crate) fn evaluate_one(
     let effective_fee_rate = modified_fee.and_then(|fee| {
         let clamped = fee.max(0);
         (vsize != 0)
-            .then(|| clamped.checked_mul(1_000).map(|prod| prod / i128::from(vsize)))
+            .then(|| {
+                clamped
+                    .checked_mul(1_000)
+                    .map(|prod| prod / i128::from(vsize))
+            })
             .flatten()
             .and_then(|rate| u64::try_from(rate).ok())
     });
@@ -813,7 +810,10 @@ mod tests {
 
         // Base fee: 1_000 sats, negative delta of -3_000 sats -> modified fee: -2_000 sats.
         pool.prioritise(txid, -3_000).expect("prioritise delta");
-        assert_eq!(pool.modified_fee_for(txid, 1_000).expect("modified fee"), -2_000);
+        assert_eq!(
+            pool.modified_fee_for(txid, 1_000).expect("modified fee"),
+            -2_000
+        );
 
         let context = PackageTxContext {
             fee: 1_000,
@@ -834,7 +834,10 @@ mod tests {
 
         // Clamping negative modified fee to max(0) ensures:
         // 1. Never maps a negative delta to u64::MAX, so max feerate is not exceeded.
-        assert_ne!(fact.reject_reason, Some(AcceptanceRejectReason::MaxFeeExceeded));
+        assert_ne!(
+            fact.reject_reason,
+            Some(AcceptanceRejectReason::MaxFeeExceeded)
+        );
         // 2. Modified fee is tracked as signed -2000.
         assert_eq!(fact.modified_fee, Some(-2_000));
         // 3. Clamped effective fee rate produces Some(0), not None.
@@ -843,9 +846,9 @@ mod tests {
 
     #[test]
     fn three_vsize_meanings_on_sigop_heavy_tx() {
-        use alloc::sync::Arc;
         use crate::accounting::prepared_context;
         use crate::entry::MempoolEntry;
+        use alloc::sync::Arc;
 
         let mut tx = standard_tx(2);
         // Add 50 OP_CHECKSIG opcodes in an output script (each counts as 4 sigop cost in consensus).
@@ -894,7 +897,10 @@ mod tests {
         assert_eq!(entry.vsize, 1_020);
         // 2. entry.bip141_vsize = vsize_bip141 = tx.vsize() unadjusted
         assert_eq!(entry.bip141_vsize, vsize_bip141);
-        assert_eq!(entry.bip141_vsize, u32::try_from(tx.vsize()).expect("fits u32"));
+        assert_eq!(
+            entry.bip141_vsize,
+            u32::try_from(tx.vsize()).expect("fits u32")
+        );
         // 3. Consensus weight unadjusted
         assert_eq!(entry.weight, unadjusted_weight);
     }
