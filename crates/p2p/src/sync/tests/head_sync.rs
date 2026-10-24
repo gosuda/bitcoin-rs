@@ -1381,6 +1381,56 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
 }
 
 #[test]
+fn compact_reconstruction_admission_stays_near_the_applied_tip() -> TestResult {
+    // As in Core, an unrequested compact block earns the mempool scan only
+    // within two blocks of the applied tip; a header the tree already holds
+    // further ahead is only announced, unless this connection owns its fetch.
+    let (tree, blocks) = mined_chain(6, 0)?;
+    let applied = {
+        let id = tree
+            .lookup(Hash256::from(blocks[0].block_hash()))
+            .ok_or("block 1 is in the tree")?;
+        let node = tree.node(id)?;
+        TipSnapshot {
+            tip_id: id,
+            chain_tx_count: node.chain_tx_count,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    let harness = SyncHarness::new(tree);
+    harness.applied_tip.store(Some(Arc::new(applied)));
+    let peer = test_addr(9790, 0)?;
+    let _rx = connect_peer(&harness.peers, synthetic_peer(peer, 0));
+    let source = current_source(&harness.peers, peer);
+    let sync = &harness.sync;
+
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[1].header),
+        "one block above the applied tip"
+    );
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[2].header),
+        "two blocks above the applied tip"
+    );
+    assert!(
+        !sync.compact_reconstruction_admissible(source, &blocks[3].header),
+        "three blocks above the applied tip"
+    );
+    assert!(
+        !sync.compact_reconstruction_admissible(source, &blocks[5].header),
+        "five blocks above the applied tip"
+    );
+    sync.record_owned_body_fetch(source, Hash256::from(blocks[3].block_hash()));
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[3].header),
+        "a fetch this connection owns"
+    );
+    Ok(())
+}
+
+#[test]
 fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
     // A compact-owned tip announced ahead of its ancestry cannot be marked
     // at delivery: the tree has no height for it yet. Dropping the mark
