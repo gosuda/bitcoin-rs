@@ -210,6 +210,8 @@ pub struct Peer<S> {
     pub version_received_time: Option<u64>,
     /// Whether a remote verack has been received.
     pub received_verack: bool,
+    /// Local BIP434 send window closes after a successful verack write.
+    sent_verack: bool,
     /// Local view of negotiated feature flags.
     pub capabilities: PeerCapabilities,
     /// BIP152 compact-block negotiation state for the peer.
@@ -266,6 +268,7 @@ impl<S> Peer<S> {
             remote_version: None,
             version_received_time: None,
             received_verack: false,
+            sent_verack: false,
             capabilities: PeerCapabilities::default(),
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
@@ -321,12 +324,27 @@ impl<S: Read + Write> Peer<S> {
     /// payload before the write attempt, the way Core's `CSerializedNetMsg` is
     /// shared by its send path and the probe.
     pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
+        if matches!(message, Message::Feature { .. })
+            && (self.sent_verack
+                || self
+                    .remote_version
+                    .as_ref()
+                    .is_none_or(|version| version.version < crate::wire::FEATURE_VERSION))
+        {
+            return Err(PeerError::Protocol(
+                "feature outside negotiated send window",
+            ));
+        }
         let transport = self.send.as_mut().ok_or(PeerError::Protocol(
             "send transport moved to the writer thread",
         ))?;
         let frame = transport.encode(message)?;
         crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
-        crate::wire::write_frame(&mut self.stream, &frame)
+        let written = crate::wire::write_frame(&mut self.stream, &frame)?;
+        if matches!(message, Message::Verack) {
+            self.sent_verack = true;
+        }
+        Ok(written)
     }
 }
 

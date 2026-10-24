@@ -1104,6 +1104,12 @@ impl PeerLease {
         message: crate::Message,
         credit: OutboundCredit,
     ) -> Result<(), OutboundRefusal> {
+        // BIP434 advertisements belong to Peer::send's version/verack
+        // window, never the asynchronous post-handshake writer queue.
+        if matches!(message, crate::Message::Feature { .. }) {
+            self.cancel();
+            return Err(OutboundRefusal::Closed(message));
+        }
         match self.outbound.try_send(QueuedFrame { message, credit }) {
             Ok(()) => {
                 *self.last_send.lock() = Instant::now();
@@ -1539,6 +1545,28 @@ mod tests {
         );
         assert!(lease.is_cancelled());
         assert_eq!(lease.budget_handle().pending(), (0, 0));
+    }
+
+    #[test]
+    fn bip434_features_cannot_enter_the_post_handshake_queue() {
+        let shared = Arc::new(SharedOutboundBudget::with_limits(10_000, 1_000));
+        for reserved in [false, true] {
+            let (lease, rx) = shared_lease_with_reserve(&shared, 1_000);
+            let message = crate::Message::Feature {
+                id: b"BIP999".to_vec(),
+                data: vec![],
+            };
+            let result = if reserved {
+                lease.send_with(reserve(&lease.budget_handle()), message.clone())
+            } else {
+                lease.send(message.clone())
+            };
+            assert_eq!(result, Err(OutboundRefusal::Closed(message)));
+            assert!(lease.is_cancelled());
+            assert!(rx.try_recv().is_err());
+            assert_eq!(shared.pending(), 0);
+            assert_eq!(lease.budget_handle().pending(), (0, 0));
+        }
     }
 
     #[test]

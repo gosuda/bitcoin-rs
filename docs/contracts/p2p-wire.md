@@ -14,7 +14,7 @@ This page assigns ownership and cites proof under the
 
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
-- **Owner**: `crates/p2p/src/compat.rs` owns the 36-command inventory and
+- **Owner**: `crates/p2p/src/compat.rs` owns the 37-command inventory and
   `PINNED_CORE_VERSION` (Bitcoin Core 31.1). The policy document owns
   handshake fields, reject-or-ignore semantics, and recorded deviations.
 - **Scope**: `crates/p2p` wire, handshake, protocol FSM, and message policy; the

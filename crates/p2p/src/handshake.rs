@@ -102,15 +102,12 @@ pub fn start<S>(
     local_services: ServiceFlags,
 ) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
-    let mut messages = Vec::with_capacity(4);
-    messages.push(Message::Version(version_message(
+    vec![Message::Version(version_message(
         nonce,
         start_height,
         role,
         local_services,
-    )));
-    messages.extend(feature_messages());
-    messages
+    ))]
 }
 
 /// Drive a Bitcoin v1 handshake from the inbound listener side.
@@ -422,8 +419,8 @@ mod tests {
         );
         assert_eq!(
             messages.len(),
-            4,
-            "one version plus the three feature messages"
+            1,
+            "only version is sent before learning the remote version"
         );
         assert!(
             matches!(&messages[0], Message::Version(version)
@@ -431,5 +428,30 @@ mod tests {
             "the first message is the version the role advertises"
         );
         assert_eq!(peer.state, PeerState::VersionExchange);
+    }
+
+    #[test]
+    fn bip434_send_window_is_independent_of_received_verack() -> Result<(), PeerError> {
+        let feature = Message::Feature {
+            id: b"BIP999".to_vec(),
+            data: vec![],
+        };
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        assert!(peer.send(&feature).is_err());
+        let mut version = version_message(1, 0, PeerRole::FullRelay, ServiceFlags::NETWORK);
+        version.version = 70_016;
+        crate::fsm::step(&mut peer, &Message::Version(version.clone()))?;
+        assert!(peer.send(&feature).is_err());
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        version.version = super::PROTOCOL_VERSION;
+        crate::fsm::step(&mut peer, &Message::Version(version))?;
+        // Receiving verack closes reception, not our send window.
+        crate::fsm::step(&mut peer, &Message::Verack)?;
+        peer.send(&feature)?;
+        peer.send(&Message::Verack)?;
+        assert!(peer.send(&feature).is_err());
+        let mut replacement = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        assert!(replacement.send(&feature).is_err());
+        Ok(())
     }
 }

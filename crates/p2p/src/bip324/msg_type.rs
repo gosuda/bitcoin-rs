@@ -8,7 +8,7 @@ use crate::wire::read_command;
 
 /// Commands with a one-byte ID, indexed by that ID. Index 0 introduces the
 /// 13-byte long form; IDs past the table are undefined.
-const SHORT_IDS: [&str; 29] = [
+const SHORT_IDS: [&str; 38] = [
     "",
     "addr",
     "block",
@@ -38,6 +38,15 @@ const SHORT_IDS: [&str; 29] = [
     "getcfcheckpt",
     "cfcheckpt",
     "addrv2",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "", // Unimplemented IDs 29–36.
+    "feature",
 ];
 
 /// First byte of the long form.
@@ -53,7 +62,7 @@ pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {
     let short_id = SHORT_IDS
         .iter()
         .skip(1)
-        .position(|known| *known == name)
+        .position(|known| !known.is_empty() && *known == name)
         .and_then(|index| u8::try_from(index + 1).ok());
     let mut contents = Vec::with_capacity(1 + COMMAND_LEN + payload.len());
     if let Some(id) = short_id {
@@ -83,6 +92,9 @@ pub(crate) fn decode(contents: &Bytes) -> Option<(String, Bytes)> {
         return Some((command, contents.slice(1 + COMMAND_LEN..)));
     }
     let command = SHORT_IDS.get(usize::from(first))?;
+    if command.is_empty() {
+        return None;
+    }
     Some(((*command).to_owned(), contents.slice(1..)))
 }
 
@@ -101,6 +113,13 @@ mod tests {
     #[test]
     fn every_assigned_command_uses_its_one_byte_id() {
         for (id, name) in SHORT_IDS.iter().enumerate().skip(1) {
+            if name.is_empty() {
+                assert_eq!(
+                    decode(&Bytes::from(vec![u8::try_from(id).unwrap_or(u8::MAX)])),
+                    None
+                );
+                continue;
+            }
             let contents = encode(&command(name), b"payload");
             assert_eq!(usize::from(contents[0]), id, "{name}");
             assert_eq!(&contents[1..], b"payload");
@@ -137,6 +156,12 @@ mod tests {
         long.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
         long.extend_from_slice(&7u64.to_le_bytes());
         let short = encode(&command("ping"), &7u64.to_le_bytes());
+        assert_eq!(decode(&Bytes::from(long)), decode(&Bytes::from(short)));
+        let mut long = vec![LONG_FORM];
+        long.extend_from_slice(b"feature\0\0\0\0\0");
+        long.extend_from_slice(b"\x04test\x00");
+        let short = encode(&command("feature"), b"\x04test\x00");
+        assert_eq!(short[0], 37);
         assert_eq!(decode(&Bytes::from(long)), decode(&Bytes::from(short)));
     }
 
