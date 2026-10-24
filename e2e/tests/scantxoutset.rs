@@ -128,6 +128,119 @@ fn fixed_descriptors_scan_identical_core_created_coins() -> Result<()> {
 }
 
 #[test]
+fn ranged_and_multipath_scans_match_core_and_fixed_scripts() -> Result<()> {
+    let mut core = ProcessNode::spawn(Kind::Core)?;
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    submit_genesis(&mut node)?;
+    let key = "[deadbeef/84h/1h/0h]tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+    let forms = ["pkh", "wpkh", "sh(wpkh", "tr"];
+    let mut fixed = Vec::new();
+    let mut ranged = Vec::new();
+    for form in forms {
+        let close = if form == "sh(wpkh" { "))" } else { ")" };
+        for branch in [0, 1] {
+            for index in [0, 2, 3] {
+                let descriptor = format!("{form}({key}/{branch}/{index}{close}");
+                let generated = core.rpc("generateblock", &json!([descriptor, []]))?;
+                let block = core.rpc("getblock", &json!([generated.str_field("hash")?, 0]))?;
+                assert!(node.rpc("submitblock", &json!([block]))?.is_null());
+                if index <= 2 {
+                    fixed.push(descriptor);
+                }
+            }
+        }
+        ranged.push(json!({
+            "desc":format!("{form}({key}/<0;1>/*{close}"), "range":[0,2],
+        }));
+    }
+    compare_scan(
+        &mut core,
+        &mut node,
+        "ranged-all-forms",
+        json!(["start", ranged]),
+    )?;
+    // This also checks that funded indexes outside the requested range do not
+    // leak into the result. Fixed scripts are supplied independently to Core.
+    let expected = core.rpc("scantxoutset", &json!(["start", fixed]))?;
+    let actual = node.rpc("scantxoutset", &json!(["start", ranged]))?;
+    compare_reply("ranged-versus-fixed", &expected, &actual)?;
+    assert_eq!(actual["unspents"].as_array().map(Vec::len), Some(16));
+
+    let multi = format!("wpkh({key}/<0;1>/*)");
+    for (name, objects) in [
+        ("scalar-range", json!([{"desc":multi,"range":2}])),
+        ("nonzero-range", json!([{"desc":multi,"range":[2,3]}])),
+        (
+            "implicit-origin",
+            json!([{"desc":multi.replace("[deadbeef/84h/1h/0h]", ""),"range":2}]),
+        ),
+        (
+            "fixed-multipath",
+            json!([{"desc":format!("wpkh({key}/<0;1>/2)"),"range":999_999}]),
+        ),
+        (
+            "overlapping-ranges",
+            json!([
+                {"desc":multi,"range":[2,3]},
+                {"desc":multi,"range":[0,2]},
+            ]),
+        ),
+    ] {
+        compare_scan(&mut core, &mut node, name, json!(["start", objects]))?;
+    }
+
+    // Both parsers reject repeated path alternatives; native diagnostic text
+    // differs. Overlap between valid scan objects is tested separately below.
+    let duplicate = json!({"jsonrpc":"2.0", "id":"duplicate", "method":"scantxoutset",
+        "params":["start", [{"desc":format!("wpkh({key}/<0;0>/*)"),"range":2}]]});
+    for response in [core.rpc_raw(&duplicate)?, node.rpc_raw(&duplicate)?] {
+        assert_eq!(response["error"]["code"], json!(-5));
+    }
+
+    // Distinct origin metadata for the same derived key must retain the
+    // first scan object's attribution, regardless of object order.
+    let alias = multi.replace("deadbeef", "12345678");
+    for (index, (first, second)) in [(&multi, &alias), (&alias, &multi)].into_iter().enumerate() {
+        compare_scan(
+            &mut core,
+            &mut node,
+            &format!("ranged-attribution-{index}"),
+            json!([
+                "start", [{"desc":first,"range":2},{"desc":second,"range":2}],
+            ]),
+        )?;
+    }
+
+    for index in [1000, 1001] {
+        let generated = core.rpc(
+            "generateblock",
+            &json!([format!("wpkh({key}/0/{index})"), []]),
+        )?;
+        let block = core.rpc("getblock", &json!([generated.str_field("hash")?, 0]))?;
+        assert!(node.rpc("submitblock", &json!([block]))?.is_null());
+    }
+    let single = format!("wpkh({key}/0/*)");
+    let checked = core
+        .rpc("getdescriptorinfo", &json!([single]))?
+        .str_field("descriptor")?
+        .to_owned();
+    for (name, objects) in [
+        ("default-range", json!([single])),
+        ("null-range", json!([{"desc":single,"range":null}])),
+        (
+            "checked-range",
+            json!([{"desc":checked,"range":[1000,1001]}]),
+        ),
+        ("maximum-expansions", json!([{"desc":single,"range":1023}])),
+    ] {
+        compare_scan(&mut core, &mut node, name, json!(["start", objects]))?;
+    }
+    let default = node.rpc("scantxoutset", &json!(["start", [single]]))?;
+    assert_eq!(default["unspents"].as_array().map(Vec::len), Some(4));
+    Ok(())
+}
+
+#[test]
 fn scan_parameter_and_signed_range_errors_match_core() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;

@@ -1100,10 +1100,16 @@ evidence does not establish mainnet memory or throughput qualifications.
 ### `API-35`: Bounded public-descriptor UTXO scans
 
 - `scantxoutset` accepts strings and `{desc, range}` objects with optional
-  verified checksums. Public fixed `addr`, `raw`, `pkh`, `wpkh`, `sh(wpkh)`
-  and key-only `tr` are supported. Private keys, wildcard/multipath expansion,
-  Taproot trees and other descriptors are refused; these are explicit Core
-  deviations. A valid range on a fixed descriptor is checked and ignored.
+  verified checksums. Fixed `addr` and `raw`, and public `pkh`, `wpkh`,
+  `sh(wpkh)` and key-only `tr` are supported, including public wildcard and
+  multipath derivation. Scalar ranges mean `[0,end]`; array ranges include
+  both endpoints. An omitted or null range on a wildcard uses `[0,1000]`
+  on each path, matching Core. A valid range on a descriptor without a
+  wildcard is checked and ignored, including fixed multipath descriptors.
+  Private keys, derivations requiring private keys, Taproot trees and other
+  descriptors are refused; these remain explicit Core deviations. Repeated
+  alternatives within one multipath specifier are rejected with -5, like Core,
+  with native parser diagnostics rather than identical error text.
 - One transient reservation belongs to the authoritative `UtxoSet`. A second
   start returns -8. Status is null when idle, otherwise approximate progress;
   abort requests cancellation and returns whether a reservation exists.
@@ -1112,9 +1118,13 @@ evidence does not establish mainnet memory or throughput qualifications.
   The amount sums only that projected prefix.
   Errors and guard drop release the reservation; restart has no active scan.
 - Input limits are 1,024 descriptors, 16 KiB per descriptor, 1 MiB combined
-  descriptor bytes and 1 MiB of distinct scripts. The reservation has a
-  60-second deadline, checked during script preparation, while waiting for
-  exclusion and every 256 coins or shard boundary. Traversal permits at most
+  descriptor bytes, 1,024 script expansions across all objects and paths
+  before deduplication, and 1 MiB of distinct scripts. The aggregate expansion
+  count is checked before public-key derivation. A two-path wildcard with
+  omitted range exceeds this budget and requires a smaller explicit range;
+  duplicate expansions also consume work budget. The reservation has a
+  60-second deadline, checked during parsing and before each script expansion,
+  while waiting for exclusion and every 256 coins or shard boundary. Traversal permits at most
   250 million coins, 10,000 matches and 8 MiB of matched script bytes; projection additionally caps
   estimated JSON materialization at 16 MiB, including repeated descriptors.
   Retained-branch ancestry resolves requested distinct heights in one walk

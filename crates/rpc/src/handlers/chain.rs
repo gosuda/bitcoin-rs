@@ -1516,40 +1516,65 @@ fn parse_scan_scripts(
             "At most 1024 scan descriptors are supported".into(),
         ));
     }
-    let mut scripts = std::collections::BTreeMap::new();
+    let mut descriptors = Vec::with_capacity(scanobjects.len());
     let mut input_bytes = 0usize;
-    let mut script_bytes = 0usize;
+    let mut script_count = 0usize;
     for scanobject in scanobjects {
         if cancelled()? {
-            break;
+            return Ok(std::collections::BTreeMap::new());
         }
-        let descriptor = scanobject_descriptor(scanobject)?;
+        let (descriptor, range) = scanobject_descriptor(scanobject)?;
+        let range = range.map(parse_derivation_range).transpose()?;
         input_bytes = input_bytes.saturating_add(descriptor.len());
         if descriptor.len() > MAX_SCAN_DESCRIPTOR_BYTES || input_bytes > MAX_SCAN_INPUT_BYTES {
             return Err(RpcError::InvalidParameter(
                 "Scan descriptor byte limit exceeded".into(),
             ));
         }
-        let ScanScript {
-            script_pubkey,
-            desc,
-        } = scan_descriptor(descriptor, network)?;
-        if let std::collections::btree_map::Entry::Vacant(entry) = scripts.entry(script_pubkey) {
-            script_bytes += entry.key().len();
-            if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
-                return Err(RpcError::InvalidParameter(
-                    "Scan script byte limit exceeded".into(),
-                ));
-            }
-            entry.insert(desc);
+        let descriptor = scan_descriptor(descriptor, range, network)?;
+        script_count = script_count.saturating_add(descriptor.script_count());
+        if script_count > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS {
+            return Err(RpcError::InvalidParameter(
+                "At most 1024 scan script expansions are supported".into(),
+            ));
         }
+        descriptors.push(descriptor);
+    }
+    // Admit the whole request's work before deriving any public keys. Count
+    // duplicate expansions too: deduplication bounds retained scripts, not CPU.
+    let mut scripts = std::collections::BTreeMap::new();
+    let mut script_bytes = 0usize;
+    for descriptor in descriptors {
+        if cancelled()? {
+            break;
+        }
+        descriptor.expand(
+            &cancelled,
+            |ScanScript {
+                 script_pubkey,
+                 desc,
+             }| {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    scripts.entry(script_pubkey)
+                {
+                    script_bytes += entry.key().len();
+                    if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
+                        return Err(RpcError::InvalidParameter(
+                            "Scan script byte limit exceeded".into(),
+                        ));
+                    }
+                    entry.insert(desc);
+                }
+                Ok(())
+            },
+        )?;
     }
     Ok(scripts)
 }
 
-fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
+fn scanobject_descriptor(scanobject: &Value) -> Result<(&str, Option<&Value>), RpcError> {
     if let Some(descriptor) = scanobject.as_str() {
-        return Ok(descriptor);
+        return Ok((descriptor, None));
     }
     let object = scanobject.as_object().ok_or_else(|| {
         RpcError::InvalidParameter("Scan object needs to be either a string or an object".into())
@@ -1563,10 +1588,8 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
     let descriptor = descriptor
         .as_str()
         .ok_or_else(|| super::wrong_type_plain(descriptor, "string"))?;
-    if let Some(range) = object.get(&"range").filter(|value| !value.is_null()) {
-        parse_derivation_range(range)?;
-    }
-    Ok(descriptor)
+    let range = object.get(&"range").filter(|value| !value.is_null());
+    Ok((descriptor, range))
 }
 
 fn scan_unspents(
@@ -5743,11 +5766,6 @@ mod scantxoutset_tests {
                 "Descriptor needs to be provided",
             ),
             (
-                "ranged descriptor",
-                json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
-                "Ranged and multipath scantxoutset descriptors are not supported",
-            ),
-            (
                 "inverted range",
                 json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
                 "must not have begin after end",
@@ -6163,6 +6181,138 @@ mod scantxoutset_tests {
                 .code(),
             -8
         );
+    }
+
+    const SCAN_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+    #[test]
+    fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> anyhow::Result<()> {
+        let ctx = Arc::new(Context::new());
+        let single = format!("wpkh({SCAN_XPUB}/0/*)");
+        let multi = format!("wpkh({SCAN_XPUB}/<0;1>/*)");
+        for objects in [
+            json!([{"desc":single,"range":1024}]),
+            json!([{"desc":multi,"range":512}]),
+            json!([multi]), // Default 0..=1000 applies to each path.
+            json!([{"desc":single,"range":512},{"desc":single,"range":512}]),
+            // The trailing object takes the total over budget before the
+            // earlier descriptor can attempt an impossible hardened derive.
+            json!([{"desc":format!("wpkh({SCAN_XPUB}/*h)"),"range":1023},"raw(51)"]),
+        ] {
+            let error = scantxoutset(&ctx, &json!(["start", objects]))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("oversized scan succeeded"))?;
+            assert_eq!(error.code(), -8);
+            assert!(error.to_string().contains("1024 scan script expansions"));
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+        }
+        for objects in [
+            json!([{"desc":single,"range":1023}]),
+            json!([{"desc":multi,"range":511}]),
+            json!([single]),
+            json!([{"desc":format!("wpkh({SCAN_XPUB}/<0;1>/7)"),"range":999_999}]),
+        ] {
+            let result = scantxoutset(&ctx, &json!(["start", objects]))?;
+            assert_eq!(result["success"].as_bool(), Some(true));
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> anyhow::Result<()> {
+        let ctx = Arc::new(Context::new());
+        let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+        let secret = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
+        for desc in [
+            format!("wpkh({SCAN_XPUB}/0h/*)"),
+            format!("wpkh({SCAN_XPUB}/<0;1h>/*)"),
+            format!("wpkh({SCAN_XPUB}/*h)"),
+            format!("wpkh({SCAN_XPUB}/<0;1>/*h)"),
+            format!("wpkh({SCAN_XPUB}/<0;0>/*)"),
+            format!("wpkh({tpub}/0/*)"),
+            format!("wpkh({secret}/<0;1>/*)"),
+            format!("wpkh({SCAN_XPUB}/0/*)#badbadba"),
+            "addr(foo*)".into(),
+        ] {
+            let error = scantxoutset(&ctx, &json!(["start", [{"desc":desc,"range":[0,1]}]]))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("invalid descriptor succeeded: {desc}"))?;
+            assert_eq!(error.code(), -5, "{desc}: {error}");
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+            assert_eq!(
+                scantxoutset(&ctx, &json!(["start", []]))?["success"].as_bool(),
+                Some(true)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_expansion_observes_abort_shutdown_and_deadline() -> anyhow::Result<()> {
+        use std::cell::Cell;
+
+        let ctx = Arc::new(Context::new());
+        for cause in ["abort", "shutdown", "deadline"] {
+            let permit = ctx.chain.utxo.reserve_scan()?;
+            let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
+            let descriptor = scan_descriptor(
+                &format!("wpkh({SCAN_XPUB}/<0;1>/*)"),
+                Some((0, 9)),
+                ctx.chain.chain_network,
+            )?;
+            let emitted = Cell::new(0);
+            let result = descriptor.expand(
+                &|| {
+                    if emitted.get() >= 2 {
+                        if cause == "deadline" {
+                            return Err(scan_error(&bitcoin_rs_utxo::scan::UtxoScanError::Limit(
+                                "60 seconds",
+                            )));
+                        }
+                        if cause == "shutdown" {
+                            cancellation.store(true);
+                        } else {
+                            ctx.chain.utxo.abort_scan();
+                        }
+                    }
+                    permit
+                        .cancelled(|| cancellation.is_triggered())
+                        .map_err(|error| scan_error(&error))
+                },
+                |_| {
+                    emitted.set(emitted.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(emitted.get() > 0 && emitted.get() < 20);
+            if cause == "deadline" {
+                assert!(
+                    result
+                        .err()
+                        .ok_or_else(|| anyhow::anyhow!("deadline ignored"))?
+                        .to_string()
+                        .contains("60 seconds")
+                );
+            } else {
+                result?;
+                let response = scantxoutset_scan(
+                    &ctx,
+                    &permit,
+                    &std::collections::BTreeMap::new(),
+                    &cancellation,
+                )?;
+                assert_eq!(response["success"].as_bool(), Some(false));
+                assert_eq!(response["txouts"].as_u64(), Some(0));
+            }
+            drop(permit);
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+            assert_eq!(
+                scantxoutset(&ctx, &json!(["start", []]))?["success"].as_bool(),
+                Some(true)
+            );
+        }
+        Ok(())
     }
 
     #[test]
