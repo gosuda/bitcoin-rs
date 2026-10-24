@@ -373,8 +373,14 @@ impl PreparedAdmission {
         // The caller's cap gates the bump like scripts do — Core applies
         // `client_maxfeerate` in PreChecks, before any trim can touch the
         // floor. A capped candidate keeps its Full report but earns nothing.
+        let fee_for_max = self
+            .fact
+            .modified_fee
+            .map(|fee| u64::try_from(fee.max(0)).unwrap_or(u64::MAX))
+            .or(self.fact.base_fee)
+            .unwrap_or(0);
         if crate::standardness::exceeds_max_feerate(
-            self.fact.base_fee.unwrap_or(0),
+            fee_for_max,
             self.fact.vsize,
             request.max_feerate_sat_per_kvb,
         ) {

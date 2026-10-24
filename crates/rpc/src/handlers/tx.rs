@@ -684,26 +684,146 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
 }
 
-/// f64 nearest to 2^64 — the value `u64::MAX` rounds to as a float, and the
-/// first `f64` that no longer fits `u64` satoshis. A literal because
-/// `as_conversions` bans the cast that would compute it.
-const U64_MAX_F64: f64 = 18_446_744_073_709_551_616.0;
+/// Converts a BTC-denominated JSON value (number or string) to satoshis using exact
+/// decimal parsing, expanding e/E notation without floating point arithmetic and
+/// rejecting signs other than optional positive, non-digits, more than 8 fractional
+/// decimals, fractional satoshis, and overflow.
+fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
+    let text = if let Some(text) = value.as_str() {
+        text.to_owned()
+    } else if let Some(raw) = value.as_raw_number() {
+        raw.as_str().to_owned()
+    } else if value.is_number() {
+        value.to_string()
+    } else {
+        return Err(RpcError::InvalidType(
+            "amount must be a number or string".to_owned(),
+        ));
+    };
 
-/// Converts a BTC-denominated float to satoshis, rejecting non-finite,
-/// negative, and overflow values with `message`.
-///
-/// The final step is a scoped `as`: std offers no `TryFrom<f64> for u64`, and
-/// the range check above already bounds `raw` to `[0, 2^64)`, so the cast
-/// only truncates fractional satoshi dust, matching the historical behavior.
-fn sats_from_btc(btc: f64, message: &'static str) -> Result<u64, RpcError> {
-    let raw = btc * 100_000_000.0;
-    if !raw.is_finite() || !(0.0..U64_MAX_F64).contains(&raw) {
+    let text = text.as_str();
+    if text.is_empty() {
         return Err(RpcError::InvalidParams(message));
     }
-    #[expect(clippy::as_conversions)] // see fn doc: no TryFrom<f64> for u64 in std
-    #[expect(clippy::cast_possible_truncation)] // fractional dust, per fn doc
-    #[expect(clippy::cast_sign_loss)] // raw >= 0.0 checked above
-    Ok(raw as u64)
+
+    // Optional positive sign; reject any other sign including negative.
+    let text = if let Some(stripped) = text.strip_prefix('+') {
+        stripped
+    } else if text.starts_with('-') {
+        return Err(RpcError::InvalidParams(message));
+    } else {
+        text
+    };
+
+    if text.is_empty() {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    // Parse scientific notation: mantissa and optional exponent.
+    let (mantissa, exp) = if let Some(pos) = text.find(['e', 'E']) {
+        let (m, e) = text.split_at(pos);
+        let e_str = &e[1..];
+        if m.is_empty() || e_str.is_empty() {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let (e_sign, e_digits) = if let Some(stripped) = e_str.strip_prefix('+') {
+            (1_i32, stripped)
+        } else if let Some(stripped) = e_str.strip_prefix('-') {
+            (-1_i32, stripped)
+        } else {
+            (1_i32, e_str)
+        };
+        if e_digits.is_empty() || !e_digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let exp_mag: i32 = e_digits
+            .parse()
+            .map_err(|_| RpcError::InvalidParams(message))?;
+        (
+            m,
+            e_sign
+                .checked_mul(exp_mag)
+                .ok_or(RpcError::InvalidParams(message))?,
+        )
+    } else {
+        (text, 0_i32)
+    };
+
+    // Split mantissa on decimal point.
+    let (int_part, frac_part) = if let Some(pos) = mantissa.find('.') {
+        let (i, f) = mantissa.split_at(pos);
+        let f = &f[1..];
+        if f.contains('.') {
+            return Err(RpcError::InvalidParams(message));
+        }
+        (i, f)
+    } else {
+        (mantissa, "")
+    };
+
+    // Both parts must contain only ASCII digits, and there must be at least one digit total.
+    if (!int_part.is_empty() && !int_part.chars().all(|c| c.is_ascii_digit()))
+        || (!frac_part.is_empty() && !frac_part.chars().all(|c| c.is_ascii_digit()))
+        || (int_part.is_empty() && frac_part.is_empty())
+    {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let mut digits = Vec::with_capacity(int_part.len() + frac_part.len());
+    digits.extend_from_slice(int_part.as_bytes());
+    digits.extend_from_slice(frac_part.as_bytes());
+
+    if digits.iter().all(|&d| d == b'0') {
+        return Ok(0);
+    }
+
+    // Normalize: trailing zeros carry no value, so the fractional-decimal
+    // count is taken after trimming them ("100e-10" and "1.000000000" are
+    // whole satoshis, not nine-decimal amounts).
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+
+    let initial_point =
+        i32::try_from(int_part.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    let point = initial_point
+        .checked_add(exp)
+        .ok_or(RpcError::InvalidParams(message))?;
+
+    let digits_len =
+        i32::try_from(digits.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    if digits_len - point > 8 {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let sat_point = point
+        .checked_add(8)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if sat_point < digits_len {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let trailing_zeros = sat_point
+        .checked_sub(digits_len)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if trailing_zeros > 20 {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let mut sats: u64 = 0;
+    for &d in &digits {
+        sats = sats
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(d - b'0')))
+            .ok_or(RpcError::InvalidParams(message))?;
+    }
+    for _ in 0..trailing_zeros {
+        sats = sats
+            .checked_mul(10)
+            .ok_or(RpcError::InvalidParams(message))?;
+    }
+
+    Ok(sats)
 }
 
 fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
@@ -713,23 +833,28 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
     if value.is_null() {
         return Ok(Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB));
     }
-    let btc_per_kvb = if let Some(number) = value.as_f64() {
-        number
-    } else if let Some(text) = value.as_str() {
-        text.parse::<f64>()
-            .map_err(|_| RpcError::InvalidType("maxfeerate must be a number".to_owned()))?
-    } else {
+    if !value.is_number() && !value.is_str() {
         return Err(RpcError::InvalidType(
             "maxfeerate must be a number".to_owned(),
         ));
-    };
-    if !btc_per_kvb.is_finite() || btc_per_kvb < 0.0 {
-        return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
     }
-    if btc_per_kvb == 0.0 {
+    if let Some(text) = value.as_str() {
+        if text.starts_with('-') {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    } else if let Some(raw) = value.as_raw_number() {
+        if raw.as_str().starts_with('-') {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    } else if let Some(f) = value.as_f64() {
+        if f < 0.0 {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    }
+    let sats = sats_from_btc(value, "maxfeerate is out of range")?;
+    if sats == 0 {
         return Ok(None);
     }
-    let sats = sats_from_btc(btc_per_kvb, "maxfeerate is out of range")?;
     // Core's `ParseFeeRate` refuses rates at or above 1 BTC/kvB, so the
     // ceiling is enforced on the integer domain to keep the parameter
     // contract identical.
@@ -742,18 +867,7 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
 }
 
 fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
-    if let Some(number) = value.as_f64() {
-        return sats_from_btc(number, "Invalid amount");
-    }
-    if let Some(text) = value.as_str() {
-        let number: f64 = text
-            .parse()
-            .map_err(|_| RpcError::InvalidParams("Invalid amount"))?;
-        return sats_from_btc(number, "Invalid amount");
-    }
-    Err(RpcError::InvalidType(
-        "amount must be a number or string".to_owned(),
-    ))
+    sats_from_btc(value, "Invalid amount")
 }
 
 // ---------------------------------------------------------------------------
@@ -2872,5 +2986,87 @@ mod finalizepsbt_tests {
         assert_eq!(result.get("complete").and_then(Value::as_bool), Some(true));
         assert!(result.get("psbt").is_none_or(Value::is_null));
         assert!(result.get("hex").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn exact_amount_parsing_honors_precision_and_overflow_invariants() {
+        use super::{optional_max_feerate, parse_btc_amount, sats_from_btc};
+
+        // 1e-8 = 1 sat accepted, 1e-9 rejected as Invalid amount
+        assert_eq!(sats_from_btc(&json!(1e-8), "Invalid amount").unwrap(), 1);
+        assert_eq!(sats_from_btc(&json!("1e-8"), "Invalid amount").unwrap(), 1);
+        assert_eq!(sats_from_btc(&json!("1E-8"), "Invalid amount").unwrap(), 1);
+        assert!(sats_from_btc(&json!(1e-9), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1e-9"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1E-9"), "Invalid amount").is_err());
+
+        // Exact 8-decimal satoshi boundary
+        assert_eq!(
+            sats_from_btc(&json!("0.00000001"), "Invalid amount").unwrap(),
+            1
+        );
+        // More than 8 fractional decimals rejected when they carry value
+        assert!(sats_from_btc(&json!("0.000000001"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.000000001"), "Invalid amount").is_err());
+        // Trailing zeros normalize away: these are whole satoshis, not
+        // nine-decimal amounts.
+        assert_eq!(
+            sats_from_btc(&json!("1.000000000"), "Invalid amount").unwrap(),
+            100_000_000
+        );
+        assert_eq!(sats_from_btc(&json!("100e-10"), "Invalid amount").unwrap(), 1);
+        assert_eq!(sats_from_btc(&json!("0e-100"), "Invalid amount").unwrap(), 0);
+        assert_eq!(
+            sats_from_btc(&json!("0.000000000"), "Invalid amount").unwrap(),
+            0
+        );
+
+        // Zero handling
+        assert_eq!(sats_from_btc(&json!(0), "Invalid amount").unwrap(), 0);
+        assert_eq!(sats_from_btc(&json!("0"), "Invalid amount").unwrap(), 0);
+        assert_eq!(sats_from_btc(&json!("0.0"), "Invalid amount").unwrap(), 0);
+        assert_eq!(
+            sats_from_btc(&json!("0e2147483647"), "Invalid amount").unwrap(),
+            0
+        );
+
+        // Optional positive sign accepted, negative sign rejected
+        assert_eq!(
+            sats_from_btc(&json!("+1.5"), "Invalid amount").unwrap(),
+            150_000_000
+        );
+        assert!(sats_from_btc(&json!("-1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("-0"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("-0.0"), "Invalid amount").is_err());
+
+        // Non-digits and malformed text rejected (including whitespace)
+        assert!(sats_from_btc(&json!("abc"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(""), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(" 1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1 "), "Invalid amount").is_err());
+
+        // Overflow safety
+        assert_eq!(
+            sats_from_btc(&json!("184467440737.09551615"), "Invalid amount").unwrap(),
+            u64::MAX
+        );
+        assert!(sats_from_btc(&json!("184467440737.09551616"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("18446744073709551616"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1e25"), "Invalid amount").is_err());
+
+        // parse_btc_amount routes through sats_from_btc
+        assert_eq!(parse_btc_amount(&json!("1e-8")).unwrap(), 1);
+        assert!(parse_btc_amount(&json!("1e-9")).is_err());
+
+        // optional_max_feerate: 0 is no-cap, 1e-8 accepted, >= 1 BTC/kvB ceiling, negative rejected
+        assert_eq!(optional_max_feerate(&json!([0]), 0).unwrap(), None);
+        assert_eq!(optional_max_feerate(&json!(["0"]), 0).unwrap(), None);
+        assert_eq!(optional_max_feerate(&json!(["1e-8"]), 0).unwrap(), Some(1));
+        assert!(optional_max_feerate(&json!([1.0]), 0).is_err());
+        assert!(optional_max_feerate(&json!(["1.0"]), 0).is_err());
+        assert!(optional_max_feerate(&json!([-0.1]), 0).is_err());
+        assert!(optional_max_feerate(&json!(["-1"]), 0).is_err());
     }
 }

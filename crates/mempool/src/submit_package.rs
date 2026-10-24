@@ -136,7 +136,7 @@ impl MempoolGateway {
             let row = match self.submit_package_attempt(
                 core::slice::from_ref(tx),
                 LocalOrigin::Rpc,
-                None,
+                max_rate,
                 |_| time,
                 chain,
                 mode,
@@ -168,7 +168,7 @@ impl MempoolGateway {
             match self.submit_package_attempt(
                 &pending,
                 LocalOrigin::Rpc,
-                None,
+                max_rate,
                 |_| time,
                 chain,
                 mode,
@@ -245,6 +245,7 @@ impl MempoolGateway {
         time: impl Fn(&Tx) -> u64,
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
+        crate::package::check_structure(txs)?;
         let attempt = self.submit_package_attempt(
             txs,
             origin,
@@ -272,7 +273,6 @@ impl MempoolGateway {
         chain: &dyn AdmissionChain,
         mode: AdmissionMode,
     ) -> Result<PackageAttempt, SubmitError> {
-        crate::package::check_structure(txs)?;
         let origin = AdmissionOrigin::from(origin);
         'attempt: for _ in 0..MAX_ADMISSION_RETRIES {
             let Some(generation) = self.stable_generation() else {
@@ -449,7 +449,8 @@ impl MempoolGateway {
                         .fold((0, 0), |(fee, size), (_, member_fee, vsize)| {
                             (fee + member_fee, size + u64::from(*vsize))
                         });
-                fee.checked_mul(1_000)
+                fee.max(0)
+                    .checked_mul(1_000)
                     .and_then(|total| (size != 0).then(|| total / i128::from(size)))
                     .and_then(|rate| u64::try_from(rate).ok())
             });

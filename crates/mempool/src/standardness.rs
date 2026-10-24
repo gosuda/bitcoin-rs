@@ -134,6 +134,8 @@ pub struct TxAcceptanceFact {
     pub sigop_cost: u32,
     /// Base fee when acceptance accounting succeeded far enough to know it.
     pub base_fee: Option<u64>,
+    /// Modified fee in satoshis when prioritisation is applied.
+    pub modified_fee: Option<i128>,
     /// Modified fee rate in sat/kvB from the captured policy state.
     pub effective_fee_rate: Option<u64>,
     /// Rejection reason when `allowed` is false.
@@ -305,10 +307,19 @@ pub(crate) fn evaluate_one(
     // `None` omits the floor comparison entirely (Core `bypassLimits`):
     // a zero floor still rejects a tx whose prioritisation delta drags
     // its modified fee negative, which bypassing must not do.
+    let modified_fee_res = pool.modified_fee_for(txid, context.fee);
+    let modified_fee = modified_fee_res.as_ref().ok().copied();
+    let fee_for_max = u64::try_from(
+        modified_fee
+            .unwrap_or(i128::from(context.fee))
+            .max(0),
+    )
+    .unwrap_or(u64::MAX);
+
     let fee_rejection = match mempool_min_fee_sat_per_kvb {
         None => None,
         Some(floor) => match (
-            pool.modified_fee_for(txid, context.fee),
+            modified_fee_res,
             crate::rbf::required_fee(floor, vsize),
         ) {
             (Ok(fee), Ok(required)) => {
@@ -336,13 +347,21 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::TooManySigops)
     } else if let Some(reason) = fee_rejection {
         Some(reason)
-    } else if exceeds_max_feerate(context.fee, vsize, max_feerate_sat_per_kvb) {
+    } else if exceeds_max_feerate(fee_for_max, vsize, max_feerate_sat_per_kvb) {
         Some(AcceptanceRejectReason::MaxFeeExceeded)
     } else if !bip68_final(pool, tx, finality) {
         Some(AcceptanceRejectReason::NonBip68Final)
     } else {
         None
     };
+
+    let effective_fee_rate = modified_fee.and_then(|fee| {
+        let clamped = fee.max(0);
+        (vsize != 0)
+            .then(|| clamped.checked_mul(1_000).map(|prod| prod / i128::from(vsize)))
+            .flatten()
+            .and_then(|rate| u64::try_from(rate).ok())
+    });
 
     TxAcceptanceFact {
         txid,
@@ -352,11 +371,8 @@ pub(crate) fn evaluate_one(
         weight,
         sigop_cost: context.sigop_cost,
         base_fee: Some(context.fee),
-        effective_fee_rate: pool
-            .modified_fee_for(txid, context.fee)
-            .ok()
-            .and_then(|fee| (vsize != 0).then(|| fee * 1_000 / i128::from(vsize)))
-            .and_then(|rate| u64::try_from(rate).ok()),
+        modified_fee,
+        effective_fee_rate,
         reject_reason: reject,
     }
 }
@@ -787,5 +803,99 @@ mod tests {
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
         );
+    }
+
+    #[test]
+    fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate() {
+        let mut pool = Mempool::new(crate::MempoolLimits::default());
+        let tx = standard_tx(2);
+        let txid = tx.txid();
+
+        // Base fee: 1_000 sats, negative delta of -3_000 sats -> modified fee: -2_000 sats.
+        pool.prioritise(txid, -3_000).expect("prioritise delta");
+        assert_eq!(pool.modified_fee_for(txid, 1_000).expect("modified fee"), -2_000);
+
+        let context = PackageTxContext {
+            fee: 1_000,
+            vsize: 100,
+            sigop_cost: 0,
+            missing_inputs: false,
+        };
+
+        let fact = evaluate_one(
+            &pool,
+            &policy(),
+            &tx,
+            context,
+            Some(10_000), // max_feerate_sat_per_kvb
+            None,
+            &Bip68Admission::default(),
+        );
+
+        // Clamping negative modified fee to max(0) ensures:
+        // 1. Never maps a negative delta to u64::MAX, so max feerate is not exceeded.
+        assert_ne!(fact.reject_reason, Some(AcceptanceRejectReason::MaxFeeExceeded));
+        // 2. Modified fee is tracked as signed -2000.
+        assert_eq!(fact.modified_fee, Some(-2_000));
+        // 3. Clamped effective fee rate produces Some(0), not None.
+        assert_eq!(fact.effective_fee_rate, Some(0));
+    }
+
+    #[test]
+    fn three_vsize_meanings_on_sigop_heavy_tx() {
+        use alloc::sync::Arc;
+        use crate::accounting::prepared_context;
+        use crate::entry::MempoolEntry;
+
+        let mut tx = standard_tx(2);
+        // Add 50 OP_CHECKSIG opcodes in an output script (each counts as 4 sigop cost in consensus).
+        let sigop_script = Script::from_bytes(vec![opcode::OP_CHECKSIG; 50]);
+        tx.outputs.push(TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: sigop_script,
+        });
+
+        let prevout = (
+            tx.inputs[0].previous_output,
+            TxOut {
+                value: Amount::from_sat(200_000),
+                script_pubkey: p2pkh(&[7_u8; 20]).into(),
+            },
+        );
+
+        let context = prepared_context(&tx, &[prevout], false);
+        // 50 OP_CHECKSIG opcodes in added output + 1 in P2PKH output = 51 sigops = 204 sigop cost.
+        assert_eq!(context.sigop_cost, 204);
+
+        let unadjusted_weight = tx.weight();
+        let vsize_bip141 = u32::try_from(tx.vsize()).expect("vsize fits u32");
+        assert_eq!(
+            vsize_bip141,
+            u32::try_from(Tx::vsize_from_weight(unadjusted_weight)).expect("fits u32")
+        );
+
+        // Policy-adjusted virtual size reflects the heavy sigop cost:
+        // 204 sigop cost * 20 = 4,080 WU; 4,080 / 4 = 1,020 vB.
+        let vsize_adjusted = context.vsize;
+        assert_eq!(vsize_adjusted, 1_020);
+        assert!(vsize_adjusted > vsize_bip141);
+
+        let entry = MempoolEntry::new(
+            Arc::new(tx.clone()),
+            vsize_adjusted,
+            context.fee,
+            1,
+            1,
+            context.sigop_cost,
+        );
+
+        // 1. entry.vsize = vsize_adjusted = context.vsize (sigop-adjusted entry vsize)
+        assert_eq!(entry.vsize, vsize_adjusted);
+        assert_eq!(entry.vsize, 1_020);
+        // 2. entry.bip141_vsize = vsize_bip141 = tx.vsize() unadjusted
+        assert_eq!(entry.bip141_vsize, vsize_bip141);
+        assert_eq!(entry.bip141_vsize, u32::try_from(tx.vsize()).expect("fits u32"));
+        // 3. Consensus weight unadjusted
+        assert_eq!(entry.weight, unadjusted_weight);
     }
 }

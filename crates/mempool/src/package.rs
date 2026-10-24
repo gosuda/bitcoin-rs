@@ -54,6 +54,7 @@ pub(crate) fn unfinished(tx: &Tx) -> TxAcceptanceFact {
         weight: tx.weight(),
         sigop_cost: 0,
         base_fee: None,
+        modified_fee: None,
         effective_fee_rate: None,
         reject_reason: None,
     }
