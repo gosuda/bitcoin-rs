@@ -66,9 +66,12 @@ jobs:
       - name: Kernel-gated script targets Clippy
         run: cargo clippy --locked -p bitcoin-rs-script --all-targets --features kernel -- -D warnings
       # Focused kernel oracle parity tests at the merge-gate boundary (issue #1511).
+      # The library and shared-sighash suite also exercise owned block-check
+      # preparation; the oracle helpers below use the borrowed transaction API.
       - name: Kernel consensus oracle parity tests
         run: |
           cargo test --locked -p bitcoin-rs-consensus --features kernel \
+            --lib --test shared_sighash --test overhaul_parse_parity \
             --test kernel_block_parity --test kernel_vector_parity -- --nocapture
       - name: Kernel script core-vectors oracle test
         run: |
