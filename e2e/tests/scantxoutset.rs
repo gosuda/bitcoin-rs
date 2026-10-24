@@ -79,6 +79,18 @@ fn fixed_descriptors_scan_identical_core_created_coins() -> Result<()> {
     compare_scan(
         &mut core,
         &mut node,
+        "ranged-tpub-scan",
+        json!({
+            "action": "start",
+            "scanobjects": [{
+                "desc": "wpkh([deadbeef/1h/2]tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B/0/*)",
+                "range": [0, 8]
+            }]
+        }),
+    )?;
+    compare_scan(
+        &mut core,
+        &mut node,
         "all-first-attribution",
         json!(["start", descs]),
     )?;

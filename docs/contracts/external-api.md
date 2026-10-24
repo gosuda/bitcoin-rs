@@ -1150,10 +1150,11 @@ evidence does not establish mainnet memory or throughput qualifications.
 ### `API-35`: Bounded public-descriptor UTXO scans
 
 - `scantxoutset` accepts strings and `{desc, range}` objects with optional
-  verified checksums. Public fixed `addr`, `raw`, `pkh`, `wpkh`, `sh(wpkh)`
-  and key-only `tr` are supported. Private keys, wildcard/multipath expansion,
-  Taproot trees and other descriptors are refused; these are explicit Core
-  deviations. A valid range on a fixed descriptor is checked and ignored.
+  verified checksums. Public fixed `addr` and `raw`, and fixed or ranged `pkh`,
+  `wpkh`, `sh(wpkh)` and key-only `tr` descriptors with multipath expansion are
+  supported up to 1,024 scripts. Private keys, Taproot trees and other descriptors
+  are refused; these are explicit Core deviations. A valid range on a fixed
+  descriptor is checked and ignored; a ranged descriptor defaults to range `[0, 1000]`.
 - One transient reservation belongs to the authoritative `UtxoSet`. A second
   start returns -8. Status is null when idle, otherwise approximate progress;
   abort requests cancellation and returns whether a reservation exists.
@@ -1162,7 +1163,7 @@ evidence does not establish mainnet memory or throughput qualifications.
   The amount sums only that projected prefix.
   Errors and guard drop release the reservation; restart has no active scan.
 - Input limits are 1,024 descriptors, 16 KiB per descriptor, 1 MiB combined
-  descriptor bytes and 1 MiB of distinct scripts. The reservation has a
+  descriptor bytes, and 1 MiB of expanded script bytes with distinct-script recheck. The reservation has a
   60-second deadline, checked during script preparation, while waiting for
   exclusion and every 256 coins or shard boundary. Traversal permits at most
   250 million coins, 10,000 matches and 8 MiB of matched script bytes; projection additionally caps

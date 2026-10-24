@@ -14,7 +14,9 @@ use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
+use super::util::{parse_derivation_range, scan_descriptor_range_budgeted};
+#[cfg(test)]
+use super::util::{scan_descriptor, scan_descriptor_range};
 use bitcoin::hex::DisplayHex as _;
 
 use crate::context::{AppliedView, ChainControlError, Context, TxQueryError, TxUnavailableCause};
@@ -1518,38 +1520,58 @@ fn parse_scan_scripts(
     }
     let mut scripts = std::collections::BTreeMap::new();
     let mut input_bytes = 0usize;
-    let mut script_bytes = 0usize;
+    let mut script_bytes = 0_u64;
+    let max_scan_script_bytes = 1_048_576_u64;
+    let mut remaining_scripts = 1_024_u64;
+    let mut remaining_script_bytes = max_scan_script_bytes;
     for scanobject in scanobjects {
         if cancelled()? {
             break;
         }
-        let descriptor = scanobject_descriptor(scanobject)?;
+        let (descriptor, range) = scanobject_descriptor(scanobject)?;
         input_bytes = input_bytes.saturating_add(descriptor.len());
         if descriptor.len() > MAX_SCAN_DESCRIPTOR_BYTES || input_bytes > MAX_SCAN_INPUT_BYTES {
             return Err(RpcError::InvalidParameter(
                 "Scan descriptor byte limit exceeded".into(),
             ));
         }
-        let ScanScript {
-            script_pubkey,
-            desc,
-        } = scan_descriptor(descriptor, network)?;
-        if let std::collections::btree_map::Entry::Vacant(entry) = scripts.entry(script_pubkey) {
-            script_bytes += entry.key().len();
-            if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
-                return Err(RpcError::InvalidParameter(
-                    "Scan script byte limit exceeded".into(),
-                ));
+        let expanded = scan_descriptor_range_budgeted(
+            descriptor,
+            network,
+            range,
+            remaining_scripts,
+            remaining_script_bytes,
+            &cancelled,
+        )?;
+        let expanded_count_u64 = u64::try_from(expanded.len())
+            .map_err(|_| RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into()))?;
+        remaining_scripts = remaining_scripts.saturating_sub(expanded_count_u64);
+        let mut object_script_bytes = 0_u64;
+        for script in expanded {
+            let key_len_u64 = u64::try_from(script.script_pubkey.len())
+                .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
+            object_script_bytes = object_script_bytes.saturating_add(key_len_u64);
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                scripts.entry(script.script_pubkey)
+            {
+                script_bytes = script_bytes.saturating_add(key_len_u64);
+                if script_bytes > max_scan_script_bytes {
+                    return Err(RpcError::InvalidParameter(
+                        "Scan script byte limit exceeded".into(),
+                    ));
+                }
+                entry.insert(script.desc);
             }
-            entry.insert(desc);
         }
+        remaining_script_bytes = remaining_script_bytes.saturating_sub(object_script_bytes);
     }
     Ok(scripts)
 }
 
-fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
+#[expect(clippy::type_complexity, reason = "descriptor text and parsed derivation range tuple")]
+fn scanobject_descriptor(scanobject: &Value) -> Result<(&str, Option<(u32, u32)>), RpcError> {
     if let Some(descriptor) = scanobject.as_str() {
-        return Ok(descriptor);
+        return Ok((descriptor, None));
     }
     let object = scanobject.as_object().ok_or_else(|| {
         RpcError::InvalidParameter("Scan object needs to be either a string or an object".into())
@@ -1563,10 +1585,12 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
     let descriptor = descriptor
         .as_str()
         .ok_or_else(|| super::wrong_type_plain(descriptor, "string"))?;
-    if let Some(range) = object.get(&"range").filter(|value| !value.is_null()) {
-        parse_derivation_range(range)?;
-    }
-    Ok(descriptor)
+    let range = object
+        .get(&"range")
+        .filter(|value| !value.is_null())
+        .map(parse_derivation_range)
+        .transpose()?;
+    Ok((descriptor, range))
 }
 
 fn scan_unspents(
@@ -5734,9 +5758,9 @@ mod scantxoutset_tests {
                 "Descriptor needs to be provided",
             ),
             (
-                "ranged descriptor",
+                "invalid address in addr descriptor",
                 json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
-                "Ranged and multipath scantxoutset descriptors are not supported",
+                "base58 error",
             ),
             (
                 "inverted range",
@@ -6162,5 +6186,131 @@ mod scantxoutset_tests {
         let result = scantxoutset(&ctx, &json!(["abort"]))
             .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn ranged_descriptor_matches_fixed_descriptors() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let ranged_desc = format!("wpkh({xpub}/0/*)");
+        let fixed_0 = format!("wpkh({xpub}/0/0)");
+        let fixed_1 = format!("wpkh({xpub}/0/1)");
+        let fixed_2 = format!("wpkh({xpub}/0/2)");
+
+        let scripts = scan_descriptor_range(&ranged_desc, Network::Mainnet, Some((0, 2)), || Ok(false))
+            .unwrap_or_else(|err| panic!("derive ranged scripts: {err}"));
+        assert_eq!(scripts.len(), 3);
+
+        // Also test scan_descriptor on a fixed form
+        let single = scan_descriptor(&fixed_0, Network::Mainnet)
+            .unwrap_or_else(|err| panic!("scan_descriptor fixed form: {err}"));
+        assert_eq!(single.script_pubkey, scripts[0].script_pubkey);
+        assert_eq!(single.desc, scripts[0].desc);
+
+        for (i, s) in scripts.iter().enumerate() {
+            let idx_u64 = u64::try_from(i).unwrap_or(0);
+            let idx_u32 = u32::try_from(i).unwrap_or(0);
+            let outpoint = OutPoint::new(Txid::from(test_txid(50 + idx_u64)), idx_u32);
+            let txout = TxOut {
+                value: Amount::from_sat(10_000 * (idx_u64 + 1)),
+                script_pubkey: s.script_pubkey.clone().into(),
+            };
+            commit_test_utxo(&ctx, outpoint, txout, false, 0);
+        }
+
+        let ranged_result = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": ranged_desc, "range": [0, 2]}]]),
+        )
+        .unwrap_or_else(|err| panic!("ranged scan failed: {err}"));
+
+        let fixed_result = scantxoutset(
+            &ctx,
+            &json!(["start", [fixed_0, fixed_1, fixed_2]]),
+        )
+        .unwrap_or_else(|err| panic!("fixed scan failed: {err}"));
+
+        assert_eq!(ranged_result["txouts"], fixed_result["txouts"]);
+        assert_eq!(ranged_result["total_amount"], fixed_result["total_amount"]);
+        assert_eq!(ranged_result["unspents"], fixed_result["unspents"]);
+
+        let unspents = ranged_result["unspents"].as_array().unwrap();
+        assert_eq!(unspents.len(), 3);
+        for entry in unspents {
+            assert!(entry.get("txid").is_some());
+            assert!(entry.get("vout").is_some());
+            assert!(entry.get("amount").is_some());
+            assert!(entry.get("desc").is_some());
+        }
+    }
+
+    #[test]
+    fn multipath_expansion_uses_index_major_branch_inner_order() {
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let desc = format!("wpkh({xpub}/<0;1>/*)");
+        let scripts = scan_descriptor_range(&desc, Network::Mainnet, Some((0, 2)), || Ok(false))
+            .unwrap_or_else(|err| panic!("scan_descriptor_range failed: {err}"));
+        assert_eq!(scripts.len(), 6);
+        // Multipath expansion must be index-major / branch-inner:
+        // index 0: /0/0, /1/0
+        // index 1: /0/1, /1/1
+        // index 2: /0/2, /1/2
+        let descs: Vec<&str> = scripts.iter().map(|s| s.desc.as_str()).collect();
+        assert!(descs[0].contains("/0/0]"), "expected /0/0, got {}", descs[0]);
+        assert!(descs[1].contains("/1/0]"), "expected /1/0, got {}", descs[1]);
+        assert!(descs[2].contains("/0/1]"), "expected /0/1, got {}", descs[2]);
+        assert!(descs[3].contains("/1/1]"), "expected /1/1, got {}", descs[3]);
+        assert!(descs[4].contains("/0/2]"), "expected /0/2, got {}", descs[4]);
+        assert!(descs[5].contains("/1/2]"), "expected /1/2, got {}", descs[5]);
+    }
+
+    #[test]
+    fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+        // [0, 1023] is 1024 scripts: within budget, succeeds
+        let ok = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 1023]}]]),
+        );
+        assert!(ok.is_ok(), "range [0, 1023] must succeed: {ok:?}");
+
+        // [0, 1024] is 1025 scripts: fails before derivation
+        let err_1024 = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 1024]}]]),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("range [0, 1024] must fail"));
+        assert_eq!(err_1024.code(), -8);
+        assert!(err_1024.to_string().contains("At most 1024 scan descriptors are supported"));
+
+        // Omitted range on multipath descriptor defaults to [0, 1000] (1001 indices * 2 paths = 2002 scripts): fails
+        let err_multipath = scantxoutset(
+            &ctx,
+            &json!(["start", [format!("wpkh({xpub}/<0;1>/*)")]]),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("omitted multipath default must fail on 2002 scripts"));
+        assert_eq!(err_multipath.code(), -8);
+        assert!(err_multipath.to_string().contains("At most 1024 scan descriptors are supported"));
+    }
+
+    #[test]
+    fn cancellation_during_ranged_scan_releases_reservation() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let stop = Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let cancel_reader = bitcoin_rs_chain::LatchReader::new(stop);
+
+        let result = super::scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 10]}]]),
+            &cancel_reader,
+        )
+        .unwrap_or_else(|err| panic!("cancelled scan returned error: {err}"));
+        assert_eq!(result["success"].as_bool(), Some(false));
+        assert_eq!(ctx.chain.utxo.scan_progress(), None);
     }
 }
