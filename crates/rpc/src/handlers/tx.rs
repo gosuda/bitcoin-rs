@@ -565,6 +565,97 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     Ok(value)
 }
 
+/// BIP337 `compressrawtransaction`: encodes one raw transaction into
+/// its compressed form, degrading unresolvable outpoints to raw form
+/// with one warning each. Disabled (`-32603`) unless the node started
+/// with `--compressed-transactions`.
+pub(crate) fn compressrawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    if !ctx.compressed_transactions {
+        return Err(RpcError::MethodDisabled(
+            "compressrawtransaction is disabled; enable --compressed-transactions",
+        ));
+    }
+    let bound = super::bind_named_params(params, &["hexstring", "compress_outpoints"])?;
+    let params = bound.as_ref();
+    let raw = required_str(params, 0, "raw transaction is required")?;
+    if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
+        return Err(RpcError::InvalidParameter(
+            "hex string exceeds the compressed transaction size limit".to_owned(),
+        ));
+    }
+    let compress_outpoints = optional_bool(params, 1, true)?;
+    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    // Snapshot isolation: the resolver captures its applied view and
+    // resolves UTXO, txindex, and body facts only while this stable
+    // chainstate read excludes transitions, so one call cannot pair a
+    // new-branch UTXO entry with the captured height and body.
+    ctx.chain.with_stable_chainstate(|| {
+        let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
+        let (compressed, warnings) = crate::compressed_tx::compress_transaction(
+            &tx,
+            &mut resolver,
+            crate::compressed_tx::CompressOptions { compress_outpoints },
+        )
+        .map_err(RpcError::from)?;
+        if cancellation.is_triggered() || !resolver.view_matches_current() {
+            return Err(RpcError::Misc(
+                "compressed transaction request cancelled or the applied tip moved; retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(json!({
+            "result": compressed.to_lower_hex_string(),
+            "warnings": warnings,
+        }))
+    })
+}
+
+/// BIP337 `decompressrawtransaction`: restores one compressed
+/// transaction to its raw hex form, refusing when the context its
+/// compressed outpoints or signatures commit to is unavailable.
+/// Disabled (`-32603`) unless the node started with
+/// `--compressed-transactions`.
+pub(crate) fn decompressrawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    if !ctx.compressed_transactions {
+        return Err(RpcError::MethodDisabled(
+            "decompressrawtransaction is disabled; enable --compressed-transactions",
+        ));
+    }
+    let bound = super::bind_named_params(params, &["hexstring"])?;
+    let params = bound.as_ref();
+    let raw = required_str(params, 0, "compressed transaction is required")?;
+    if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
+        return Err(RpcError::InvalidParameter(
+            "hex string exceeds the compressed transaction size limit".to_owned(),
+        ));
+    }
+    let bytes =
+        hex_decode(raw).map_err(|_| RpcError::Deserialization("TX decode failed".to_owned()))?;
+    // Snapshot isolation, as in `compressrawtransaction`: every
+    // resolution read runs under the same stable chainstate read that
+    // captured the applied view.
+    ctx.chain.with_stable_chainstate(|| {
+        let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
+        let tx = crate::compressed_tx::decompress_transaction(&bytes, &mut resolver)
+            .map_err(RpcError::from)?;
+        if cancellation.is_triggered() || !resolver.view_matches_current() {
+            return Err(RpcError::Misc(
+                "compressed transaction request cancelled or the applied tip moved; retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(json!(consensus_bytes(&tx).to_lower_hex_string()))
+    })
+}
+
 const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
 
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -793,8 +884,7 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         .checked_add(exp)
         .ok_or(RpcError::InvalidParams(message))?;
 
-    let digits_len =
-        i32::try_from(digits.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    let digits_len = i32::try_from(digits.len()).map_err(|_| RpcError::InvalidParams(message))?;
     if digits_len - point > 8 {
         return Err(RpcError::InvalidParams(message));
     }
@@ -3017,8 +3107,14 @@ mod finalizepsbt_tests {
             sats_from_btc(&json!("1.000000000"), "Invalid amount").unwrap(),
             100_000_000
         );
-        assert_eq!(sats_from_btc(&json!("100e-10"), "Invalid amount").unwrap(), 1);
-        assert_eq!(sats_from_btc(&json!("0e-100"), "Invalid amount").unwrap(), 0);
+        assert_eq!(
+            sats_from_btc(&json!("100e-10"), "Invalid amount").unwrap(),
+            1
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0e-100"), "Invalid amount").unwrap(),
+            0
+        );
         assert_eq!(
             sats_from_btc(&json!("0.000000000"), "Invalid amount").unwrap(),
             0

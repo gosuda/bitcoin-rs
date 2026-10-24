@@ -107,6 +107,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `getblocktweaks` | 0.14.0 | Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md. |
+| `compressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
+| `decompressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
 | `getcapabilities` | 0.4.0 | bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs). |
 
 ### Unimplemented
@@ -240,4 +242,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 32, Implemented (unverified) 57, Extension 3, Disabled 0, Unimplemented 84 - total 176.
+Row counts: Supported 0, Deviation 32, Implemented (unverified) 57, Extension 5, Disabled 0, Unimplemented 84 - total 178.

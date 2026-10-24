@@ -14,6 +14,8 @@ extern crate alloc;
 pub mod auth;
 /// Standard-alphabet Base64 encode/decode for auth headers and PSBTs.
 mod base64;
+/// BIP337 compressed-transaction codec shared by its two RPC adapters.
+pub(crate) mod compressed_tx;
 /// Dependency-injected RPC state.
 pub mod context;
 /// Native <-> rust-bitcoin conversions and typed wire serialization.

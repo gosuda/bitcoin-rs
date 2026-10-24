@@ -171,6 +171,7 @@ fn bind_rpc(
     let chainstate = state.chainstate();
     let context = Context::from_handles(ContextHandles {
         silent_payments: config.rpc.silent_payments,
+        compressed_transactions: config.rpc.compressed_transactions,
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),

@@ -35,6 +35,28 @@ fn silent_payments_toml_overlay_preserves_explicit_disable() -> Result<()> {
 }
 
 #[test]
+fn compressed_transactions_default_off_and_overlay() -> Result<()> {
+    assert!(
+        !NodeConfig::default_for_network(Network::Regtest)
+            .rpc
+            .compressed_transactions
+    );
+    let enabled: UserConfig = toml::from_str("compressed_transactions = true")?;
+    assert!(resolve(&[&enabled])?.rpc.compressed_transactions);
+    let mut environment = UserConfig::default();
+    environment.apply_env(
+        "BITCOIN_RS_COMPRESSED_TRANSACTIONS",
+        std::ffi::OsStr::new("false"),
+    )?;
+    assert!(
+        !resolve(&[&enabled, &environment])?
+            .rpc
+            .compressed_transactions
+    );
+    Ok(())
+}
+
+#[test]
 fn standard_network_uses_builtin_defaults() -> Result<()> {
     let layer = UserConfig {
         network: Some(NetworkSelection::Testnet4),

@@ -581,6 +581,12 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_SILENT_PAYMENTS", parse_bool]
                         toml native("silent_payments")
                     }
+                    /// Enable the optional BIP337 compressrawtransaction and decompressrawtransaction RPCs.
+                    compressed_transactions as compressed_transactions: Option<bool> {
+                        cli[#[arg(long = "compressed-transactions", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_COMPRESSED_TRANSACTIONS", parse_bool]
+                        toml native("compressed_transactions")
+                    }
                     /// JSON-RPC bind address.
                     bind as rpc_bind: Option<SocketAddr> {
                         cli[#[arg(long = "rpc-bind")]]

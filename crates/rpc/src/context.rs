@@ -2,21 +2,30 @@ use alloc::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
-    BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
+    BlockBodyReadError, BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot,
+    softfork_state,
 };
 use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes, unix_time_secs,
+    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
+    layout::ParsedBlock, unix_time_secs,
+};
+
+use crate::error::RpcError;
+
+use crate::compressed_tx::{
+    LookupError, MAX_RESOLVER_STATE_BYTES, MAX_RETAINED_BODIES, MAX_RETAINED_BODY_BYTES,
+    MAX_RETAINED_BYTES_TOTAL, MAX_RETAINED_INDEX_BYTES, PrevoutResolver, ResolvedPrevout,
 };
 
 use bitcoin::hex::DisplayHex as _;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, Script, Txid};
+use bitcoin_rs_primitives::{Amount, Script};
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
@@ -299,6 +308,8 @@ pub use bitcoin_rs_index::{
 pub struct ContextHandles {
     /// Enable the compiled experimental keyless tweak service. No wallet state.
     pub silent_payments: bool,
+    /// Enable the optional BIP337 compressed-transaction RPCs. No wallet state.
+    pub compressed_transactions: bool,
     /// Chain capability: tips, block log, UTXO set, block tree, transition
     /// barrier, and the chain-owned control surfaces.
     pub chain: ChainHandles,
@@ -526,6 +537,8 @@ pub struct MiningHandles {
 pub struct Context {
     #[cfg(feature = "silent-payments")]
     pub(crate) silent_payments: Option<Mutex<()>>,
+    /// Runtime opt-in for the BIP337 compressed-transaction RPCs.
+    pub(crate) compressed_transactions: bool,
     /// Chain capability: tips, block log, UTXO set, block tree, transition
     /// barrier, and the chain-owned control surfaces.
     pub chain: ChainHandles,
@@ -659,6 +672,7 @@ impl Default for ContextHandles {
     fn default() -> Self {
         Self {
             silent_payments: false,
+            compressed_transactions: false,
             chain: ChainHandles::default(),
             mempool: MempoolHandles::default(),
             indexes: IndexHandles::default(),
@@ -722,6 +736,7 @@ impl Context {
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {
             silent_payments,
+            compressed_transactions,
             chain,
             mempool,
             indexes,
@@ -735,6 +750,7 @@ impl Context {
         Self {
             #[cfg(feature = "silent-payments")]
             silent_payments: silent_payments.then(|| Mutex::new(())),
+            compressed_transactions,
             chain,
             mempool,
             indexes,
@@ -819,6 +835,305 @@ impl Context {
     #[must_use]
     pub(crate) fn zmq_notifications(&self) -> Vec<crate::zmq::ZmqNotifier> {
         self.zmq_publisher.active_notifiers()
+    }
+}
+
+/// Flat-output prefix row for one transaction in a retained body.
+struct FlatRow {
+    txid: Txid,
+    first_flat: u32,
+    output_count: u32,
+}
+
+/// One retained block body plus its flat-output prefix rows.
+struct RetainedBody {
+    height: u32,
+    bytes: Vec<u8>,
+    rows: Vec<FlatRow>,
+    index_bytes: usize,
+}
+
+/// Production [`PrevoutResolver`] for the BIP337 codec.
+///
+/// Consistency: snapshot isolation. Handlers construct and run the
+/// resolver inside `ChainHandles::with_stable_chainstate`, so the
+/// captured `applied_view()`, UTXO entries, txindex heights, and bodies
+/// all come from one transition-excluded chainstate read; a tip that
+/// moves mid-call cancels the call instead of mixing branches. It holds one
+/// block-render permit for the whole call, retains body bytes plus
+/// cumulative-output prefix rows per height, and parses each retained
+/// body in a scope that drops the parsed block before the next body is
+/// read. Missing, corrupt, and unreadable bodies stay distinct
+/// ([`LookupError`]) because the codec degrades them differently.
+pub(crate) struct RpcPrevoutResolver<'ctx> {
+    ctx: &'ctx Context,
+    view: AppliedView,
+    /// Held for the whole call; dropping releases the render slot.
+    _permit: BlockRenderPermit,
+    cancellation: LatchReader,
+    bodies: Vec<RetainedBody>,
+    retained_body_bytes: usize,
+    retained_index_bytes: usize,
+    memo: HashMap<OutPoint, Option<ResolvedPrevout>>,
+    state_bytes: usize,
+}
+
+impl<'ctx> RpcPrevoutResolver<'ctx> {
+    /// Captures the applied view and the call's single render permit.
+    ///
+    /// # Errors
+    /// Returns retryable `Misc` (-1) when both block-render slots are
+    /// busy; the caller never queues behind a render.
+    pub(crate) fn new(ctx: &'ctx Context, cancellation: LatchReader) -> Result<Self, RpcError> {
+        let permit = ctx
+            .try_acquire_block_render()
+            .ok_or_else(|| RpcError::Misc("block rendering is busy; retry".to_owned()))?;
+        Ok(Self {
+            ctx,
+            view: ctx.chain.applied_view(),
+            _permit: permit,
+            cancellation,
+            bodies: Vec::new(),
+            retained_body_bytes: 0,
+            retained_index_bytes: 0,
+            memo: HashMap::new(),
+            state_bytes: 0,
+        })
+    }
+
+    /// Whether the captured view still equals the live applied view.
+    #[must_use]
+    pub(crate) fn view_matches_current(&self) -> bool {
+        let current = self.ctx.chain.applied_view();
+        match (self.view.tip(), current.tip()) {
+            (None, None) => true,
+            (Some(before), Some(now)) => before.height == now.height && before.hash == now.hash,
+            _ => false,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_triggered() || !self.view_matches_current()
+    }
+
+    /// Ensures the body at `height` is retained, evicting oldest-first.
+    fn ensure_body(&mut self, height: u32) -> Result<(), LookupError> {
+        if self.bodies.iter().any(|body| body.height == height) {
+            return Ok(());
+        }
+        if self.is_cancelled() {
+            return Err(LookupError::Cancelled);
+        }
+        let record = self
+            .ctx
+            .chain
+            .block_by_height_in_view(&self.view, height)
+            .ok_or(LookupError::Missing)?;
+        let source = self
+            .ctx
+            .chain
+            .block_body_source
+            .as_ref()
+            .ok_or(LookupError::BodyMissing(height))?;
+        let bytes = source
+            .block_body(height, record.hash)
+            .map_err(|error| match error {
+                BlockBodyReadError::Corrupt(_) => LookupError::CorruptBody(height),
+                BlockBodyReadError::Read(_) => LookupError::BodyReadFailed(height),
+            })?
+            .ok_or(LookupError::BodyMissing(height))?;
+        if bytes.len() > MAX_RETAINED_BODY_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::BodyBytes,
+            ));
+        }
+        // Pre-charge the transient index space this body will occupy.
+        let index_bytes = bytes.len() / 60 * 40;
+        if index_bytes > MAX_RETAINED_INDEX_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::IndexBytes,
+            ));
+        }
+        let rows = {
+            let parsed =
+                ParsedBlock::parse_exact(&bytes).map_err(|_| LookupError::CorruptBody(height))?;
+            let mut rows = Vec::with_capacity(parsed.transactions().len());
+            let mut flat = 0_u32;
+            for parsed_tx in parsed.transactions() {
+                let tx = parsed_tx.materialize();
+                let output_count = u32::try_from(tx.outputs.len())
+                    .map_err(|_| LookupError::CorruptBody(height))?;
+                rows.push(FlatRow {
+                    txid: tx.txid(),
+                    first_flat: flat,
+                    output_count,
+                });
+                flat = flat
+                    .checked_add(output_count)
+                    .ok_or(LookupError::CorruptBody(height))?;
+            }
+            rows
+        };
+        while self.bodies.len() >= MAX_RETAINED_BODIES
+            || self.retained_body_bytes + bytes.len() > MAX_RETAINED_BODY_BYTES
+            || self.retained_index_bytes + index_bytes > MAX_RETAINED_INDEX_BYTES
+            || self.retained_body_bytes + self.retained_index_bytes + bytes.len() + index_bytes
+                > MAX_RETAINED_BYTES_TOTAL
+        {
+            let Some(evicted) = (!self.bodies.is_empty()).then(|| self.bodies.remove(0)) else {
+                return Err(LookupError::LimitExceeded(
+                    crate::compressed_tx::Limit::Bodies,
+                ));
+            };
+            self.retained_body_bytes -= evicted.bytes.len();
+            self.retained_index_bytes -= evicted.index_bytes;
+        }
+        self.retained_body_bytes += bytes.len();
+        self.retained_index_bytes += index_bytes;
+        self.bodies.push(RetainedBody {
+            height,
+            bytes,
+            rows,
+            index_bytes,
+        });
+        Ok(())
+    }
+
+    /// Materializes the transaction `txid` inside the retained body at
+    /// `height`; the parsed block is dropped before this returns.
+    fn body_tx(&mut self, height: u32, txid: &Txid) -> Result<Option<Tx>, LookupError> {
+        self.ensure_body(height)?;
+        let Some(body) = self.bodies.iter().find(|body| body.height == height) else {
+            return Err(LookupError::BodyMissing(height));
+        };
+        let parsed =
+            ParsedBlock::parse_exact(&body.bytes).map_err(|_| LookupError::CorruptBody(height))?;
+        for parsed_tx in parsed.transactions() {
+            let tx = parsed_tx.materialize();
+            if tx.txid() == *txid {
+                return Ok(Some(tx));
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_prevout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> Result<Option<ResolvedPrevout>, LookupError> {
+        if let Some(coin) = self.ctx.chain.utxo.get_entry(outpoint) {
+            return Ok(Some(ResolvedPrevout {
+                txout: coin.txout,
+                confirmed_height: Some(coin.height),
+            }));
+        }
+        let height = match self.ctx.indexes.derived_index.as_ref() {
+            Some(index) => index
+                .transaction_height(&outpoint.txid)
+                .map_err(|_| LookupError::Missing)?,
+            None => None,
+        };
+        let Some(height) = height else {
+            return Ok(None);
+        };
+        let Some(tx) = self.body_tx(height, &outpoint.txid)? else {
+            return Ok(None);
+        };
+        let vout = usize::try_from(outpoint.vout).map_err(|_| LookupError::Missing)?;
+        Ok(tx.outputs.get(vout).cloned().map(|txout| ResolvedPrevout {
+            txout,
+            confirmed_height: Some(height),
+        }))
+    }
+}
+
+impl PrevoutResolver for RpcPrevoutResolver<'_> {
+    fn prevout(&mut self, outpoint: &OutPoint) -> Result<Option<ResolvedPrevout>, LookupError> {
+        if let Some(cached) = self.memo.get(outpoint) {
+            return Ok(cached.clone());
+        }
+        let resolved = self.resolve_prevout(outpoint)?;
+        let charge = 96_usize
+            + resolved
+                .as_ref()
+                .map_or(0, |prevout| prevout.txout.script_pubkey.len());
+        let total = self
+            .state_bytes
+            .checked_add(charge)
+            .ok_or(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::State,
+            ))?;
+        if total > MAX_RESOLVER_STATE_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::State,
+            ));
+        }
+        self.state_bytes = total;
+        self.memo.insert(*outpoint, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn flat_output_index(
+        &mut self,
+        height: u32,
+        txid: &Txid,
+        vout: u32,
+    ) -> Result<Option<u32>, LookupError> {
+        match self.ensure_body(height) {
+            Err(LookupError::Missing) => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        let Some(body) = self.bodies.iter().find(|body| body.height == height) else {
+            return Err(LookupError::BodyMissing(height));
+        };
+        Ok(body
+            .rows
+            .iter()
+            .find(|row| row.txid == *txid && vout < row.output_count)
+            .map(|row| row.first_flat + vout))
+    }
+
+    fn outpoint_at(
+        &mut self,
+        height: u32,
+        flat_index: u32,
+    ) -> Result<Option<(OutPoint, ResolvedPrevout)>, LookupError> {
+        match self.ensure_body(height) {
+            Err(LookupError::Missing) => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        let located = self.bodies.iter().find_map(|body| {
+            if body.height != height {
+                return None;
+            }
+            body.rows.iter().find_map(|row| {
+                (flat_index >= row.first_flat && flat_index < row.first_flat + row.output_count)
+                    .then_some((row.txid, flat_index - row.first_flat))
+            })
+        });
+        let Some((txid, vout)) = located else {
+            return Ok(None);
+        };
+        let Some(tx) = self.body_tx(height, &txid)? else {
+            return Ok(None);
+        };
+        let vout_index = usize::try_from(vout).map_err(|_| LookupError::Missing)?;
+        let Some(txout) = tx.outputs.get(vout_index).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            OutPoint::new(txid, vout),
+            ResolvedPrevout {
+                txout,
+                confirmed_height: Some(height),
+            },
+        )))
+    }
+
+    fn cancelled(&self) -> bool {
+        self.is_cancelled()
     }
 }
 
