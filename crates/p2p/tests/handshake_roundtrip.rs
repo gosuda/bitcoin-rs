@@ -3,6 +3,7 @@
 //! Both test-local helpers here drive cursor-backed peers only; production
 //! code exercises the handshake through `run_inbound_handshake` and
 //! `start` on real streams.
+use std::collections::VecDeque;
 use std::io::{Cursor, Read, Write};
 
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
@@ -27,12 +28,26 @@ fn handshake_cursors(
     right: &mut Peer<Cursor<Vec<u8>>>,
 ) -> Result<(), PeerError> {
     let unpruned = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-    let left_messages = start(left, 1, 0, PeerRole::FullRelay, unpruned);
-    exchange(left, right, left_messages)?;
-    let right_messages = start(right, 2, 0, PeerRole::FullRelay, unpruned);
-    exchange(right, left, right_messages)?;
-    exchange(left, right, vec![Message::Verack])?;
-    exchange(right, left, vec![Message::Verack])?;
+    let mut pending: VecDeque<_> = start(left, 1, 0, PeerRole::FullRelay, unpruned)
+        .into_iter()
+        .map(|message| (true, message))
+        .collect();
+    pending.extend(
+        start(right, 2, 0, PeerRole::FullRelay, unpruned)
+            .into_iter()
+            .map(|message| (false, message)),
+    );
+    // Deliver responses too: negotiation is generated only after VERSION.
+    while let Some((from_left, message)) = pending.pop_front() {
+        let responses = if from_left {
+            left.send(&message)?;
+            dispatch_inbound(right, &message)?
+        } else {
+            right.send(&message)?;
+            dispatch_inbound(left, &message)?
+        };
+        pending.extend(responses.into_iter().map(|reply| (!from_left, reply)));
+    }
     let send_cmpct = Message::SendCmpct(SendCmpct {
         send_compact: false,
         version: COMPACT_BLOCK_VERSION,

@@ -14,7 +14,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | :--- | :--- |
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
-| Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
+| Protocol version advertised | `70017` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`); BIP434 extension to the Core 31.1 baseline |
 | Transport | BIP324 v2 by default with v1 detection and fallback; `--v2transport=false` keeps every connection on v1 (§7) |
 
 ### 2.1 Version-Bump Rules
@@ -35,14 +35,50 @@ Re-pinning to a newer Core version requires all of:
 
 ## 4. Handshake Contract
 
-An outbound bitcoin-rs connection sends, in order: `version`, `wtxidrelay` (BIP339), `sendaddrv2` (BIP155), `sendheaders` (BIP130). An inbound connection receives `version` and answers with the same four messages, then `verack` completes readiness (`crates/p2p/src/handshake.rs`, `dispatch.rs`).
+An outbound bitcoin-rs connection initially sends only `version`. Upon receiving
+the remote `version`, either direction produces `wtxidrelay` (BIP339),
+`sendaddrv2` (BIP155), `sendheaders` (BIP130), then `verack`, once. An inbound
+connection sends its own `version` before those responses. Existing preference
+messages retain their behavior; BIP434 advertisements must additionally wait for
+a remote version of at least `70017`. No BIP434 extensions are currently enabled,
+so no `feature` advertisements are generated. BIP339/BIP155 are not migrated to
+BIP434. The existing post-verack `sendcmpct(false, 2)` remains in place.
+
+BIP434 v1.0.0 is implemented against
+[`bitcoin/bips` BIP434](https://github.com/bitcoin/bips/blob/master/bip-0434.md)
+and Core's implementation at
+[`8598ec220450b05eff03fc1d1c81f51269cca247`](https://github.com/bitcoin/bitcoin/commit/8598ec220450b05eff03fc1d1c81f51269cca247).
+This does not repin the Core 31.1 baseline or establish live BIP434 interoperability.
+`feature` uses BIP324 short ID 37 (or the long command form); unimplemented
+IDs 29–36 remain ignored. Feature IDs are 4–80 bytes, configuration is 0–512
+bytes, both lengths use minimal CompactSize, and decoding consumes the entire
+payload. Printable ASCII is recommended by the BIP, not required by the decoder.
+The maximum valid payload is 596 bytes; existing transport bounds still apply.
+
+The FSM accepts `feature` only after a `version >= 70017` and before receiving
+the remote `verack`. Unknown IDs, including repeats, are discarded after codec
+validation, without retained per-feature state or deadline extension. Later
+extensions must own their recognized configuration in existing connection state
+and publish only the completed negotiation to relay consumers. The handshake
+send owner refuses `feature` before a suitable remote version or after its own
+successful `verack` write. Receiving the remote verack does not close that local
+send window. The asynchronous writer queue refuses feature advertisements;
+they can only be sent through the handshake owner. Invalid payloads and advertisements outside the receive window
+follow the existing protocol-error and permission policy in section 6.
+
+Deterministic evidence: `wire_codec::bip434_feature_codec_checks_bounds_and_exact_consumption`,
+the `fsm` and `handshake` BIP434 window tests, `connection`'s BIP434 queue/credit
+test, `bip324::msg_type` tests, and
+`listener::v2_transport_tests::bip434_pre_verack_features_and_legacy_sessions_over_both_transports`.
+The socket test exercises the real inbound listener with 70015, 70016 and 70017
+clients over both transports and verifies readiness with a ping response.
 
 
 The `version` message pins:
 
 | Field | Value | Core 31.1 comparison |
 | :--- | :--- | :--- |
-| `version` | `70016` | matches Core's latest protocol version |
+| `version` | `70017` | BIP434 extension; Core 31.1 baseline remains `70016` |
 | `services` | `NETWORK \| WITNESS`, or `NETWORK_LIMITED \| WITNESS` when `storage.prune_target_mb > 0`; adds `P2P_V2` while `v2transport` is on (the default) and `COMPACT_FILTERS` only when the optional filter index is ready | Core derives the base set from the prune setting (`init.cpp:2022-2026`): a pruned node never advertises `NODE_NETWORK`. `--blockfilterindex` defaults off and requires unpruned history. `BLOOM` remains unsupported. |
 | `relay` | `true` on a full-relay connection, `false` on a block-relay-only dial | matches Core's per-connection preference (`PushNodeVersion`, `net_processing.cpp:1651-1689`) |
 | `user_agent` | `/bitcoin-rs:<version>/` | distinct subver string; Core records it in `getpeerinfo.subver` |
@@ -52,17 +88,18 @@ The `version` message pins:
 Rules, each enforced by the FSM (`crates/p2p/src/fsm.rs`) and identical to Core's posture unless noted:
 
 - `verack` before `version` → disconnect. Duplicate `version` after completion → disconnect (Core: misbehavior; ours: disconnect without ban scoring, §6).
-- Any non-handshake message before readiness → disconnect. Core has the same rule except for a small handshake whitelist (`sendtxrcncl`); see §7 for the one practical divergence.
+- Unknown commands after `version` are ignored during negotiation (BIP434). Other non-handshake traffic before readiness is rejected.
 - After `verack`, unknown commands are ignored and the connection stays up — identical to Core's handling of unrecognized commands.
 
 ## 5. Message Surface
 
-The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**36**). That table is the authority for names; this section owns each command's status and is the Core-comparison commentary, kept in sync with `COMMANDS` by hand in the same change-set.
+The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**37**). That table is the authority for names; this section owns each command's status and is the Core-comparison commentary, kept in sync with `COMMANDS` by hand in the same change-set.
 
 | Command | Behavior and Core 31.1 comparison |
 | :--- | :--- | :--- |
 | `version` | negotiated | §4. |
 | `verack` | negotiated | §4. |
+| `feature` | BIP434 | Typed, bounded advertisements during the version/verack window; unknown IDs are ignored. Extension to Core 31.1, with short ID 37 on v2. No feature is currently advertised. |
 | `wtxidrelay` | negotiated | BIP339. Sent in handshake; inbound marks the peer wtxid-relay capable. |
 | `sendaddrv2` | negotiated | BIP155. Sent in handshake; inbound tracked. |
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
@@ -182,6 +219,7 @@ transport I/O/timeouts, and local encoding failures never discourage an IP.
 | Condition | bitcoin-rs action for an ordinary automatic nonlocal peer | Core 31.1 reference |
 | :--- | :--- | :--- |
 | Unknown command after readiness | ignore | ignore |
+| Unknown command after version, before remote verack | ignore without extending the handshake deadline | BIP434 recommendation; this also allows unknown `sendtxrcncl` negotiation without enabling reconciliation |
 | Decoded compact-filter requests with a non-basic type, unknown/unapplied stop, inverted range or more than 1,000 filters / 2,000 hashes | ignore and keep the connection open, without discouragement | `PrepareBlockFilterRequest` disconnects without discouragement; this is a deliberate connection-policy deviation, tested by the compact-filter wire probe |
 | Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
 | Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
@@ -242,7 +280,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 `net_processing.cpp:319` under the `INVENTORY_BROADCAST_*` delays at `:163-166`):
 
 1. **BIP324 v2 transport**: on by default, as in Core 31. A live run against an unmodified Core 31.1 recorded v2 in both connection directions with matching session ids, ping answers and a full header and block sync over each, plus a v2-off node syncing over v1 from v2 Core (https://github.com/gosuda/bitcoin-rs/pull/1612; CORE-06). No deviation from Core is known; the v1 retry after an unanswered v2 dial, decoy packets and rekeying rest on in-tree tests only. `--v2transport=false` keeps every connection on v1 and stops advertising `NODE_P2P_V2`. BIP324 does not authenticate peers, so it does not stop an active MITM or eclipsing peer.
-2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
+2. **BIP330 `sendtxrcncl`**: not implemented. It decodes as `Unknown` and is ignored after `version`, including during negotiation, and after readiness. Reconciliation is never enabled.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: one P2P-owned `AddressBook` retains canonical
    endpoints, their original source and health, and up to eight distinct New

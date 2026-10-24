@@ -6,6 +6,22 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
     match message {
         Message::Version(version) => receive_version(peer, version.clone()),
         Message::Verack => receive_verack(peer),
+        Message::Feature { .. } => {
+            if peer
+                .remote_version
+                .as_ref()
+                .is_none_or(|version| version.version < crate::wire::FEATURE_VERSION)
+                || peer.received_verack
+            {
+                return Err(PeerError::Misbehavior(
+                    "feature outside negotiated pre-verack window",
+                ));
+            }
+            // No BIP434 extensions are enabled yet. Unknown IDs (including
+            // duplicate advertisements) are ignored without retaining state.
+            Ok(())
+        }
+        Message::Unknown { .. } if peer.remote_version.is_some() && !peer.received_verack => Ok(()),
         Message::SendHeaders => {
             ensure_negotiating_or_ready(peer)?;
             peer.capabilities.send_headers = true;
@@ -47,6 +63,9 @@ fn receive_version<S>(
     peer: &mut Peer<S>,
     version: bitcoin::p2p::message_network::VersionMessage,
 ) -> Result<(), PeerError> {
+    if peer.remote_version.is_some() {
+        return Err(PeerError::Misbehavior("duplicate version message"));
+    }
     match peer.state {
         PeerState::Disconnected | PeerState::VersionExchange | PeerState::Verack => {
             peer.remote_version = Some(version);
@@ -150,6 +169,37 @@ mod tests {
     fn verack_before_version_is_rejected() {
         let mut peer = fresh_peer();
         assert!(step(&mut peer, &Message::Verack).is_err());
+    }
+
+    #[test]
+    fn bip434_receive_window_and_unknown_features() -> Result<(), Box<dyn std::error::Error>> {
+        let feature = Message::Feature {
+            id: b"unknown".to_vec(),
+            data: vec![],
+        };
+        let mut peer = fresh_peer();
+        assert!(step(&mut peer, &feature).is_err());
+        let mut version = version_message();
+        version.version = crate::wire::FEATURE_VERSION;
+        step(&mut peer, &Message::Version(version.clone()))?;
+        for _ in 0..1000 {
+            step(&mut peer, &feature)?;
+        }
+        step(
+            &mut peer,
+            &Message::Unknown {
+                command: "future".parse()?,
+                payload: vec![],
+            },
+        )?;
+        assert_eq!(peer.state, PeerState::Verack);
+        assert!(step(&mut peer, &Message::Version(version)).is_err());
+        step(&mut peer, &Message::Verack)?;
+        assert!(step(&mut peer, &feature).is_err());
+        let mut old = fresh_peer();
+        step(&mut old, &Message::Version(version_message()))?;
+        assert!(step(&mut old, &feature).is_err());
+        Ok(())
     }
 
     #[test]

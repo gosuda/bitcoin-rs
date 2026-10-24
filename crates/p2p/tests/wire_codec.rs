@@ -27,6 +27,63 @@ use bitcoin_rs_p2p::wire::{
 use sha2::{Digest, Sha256};
 
 #[test]
+fn bip434_feature_codec_checks_bounds_and_exact_consumption()
+-> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin_rs_p2p::wire::encode_payload;
+
+    // Independent byte encoding, including non-UTF8 IDs (ASCII is a SHOULD).
+    for id in [b"BIP999".to_vec(), vec![0, 255, 1, 127], vec![b'x'; 80]] {
+        for data in [Vec::new(), vec![7; 252], vec![7; 253], vec![7; 512]] {
+            let message = Message::Feature {
+                id: id.clone(),
+                data: data.clone(),
+            };
+            let mut expected = vec![u8::try_from(id.len())?];
+            expected.extend_from_slice(&id);
+            VarInt(u64::try_from(data.len())?).consensus_encode(&mut expected)?;
+            expected.extend_from_slice(&data);
+            assert_eq!(encode_payload(&message)?, expected);
+            let (decoded, _) = read_message(
+                &mut Cursor::new(message_frame(b"feature", &expected)?),
+                Magic::BITCOIN,
+            )?;
+            assert_eq!(decoded, message);
+        }
+    }
+    for payload in [
+        vec![],
+        vec![0, 0],
+        vec![3, b'a', b'b', b'c', 0],
+        vec![81],
+        vec![4, b'a'],
+        b"\x04abcd".to_vec(),
+        b"\xfd\x04\x00abcd\x00".to_vec(), // Nonminimal identifier length.
+        b"\x04abcd\xfd\x00\x00".to_vec(), // Nonminimal data length.
+        b"\x04abcd\x01".to_vec(),         // Truncated data.
+        b"\x04abcd\x00\x00".to_vec(),     // Trailing byte.
+        b"\x04abcd\xfd\x01\x02".to_vec(), // 513-byte data declaration.
+        b"\x04abcd\xff\xff\xff\xff\xff\xff\xff\xff\xff".to_vec(),
+    ] {
+        assert!(
+            read_message(
+                &mut Cursor::new(message_frame(b"feature", &payload)?),
+                Magic::BITCOIN
+            )
+            .is_err(),
+            "{payload:?}"
+        );
+    }
+    for (id, data) in [
+        (vec![0; 3], vec![]),
+        (vec![0; 81], vec![]),
+        (vec![0; 4], vec![0; 513]),
+    ] {
+        assert!(encode_payload(&Message::Feature { id, data }).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError> {
     let messages = vec![
         Message::Ping(42),

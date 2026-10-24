@@ -20,7 +20,10 @@ use thiserror::Error;
 use crate::inv::MAX_INV_PER_MSG;
 
 /// Latest protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u32 = 70_016;
+pub const PROTOCOL_VERSION: u32 = 70_017;
+
+/// First protocol version supporting BIP434 feature announcements.
+pub const FEATURE_VERSION: u32 = 70_017;
 
 /// Maximum payload length of one network message on either transport: Bitcoin
 /// Core's `MAX_PROTOCOL_MESSAGE_LENGTH`. No block serializes above it.
@@ -123,6 +126,14 @@ pub enum Message {
     AddrV2(Vec<AddrV2Message>),
     /// `sendaddrv2`
     SendAddrV2,
+    /// BIP434 advertisement. IDs are bytes: printable ASCII is recommended,
+    /// but non-ASCII and non-UTF8 identifiers must remain ignorable.
+    Feature {
+        /// Globally unique feature identifier (4–80 bytes).
+        id: Vec<u8>,
+        /// Feature-specific configuration (at most 512 bytes).
+        data: Vec<u8>,
+    },
     /// Any other message.
     Unknown {
         /// The command of this message.
@@ -172,6 +183,7 @@ impl Message {
             Self::WtxidRelay => "wtxidrelay",
             Self::AddrV2(_) => "addrv2",
             Self::SendAddrV2 => "sendaddrv2",
+            Self::Feature { .. } => "feature",
             Self::Unknown { command, .. } => return command.clone(),
         };
         #[expect(clippy::expect_used)]
@@ -208,7 +220,11 @@ impl Message {
             Self::GetBlocks(message) => NetworkMessage::GetBlocks(message.clone()),
             Self::GetHeaders(message) => NetworkMessage::GetHeaders(message.clone()),
             Self::MemPool => NetworkMessage::MemPool,
-            Self::Tx(_) | Self::Block(_) | Self::BlockPayload(_) | Self::Headers(_) => {
+            Self::Tx(_)
+            | Self::Block(_)
+            | Self::BlockPayload(_)
+            | Self::Headers(_)
+            | Self::Feature { .. } => {
                 unreachable!("native payloads are encoded directly")
             }
             Self::SendHeaders => NetworkMessage::SendHeaders,
@@ -628,6 +644,7 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .checked_add(entries_len)
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
+        Message::Feature { .. } => encode_payload(message)?.len(),
         other => {
             let envelope = other.envelope();
             bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
@@ -646,6 +663,19 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
         Message::Tx(tx) => tx.consensus_encode(&mut payload),
         Message::Block(block) => block.consensus_encode(&mut payload),
         Message::BlockPayload(bytes) => payload.extend_from_slice(bytes),
+        Message::Feature { id, data } => {
+            validate_feature_lengths(id.len(), data.len())?;
+            encode_varint(
+                &mut payload,
+                u64::try_from(id.len()).map_err(|_| PeerError::PayloadTooLarge(id.len()))?,
+            );
+            payload.extend_from_slice(id);
+            encode_varint(
+                &mut payload,
+                u64::try_from(data.len()).map_err(|_| PeerError::PayloadTooLarge(data.len()))?,
+            );
+            payload.extend_from_slice(data);
+        }
         Message::Headers(headers) => {
             let count = u64::try_from(headers.len())
                 .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
@@ -713,6 +743,7 @@ pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, P
         "wtxidrelay" => empty_payload(payload, Message::WtxidRelay)?,
         "addrv2" => Message::AddrV2(decode_addrv2(payload)?),
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
+        "feature" => decode_feature(payload)?,
         _ => {
             debug_assert!(
                 !crate::compat::is_typed_command(command),
@@ -725,6 +756,34 @@ pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, P
         }
     };
     Ok(message)
+}
+
+fn validate_feature_lengths(id: usize, data: usize) -> Result<(), PeerError> {
+    if !(4..=80).contains(&id) || data > 512 {
+        return Err(PeerError::Misbehavior("invalid feature lengths"));
+    }
+    Ok(())
+}
+
+fn decode_feature(payload: &[u8]) -> Result<Message, PeerError> {
+    let mut reader = payload;
+    let id_len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let id_len = usize::try_from(id_len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    validate_feature_lengths(id_len, 0)?;
+    let id = reader
+        .get(..id_len)
+        .ok_or(PeerError::Protocol("truncated feature identifier"))?;
+    reader = &reader[id_len..];
+    let data_len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let data_len = usize::try_from(data_len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    validate_feature_lengths(id_len, data_len)?;
+    if data_len != reader.len() {
+        return Err(PeerError::Misbehavior("invalid feature data length"));
+    }
+    Ok(Message::Feature {
+        id: id.to_vec(),
+        data: reader.to_vec(),
+    })
 }
 
 fn decode_addr(payload: &[u8]) -> Result<Vec<(u32, bitcoin::p2p::Address)>, PeerError> {

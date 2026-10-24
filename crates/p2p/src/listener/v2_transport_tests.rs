@@ -110,6 +110,85 @@ fn handshake_and_ping(addr: SocketAddr, stream: TcpStream, negotiated: Negotiate
 }
 
 #[test]
+fn bip434_pre_verack_features_and_legacy_sessions_over_both_transports() -> TestResult {
+    for v2 in [false, true] {
+        for version in [70_015, 70_016, wire::FEATURE_VERSION] {
+            let (listener_shared, table) = shared(v2);
+            let (addr, shutdown, handle) = listen(listener_shared)?;
+            let result = (|| -> TestResult {
+                let mut stream = connect(addr)?;
+                let negotiated = if v2 {
+                    let mut handshake =
+                        Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(434));
+                    establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?
+                } else {
+                    Negotiated::v1(MAGIC)
+                };
+                let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+                let mut announcement = crate::handshake::version_message(
+                    434,
+                    0,
+                    PeerRole::FullRelay,
+                    ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                );
+                announcement.version = version;
+                peer.send(&Message::Version(announcement))?;
+                // Read our server's complete handshake without sending verack.
+                // Receipt of its verack must not close its receive window.
+                let until = deadline();
+                let mut commands = Vec::new();
+                loop {
+                    if Instant::now() >= until {
+                        return Err("server handshake timed out".into());
+                    }
+                    match peer.read_message() {
+                        Ok(Some((message, _))) => {
+                            commands.push(message.command().to_string());
+                            if matches!(message, Message::Version(_)) {
+                                crate::fsm::step(&mut peer, &message)?;
+                            }
+                            if message == Message::Verack {
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(PeerError::Io(error)) if crate::recv::is_poll_timeout(&error) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                assert_eq!(
+                    commands,
+                    [
+                        "version",
+                        "wtxidrelay",
+                        "sendaddrv2",
+                        "sendheaders",
+                        "verack"
+                    ]
+                );
+                if version >= wire::FEATURE_VERSION {
+                    for id in [b"BIP999".to_vec(), b"BIP999".to_vec(), vec![0, 255, 1, 127]] {
+                        peer.send(&Message::Feature {
+                            id,
+                            data: vec![0; 512],
+                        })?;
+                    }
+                }
+                peer.send(&Message::Verack)?;
+                peer.send(&Message::Ping(434))?;
+                read_until(&mut peer, &Message::Pong(434))?;
+                Ok(())
+            })();
+            table.cancel_all();
+            shutdown.store(true, Ordering::Relaxed);
+            handle.join().map_err(|_| "listener panicked")?;
+            result?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
     let (listener_shared, _) = shared(true);
     let (addr, shutdown, handle) = listen(listener_shared)?;

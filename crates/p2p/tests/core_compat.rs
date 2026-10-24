@@ -20,7 +20,7 @@ use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
 };
-use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
+use bitcoin_rs_p2p::handshake::{start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
@@ -442,8 +442,8 @@ fn version_message_pins_core_31_handshake_fields() {
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
         u64::from(PROTOCOL_VERSION),
-        70_016,
-        "pinned Core 31.1 protocol version"
+        70_017,
+        "BIP434 protocol version (extension to the Core 31.1 baseline)"
     );
     let expected_services = {
         let mut services = ServiceFlags::NETWORK;
@@ -464,7 +464,7 @@ fn version_message_pins_core_31_handshake_fields() {
 }
 
 #[test]
-fn outbound_handshake_sends_version_then_core_feature_set() {
+fn outbound_handshake_waits_for_remote_version_before_negotiating() -> Result<(), Box<dyn Error>> {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
     let messages = start(
         &mut peer,
@@ -475,13 +475,19 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
     );
 
     assert_eq!(peer.state, PeerState::VersionExchange);
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 1);
     assert!(matches!(messages.first(), Some(Message::Version(_))));
+    let responses = dispatch_inbound(&mut peer, &version_for_handshake())?;
     assert_eq!(
-        &messages[1..],
-        &feature_messages(),
-        "BIP339 wtxidrelay, BIP155 sendaddrv2, BIP130 sendheaders — Core 31 order"
+        responses,
+        [
+            Message::WtxidRelay,
+            Message::SendAddrV2,
+            Message::SendHeaders,
+            Message::Verack
+        ]
     );
+    Ok(())
 }
 
 #[test]
