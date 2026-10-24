@@ -468,7 +468,6 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate() -> TestResult
             headers: vec![far_future_header(genesis.compute_hash(), 1)?],
             source: Some(a_source),
             wire_response: false,
-            body_fetch_owned: false,
         })?;
         sync.tick();
 
@@ -948,7 +947,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         headers: vec![block1.header, block2.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert_eq!(
@@ -2726,7 +2724,6 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         headers: vec![block2.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     Ok(PunishmentFixture {

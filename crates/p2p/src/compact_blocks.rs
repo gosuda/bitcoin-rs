@@ -104,8 +104,6 @@ struct Pending {
     /// Approximate retained bytes (prefill bodies + short IDs + filled bodies).
     retained_bytes: usize,
     deadline: Instant,
-    /// A full-block fallback was already issued; late `blocktxn` is ignored.
-    fallback: bool,
 }
 
 impl Reconstruction {
@@ -214,7 +212,6 @@ impl Reconstruction {
                 missing: missing.clone(),
                 retained_bytes,
                 deadline: now + PENDING_DEADLINE,
-                fallback: false,
             },
         );
         Outcome::RequestMissing(GetBlockTxn {
@@ -226,44 +223,36 @@ impl Reconstruction {
     }
 
     /// Receive-side entry for `blocktxn`.
+    ///
+    /// Absence is terminal: the entry is removed on entry, so any count,
+    /// decode, slot, or Merkle failure releases `filled` and
+    /// `retained_bytes` at once with one `Fallback`. A later `blocktxn`
+    /// finds no entry and returns `Idle`.
     pub fn receive_blocktxn(&mut self, txn: &BlockTxn, now: Instant) -> Outcome {
         self.prune(now);
         let hash = native_block_hash(txn.transactions.block_hash);
-        let Some(entry) = self.pending.get_mut(&hash) else {
+        let Some(mut entry) = self.pending.remove(&hash) else {
             return Outcome::Idle;
         };
-        if entry.fallback {
-            return Outcome::Idle;
-        }
         if txn.transactions.transactions.len() != entry.missing.len() {
-            entry.fallback = true;
             return Outcome::Fallback(hash);
         }
         for (slot, tx) in entry.missing.iter().zip(&txn.transactions.transactions) {
             let Some(body) = native_tx(tx) else {
-                entry.fallback = true;
                 return Outcome::Fallback(hash);
             };
             let Some(slot) = usize::try_from(*slot)
                 .ok()
                 .filter(|slot| *slot < entry.filled.len())
             else {
-                entry.fallback = true;
                 return Outcome::Fallback(hash);
             };
             entry.filled[slot] = Some(body);
         }
         let filled = std::mem::take(&mut entry.filled);
         let Ok(block) = complete_block(entry.header, filled) else {
-            // The taken bodies are dropped, so no byte stays retained: without
-            // this reset the dead entry keeps its charge until the deadline
-            // and later compact reconstructions can be refused for bytes that
-            // no longer exist.
-            entry.retained_bytes = 0;
-            entry.fallback = true;
             return Outcome::Fallback(hash);
         };
-        self.pending.remove(&hash);
         Outcome::Complete(block)
     }
 

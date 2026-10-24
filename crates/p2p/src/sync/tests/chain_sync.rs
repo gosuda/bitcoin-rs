@@ -477,7 +477,6 @@ fn frontier_and_eviction_probes_do_not_overwrite_live_requests() -> TestResult {
         headers: vec![blocks[0].header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     let _ = rx.try_iter().collect::<Vec<_>>();
@@ -582,7 +581,6 @@ fn chain_sync_probe_holds_request_for_its_response_window() -> TestResult {
         headers: vec![blocks[0].header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     let _ = rx.try_iter().collect::<Vec<_>>();
@@ -742,7 +740,6 @@ fn empty_chain_sync_probe_keeps_original_five_second_pacing() -> TestResult {
         headers: Vec::new(),
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
 

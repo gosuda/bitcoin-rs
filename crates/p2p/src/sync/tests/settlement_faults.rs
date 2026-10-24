@@ -276,7 +276,6 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
         source: Some(current_source(&peers, peer_addr)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
@@ -412,7 +411,6 @@ pub(crate) fn deliver_headers(
         headers,
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     Ok(())
 }

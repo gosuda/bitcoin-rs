@@ -246,7 +246,6 @@ fn empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement() -> 
         headers: Vec::new(),
         source: Some(first),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     let answered = pending_request(&sync, first).ok_or("the empty reply lost its request")?;
@@ -303,7 +302,6 @@ fn empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement() -> 
         headers: Vec::new(),
         source: Some(second),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     let answered = pending_request(&sync, second).ok_or("the empty answer lost its pacing gate")?;
@@ -355,7 +353,6 @@ fn unowned_below_floor_peer_receives_one_tracked_chain_sync_probe() -> TestResul
         headers: chain_on(&genesis, 0, PAGE),
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert_eq!(
@@ -1000,7 +997,6 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
             headers: vec![mine_header(genesis.compute_hash(), 5_000)],
             source: Some(source),
             wire_response: false,
-            body_fetch_owned: false,
         })
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     sync.tick();

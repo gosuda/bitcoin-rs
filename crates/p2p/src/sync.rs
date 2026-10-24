@@ -461,22 +461,47 @@ impl BlockSync {
             .or_insert(hash);
     }
 
-    /// Records an in-flight body fetch the window does not own yet — the
-    /// compact path's `getblocktxn` or fallback `getdata` — so the body
-    /// counts as requested if it arrives before its header drains. The mark
-    /// resolves into a real pending entry on the next header drain
-    /// (`note_owned_body_fetch`/`resolve_owned_body_fetches`).
+    /// Linearizably enqueues one deferred owned body fetch and publishes its
+    /// ownership only after the follow-up left on the same connection.
     ///
-    /// PRE: `source` issued the fetch for `hash`.
-    /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
-    /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
-    /// mark is dropped at resolve time, never attributed to a replacement.
-    pub(crate) fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
-        if !self.peer_table.is_current(source) {
-            return;
-        }
-        let mut scheduler = self.scheduler.lock();
-        defer_owned_body_fetch(&mut scheduler, source, hash);
+    /// The exact-source peer-table guard (`PeerTable::with_current`, holding
+    /// the `parking_lot::RwLockReadGuard<TableView>` entries read guard) is
+    /// held across the scheduler lock, the nonblocking reserved-credit
+    /// `enqueue`, and the ownership publication, so a same-address
+    /// replacement cannot register between validation and publication. The
+    /// tree guard is released before this call; only the
+    /// `peer_table -> scheduler` order is taken here. `enqueue` spends the
+    /// held `ProductionSink` reservation through `send_with` and nonblocking
+    /// `outbound.try_send`, so no blocking send or credit-free write occurs
+    /// under the lock.
+    ///
+    /// PRE: `enqueue` sends the `GetBlockTxn`/`GetData` follow-up for `hash`
+    /// on `source`'s connection under its reply reservation and answers
+    /// whether it left the wire.
+    /// POST: on `false` nothing is published and the answer is `false`; on
+    /// `true` `(source, hash)` is deduplicated under
+    /// `MAX_DEFERRED_OWNED_FETCHES` and the answer is `true`. A stale source
+    /// publishes nothing and answers `false`.
+    /// INVARIANT: `send_then` is not used here because it would charge a new
+    /// budget credit instead of spending the held reply reservation; the
+    /// `with_current` guard plus the reserved-credit `enqueue` is the
+    /// linearizable path.
+    pub(crate) fn enqueue_owned_body_fetch(
+        &self,
+        source: PeerSource,
+        hash: Hash256,
+        enqueue: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut published = false;
+        let admitted = self.peer_table.with_current(source, || {
+            let mut scheduler = self.scheduler.lock();
+            if !enqueue() {
+                return;
+            }
+            defer_owned_body_fetch(&mut scheduler, source, hash);
+            published = true;
+        });
+        admitted && published
     }
 
     /// Whether `source` already owns the download of `hash`.

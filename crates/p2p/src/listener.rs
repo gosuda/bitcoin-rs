@@ -343,13 +343,11 @@ impl ConnectionShared {
         source: crate::PeerSource,
         headers: Vec<bitcoin_rs_primitives::Header>,
         wire_response: bool,
-        body_fetch_owned: bool,
     ) {
         if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
-            body_fetch_owned,
         }) {
             tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound headers channel disconnected");
         } else {
@@ -415,7 +413,7 @@ impl ConnectionShared {
             return;
         };
         if self.forward_block(block, serialized, source, Some(credit)) {
-            self.send_headers(source, vec![header], false, false);
+            self.send_headers(source, vec![header], false);
         }
     }
 
@@ -2359,7 +2357,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 }
             }
             crate::Message::Headers(headers) => {
-                shared.send_headers(lease.source(peer_addr), headers, true, false);
+                shared.send_headers(lease.source(peer_addr), headers, true);
             }
             crate::Message::Block(block) => {
                 shared.send_block(lease, peer_addr, block, raw);
@@ -2672,9 +2670,10 @@ fn learn_addresses(
 /// and the loop reserved `sink`'s reply credit for it ([`reply_bound`]).
 /// POST: Forward the outcome through `shared`: a finished block to the
 /// block sink, a follow-up request to the same connection under the reply
-/// credit.
-/// INVARIANT: A header forward marks `body_fetch_owned` exactly when the
-/// outcome itself fetches the body, and is never a `headers` response.
+/// credit through the single linearizable enqueue.
+/// INVARIANT: A compact header forward is never a `headers` response; the
+/// follow-up (if any) leaves only inside the `enqueue_owned_body_fetch`
+/// closure, which publishes ownership atomically with the send.
 fn process_compact_wire_message(
     message: &crate::Message,
     compact_reconstruction: &mut crate::compact_blocks::Reconstruction,
@@ -2699,7 +2698,7 @@ fn process_compact_wire_message(
             hash = %header.compute_hash(),
             "p2p compact block header does not earn reconstruction"
         );
-        shared.send_headers(lease.source(peer_addr), vec![header], false, false);
+        shared.send_headers(lease.source(peer_addr), vec![header], false);
         return;
     }
 
@@ -2721,81 +2720,72 @@ fn process_compact_wire_message(
     } else {
         None
     };
-    // When the outcome itself fetches the body (`RequestMissing` issues
-    // a `getblocktxn`, `Fallback` a full-block `getdata`), the window
-    // must record that in-flight fetch instead of scheduling a
-    // duplicate request for the freshly admitted tip.
-    let body_fetch_owned = matches!(
-        outcome,
-        crate::compact_blocks::Outcome::RequestMissing(_)
-            | crate::compact_blocks::Outcome::Fallback(_)
-    );
-    // Ownership — the header's `body_fetch_owned` flag and the scheduler
-    // mark alike — is recorded only once the follow-up request actually
-    // left on the connection: a failed send enqueues nothing, and marking
-    // either path anyway would suppress recovery of that block from
-    // another peer.
-    let fetch_issued = handle_compact_outcome(outcome, sink, peer_addr, shared);
+    // Ownership is published only once the follow-up actually leaves on the
+    // connection: a failed send enqueues nothing, and publishing anyway
+    // would suppress recovery of that block from another peer. Exactly one
+    // enqueue site exists; there is no direct follow-up send outside the
+    // closure and no second enqueue.
+    let source = lease.source(peer_addr);
+    if let Some((hash, follow_up)) = handle_compact_outcome(outcome, sink, peer_addr, shared)
+        && let Some(sync) = shared.block_sync.as_ref()
+    {
+        sync.enqueue_owned_body_fetch(source, hash, || sink.send(follow_up).is_ok());
+    }
     if let Some(header) = announced_header {
-        let fetch_owned = body_fetch_owned && fetch_issued;
-        shared.send_headers(lease.source(peer_addr), vec![header], false, fetch_owned);
-        if fetch_owned && let Some(sync) = shared.block_sync.as_ref() {
-            sync.record_owned_body_fetch(
-                lease.source(peer_addr),
-                bitcoin_rs_primitives::Hash256::from(header.compute_hash()),
-            );
-        }
+        shared.send_headers(source, vec![header], false);
     }
 }
 
 /// Applies one BIP152 receive-side outcome: a finished block enters the
-/// ordinary block sink exactly like a `block` message, a missing list
-/// becomes a `getblocktxn` request on the same connection, and an
-/// unrecoverable reconstruction falls back to one full-block `getdata` —
+/// ordinary block sink exactly like a `block` message; a missing list or an
+/// unrecoverable reconstruction becomes a `Some((hash, message))` follow-up
+/// the caller sends exactly once inside `enqueue_owned_body_fetch` —
 /// the node's download window resolves both by hash on arrival, so no
 /// request ownership is lost or duplicated.
 ///
 /// PRE: `outcome` came from a message of the connection `sink`'s lease
 /// identifies, and `sink` holds the reply reservation taken for it.
-/// POST: A finished block reaches `shared`'s block sink; a follow-up goes to
-/// the same connection, queued under that reservation.
-/// INVARIANT: A refused follow-up is dropped with a debug log; it never
-/// ends the connection here.
+/// POST: A finished block reaches `shared`'s block sink and the answer is
+/// `None`; a follow-up is returned unsent for the single enqueue site and
+/// `Idle` returns `None`.
+/// INVARIANT: This function never sends the follow-up itself; the caller
+/// owns the one send inside the enqueue closure. Linearizability
+/// (exact-source peer-table guard across the scheduler lock, send, and
+/// publication) lives in `enqueue_owned_body_fetch`, not here.
 fn handle_compact_outcome(
     outcome: crate::compact_blocks::Outcome,
     sink: &ProductionSink<'_>,
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
-) -> bool {
+) -> Option<(bitcoin_rs_primitives::Hash256, crate::Message)> {
     let lease = sink.lease;
-    let mut fetch_issued = false;
-    let mut follow_up = |message: crate::Message| match sink.send(message) {
-        Ok(()) => fetch_issued = true,
-        Err(error) => {
-            tracing::debug!(peer_addr = %peer_addr, %error, "p2p compact-block follow-up dropped");
-        }
-    };
     match outcome {
         crate::compact_blocks::Outcome::Complete(block) => {
             let serialized = bitcoin_rs_primitives::consensus_bytes(&block);
             tracing::info!(peer_addr = %peer_addr, hash = %block.block_hash(), "p2p compact block reconstructed");
             shared.send_block(lease, peer_addr, block, serialized.into());
+            None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction missing");
-            follow_up(crate::Message::GetBlockTxn(request));
+            let hash = bitcoin_rs_primitives::Hash256::from(crate::inv::native_block_hash(
+                request.txs_request.block_hash,
+            ));
+            Some((hash, crate::Message::GetBlockTxn(request)))
         }
         crate::compact_blocks::Outcome::Fallback(hash) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction fallback");
-            follow_up(crate::Message::GetData(vec![
-                bitcoin::p2p::message_blockdata::Inventory::WitnessBlock(
-                    bitcoin::BlockHash::from_byte_array(*hash.as_bytes()),
-                ),
-            ]));
+            Some((
+                bitcoin_rs_primitives::Hash256::from(hash),
+                crate::Message::GetData(vec![
+                    bitcoin::p2p::message_blockdata::Inventory::WitnessBlock(
+                        bitcoin::BlockHash::from_byte_array(*hash.as_bytes()),
+                    ),
+                ]),
+            ))
         }
-        crate::compact_blocks::Outcome::Idle => {}
+        crate::compact_blocks::Outcome::Idle => None,
     }
-    fetch_issued
 }
 
 /// Feeds one receive-side BIP152 message into the loop's reconstruction
@@ -3637,7 +3627,7 @@ mod writer_shutdown_tests {
         let serialized = bytes::Bytes::from(block_bytes);
         let source = lease.source(addr);
 
-        shared.send_headers(source, Vec::new(), true, false);
+        shared.send_headers(source, Vec::new(), true);
         shared.send_block(&lease, addr, block, serialized.clone());
 
         assert_eq!(headers_rx.try_recv()?.source, Some(source));
@@ -4850,7 +4840,6 @@ mod block_forward_tests {
             headers: vec![block2.header],
             source: Some(source),
             wire_response: true,
-            body_fetch_owned: false,
         })?;
         sync.tick();
         assert!(
@@ -5041,17 +5030,24 @@ mod block_forward_tests {
         for _ in 0..3 {
             let announced = headers_rx.try_recv()?;
             assert_eq!(announced.headers.len(), 1, "each header is still announced");
-            assert!(!announced.body_fetch_owned);
         }
 
         // Another connection owning its body fetch does not count for this one.
-        sync.record_owned_body_fetch(other_source, Hash256::from(replayed.block_hash()));
+        assert!(sync.enqueue_owned_body_fetch(
+            other_source,
+            Hash256::from(replayed.block_hash()),
+            || true,
+        ));
         deliver(replayed)?;
         assert_reconstructed(0, 0, "ownership is by exact connection");
         assert_eq!(headers_rx.try_recv()?.headers.len(), 1);
 
         // The replayed block once this connection owns its body fetch.
-        sync.record_owned_body_fetch(source, Hash256::from(replayed.block_hash()));
+        assert!(sync.enqueue_owned_body_fetch(
+            source,
+            Hash256::from(replayed.block_hash()),
+            || true,
+        ));
         deliver(replayed)?;
         assert_reconstructed(1, 1, "this connection owns the replayed body fetch");
 

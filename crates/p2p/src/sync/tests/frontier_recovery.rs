@@ -81,7 +81,6 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
         source: Some(current_source(&peers, first)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert!(first_rx.try_recv().is_err());

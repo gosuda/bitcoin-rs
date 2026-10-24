@@ -21,7 +21,7 @@ use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
 use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::{BlockSync, SchedulerState};
-use super::{MAX_DEFERRED_OWNED_FETCHES, defer_owned_body_fetch};
+use super::MAX_DEFERRED_OWNED_FETCHES;
 use crate::InboundHeaders;
 use crate::Message;
 use crate::PeerSource;
@@ -63,7 +63,6 @@ impl BlockSync {
             headers,
             source,
             wire_response,
-            body_fetch_owned,
         }) = self.inbound_headers_rx.try_recv()
         {
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
@@ -100,12 +99,9 @@ impl BlockSync {
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
                     credit_refresh_needed = true;
-                    if wire_response && !body_fetch_owned {
+                    if wire_response {
                         direct_fetch.push((source, tip_hash));
                     }
-                }
-                if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
                 }
                 continue;
             }
@@ -118,9 +114,6 @@ impl BlockSync {
             let Some(admission) =
                 self.route_headers_batch(&headers, source, wire_response, batch_len)
             else {
-                if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
-                }
                 continue;
             };
             match admission {
@@ -132,7 +125,7 @@ impl BlockSync {
                     if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
                         self.peer_table
                             .note_announced_tip(source, tip_hash, active_height);
-                        if wire_response && !body_fetch_owned {
+                        if wire_response {
                             direct_fetch.push((source, tip_hash));
                         }
                     }
@@ -210,9 +203,6 @@ impl BlockSync {
                     // silently losing the announcement.
                     self.request_ancestry_after_refusal(source, &error);
                 }
-            }
-            if body_fetch_owned {
-                self.note_owned_body_fetch(source, headers.last());
             }
         }
         if credit_refresh_needed {
@@ -482,45 +472,6 @@ impl BlockSync {
         self.chain
             .chain_tip()
             .is_none_or(|tip| tip.chainwork < minimum_work)
-    }
-
-    /// Records a body fetch the window does not own — the compact outcome
-    /// that forwarded this header already issued a `getblocktxn` or a
-    /// fallback `getdata` for the tip body — as pending under `source`, so
-    /// `next_peer_request` does not schedule a duplicate getdata for the
-    /// freshly admitted tip. A tip that has not attached yet is retained in
-    /// `SchedulerState::owned_body_fetches` and resolved once ancestry
-    /// admits it; without retention a gap batch would let the window
-    /// schedule a second fetch in parallel with the pending compact one.
-    fn note_owned_body_fetch(
-        &self,
-        source: Option<PeerSource>,
-        header: Option<&bitcoin_rs_primitives::Header>,
-    ) {
-        let (Some(source), Some(header)) = (source, header) else {
-            return;
-        };
-        // A stale source names a dead connection: its compact fetch died
-        // with it, and marking the body pending under that address would
-        // suppress scheduling from the live replacement until expiry.
-        if !self.peer_table.is_current(source) {
-            return;
-        }
-        let hash = Hash256::from(header.compute_hash());
-        let height = {
-            let tree = self.chain.block_tree();
-            tree.lookup(hash)
-                .and_then(|id| tree.node(id).ok().map(|node| node.height))
-        };
-        let mut scheduler = self.scheduler.lock();
-        let Some(height) = height else {
-            defer_owned_body_fetch(&mut scheduler, source, hash);
-            return;
-        };
-        let SchedulerState { window, stager, .. } = &mut *scheduler;
-        if !window.mark_owned_fetch(stager, source, hash, height, Instant::now()) {
-            defer_owned_body_fetch(&mut scheduler, source, hash);
-        }
     }
 
     /// Resolves deferred owned-fetch marks now that this drain may have

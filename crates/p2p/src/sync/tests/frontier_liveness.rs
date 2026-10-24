@@ -24,7 +24,6 @@ fn answer_requests(
                     headers: headers.to_vec(),
                     source: Some(source),
                     wire_response,
-                    body_fetch_owned: false,
                 })?;
             }
             Message::GetData(inventory) => {
@@ -95,7 +94,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
             headers: active.clone(),
             source: Some(source),
             wire_response: false,
-            body_fetch_owned: false,
         })?;
     }
 
@@ -200,7 +198,6 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
         headers: fork.clone(),
         source: Some(p_source),
         wire_response: false,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 

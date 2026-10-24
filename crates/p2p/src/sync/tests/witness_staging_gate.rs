@@ -259,7 +259,6 @@ fn idle_frontier_relearns_stale_peer_credit_after_rejected_body() -> TestResult 
         source: Some(current_source(&sync.peer_table, good)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert_eq!(

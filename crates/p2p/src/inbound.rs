@@ -28,10 +28,6 @@ pub struct InboundHeaders {
     /// not a response to an outstanding `getheaders` and must not consume
     /// its pending-request state.
     pub wire_response: bool,
-    /// `true` when the source already has this batch's tip body fetch in flight
-    /// outside the download window — a compact `getblocktxn` or a fallback
-    /// `getdata` issued during compact handling.
-    pub body_fetch_owned: bool,
 }
 
 /// A transaction received from a peer, ready for mempool admission.
