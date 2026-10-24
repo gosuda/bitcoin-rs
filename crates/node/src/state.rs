@@ -16,8 +16,6 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
@@ -36,7 +34,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(any(test, feature = "test-seam"))]
+#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use storage::NodeStorage;
@@ -258,13 +256,6 @@ impl NodeState {
         self.followers.block_log_reader()
     }
 
-    /// Returns the shared block-records handle exposed to RPC handlers.
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
-        Arc::clone(self.followers.block_log())
-    }
-
     /// Returns a durable block body reader for metadata-only block records.
     pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
         let store = self
@@ -328,13 +319,6 @@ impl NodeState {
     #[must_use]
     pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
-    }
-
-    /// Returns the process-wide shutdown signal shared by all runtime workers.
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn shutdown(&self) -> Arc<AtomicBool> {
-        self.chainstate.shutdown_handle()
     }
 
     /// Returns a read-only capability to observe the process-wide shutdown signal.

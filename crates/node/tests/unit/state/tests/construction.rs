@@ -17,7 +17,7 @@ fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
             .inbound_blocks_sender()
             .same_channel(&p2p.inbound_blocks_sender())
     );
-    assert!(Arc::ptr_eq(&state.blocks(), followers.block_log()));
+    assert!(Arc::ptr_eq(state.block_log_reader().raw_handle(), followers.block_log()));
     assert!(Arc::ptr_eq(
         &state.mining_generation_signal(),
         followers.mining()

@@ -174,7 +174,7 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                     .applied_tip_snapshot()
                     .unwrap_or_else(|| panic!("pruned proxy apply did not publish a tip"));
                 let record = state
-                    .blocks()
+                    .block_log_reader()
                     .read()
                     .last()
                     .cloned()
@@ -517,7 +517,7 @@ fn print_proxy_summary(blocks: &[Block]) {
         .height;
     let blocks_per_second = f64::from(applied_height.saturating_add(1)) / elapsed.as_secs_f64();
     let recorded_body_bytes: usize = state
-        .blocks()
+        .block_log_reader()
         .read()
         .iter()
         .map(|record| record.body_size)
@@ -545,7 +545,7 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
         .height;
     let transaction_count: usize = blocks.iter().map(|block| block.txs.len()).sum();
     let recorded_body_bytes: usize = state
-        .blocks()
+        .block_log_reader()
         .read()
         .iter()
         .map(|record| record.body_size)

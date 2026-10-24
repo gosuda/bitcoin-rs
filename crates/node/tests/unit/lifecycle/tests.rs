@@ -492,7 +492,7 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
     let config = isolated_config(&temp.path().join("startup-rollback"));
     let state = NodeState::open(config.clone(), None)?;
     let (current, previous) = seed_checkpoint(&state)?;
-    let shutdown_flag = state.shutdown();
+    let shutdown_flag = state.chainstate().shutdown_handle();
     let exited = Arc::new(AtomicBool::new(false));
     let worker_exited = Arc::clone(&exited);
     let worker = std::thread::spawn(move || {
@@ -995,7 +995,7 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Resul
     let addr = server.local_addr()?;
 
     gate.arm();
-    let mut witness = ServedWitness::new(state.shutdown(), Some(Arc::clone(&gate)));
+    let mut witness = ServedWitness::new(state.chainstate().shutdown_handle(), Some(Arc::clone(&gate)));
     witness.serve(server, state.shutdown_reader())?;
     witness.send(addr)?;
 

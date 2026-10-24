@@ -42,7 +42,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
     let resumed = NodeState::open(config, None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     assert!(
-        resumed.blocks().read().is_empty(),
+        resumed.block_log_reader().read().is_empty(),
         "the record log really does start empty; the count cannot come from it"
     );
     assert_eq!(applied_chain_tx_count(&resumed), expected);
@@ -98,7 +98,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
         resumed.chainstate().coin_stats_handle().snapshot(),
         expected_stats
     );
-    assert!(resumed.blocks().read().is_empty());
+    assert!(resumed.block_log_reader().read().is_empty());
     assert!(resumed.mempool().read().is_empty());
 
     let next = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;

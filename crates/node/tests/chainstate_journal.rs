@@ -221,7 +221,7 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     let expected_tip = state.apply_block(&child)?;
     let worker = state.start_chainstate_maintenance()?;
     std::thread::sleep(Duration::from_secs(3));
-    state.shutdown().store(true, Ordering::Release);
+    state.chainstate().shutdown_handle().store(true, Ordering::Release);
     worker
         .join()
         .map_err(|_| std::io::Error::other("chainstate maintenance worker panicked"))?;
@@ -284,7 +284,7 @@ fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    state.shutdown().store(true, Ordering::Release);
+    state.chainstate().shutdown_handle().store(true, Ordering::Release);
     worker
         .join()
         .map_err(|_| std::io::Error::other("chainstate maintenance worker panicked"))?;

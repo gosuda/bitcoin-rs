@@ -147,7 +147,7 @@ impl ChainFollowers {
     }
 
     /// Shared RPC block log owned by this committed-effect dispatcher.
-    #[cfg(any(test, feature = "test-seam"))]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
         &self.blocks
@@ -1062,7 +1062,7 @@ mod tests {
             BlockValidationResult::Accepted,
             "submitblock must not invite retry after authoritative commit"
         );
-        assert!(state.shutdown().load(std::sync::atomic::Ordering::Acquire));
+        assert!(state.chainstate().shutdown_handle().load(std::sync::atomic::Ordering::Acquire));
         Ok(())
     }
 }
