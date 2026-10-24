@@ -112,8 +112,8 @@ impl BlockSync {
             .infos()
             .into_iter()
             .filter_map(|info| {
-                self.peer_table
-                    .ready_source(info.addr)
+                info.endpoint
+                    .and_then(|endpoint| self.peer_table.ready_source(endpoint))
                     .map(|source| (source, info))
             })
             .collect::<Vec<_>>();
@@ -151,7 +151,7 @@ impl BlockSync {
                 let mut historical = self.historical.lock();
                 let HistoricalDownload { window, stager, .. } = &mut *historical;
                 // Back off corrupt deliveries even if this is our only peer.
-                if window.peer_in_staller_cooldown(source.addr, now) {
+                if window.peer_in_staller_cooldown(source.endpoint, now) {
                     continue;
                 }
                 window.next_peer_request(
@@ -204,7 +204,9 @@ impl BlockSync {
             tracing::warn!(%error, "historical body rejected");
             let mut historical = self.historical.lock();
             historical.window.reject_delivery(hash, Some(source), now);
-            historical.window.mark_peer_unresponsive(source.addr, now);
+            historical
+                .window
+                .mark_peer_unresponsive(source.endpoint, now);
             return None;
         }
         let mut historical = self.historical.lock();

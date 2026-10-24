@@ -52,7 +52,8 @@ fn info(addr: SocketAddr) -> PeerInfo {
         wtxid_relay: false,
         relay_transactions: true,
         compact_block_relay: false,
-        addr,
+        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)),
+        network: bitcoin_rs_p2p::PeerEndpoint::Ip(addr).net(),
         send_headers: false,
         version: 70_016,
         services: 1,
@@ -60,7 +61,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
         start_height: 0,
         best_known_height: 0,
         conn_time: 0,
-        addr_bind: addr,
+        addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         inbound: true,
@@ -74,18 +75,18 @@ fn peer_table_owns_handshake_publication_and_replacement() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
     let (old_tx, _old_rx) = unbounded::<QueuedFrame>();
     let old = PeerLease::new(old_tx);
-    assert!(!table.register(addr, old.clone()));
-    assert!(table.publish_info(addr, &old, info(addr)));
+    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), old.clone()));
+    assert!(table.publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), &old, info(addr)));
     assert!(!old.is_cancelled());
     assert_eq!(table.len(), 1);
     assert_eq!(table.infos().len(), 1);
 
     let (new_tx, _new_rx) = unbounded::<QueuedFrame>();
     let new = PeerLease::new(new_tx);
-    assert!(table.register(addr, new.clone()));
+    assert!(table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), new.clone()));
     assert!(old.is_cancelled());
     assert!(!new.is_cancelled());
-    assert!(table.is_current(new.source(addr)));
+    assert!(table.is_current(new.source_ip(addr)));
 
     let sync = make_sync(Arc::clone(&table));
     sync.tick();

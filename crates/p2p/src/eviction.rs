@@ -8,7 +8,6 @@
 //! bitcoin-rs refuses a discouraged address at accept.
 
 use std::cmp::Ordering;
-use std::net::SocketAddr;
 use std::time::Instant;
 
 use hashbrown::HashMap;
@@ -17,7 +16,7 @@ use hashbrown::HashMap;
 /// `NodeEvictionCandidate` without the fields of the absent steps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EvictionCandidate {
-    pub(crate) addr: SocketAddr,
+    pub(crate) key: crate::ConnectionId,
     pub(crate) connected: Instant,
     /// Recency of the last block from this connection the node committed;
     /// 0 when there is none (Core `m_last_block_time`).
@@ -45,7 +44,7 @@ pub(crate) struct EvictionCandidate {
 ///   unprotected candidates.
 pub(crate) fn select_inbound_to_evict(
     mut candidates: Vec<EvictionCandidate>,
-) -> Option<SocketAddr> {
+) -> Option<crate::ConnectionId> {
     // Core's `std::sort` leaves ties unordered; stable sorts from a
     // newest-first start make them deterministic.
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.connected));
@@ -138,7 +137,7 @@ fn protect_by_ratio(candidates: &mut Vec<EvictionCandidate>) {
 /// candidates, a size tie going to the group whose newest member is newer.
 ///
 /// PRE: `candidates` is sorted newest first.
-fn newest_in_largest_netgroup(candidates: &[EvictionCandidate]) -> Option<SocketAddr> {
+fn newest_in_largest_netgroup(candidates: &[EvictionCandidate]) -> Option<crate::ConnectionId> {
     let mut groups: HashMap<u64, (usize, &EvictionCandidate)> = HashMap::new();
     let mut chosen: Option<(usize, &EvictionCandidate)> = None;
     for candidate in candidates {
@@ -153,7 +152,7 @@ fn newest_in_largest_netgroup(candidates: &[EvictionCandidate]) -> Option<Socket
             chosen = Some((size, newest));
         }
     }
-    chosen.map(|(_, newest)| newest.addr)
+    chosen.map(|(_, newest)| newest.key)
 }
 
 #[cfg(test)]
@@ -165,7 +164,7 @@ mod tests {
     /// A plain candidate: `order` sets its connection age, higher is newer.
     fn candidate(base: Instant, order: u16, keyed_netgroup: u64) -> EvictionCandidate {
         EvictionCandidate {
-            addr: SocketAddr::from(([203, 0, 113, 1], order)),
+            key: crate::ConnectionId::for_test_raw(u64::from(order)),
             connected: base + Duration::from_secs(u64::from(order)),
             last_block: 0,
             last_tx: 0,
@@ -181,8 +180,8 @@ mod tests {
         (0..40).map(|order| candidate(base, order, 7)).collect()
     }
 
-    fn port(selected: Option<SocketAddr>) -> Option<u16> {
-        selected.map(|addr| addr.port())
+    fn port(selected: Option<crate::ConnectionId>) -> Option<u16> {
+        selected.and_then(|id| u16::try_from(id.get()).ok())
     }
 
     #[test]

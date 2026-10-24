@@ -782,7 +782,11 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         None,
         ListenerExtras::default(),
     );
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
+    let dial = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::BlockRelayOnly,
+    );
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1346,7 +1350,11 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1376,7 +1384,7 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
         peer_table.live_sessions().is_empty(),
         "the refused peer leaves no live entry"
     );
-    assert!(!peer_table.is_connected(addr));
+    assert!(!peer_table.is_connected(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)));
     Ok(())
 }
 
@@ -1387,7 +1395,11 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1403,11 +1415,17 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
     write_message(&mut server, magic, &Message::Verack)?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+    while peer_table
+        .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+        .is_none()
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        peer_table.ready_source(addr).is_some(),
+        peer_table
+            .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+            .is_some(),
         "an eligible peer is published ready"
     );
     drop(server);
@@ -1431,7 +1449,11 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     shared.chain_query = Some(Arc::new(FakeChain::new(vec![recent], HashMap::new())));
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1447,11 +1469,17 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     write_message(&mut server, magic, &Message::Verack)?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+    while peer_table
+        .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+        .is_none()
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        peer_table.ready_source(addr).is_some(),
+        peer_table
+            .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+            .is_some(),
         "a LIMITED peer near the local tip is desirable"
     );
     drop(server);

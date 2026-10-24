@@ -36,7 +36,11 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
         Arc::new(AtomicBool::new(false)),
     );
 
-    let handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let handle = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
     let result = match handle.join() {
         Ok(result) => result,
         Err(error) => std::panic::resume_unwind(error),
@@ -150,7 +154,11 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
         Arc::new(AtomicBool::new(false)),
     );
 
-    let inactive = spawn_outbound_connection(addr, shared.clone(), PeerRole::FullRelay);
+    let inactive = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared.clone(),
+        PeerRole::FullRelay,
+    );
     let inactive = inactive
         .join()
         .map_err(|_| io::Error::other("inactive outbound thread panicked"))?;
@@ -165,7 +173,11 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     );
 
     network_active.store(true, Ordering::Release);
-    let active = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let active = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
     assert!(join_accept(accept_handle)?);
     let _ = active
         .join()
@@ -198,9 +210,13 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error
         Arc::new(AtomicBool::new(true)),
     );
 
-    let refused = spawn_outbound_connection(addr, shared, PeerRole::FullRelay)
-        .join()
-        .map_err(|_| io::Error::other("cancelled outbound thread panicked"))?;
+    let refused = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    )
+    .join()
+    .map_err(|_| io::Error::other("cancelled outbound thread panicked"))?;
     assert!(
         matches!(refused, Err(PeerError::Protocol("p2p startup cancelled"))),
         "a cancelled start must refuse the dial, got {refused:?}"
@@ -233,7 +249,11 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn E
     let listener_shutdown = Arc::clone(&shutdown);
     let serve_shared = shared.clone();
     let serve_handle = thread::spawn(move || serve(listener, listener_shutdown, serve_shared));
-    let outbound_handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let outbound_handle = spawn_outbound_connection(
+        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        shared,
+        PeerRole::FullRelay,
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

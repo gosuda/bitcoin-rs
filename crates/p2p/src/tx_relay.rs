@@ -969,7 +969,10 @@ mod tests {
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
-                    addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(SocketAddr::from((
+                        [127, 0, 0, 1],
+                        8333,
+                    )))),
                     connection_id: 7,
                 }),
                 false,
@@ -1094,7 +1097,10 @@ mod tests {
     }
     fn relay_identity_peer() -> AdmissionOrigin {
         AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
-            addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(SocketAddr::from((
+                [127, 0, 0, 1],
+                8333,
+            )))),
             connection_id: 7,
         })
     }

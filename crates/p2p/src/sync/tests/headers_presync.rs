@@ -109,8 +109,12 @@ fn connect(
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
-    peers.register(addr, lease.clone());
-    peers.publish_info(addr, &lease, synthetic_peer(addr, start_height));
+    peers.register(crate::PeerEndpoint::Ip(addr), lease.clone());
+    peers.publish_info(
+        crate::PeerEndpoint::Ip(addr),
+        &lease,
+        synthetic_peer(addr, start_height),
+    );
     (addr, lease, rx)
 }
 
@@ -433,7 +437,7 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
         "the second page must extend the same state's cursor"
     );
     assert!(
-        !lease.is_cancelled() && peers.is_connected(addr),
+        !lease.is_cancelled() && peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "collecting a low-work chain must not blame the peer"
     );
     Ok(())
@@ -583,7 +587,7 @@ fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     sync.tick();
 
     assert!(
-        lease.is_cancelled() || !peers.is_connected(addr),
+        lease.is_cancelled() || !peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a salted-commitment divergence must cost the connection its lease"
     );
     assert_eq!(
@@ -661,7 +665,7 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
     sync.tick();
     let _ = next_locator(&rx_b).ok_or("the first recovery request was not sent")?;
     assert!(
-        !peers.is_connected(addr_a),
+        !peers.is_connected(crate::PeerEndpoint::Ip(addr_a)),
         "the timed-out source must disconnect"
     );
     assert_eq!(sync_phase(&sync, source_a), None);
@@ -685,7 +689,7 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
     sync.tick();
     let _ = next_locator(&rx_c).ok_or("the presync recovery request was not sent")?;
     assert!(
-        !peers.is_connected(addr_b),
+        !peers.is_connected(crate::PeerEndpoint::Ip(addr_b)),
         "the presync timeout must disconnect its source"
     );
     assert_eq!(sync_phase(&sync, source_b), None);
@@ -723,7 +727,7 @@ fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
     sync.tick();
     let _ = next_locator(&rx_d).ok_or("the redownload recovery request was not sent")?;
     assert!(
-        !peers.is_connected(addr_c),
+        !peers.is_connected(crate::PeerEndpoint::Ip(addr_c)),
         "the redownload timeout must disconnect its source"
     );
     assert_eq!(sync_phase(&sync, source_c), None);
@@ -792,8 +796,12 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
 
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     let replacement_lease = PeerLease::new(replacement_tx);
-    peers.register(addr, replacement_lease.clone());
-    peers.publish_info(addr, &replacement_lease, synthetic_peer(addr, 100_000));
+    peers.register(crate::PeerEndpoint::Ip(addr), replacement_lease.clone());
+    peers.publish_info(
+        crate::PeerEndpoint::Ip(addr),
+        &replacement_lease,
+        synthetic_peer(addr, 100_000),
+    );
     let replacement = current_source(&peers, addr);
 
     sync.tick();
@@ -968,7 +976,7 @@ fn a_midbatch_continuity_break_spends_the_sync() -> TestResult {
         "the disconnected branch must not reach the tree"
     );
     assert!(
-        !lease.is_cancelled() && peers.is_connected(addr),
+        !lease.is_cancelled() && peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a lost continuation is possibly benign: the connection stays"
     );
     Ok(())
@@ -1017,7 +1025,9 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
         "a header below the floor must not reach the tree through a body either"
     );
     assert!(
-        rx.try_recv().is_err() && !lease.is_cancelled() && peers.is_connected(addr),
+        rx.try_recv().is_err()
+            && !lease.is_cancelled()
+            && peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a forwarded header sends nothing and blames no one"
     );
     Ok(())
@@ -1170,7 +1180,7 @@ fn an_invalid_anchor_refuses_without_presync() -> TestResult {
         "the InvalidParent refusal must not grow the tree"
     );
     assert!(
-        peers.is_connected(addr),
+        peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a refused anchor is not a peer fault"
     );
     Ok(())
@@ -1183,7 +1193,9 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let (addr, _lease, _rx) = connect(&peers, 9706, 100_000);
     let source = current_source(&peers, addr);
     assert_eq!(
-        peers.info_of(addr).map(|info| info.best_known_height),
+        peers
+            .info_of(crate::PeerEndpoint::Ip(addr))
+            .map(|info| info.best_known_height),
         Some(100_000)
     );
 
@@ -1199,7 +1211,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let session = peers
         .sessions()
         .into_iter()
-        .find(|session| session.addr == addr)
+        .find(|session| session.endpoint == Some(crate::PeerEndpoint::Ip(addr)))
         .ok_or_else(|| std::io::Error::other("session vanished"))?;
     assert_eq!(
         session.headers_horizon,
@@ -1212,7 +1224,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
         "best_known_height must not be lowered"
     );
     assert!(
-        peers.is_connected(addr),
+        peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a short sync below the floor is not a peer fault"
     );
     Ok(())
@@ -1278,7 +1290,7 @@ fn assert_invalid_body_header_is_discarded(block: Block, port: u16) -> TestResul
         "an inadmissible carried header must release its staged body"
     );
     assert!(
-        !peers.is_connected(addr),
+        !peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "a permanent header fault must disconnect the delivering peer"
     );
     assert_eq!(
@@ -1346,7 +1358,7 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
         "a valid below-floor body must wait for the wire presync admission"
     );
     assert!(
-        peers.is_connected(addr),
+        peers.is_connected(crate::PeerEndpoint::Ip(addr)),
         "valid carried headers do not fault the peer"
     );
     assert_eq!(

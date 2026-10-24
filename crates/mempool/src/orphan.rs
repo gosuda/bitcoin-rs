@@ -396,8 +396,8 @@ impl OrphanPool {
                     .rank(&self.peer_allowance)
                     .cmp(&right.rank(&self.peer_allowance));
                 rank.then_with(|| {
-                    (left_peer.connection_id, left_peer.addr)
-                        .cmp(&(right_peer.connection_id, right_peer.addr))
+                    (left_peer.connection_id, left_peer.endpoint)
+                        .cmp(&(right_peer.connection_id, right_peer.endpoint))
                 })
             })
             .map(|(peer, _)| *peer)
@@ -480,7 +480,7 @@ impl OrphanPool {
         announcers
             .iter()
             .copied()
-            .min_by_key(|peer| (peer.connection_id, peer.addr))
+            .min_by_key(|peer| (peer.connection_id, peer.endpoint))
     }
 
     fn unindex_parents(&mut self, wtxid: Wtxid, tx: &Tx) {
@@ -588,7 +588,9 @@ mod tests {
     };
     fn source(id: u64) -> PeerToken {
         PeerToken {
-            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            )),
             connection_id: id,
         }
     }

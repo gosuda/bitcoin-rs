@@ -47,21 +47,24 @@ fn asmap_placement_matches_224_actual_core_vectors() {
         let groups = &classifiers[row["map"].as_str().expect("map")];
         let secret =
             <[u8; 32]>::from_hex(row["secret_raw_hex"].as_str().expect("secret")).expect("key");
-        let addr = canonical(SocketAddr::new(
-            row["address"]
-                .as_str()
-                .expect("address")
-                .parse()
-                .expect("IP"),
-            u16::try_from(row["port"].as_u64().expect("port")).expect("port"),
-        ));
+        let addr = canonical(
+            SocketAddr::new(
+                row["address"]
+                    .as_str()
+                    .expect("address")
+                    .parse()
+                    .expect("IP"),
+                u16::try_from(row["port"].as_u64().expect("port")).expect("port"),
+            )
+            .into(),
+        );
         let origin = row["source"].as_str().expect("source");
         let source = origin.strip_prefix("internal:").map_or_else(
             || Source::Ip(origin.parse().expect("source IP")),
             Source::dns,
         );
         assert_eq!(
-            groups.group(addr.ip()).to_lower_hex_string(),
+            groups.group(ip(addr)).to_lower_hex_string(),
             row["address_group_hex"].as_str().expect("group"),
             "{row}"
         );
@@ -109,7 +112,7 @@ fn incoming_source_asn_controls_corroboration_without_rewriting_primary_source()
         <[u8; 32]>::from_hex("41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b")
             .expect("Core secret");
     manager.rng = StdRng::seed_from_u64(17);
-    let addr = "4.4.4.4:8333".parse().expect("peer");
+    let addr = crate::parse_endpoint("4.4.4.4:8333").expect("peer");
     let primary = Source::Ip("8.8.0.1".parse().expect("source"));
     add_ref(&mut manager, addr, &primary, EPOCH - 1);
     for _ in 0..512 {
@@ -156,11 +159,11 @@ fn historical_v2_v3_writers_migrate_with_exact_backups_and_health() {
                 assert_eq!(manager.stored.secret, [7; 32]);
                 assert_eq!(manager.stored.records.len(), 2);
                 let successful = &manager.stored.records
-                    [manager.by_addr[&"8.8.8.8:8333".parse().expect("peer")]];
+                    [manager.by_addr[&crate::parse_endpoint("8.8.8.8:8333").expect("peer")]];
                 assert_eq!(successful.last_success, 1_700_000_001);
                 assert_eq!(successful.last_seen, 1_700_000_001);
                 let failed = &manager.stored.records
-                    [manager.by_addr[&"9.9.9.9:8333".parse().expect("peer")]];
+                    [manager.by_addr[&crate::parse_endpoint("9.9.9.9:8333").expect("peer")]];
                 assert_eq!(failed.failures, 3);
                 assert_eq!(failed.source, Source::LegacyDns(14_378_457_816_419_903_907));
                 assert!(

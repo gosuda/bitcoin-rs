@@ -19,6 +19,7 @@
 //! - Coalesces wakeups under queue saturation and rereads the committed tip from chainstate.
 //! - Disconnect cleanly removes peer announcement state.
 
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,19 +199,19 @@ impl BlockAnnouncer {
 
     /// Returns the current list of peers we requested high-bandwidth compact blocks from.
     #[cfg(test)]
-    pub fn high_bandwidth_requested_peers(&self) -> Vec<SocketAddr> {
+    pub fn high_bandwidth_requested_peers(&self) -> Vec<crate::PeerEndpoint> {
         let state = self.state.lock();
         state
             .high_bandwidth_requested_peers
             .iter()
-            .map(|source| source.addr)
+            .filter_map(|source| source.endpoint)
             .collect()
     }
 
     /// Returns the best block known for `addr`.
     #[cfg(test)]
-    pub fn peer_known_block(&self, addr: SocketAddr) -> Option<Hash256> {
-        let source = self.peers.lease(addr)?.source(addr);
+    pub fn peer_known_block(&self, addr: crate::PeerEndpoint) -> Option<Hash256> {
+        let source = self.peers.lease(addr)?.source(Some(addr));
         self.peers
             .announcement_state(source)
             .and_then(|state| state.last_announced_block)
@@ -246,7 +247,7 @@ impl BlockAnnouncer {
         &self,
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
-        sent: &mut Vec<(SocketAddr, Message)>,
+        sent: &mut Vec<(Option<crate::PeerEndpoint>, Message)>,
     ) {
         // BIP152 asks for high-bandwidth slots to go to peers that recently
         // delivered blocks quickly. Filling strictly in session order
@@ -272,20 +273,20 @@ impl BlockAnnouncer {
             if self.peers.send(source, message.clone()).is_ok() {
                 state.high_bandwidth_requested_peers.push(source);
                 self.peers.note_high_bandwidth_selected(source, true);
-                sent.push((source.addr, message));
+                sent.push((source.endpoint, message));
             }
         }
     }
 
     /// Reconciles the selected high-bandwidth compact-relay peers against
     /// current ready sessions and IBD state.
-    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(SocketAddr, Message)> {
+    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         let eligible: Vec<_> = self
             .peers
             .sessions()
             .into_iter()
             .filter_map(|session| {
-                let source = session.lease.source(session.addr);
+                let source = session.lease.source(session.endpoint);
                 let info = session.info.as_ref()?;
                 let announcement = self.peers.announcement_state(source)?;
                 (!session.lease.is_cancelled()
@@ -320,7 +321,7 @@ impl BlockAnnouncer {
                 .retain(|candidate| *candidate != source);
             self.peers.note_high_bandwidth_selected(source, false);
             if send_succeeded {
-                sent.push((source.addr, message));
+                sent.push((source.endpoint, message));
             }
         }
 
@@ -359,7 +360,7 @@ impl BlockAnnouncer {
                     version: COMPACT_BLOCK_VERSION,
                 });
                 match self.peers.send(demoted, demote.clone()) {
-                    Ok(()) => sent.push((demoted.addr, demote)),
+                    Ok(()) => sent.push((demoted.endpoint, demote)),
                     // Aggregate budget full: the demotion did not happen, so
                     // the selection is restored as it was and the next
                     // reconcile retries the whole rotation.
@@ -380,7 +381,7 @@ impl BlockAnnouncer {
                 if self.peers.send(candidate, promote.clone()).is_ok() {
                     state.high_bandwidth_requested_peers.push(candidate);
                     self.peers.note_high_bandwidth_selected(candidate, true);
-                    sent.push((candidate.addr, promote));
+                    sent.push((candidate.endpoint, promote));
                 } else {
                     break;
                 }
@@ -429,7 +430,7 @@ impl BlockAnnouncer {
         crate::peer_table::PeerAnnouncementState,
         Option<(Hash256, u32)>,
     ) {
-        let source = session.lease.source(session.addr);
+        let source = session.lease.source(session.endpoint);
         let peer_state = self.peers.announcement_state(source).unwrap_or_default();
         let known_position = peer_state
             .last_announced_block
@@ -477,7 +478,7 @@ impl BlockAnnouncer {
             return None;
         }
         build().map(|message| PlannedAnnouncement {
-            source: session.lease.source(session.addr),
+            source: session.lease.source(session.endpoint),
             message,
             confirms_tip: true,
         })
@@ -497,7 +498,7 @@ impl BlockAnnouncer {
         block: &Block,
         hash: Hash256,
         height: u32,
-    ) -> Vec<(SocketAddr, Message)> {
+    ) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         if self.in_ibd() {
             return Vec::new();
         }
@@ -535,7 +536,7 @@ impl BlockAnnouncer {
             // reads it as the peer's known position and sends no second
             // `cmpctblock` for this hash.
             self.peers.note_announced_block(announcement.source, hash);
-            sent.push((announcement.source.addr, announcement.message));
+            sent.push((announcement.source.endpoint, announcement.message));
         }
         sent
     }
@@ -550,7 +551,7 @@ impl BlockAnnouncer {
         let mut planned = Vec::new();
 
         for session in live_sessions {
-            let addr = session.addr;
+            let addr = session.endpoint;
             let (source, peer_state, known_position) = self.peer_anchor(session);
 
             if known_position.is_some_and(|(_, height)| height >= tip.height) {
@@ -566,7 +567,7 @@ impl BlockAnnouncer {
                 })
             {
                 tracing::debug!(
-                    peer = %addr,
+                    peer = ?addr,
                     tip_height = tip.height,
                     mode = "compact",
                     "block announcement planned"
@@ -609,7 +610,7 @@ impl BlockAnnouncer {
                                 confirms_tip: true,
                             });
                             tracing::debug!(
-                                peer = %addr,
+                                peer = ?addr,
                                 tip_height = tip.height,
                                 mode = "headers",
                                 "block announcement planned"
@@ -630,7 +631,7 @@ impl BlockAnnouncer {
                 confirms_tip: false,
             });
             tracing::debug!(
-                peer = %addr,
+                peer = ?addr,
                 tip_height = tip.height,
                 mode = "inv",
                 reason,
@@ -642,7 +643,7 @@ impl BlockAnnouncer {
     }
 
     /// Rereads and processes the current committed tip.
-    pub fn process_tip(&self) -> Vec<(SocketAddr, Message)> {
+    pub fn process_tip(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         self.reconcile_high_bandwidth_peers();
         if self.in_ibd() {
             return Vec::new();
@@ -687,7 +688,7 @@ impl BlockAnnouncer {
                 self.peers
                     .note_announced_block(announcement.source, tip_hash);
             }
-            sent.push((announcement.source.addr, announcement.message));
+            sent.push((announcement.source.endpoint, announcement.message));
         }
         // Keep one retry intent across a disconnected interval. Each poll
         // rereads chainstate, so reconnecting peers receive the current tip
@@ -719,7 +720,7 @@ impl BlockAnnouncer {
     /// ready peers rearms the retry. Peers that already know it are skipped
     /// by the planner, and an `inv` fallback may repeat. Without a pending
     /// retry, nothing happens.
-    pub fn process_tip_retry(&self) -> Vec<(SocketAddr, Message)> {
+    pub fn process_tip_retry(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         // IBD suppresses announcements entirely; consuming the intent here
         // would drop a disconnect-armed retry before the first poll that can
         // act on it. Keep it armed until `process_tip` can run.
@@ -944,13 +945,14 @@ mod tests {
         }
     }
 
-    fn test_addr(port: u16) -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], port))
+    fn test_addr(port: u16) -> crate::PeerEndpoint {
+        crate::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], port)))
     }
 
-    fn test_peer_info(addr: SocketAddr, send_headers: bool) -> PeerInfo {
+    fn test_peer_info(addr: crate::PeerEndpoint, send_headers: bool) -> PeerInfo {
         PeerInfo {
-            addr,
+            endpoint: Some(addr),
+            network: addr.net(),
             version: 70016,
             wtxid_relay: false,
             relay_transactions: true,
@@ -962,7 +964,7 @@ mod tests {
             best_known_height: 0,
             conn_time: 0,
             inbound: false,
-            addr_bind: addr,
+            addr_bind: crate::TransportRemote::new(addr.as_ip().expect("ip test peer")),
             time_offset: 0,
             counters: Arc::new(crate::counters::PeerCounters::default()),
             transport: crate::TransportProtocol::V1,
@@ -972,7 +974,7 @@ mod tests {
     fn setup_peer(
         table: &Arc<PeerTable>,
         announcer: &BlockAnnouncer,
-        addr: SocketAddr,
+        addr: crate::PeerEndpoint,
         send_headers: bool,
     ) -> (PeerLease, crate::test_support::MessageReceiver) {
         let (tx, rx) = crate::test_support::message_channel();
@@ -985,17 +987,25 @@ mod tests {
         (lease, rx)
     }
 
-    fn source(table: &PeerTable, addr: SocketAddr) -> PeerSource {
-        table.lease(addr).expect("live test peer").source(addr)
+    fn source(table: &PeerTable, addr: crate::PeerEndpoint) -> PeerSource {
+        table
+            .lease(addr)
+            .expect("live test peer")
+            .source(Some(addr))
     }
 
-    fn mark_known(table: &PeerTable, _announcer: &BlockAnnouncer, addr: SocketAddr, hash: Hash256) {
+    fn mark_known(
+        table: &PeerTable,
+        _announcer: &BlockAnnouncer,
+        addr: crate::PeerEndpoint,
+        hash: Hash256,
+    ) {
         table.note_announced_block(source(table, addr), hash);
     }
 
     fn note_compact_preference(
         table: &PeerTable,
-        addr: SocketAddr,
+        addr: crate::PeerEndpoint,
         high_bandwidth: bool,
         version: u64,
     ) {
@@ -1144,9 +1154,9 @@ mod tests {
         note_compact_preference(&table, a4, false, 2);
         assert_eq!(announcer.reconcile_high_bandwidth_peers(), Vec::new());
         assert_eq!(announcer.high_bandwidth_requested_peers(), vec![a1, a2, a3]);
-        assert!(table.note_useful_block(leases[1].source(a2)));
-        assert!(table.note_useful_block(leases[2].source(a3)));
-        assert!(table.note_useful_block(lease4.source(a4)));
+        assert!(table.note_useful_block(leases[1].source(Some(a2))));
+        assert!(table.note_useful_block(leases[2].source(Some(a3))));
+        assert!(table.note_useful_block(lease4.source(Some(a4))));
         let hold = crate::test_support::hog(&aggregate, 256);
         assert_eq!(announcer.reconcile_high_bandwidth_peers(), Vec::new());
         assert_eq!(
@@ -1170,7 +1180,7 @@ mod tests {
             2,
             "the next reconcile retries demotion plus promotion"
         );
-        assert_eq!(sent[0].0, a1);
+        assert_eq!(sent[0].0, Some(a1));
         assert!(matches!(
             sent[0].1,
             Message::SendCmpct(SendCmpct {
@@ -1178,7 +1188,7 @@ mod tests {
                 version: 2,
             })
         ));
-        assert_eq!(sent[1].0, a4);
+        assert_eq!(sent[1].0, Some(a4));
         assert!(matches!(
             sent[1].1,
             Message::SendCmpct(SendCmpct {
@@ -1309,7 +1319,7 @@ mod tests {
         let sent = announcer.process_tip();
 
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, addr);
+        assert_eq!(sent[0].0, Some(addr));
         match &sent[0].1 {
             Message::Headers(headers) => {
                 assert_eq!(headers.len(), 1);
@@ -1509,7 +1519,7 @@ mod tests {
         announcer.reconcile_high_bandwidth_peers();
         assert_eq!(announcer.high_bandwidth_requested_peers(), vec![addr]);
 
-        announcer.on_peer_disconnected(lease.source(addr));
+        announcer.on_peer_disconnected(lease.source(Some(addr)));
         assert_eq!(announcer.high_bandwidth_requested_peers(), Vec::new());
         assert_eq!(announcer.peer_known_block(addr), None);
     }
@@ -1679,7 +1689,7 @@ mod tests {
         assert_eq!(announcer.process_tip(), Vec::new());
         assert_eq!(
             table
-                .announcement_state(lease.source(addr))
+                .announcement_state(lease.source(Some(addr)))
                 .and_then(|state| state.last_announced_block),
             Some(chain.hash_at(0))
         );
@@ -1764,7 +1774,7 @@ mod tests {
         // announced-tip state.
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
-        let old_source = old_lease.source(addr);
+        let old_source = old_lease.source(Some(addr));
         table.remove_current(addr, &old_lease);
         announcer.on_peer_disconnected(old_source);
         let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
@@ -1843,7 +1853,7 @@ mod tests {
         let msgs = announcer.reconcile_high_bandwidth_peers();
 
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0, addr);
+        assert_eq!(msgs[0].0, Some(addr));
         assert_eq!(
             msgs[0].1,
             Message::SendCmpct(SendCmpct {
@@ -1884,7 +1894,7 @@ mod tests {
 
         let msgs = announcer.reconcile_high_bandwidth_peers();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0, block_only_addr);
+        assert_eq!(msgs[0].0, Some(block_only_addr));
         assert_eq!(
             msgs[0].1,
             Message::SendCmpct(SendCmpct {
@@ -1918,7 +1928,7 @@ mod tests {
         mark_known(&table, &announcer, addr, chain.hash_at(1));
 
         let sent = announcer.process_tip();
-        let pushed = sent.iter().find(|(a, _)| *a == addr);
+        let pushed = sent.iter().find(|(a, _)| *a == Some(addr));
         let Some((_, message)) = pushed else {
             panic!("a block-relay-only high-bandwidth peer must receive an announcement");
         };
@@ -1972,13 +1982,13 @@ mod tests {
         );
         let addr = test_addr(1012);
         let (old, _old_rx) = setup_peer(&table, &announcer, addr, true);
-        let old_source = old.source(addr);
+        let old_source = old.source(Some(addr));
 
         let (replacement_tx, _replacement_rx) = crate::test_support::message_channel();
         let replacement = PeerLease::new(replacement_tx);
         table.register(addr, replacement.clone());
         assert!(table.publish_info(addr, &replacement, test_peer_info(addr, true),));
-        let replacement_source = replacement.source(addr);
+        let replacement_source = replacement.source(Some(addr));
         table.note_announced_block(replacement_source, chain.hash_at(1));
 
         announcer.on_peer_disconnected(old_source);
@@ -1997,7 +2007,7 @@ mod tests {
         );
         let addr = test_addr(1013);
         let (lease, rx) = setup_peer(&table, &announcer, addr, true);
-        let source = lease.source(addr);
+        let source = lease.source(Some(addr));
         table.note_announced_tip(source, chain.hash_at(3), Some(3));
         table.note_announced_tip(source, chain.hash_at(1), Some(1));
 
@@ -2063,7 +2073,7 @@ mod tests {
         assert_eq!(connected, Vec::new());
         assert_eq!(announcer.high_bandwidth_requested_peers(), vec![a1, a2, a3]);
 
-        table.note_useful_block(lease4.source(a4));
+        table.note_useful_block(lease4.source(Some(a4)));
         let msgs = announcer.reconcile_high_bandwidth_peers();
 
         assert_eq!(msgs.len(), 2);
@@ -2115,19 +2125,19 @@ mod tests {
         let sent = announcer.process_tip();
 
         assert_eq!(sent.len(), 3);
-        let sent1 = sent.iter().find(|(a, _)| *a == addr1).unwrap();
+        let sent1 = sent.iter().find(|(a, _)| *a == Some(addr1)).unwrap();
         assert!(
             matches!(sent1.1, Message::CmpctBlock(_)),
             "peer with high-bandwidth request and prev_hash should receive CmpctBlock"
         );
 
-        let sent2 = sent.iter().find(|(a, _)| *a == addr2).unwrap();
+        let sent2 = sent.iter().find(|(a, _)| *a == Some(addr2)).unwrap();
         assert!(
             matches!(sent2.1, Message::Headers(_)),
             "peer without prev_hash should fall back to Headers"
         );
 
-        let sent3 = sent.iter().find(|(a, _)| *a == addr3).unwrap();
+        let sent3 = sent.iter().find(|(a, _)| *a == Some(addr3)).unwrap();
         assert!(
             matches!(sent3.1, Message::Headers(_)),
             "peer that sent sendcmpct(false) must fall back to Headers"
@@ -2213,7 +2223,7 @@ mod tests {
         let addr = test_addr(1044);
         let (old_lease, _rx) = setup_peer(&table, &announcer, addr, true);
         mark_known(&table, &announcer, addr, chain.hash_at(0));
-        let old_source = old_lease.source(addr);
+        let old_source = old_lease.source(Some(addr));
         table.remove_current(addr, &old_lease);
         announcer.on_peer_disconnected(old_source);
         let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
@@ -2351,7 +2361,7 @@ mod tests {
         let sent_b = announcer.process_tip();
         let sent_b_item = sent_b
             .iter()
-            .find(|(addr, _)| *addr == addr_b)
+            .find(|(addr, _)| *addr == Some(addr_b))
             .expect("announcement for peer B");
         match &sent_b_item.1 {
             Message::Inv(inv) => {
@@ -2424,7 +2434,7 @@ mod tests {
         let sent = announcer.announce_pow_valid(&block, hash, 2);
 
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, addr);
+        assert_eq!(sent[0].0, Some(addr));
         assert!(
             matches!(sent[0].1, Message::CmpctBlock(_)),
             "expected one cmpctblock, got {:?}",
@@ -2513,7 +2523,8 @@ mod tests {
         assert!(
             !sent
                 .iter()
-                .any(|(peer, message)| *peer == addr && matches!(message, Message::CmpctBlock(_))),
+                .any(|(peer, message)| *peer == Some(addr)
+                    && matches!(message, Message::CmpctBlock(_))),
             "post-commit must not resend cmpctblock to the early peer: {sent:?}"
         );
         // Reconciliation inside `process_tip` may promote the peer with

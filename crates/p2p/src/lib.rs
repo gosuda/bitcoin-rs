@@ -23,6 +23,8 @@ pub(crate) mod counters;
 pub mod dispatch;
 /// Block download window, peer-assignment, stall, and scheduling policy.
 pub mod download_window;
+/// Typed endpoint parsing, BIP155 conversion, and the single transport dial.
+pub mod endpoint;
 /// Inbound eviction selection when the inbound slots are full.
 pub(crate) mod eviction;
 /// Peer finite-state machine.
@@ -66,6 +68,7 @@ pub mod wire;
 #[cfg(test)]
 mod test_support;
 
+pub use bitcoin_rs_primitives::{EndpointHost, NetworkLabel, PeerEndpoint};
 pub use block_announce::{
     BlockAnnounceConfig, BlockAnnounceQueue, BlockAnnounceReceiver, BlockAnnouncer,
     MAX_BLOCKS_TO_ANNOUNCE, MAX_HIGH_BANDWIDTH_PEERS, spawn_block_announce_worker,
@@ -77,6 +80,10 @@ pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, OutboundRefusal, PeerLease, PeerSource, QueuedFrame};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, FilterRequest, FilterServing, InventoryServing, TxInventory};
+pub use endpoint::{
+    DialRoutes, TransportRemote, accepted_ip_identity, addrv2_gossip_enabled, connect_peer_stream,
+    dialed_ip_identity, endpoint_from_addrv2, endpoint_to_addrv2, format_endpoint, parse_endpoint,
+};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;

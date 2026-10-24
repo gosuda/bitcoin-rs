@@ -5,6 +5,7 @@
 //! to manage the in-flight window budget. `crate::BlockStager` owns the
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -145,7 +146,7 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 struct PendingBlock {
     /// The exact connection that owns this request. Same-address
     /// replacement must never inherit it: liveness is checked on the pair
-    /// `(owner.addr, owner.connection_id())`, not the address alone.
+    /// `(owner.endpoint, owner.connection_id())`, not the address alone.
     owner: PeerSource,
     requested_at: Instant,
     height: u32,
@@ -381,7 +382,7 @@ pub(crate) struct DownloadWindow {
     /// time. While inside `staller_cooldown` such a peer is not fan-out
     /// eligible and receives no block requests except as the last-resort peer.
     /// This prevents immediate re-acquisition of the same block stripe.
-    recent_stallers: HashMap<SocketAddr, Instant>,
+    recent_stallers: HashMap<crate::PeerEndpoint, Instant>,
 }
 
 impl DownloadWindow {
@@ -794,7 +795,7 @@ impl DownloadWindow {
                         now,
                     ))
             {
-                self.mark_peer_unresponsive(observation.owner.addr, now);
+                self.mark_peer_unresponsive(observation.owner.endpoint, now);
                 return Some(observation.owner);
             }
             return None;
@@ -991,7 +992,7 @@ impl DownloadWindow {
                 stored.info_logged = true;
             }
             tracing::info!(
-                peer_addr = %episode.owner.addr,
+                peer_addr = ?episode.owner.endpoint,
                 front_hash = %episode.front_hash,
                 front_height = next_apply_height,
                 episode_age_ms = u64::try_from(now.duration_since(episode.since).as_millis())
@@ -1017,7 +1018,7 @@ impl DownloadWindow {
         self.stall_timeout = effective_timeout
             .saturating_mul(2)
             .min(self.budget.stall_timeout_max);
-        self.mark_peer_unresponsive(owner.addr, now);
+        self.mark_peer_unresponsive(owner.endpoint, now);
         Some(owner)
     }
 
@@ -1153,9 +1154,9 @@ impl DownloadWindow {
     /// peer delivering each front block just under the adaptive threshold is
     /// never disconnected (same exposure as Core) but is visible here and on
     /// the `node.sync.stall_seconds` gauge.
-    pub(crate) fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(Option<crate::PeerEndpoint>, Instant)> {
         self.stall
-            .map(|episode| (episode.owner.addr, episode.since))
+            .map(|episode| (episode.owner.endpoint, episode.since))
     }
     /// Advances the cold-start front timer independently of the strong stall
     /// predicate. Returns a duplicate request only after the same apply-front
@@ -1342,7 +1343,14 @@ impl DownloadWindow {
     }
 
     /// Starts the re-acquisition cooldown for an unresponsive peer.
-    pub(crate) fn mark_peer_unresponsive(&mut self, peer_addr: SocketAddr, now: Instant) {
+    pub(crate) fn mark_peer_unresponsive(
+        &mut self,
+        peer_addr: Option<crate::PeerEndpoint>,
+        now: Instant,
+    ) {
+        let Some(peer_addr) = peer_addr else {
+            return;
+        };
         let cooldown = self.budget.staller_cooldown;
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < cooldown);
@@ -1351,7 +1359,14 @@ impl DownloadWindow {
 
     /// Whether `peer_addr` is in cooldown; such peers are a last resort so a
     /// reconnecting staller cannot immediately reacquire the window front.
-    pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn peer_in_staller_cooldown(
+        &self,
+        peer_addr: Option<crate::PeerEndpoint>,
+        now: Instant,
+    ) -> bool {
+        let Some(peer_addr) = peer_addr else {
+            return false;
+        };
         self.recent_stallers
             .get(&peer_addr)
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
@@ -1616,7 +1631,7 @@ impl DownloadWindow {
         }
         if !allow_expired_retry_from_peer
             && (self.peer_has_expired_pending(source, now)
-                || self.peer_in_staller_cooldown(source.addr, now))
+                || self.peer_in_staller_cooldown(source.endpoint, now))
         {
             return None;
         }
@@ -1915,12 +1930,12 @@ impl DownloadWindow {
         self.pending_timeout_observation = None;
         self.retain_peer_assignments(|peer| *peer == winner || !probe.racers.contains_key(peer));
         if winner != owner {
-            self.mark_peer_unresponsive(owner.addr, now);
+            self.mark_peer_unresponsive(owner.endpoint, now);
         }
         self.preferred_peer = Some(winner);
         tracing::info!(
-            owner = %owner.addr,
-            winner = %winner.addr,
+            owner = ?owner.endpoint,
+            winner = ?winner.endpoint,
             winner_is_owner = winner == owner,
             blocks = probe.hashes.len(),
             elapsed_ms = u64::try_from(now.duration_since(probe.started_at).as_millis()).unwrap_or(u64::MAX),
@@ -1954,11 +1969,11 @@ impl DownloadWindow {
                 }
                 self.prefix_probe = None;
                 self.retain_peer_assignments(|peer| *peer != owner);
-                self.mark_peer_unresponsive(owner.addr, now);
+                self.mark_peer_unresponsive(owner.endpoint, now);
                 self.preferred_peer = Some(alternate);
                 tracing::info!(
-                    owner = %owner.addr,
-                    winner = %alternate.addr,
+                    owner = ?owner.endpoint,
+                    winner = ?alternate.endpoint,
                     %hash,
                     "block sync: cold-front hedge elected alternate"
                 );
@@ -2387,13 +2402,13 @@ impl DownloadWindow {
     /// tick's request scan must reach in addition to fresh capacity.
     ///
     /// PRE: expiry has run this tick.
-    /// POST: returns the number of distinct `pending.owner.addr` values.
+    /// POST: returns the number of distinct `pending.owner.endpoint` values.
     /// INVARIANT: each address counts once, however many requests it owns.
     fn owner_address_count(&self) -> usize {
-        let mut owners: SmallVec<[SocketAddr; 16]> = SmallVec::new();
+        let mut owners: SmallVec<[Option<crate::PeerEndpoint>; 16]> = SmallVec::new();
         for pending in self.pending.values() {
-            if !owners.contains(&pending.owner.addr) {
-                owners.push(pending.owner.addr);
+            if !owners.contains(&pending.owner.endpoint) {
+                owners.push(pending.owner.endpoint);
             }
         }
         owners.len()

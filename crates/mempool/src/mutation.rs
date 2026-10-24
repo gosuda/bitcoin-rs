@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{Hash256, Txid};
+use bitcoin_rs_primitives::{Hash256, PeerEndpoint, Txid};
 
 /// Canonical modulo-2^64 arithmetic for mutation sequence values.
 pub(crate) struct MutationSequence;
@@ -141,8 +141,8 @@ impl MutationResult {
 /// Identifies the network peer a transaction arrived from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
-    /// The peer's wire address.
-    pub addr: core::net::SocketAddr,
+    /// The peer's logical endpoint; `None` for unidentified sessions.
+    pub endpoint: Option<PeerEndpoint>,
     /// The node-local id of the connection the peer arrived on.
     pub connection_id: u64,
 }

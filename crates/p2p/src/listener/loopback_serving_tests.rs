@@ -317,11 +317,10 @@ fn messages_of(frames: Vec<Frame>) -> Vec<Message> {
 fn session_of(node: &Node, client: &Client) -> Fallible<PeerSession> {
     let mut found = None;
     wait_until("the node to publish the client's session", || {
-        found = node
-            .table
-            .sessions()
-            .into_iter()
-            .find(|session| session.addr == client.local && session.info.is_some());
+        found = node.table.sessions().into_iter().find(|session| {
+            session.endpoint == Some(crate::PeerEndpoint::Ip(client.local))
+                && session.info.is_some()
+        });
         found.is_some()
     })?;
     found.ok_or_else(|| "the client's session vanished".into())

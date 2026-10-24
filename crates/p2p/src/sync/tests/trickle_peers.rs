@@ -40,12 +40,12 @@ fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
                     .window
                     .stalling_peer()
                     .map(|(addr, _)| addr),
-                Some(trickler),
+                Some(Some(crate::PeerEndpoint::Ip(trickler))),
                 "the stall episode must be observable while the front trickles"
             );
             std::thread::sleep(Duration::from_millis(100));
             sync.tick();
-            assert!(peers.is_connected(trickler));
+            assert!(peers.is_connected(crate::PeerEndpoint::Ip(trickler)));
             match recorder.snapshot().get("node.sync.stall_seconds") {
                 Some(TestMetric::Gauge(seconds)) => {
                     assert!(
@@ -71,7 +71,7 @@ fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
             .height;
         assert_eq!(applied_height, 6);
         assert!(
-            peers.is_connected(trickler),
+            peers.is_connected(crate::PeerEndpoint::Ip(trickler)),
             "a trickler under the threshold must never be disconnected"
         );
         assert!(

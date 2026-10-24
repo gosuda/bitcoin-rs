@@ -355,14 +355,14 @@ fn ineligible_peers_receive_no_block_requests_during_fanout() -> TestResult {
     sync.tick();
     sync.tick();
     assert!(
-        !peers.is_connected(test_addr(9250, 0)?),
+        !peers.is_connected(crate::PeerEndpoint::Ip(test_addr(9250, 0)?)),
         "a peer that misses the request timeout must release its outbound slot"
     );
     assert!(
-        sync.scheduler
-            .lock()
-            .window
-            .peer_in_staller_cooldown(test_addr(9250, 0)?, Instant::now()),
+        sync.scheduler.lock().window.peer_in_staller_cooldown(
+            Some(crate::PeerEndpoint::Ip(test_addr(9250, 0)?)),
+            Instant::now()
+        ),
         "a timed-out peer must not immediately reacquire the same block stripe"
     );
 

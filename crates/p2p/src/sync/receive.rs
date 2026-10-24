@@ -187,7 +187,7 @@ impl BlockSync {
     /// operations precede the scheduler lock to preserve the `PeerTable` ->
     /// scheduler ordering used elsewhere.
     fn discard_inadmissible_header_bodies(&self, invalid: &[(Hash256, Option<crate::PeerSource>)]) {
-        let blamed: Vec<std::net::SocketAddr> = invalid
+        let blamed: Vec<_> = invalid
             .iter()
             .filter_map(|(_, source)| *source)
             .filter(|source| {
@@ -201,7 +201,7 @@ impl BlockSync {
                     false
                 }
             })
-            .map(|source| source.addr)
+            .map(|source| source.endpoint)
             .collect();
         let mut scheduler = self.scheduler.lock();
         for (hash, _) in invalid {
@@ -746,8 +746,8 @@ impl BlockSync {
                         self.scheduler
                             .lock()
                             .window
-                            .mark_peer_unresponsive(source.addr, now);
-                        tracing::warn!(peer_addr = %source.addr, %hash, "block sync: peer served mutated block body; disconnecting");
+                            .mark_peer_unresponsive(source.endpoint, now);
+                        tracing::warn!(peer_addr = ?source.endpoint, %hash, "block sync: peer served mutated block body; disconnecting");
                     }
                 }
             }

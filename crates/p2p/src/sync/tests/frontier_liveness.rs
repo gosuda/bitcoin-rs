@@ -104,12 +104,15 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     for _ in 0..24 {
         std::thread::sleep(Duration::from_millis(250));
         sync.tick();
-        if !peers.is_connected(s1) && !peers.is_connected(s2) {
+        if !peers.is_connected(crate::PeerEndpoint::Ip(s1))
+            && !peers.is_connected(crate::PeerEndpoint::Ip(s2))
+        {
             break;
         }
     }
     assert!(
-        !peers.is_connected(s1) && !peers.is_connected(s2),
+        !peers.is_connected(crate::PeerEndpoint::Ip(s1))
+            && !peers.is_connected(crate::PeerEndpoint::Ip(s2)),
         "both serving peers must be convicted of the block-request timeout"
     );
     assert_eq!(

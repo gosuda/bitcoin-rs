@@ -813,7 +813,11 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            8333,
+        ))),
+        network: bitcoin_rs_p2p::NetworkLabel::Ipv4,
         version: 70016,
         services: 0,
         user_agent: "/bitcoin-rs:0.1.0/".to_string(),
@@ -821,15 +825,18 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         best_known_height: 0,
         conn_time: 0,
         inbound: true,
-        addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        addr_bind: bitcoin_rs_p2p::TransportRemote::new(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            8333,
+        )),
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         transport: bitcoin_rs_p2p::TransportProtocol::V1,
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    peer_table.register(info.endpoint.expect("identified test peer"), lease.clone());
+    peer_table.publish_info(info.endpoint.expect("identified test peer"), &lease, info);
     let ctx = context_with_peers(peer_table);
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getpeerinfo", &json!([]))?;

@@ -402,11 +402,11 @@ fn orphan_headers_keep_source_peer_connected() -> TestResult {
     sync.tick();
 
     assert!(
-        peers.is_connected(peer_addr),
+        peers.is_connected(crate::PeerEndpoint::Ip(peer_addr)),
         "orphan announcements are not evidence of a bad peer"
     );
     assert!(
-        peers.is_connected(peer_addr),
+        peers.is_connected(crate::PeerEndpoint::Ip(peer_addr)),
         "orphan announcements must not revoke the peer lease"
     );
     Ok(())

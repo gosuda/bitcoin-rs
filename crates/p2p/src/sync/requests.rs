@@ -72,7 +72,7 @@ impl BlockSync {
             .window
             .confirm_prefix_probe(owner, hashes, &successful, now);
         tracing::info!(
-            owner = %owner.addr,
+            owner = ?owner.endpoint,
             alternates = successful.len(),
             blocks = block_count,
             "block sync: started common-prefix peer probe"
@@ -111,7 +111,10 @@ impl BlockSync {
             return false;
         };
         chain_tip.height.saturating_sub(first_height) < COMPACT_RELAY_NEAR_TIP_BLOCKS
-            && self.peer_table.compact_relay_of(request.owner().addr)
+            && request
+                .owner()
+                .endpoint
+                .is_some_and(|endpoint| self.peer_table.compact_relay_of(endpoint))
     }
 
     /// Requests the next window batch from `source`, a usable peer from the
@@ -137,7 +140,10 @@ impl BlockSync {
         // too: header-drain fetches and stripe retries reach this function
         // without passing the selector, so the gate is enforced at the one
         // path every body request takes (net_processing.cpp:6521-6525).
-        let Some(info) = self.peer_table.info_of(source.addr) else {
+        let Some(info) = source
+            .endpoint
+            .and_then(|endpoint| self.peer_table.info_of(endpoint))
+        else {
             return GetdataRequestOutcome::default();
         };
         let policy = BlockDownloadPolicy {
@@ -190,12 +196,12 @@ impl BlockSync {
             // plans the request again from the window's then-current state.
             if refusal.is_saturated() {
                 tracing::debug!(
-                    peer_addr = %source.addr,
+                    peer_addr = ?source.endpoint,
                     "block sync: getdata deferred; node outbound budget is full"
                 );
             } else {
                 tracing::warn!(
-                    peer_addr = %source.addr,
+                    peer_addr = ?source.endpoint,
                     "block sync: outbound channel disconnected (getdata)"
                 );
             }
@@ -204,13 +210,13 @@ impl BlockSync {
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         if compact_fetch {
             tracing::info!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 count,
                 "block sync: requested compact blocks near tip"
             );
         }
         tracing::debug!(
-            peer_addr = %source.addr,
+            peer_addr = ?source.endpoint,
             count,
             compact = compact_fetch,
             applied_height = applied_tip.height,
@@ -249,7 +255,7 @@ impl BlockSync {
             let Some(peer) = session.info else {
                 continue;
             };
-            let source = session.lease.source(session.addr);
+            let source = session.lease.source(session.endpoint);
             // One capability rule for every path that asks for a body: the
             // same `body_capability` the frontier's usable-peer view
             // precomputes, so the hedge and the scheduler can never disagree
@@ -277,7 +283,7 @@ impl BlockSync {
                 .into_iter()
                 .filter(|source| {
                     !window.peer_has_expired_pending(*source, now)
-                        && !window.peer_in_staller_cooldown(source.addr, now)
+                        && !window.peer_in_staller_cooldown(source.endpoint, now)
                 })
                 .collect()
         };
@@ -288,8 +294,8 @@ impl BlockSync {
             match self.peer_table.send(source, message) {
                 Ok(()) => {
                     tracing::info!(
-                        owner = %owner.addr,
-                        hedge_peer = %source.addr,
+                        owner = ?owner.endpoint,
+                        hedge_peer = ?source.endpoint,
                         %front_hash,
                         front_height,
                         "block sync: hedged cold-start stalled front"

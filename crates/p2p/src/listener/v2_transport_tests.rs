@@ -168,7 +168,11 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
     });
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+    let dial = spawn_pinned_outbound_connection(
+        crate::PeerEndpoint::Ip(addr),
+        dialer,
+        PeerRole::FullRelay,
+    );
     let protocol = responder.join().map_err(|_| "responder panicked")??;
     assert!(matches!(protocol, TransportProtocol::V2 { .. }));
 
@@ -183,7 +187,11 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+    let dial = spawn_pinned_outbound_connection(
+        crate::PeerEndpoint::Ip(addr),
+        dialer,
+        PeerRole::FullRelay,
+    );
     let deadline = deadline();
     let published = loop {
         if let (Some(outbound), Some(inbound)) = (
@@ -223,7 +231,11 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+    let dial = spawn_pinned_outbound_connection(
+        crate::PeerEndpoint::Ip(addr),
+        dialer,
+        PeerRole::FullRelay,
+    );
     let deadline = deadline();
     let dialed = loop {
         let dialed = dialer_table.infos();

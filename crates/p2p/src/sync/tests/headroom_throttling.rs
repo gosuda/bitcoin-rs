@@ -117,16 +117,20 @@ fn cold_start_stall_hedges_front_without_reassigning_owner() -> TestResult {
     }
 
     let alternate_lease = peers
-        .lease(alternate)
+        .lease(crate::PeerEndpoint::Ip(alternate))
         .ok_or_else(|| std::io::Error::other("alternate peer lease missing"))?;
     let mut alternate_info = peers
         .infos()
         .into_iter()
-        .find(|info| info.addr == alternate)
+        .find(|info| info.endpoint == Some(crate::PeerEndpoint::Ip(alternate)))
         .ok_or_else(|| std::io::Error::other("alternate peer info missing"))?;
     alternate_info.start_height = 0;
     alternate_info.best_known_height = 0;
-    assert!(peers.publish_info(alternate, &alternate_lease, alternate_info));
+    assert!(peers.publish_info(
+        crate::PeerEndpoint::Ip(alternate),
+        &alternate_lease,
+        alternate_info
+    ));
     assert!(peers.note_announced_tip(
         current_source(&peers, alternate),
         Hash256::from_le_bytes(expected[0].as_bytes()),
@@ -137,7 +141,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner() -> TestResult {
     sync.tick();
 
     assert!(
-        peers.is_connected(owner),
+        peers.is_connected(crate::PeerEndpoint::Ip(owner)),
         "a cold-start hedge must not disconnect the pending owner"
     );
     let mut hedged = Vec::new();
@@ -367,7 +371,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
 
     sync.reconcile_window_recovery(&sync.observe_chain_frontier(), far_future);
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
-    assert!(peers.is_connected(staller));
+    assert!(peers.is_connected(crate::PeerEndpoint::Ip(staller)));
 
     let drained = sync
         .scheduler
@@ -382,15 +386,15 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
             .window
             .stalling_peer()
             .map(|(addr, _)| addr),
-        Some(staller)
+        Some(Some(crate::PeerEndpoint::Ip(staller)))
     );
-    assert!(peers.is_connected(staller));
+    assert!(peers.is_connected(crate::PeerEndpoint::Ip(staller)));
     sync.reconcile_window_recovery(
         &sync.observe_chain_frontier(),
         far_future + super::super::BLOCK_STALLING_TIMEOUT,
     );
     assert!(
-        !peers.is_connected(staller),
+        !peers.is_connected(crate::PeerEndpoint::Ip(staller)),
         "with the apply side idle the same state must fire normally"
     );
     Ok(())
@@ -471,7 +475,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
         sync.scheduler.lock().stager.contains(&frontier),
         "below the bound the staged frontier must stay put"
     );
-    assert!(peers.is_connected(staller));
+    assert!(peers.is_connected(crate::PeerEndpoint::Ip(staller)));
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
 
     sync.reconcile_window_recovery(
@@ -483,7 +487,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
         "past the bound the stuck staged frontier must be evicted for refetch"
     );
     assert!(
-        peers.is_connected(staller),
+        peers.is_connected(crate::PeerEndpoint::Ip(staller)),
         "the apply-side escalation must never blame or disconnect the front peer"
     );
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
@@ -505,14 +509,14 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
             .window
             .stalling_peer()
             .map(|(addr, _)| addr),
-        Some(staller)
+        Some(Some(crate::PeerEndpoint::Ip(staller)))
     );
     sync.reconcile_window_recovery(
         &sync.observe_chain_frontier(),
         start + bound + Duration::from_secs(1) + super::super::BLOCK_STALLING_TIMEOUT * 2,
     );
     assert!(
-        !peers.is_connected(staller),
+        !peers.is_connected(crate::PeerEndpoint::Ip(staller)),
         "after the escalation a genuinely stalling peer must be convictable"
     );
     Ok(())

@@ -94,7 +94,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     for listener in &listeners {
         let addr = listener.local_addr().expect("fake peer address");
         service
-            .test_queue_automatic_dial(addr)
+            .test_queue_automatic_dial(crate::PeerEndpoint::Ip(addr))
             .expect("queue the automatic dial");
     }
 

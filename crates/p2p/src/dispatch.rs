@@ -2042,7 +2042,9 @@ mod tests {
             assert_ne!(txid.as_byte_array(), wtxid.as_byte_array());
             if orphan {
                 let source = PeerToken {
-                    addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    )),
                     connection_id: 1,
                 };
                 assert!(matches!(

@@ -17,7 +17,10 @@ fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
             .inbound_blocks_sender()
             .same_channel(&p2p.inbound_blocks_sender())
     );
-    assert!(Arc::ptr_eq(state.block_log_reader().raw_handle(), followers.block_log()));
+    assert!(Arc::ptr_eq(
+        state.block_log_reader().raw_handle(),
+        followers.block_log()
+    ));
     assert!(Arc::ptr_eq(
         &state.mining_generation_signal(),
         followers.mining()
@@ -104,7 +107,7 @@ fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
     let sender = state.inbound_tx_sender();
     let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
     let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
-    let source = lease.source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let source = lease.source_ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
     let tx = bitcoin_rs_primitives::Tx {
         version: 1,
         inputs: Vec::new(),

@@ -112,7 +112,7 @@ fn test_source() -> bitcoin_rs_p2p::PeerSource {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_333);
     let (queue, _frames) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
     let lease = bitcoin_rs_p2p::PeerLease::new(queue);
-    lease.source(addr)
+    lease.source_ip(addr)
 }
 
 #[test]

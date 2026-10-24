@@ -201,12 +201,20 @@ impl PeerTable {
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+                .then(|| {
+                    session
+                        .endpoint
+                        .and_then(crate::PeerEndpoint::as_ip)
+                        .map(|socket| {
+                            InboundClockKey::new(socket.ip(), info.addr_bind.socket_addr())
+                        })
+                })
+                .flatten();
             let TxPolicy {
                 relay, inbound_inv, ..
             } = &mut *policy;
             let peer = relay
-                .entry(session.lease.source(session.addr))
+                .entry(session.lease.source(session.endpoint))
                 .or_insert_with(|| RelayPeer::new(now, inbound, inbound_inv, rng));
             if request.source == Some(session.lease.node_id()) {
                 peer.note_known(Identity::Txid(request.txid.0));
@@ -258,7 +266,13 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+            .then(|| {
+                session
+                    .endpoint
+                    .and_then(crate::PeerEndpoint::as_ip)
+                    .map(|socket| InboundClockKey::new(socket.ip(), info.addr_bind.socket_addr()))
+            })
+            .flatten();
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -303,7 +317,13 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+            .then(|| {
+                session
+                    .endpoint
+                    .and_then(crate::PeerEndpoint::as_ip)
+                    .map(|socket| InboundClockKey::new(socket.ip(), info.addr_bind.socket_addr()))
+            })
+            .flatten();
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -348,7 +368,7 @@ impl PeerTable {
             let sessions = self.usable_peers();
             let live: HashSet<_> = sessions
                 .iter()
-                .map(|session| session.lease.source(session.addr))
+                .map(|session| session.lease.source(session.endpoint))
                 .collect();
             policy.relay.retain(|source, _| live.contains(source));
             sessions
@@ -358,11 +378,19 @@ impl PeerTable {
             if !session.lease.role().relays_transactions() {
                 continue;
             }
-            let source = session.lease.source(session.addr);
+            let source = session.lease.source(session.endpoint);
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+                .then(|| {
+                    session
+                        .endpoint
+                        .and_then(crate::PeerEndpoint::as_ip)
+                        .map(|socket| {
+                            InboundClockKey::new(socket.ip(), info.addr_bind.socket_addr())
+                        })
+                })
+                .flatten();
             let requests = {
                 let mut policy = self.tx_policy.lock();
                 let TxPolicy {
@@ -526,7 +554,7 @@ impl PeerTable {
                 }
             }
             Err(crate::OutboundRefusal::Closed(_)) => {
-                tracing::debug!(peer_addr = %source.addr, "relay inventory queue closed; connection cancelled");
+                tracing::debug!(peer_addr = ?source.endpoint, "relay inventory queue closed; connection cancelled");
             }
         }
     }
@@ -669,8 +697,8 @@ mod tests {
         } else {
             crate::PeerLease::new(sender)
         };
-        let source = lease.source(addr);
-        table.register(addr, lease.clone());
+        let source = lease.source_ip(addr);
+        table.register(crate::PeerEndpoint::Ip(addr), lease.clone());
         if ready {
             let version = crate::handshake::version_message(
                 1,
@@ -687,7 +715,7 @@ mod tests {
                 Arc::new(crate::PeerCounters::default()),
             );
             info.wtxid_relay = wtxid;
-            table.publish_info(addr, &lease, info);
+            table.publish_info(crate::PeerEndpoint::Ip(addr), &lease, info);
         }
         (source, receiver)
     }
@@ -762,15 +790,19 @@ mod tests {
         );
         let source = connected.0;
         let lease = table
-            .lease(source.addr)
+            .lease(source.endpoint.expect("clock fixture endpoint"))
             .unwrap_or_else(|| panic!("clock fixture lease"));
         let mut info = table
-            .info_of(source.addr)
+            .info_of(source.endpoint.expect("clock fixture endpoint"))
             .unwrap_or_else(|| panic!("clock fixture info"));
         // A pre-BIP133 peer isolates inventory clock draws from fee-filter
         // refreshes without substituting the scheduler under test.
         info.version = 70_012;
-        table.publish_info(source.addr, &lease, info);
+        table.publish_info(
+            source.endpoint.expect("identified peer endpoint"),
+            &lease,
+            info,
+        );
         connected
     }
 
@@ -1047,8 +1079,8 @@ mod tests {
         let addr = ([127, 0, 0, 1], port).into();
         let (sender, receiver) = message_channel_bounded(1024);
         let lease = crate::PeerLease::new(sender).with_shared_budget(aggregate);
-        let source = lease.source(addr);
-        table.register(addr, lease.clone());
+        let source = lease.source_ip(addr);
+        table.register(crate::PeerEndpoint::Ip(addr), lease.clone());
         let version = crate::handshake::version_message(
             1,
             0,
@@ -1064,7 +1096,7 @@ mod tests {
             Arc::new(crate::PeerCounters::default()),
         );
         info.wtxid_relay = true;
-        table.publish_info(addr, &lease, info);
+        table.publish_info(crate::PeerEndpoint::Ip(addr), &lease, info);
         (source, receiver)
     }
 
@@ -1354,14 +1386,14 @@ mod tests {
             connect(&table, 1, false, false, crate::PeerRole::FullRelay, true);
         let (known, known_rx) = connect(&table, 2, false, true, crate::PeerRole::FullRelay, true);
         let (_, other_rx) = connect(&table, 3, false, true, crate::PeerRole::FullRelay, true);
-        let Some(lease) = table.lease(optout.addr) else {
+        let Some(lease) = table.lease(optout.endpoint.expect("identified fixture")) else {
             panic!("live fixture lease")
         };
-        let Some(mut info) = table.info_of(optout.addr) else {
+        let Some(mut info) = table.info_of(optout.endpoint.expect("identified fixture")) else {
             panic!("published fixture info")
         };
         info.relay_transactions = false;
-        table.publish_info(optout.addr, &lease, info);
+        table.publish_info(optout.endpoint.expect("identified fixture"), &lease, info);
         let request = insert(&gateway, &transaction(1, None), 1_000);
         table.note_transaction_inventory(
             known,

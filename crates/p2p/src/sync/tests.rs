@@ -814,7 +814,7 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
     let best_known = peers
         .sessions()
         .iter()
-        .find(|session| session.addr == addr)
+        .find(|session| session.endpoint == Some(crate::PeerEndpoint::Ip(addr)))
         .and_then(|session| session.info.as_ref())
         .map(|info| info.best_known_height)
         .ok_or_else(|| std::io::Error::other("missing peer info"))?;
@@ -1117,7 +1117,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         assert_eq!(scheduler.window.pending_len(), 2);
         assert_eq!(
             scheduler.window.stalling_peer().map(|(addr, _)| addr),
-            Some(staller),
+            Some(Some(crate::PeerEndpoint::Ip(staller))),
             "the front-stripe owner must be the observed staller"
         );
     }
@@ -1126,14 +1126,14 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     sync.tick();
 
     assert!(
-        !peers.is_connected(staller),
+        !peers.is_connected(crate::PeerEndpoint::Ip(staller)),
         "staller's outbound lease must be revoked"
     );
     assert!(
         sync.scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(staller, Instant::now()),
+            .peer_in_staller_cooldown(Some(crate::PeerEndpoint::Ip(staller)), Instant::now()),
         "disconnected staller must enter the cooldown"
     );
     assert_no_getdata(&rxs[0])?;
@@ -1871,7 +1871,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .historical
             .lock()
             .window
-            .peer_in_staller_cooldown(addr, Instant::now())
+            .peer_in_staller_cooldown(Some(crate::PeerEndpoint::Ip(addr)), Instant::now())
     );
     let retry_addr = test_addr(28001, 0)?;
     let retry_rx = connect_peer(&harness.peers, synthetic_peer(retry_addr, 3));
@@ -2377,9 +2377,9 @@ fn assert_applied_genesis(
 }
 
 pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
-    peer_table.lease(addr).map_or_else(
+    peer_table.lease(crate::PeerEndpoint::Ip(addr)).map_or_else(
         || panic!("test peer {addr} must be connected"),
-        |lease| lease.source(addr),
+        |lease| lease.source_ip(addr),
     )
 }
 
@@ -2391,14 +2391,22 @@ fn test_frontier(sync: &BlockSync) -> super::ChainFrontier {
 fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     let (tx, _rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    peer_table.register(
+        info.endpoint.expect("identified peer endpoint"),
+        lease.clone(),
+    );
+    peer_table.publish_info(
+        info.endpoint.expect("identified peer endpoint"),
+        &lease,
+        info,
+    );
 }
 /// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK` plus
 /// `NODE_WITNESS`, so it may serve block bodies at any height.
 pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     PeerInfo {
-        addr,
+        endpoint: Some(crate::PeerEndpoint::Ip(addr)),
+        network: crate::PeerEndpoint::Ip(addr).net(),
         version: 70_016,
         wtxid_relay: false,
         relay_transactions: true,
@@ -2411,7 +2419,7 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         best_known_height: start_height,
         conn_time: 0,
         inbound: false,
-        addr_bind: addr,
+        addr_bind: crate::TransportRemote::new(addr),
         time_offset: 0,
         counters: std::sync::Arc::new(crate::PeerCounters::default()),
         transport: crate::TransportProtocol::V1,
@@ -2444,8 +2452,15 @@ pub(crate) fn connect_peer(
 ) -> crate::test_support::MessageReceiver {
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    peer_table.register(
+        info.endpoint.expect("identified peer endpoint"),
+        lease.clone(),
+    );
+    peer_table.publish_info(
+        info.endpoint.expect("identified peer endpoint"),
+        &lease,
+        info,
+    );
     rx
 }
 
@@ -2579,9 +2594,12 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
     let saturated_addr = test_addr(18_910, 1)?;
     let (saturated_tx, saturated_rx) = crate::test_support::message_channel();
     let saturated_lease = PeerLease::new(saturated_tx).with_shared_budget(&aggregate);
-    peers.register(saturated_addr, saturated_lease.clone());
+    peers.register(
+        crate::PeerEndpoint::Ip(saturated_addr),
+        saturated_lease.clone(),
+    );
     peers.publish_info(
-        saturated_addr,
+        crate::PeerEndpoint::Ip(saturated_addr),
         &saturated_lease,
         synthetic_peer(saturated_addr, 300),
     );
@@ -2596,7 +2614,7 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
         !saturated_lease.is_cancelled(),
         "a full aggregate never cancels a healthy candidate"
     );
-    assert!(peers.is_connected(saturated_addr));
+    assert!(peers.is_connected(crate::PeerEndpoint::Ip(saturated_addr)));
 
     // Whichever order the candidates are tried in, the request reaches the
     // healthy one and the saturated one stays untouched and connected.
@@ -2610,7 +2628,7 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
     assert!(matches!(healthy_rx.try_recv()?, Message::GetData(_)));
     assert!(saturated_rx.is_empty());
     assert!(!saturated_lease.is_cancelled());
-    assert!(peers.is_connected(saturated_addr));
+    assert!(peers.is_connected(crate::PeerEndpoint::Ip(saturated_addr)));
     drop(hold);
     Ok(())
 }

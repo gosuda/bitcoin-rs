@@ -4,8 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bitcoin::p2p::message_network::VersionMessage;
+use bitcoin_rs_primitives::{NetworkLabel, PeerEndpoint};
 
 use crate::counters::PeerCounters;
+use crate::endpoint::TransportRemote;
 
 /// What one connection relays.
 ///
@@ -39,8 +41,10 @@ impl PeerRole {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
-    /// Remote socket address.
-    pub addr: SocketAddr,
+    /// Logical peer endpoint; `None` for unidentified inbound sessions.
+    pub endpoint: Option<PeerEndpoint>,
+    /// Network classification, set at accept/dial construction.
+    pub network: NetworkLabel,
     /// Protocol version advertised by the remote.
     pub version: u32,
     /// Whether this connection requested BIP339 witness-id announcements.
@@ -71,13 +75,13 @@ pub struct PeerInfo {
     pub conn_time: u64,
     /// Whether this connection was inbound (`true` for listener-accepted peers).
     pub inbound: bool,
-    /// Local socket address this connection is bound to.
+    /// Local socket this connection is bound to (Core `addrbind`).
     ///
     /// Bitcoin Core reports it as `addrbind`, and it is the node's own address
     /// on this connection -- not the peer's. Reporting the peer's address
     /// twice, as this used to, tells an operator listening on several
     /// interfaces nothing about which one carried the connection.
-    pub addr_bind: SocketAddr,
+    pub addr_bind: TransportRemote,
     /// Seconds the peer's clock is ahead of this node's, from its version.
     pub time_offset: i64,
     /// Live traffic counters for the connection.
@@ -121,7 +125,8 @@ impl PeerInfo {
         counters: Arc<PeerCounters>,
     ) -> Self {
         Self {
-            addr,
+            endpoint: Some(PeerEndpoint::Ip(addr)),
+            network: PeerEndpoint::Ip(addr).net(),
             version: version.version,
             wtxid_relay: false,
             relay_transactions: version.relay,
@@ -133,7 +138,7 @@ impl PeerInfo {
             best_known_height: version.start_height,
             conn_time,
             inbound: false,
-            addr_bind,
+            addr_bind: TransportRemote::new(addr_bind),
             // Freeze the offset at version receipt, not handshake completion.
             time_offset: version
                 .timestamp
@@ -253,10 +258,10 @@ mod tests {
         let table = PeerTable::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
-        assert!(!table.register(peer, lease.clone()));
+        assert!(!table.register(crate::PeerEndpoint::Ip(peer), lease.clone()));
         assert!(
             table.publish_info(
-                peer,
+                crate::PeerEndpoint::Ip(peer),
                 &lease,
                 PeerInfo::inbound_from_version(peer, bind, &fake_version(), 0, 0, counters())
             ),
@@ -265,9 +270,12 @@ mod tests {
 
         let infos = table.infos();
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].addr, peer);
-        assert_eq!(infos[0].addr_bind, bind);
-        assert_ne!(infos[0].addr, infos[0].addr_bind);
+        assert_eq!(infos[0].endpoint, Some(crate::PeerEndpoint::Ip(peer)));
+        assert_eq!(infos[0].addr_bind, crate::TransportRemote::new(bind));
+        assert_ne!(
+            infos[0].endpoint,
+            Some(crate::PeerEndpoint::Ip(infos[0].addr_bind.socket_addr()))
+        );
     }
 
     #[test]
