@@ -749,11 +749,13 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         (text, 0_i32)
     };
 
-    // Split mantissa on decimal point.
+    // Split mantissa on decimal point. Like Core's ParseFixedPoint, a
+    // decimal point requires at least one digit on each side ("1." and
+    // ".1" are malformed), and a second point is garbage.
     let (int_part, frac_part) = if let Some(pos) = mantissa.find('.') {
         let (i, f) = mantissa.split_at(pos);
         let f = &f[1..];
-        if f.contains('.') {
+        if i.is_empty() || f.is_empty() || f.contains('.') {
             return Err(RpcError::InvalidParams(message));
         }
         (i, f)
@@ -761,10 +763,11 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         (mantissa, "")
     };
 
-    // Both parts must contain only ASCII digits, and there must be at least one digit total.
-    if (!int_part.is_empty() && !int_part.chars().all(|c| c.is_ascii_digit()))
-        || (!frac_part.is_empty() && !frac_part.chars().all(|c| c.is_ascii_digit()))
-        || (int_part.is_empty() && frac_part.is_empty())
+    // Both parts must contain only ASCII digits, and the integer part
+    // must carry at least one digit.
+    if int_part.is_empty()
+        || !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
     {
         return Err(RpcError::InvalidParams(message));
     }
@@ -3020,6 +3023,11 @@ mod finalizepsbt_tests {
             sats_from_btc(&json!("0.000000000"), "Invalid amount").unwrap(),
             0
         );
+        // A decimal point needs a digit on each side (Core ParseFixedPoint).
+        assert!(sats_from_btc(&json!("1."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(".1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
 
         // Zero handling
         assert_eq!(sats_from_btc(&json!(0), "Invalid amount").unwrap(), 0);
