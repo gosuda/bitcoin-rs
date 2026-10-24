@@ -218,7 +218,7 @@ impl PeerTable {
         let entry = Entry {
             keyed_netgroup: self
                 .netgroup_key
-                .hash_one(&crate::endpoint::anonymous_netgroup(lease.connection_id())),
+                .hash_one(crate::endpoint::anonymous_netgroup(lease.connection_id())),
             ..Entry::fresh(lease)
         };
         Self::register_locked(&mut self.entries.write(), key, entry)
@@ -379,7 +379,7 @@ impl PeerTable {
         let entry = Entry {
             keyed_netgroup: self
                 .netgroup_key
-                .hash_one(&crate::endpoint::anonymous_netgroup(lease.connection_id())),
+                .hash_one(crate::endpoint::anonymous_netgroup(lease.connection_id())),
             ..Entry::fresh(lease.clone())
         };
         Self::register_locked(&mut entries, key, entry);
