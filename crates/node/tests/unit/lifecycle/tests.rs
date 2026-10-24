@@ -975,8 +975,45 @@ fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
         state.config().mining.payout_script.clone(),
     ));
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
-    let (_context, server) = bind_rpc(state, &mining_control, state.block_body_source()?)?;
+    let (_context, server, _auth) = bind_rpc(state, &mining_control, state.block_body_source()?)?;
     Ok(server)
+}
+
+#[test]
+fn dual_rpc_listeners_bind_and_join_on_shutdown() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = isolated_config(dir.path());
+    let public_ephemeral = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    config.rpc.public_bind = Some(public_ephemeral);
+    let state = NodeState::open(config, None)?;
+
+    let coordinator = Arc::new(crate::MiningCoordinator::new(
+        state.mempool_reader(),
+        state.chainstate(),
+        state.stable_read(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
+    ));
+    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
+    let (context, mgmt_server, rpc_auth) = bind_rpc(&state, &mining_control, state.block_body_source()?)?;
+    let public_bind = state.config().rpc.public_bind.expect("configured public bind");
+    let public_server = bind_public_rpc(public_bind, &context, rpc_auth)?;
+
+    assert_eq!(mgmt_server.role, bitcoin_rs_rpc::ListenerRole::Management);
+    assert_eq!(mgmt_server.max_connections, 16);
+    assert_eq!(public_server.role, bitcoin_rs_rpc::ListenerRole::Public);
+    assert_eq!(public_server.max_connections, 128);
+
+    let shutdown = state.shutdown_reader();
+    let sd1 = shutdown.clone();
+    let mgmt_thread = std::thread::spawn(move || mgmt_server.serve_with_shutdown(sd1));
+    let sd2 = shutdown.clone();
+    let pub_thread = std::thread::spawn(move || public_server.serve_with_shutdown(sd2));
+
+    state.request_shutdown();
+    mgmt_thread.join().expect("mgmt thread join")?;
+    pub_thread.join().expect("pub thread join")?;
+    Ok(())
 }
 
 #[test]

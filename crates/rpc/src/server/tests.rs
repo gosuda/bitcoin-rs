@@ -19,6 +19,7 @@ fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> 
             &handler,
             enabled,
             Duration::from_secs(2),
+            ListenerRole::All,
         )
     });
     client.write_all(request)?;
@@ -140,32 +141,47 @@ fn connection_admission_reserves_slots_for_other_peers() {
     let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     let mut active = ActiveConnections::default();
     for _ in 0..96 {
-        assert!(active.admit(source, 128));
+        assert_eq!(active.admit(source, 128), ConnectionAdmission::Admitted);
     }
-    assert!(
-        !active.admit(source, 128),
+    assert_eq!(
+        active.admit(source, 128),
+        ConnectionAdmission::PerSourceLimit,
         "a quarter of the pool stays open to other sources"
     );
     for _ in 0..32 {
-        assert!(active.admit(other, 128));
+        assert_eq!(active.admit(other, 128), ConnectionAdmission::Admitted);
     }
-    assert!(!active.admit(other, 128), "the pool is full");
+    assert_eq!(
+        active.admit(other, 128),
+        ConnectionAdmission::PoolFull,
+        "the pool is full"
+    );
     active.release(source);
-    assert!(active.admit(source, 128));
+    assert_eq!(active.admit(source, 128), ConnectionAdmission::Admitted);
 
     let mut small_pool = ActiveConnections::default();
     for _ in 0..3 {
-        assert!(small_pool.admit(source, 4));
+        assert_eq!(small_pool.admit(source, 4), ConnectionAdmission::Admitted);
     }
-    assert!(!small_pool.admit(source, 4));
-    assert!(small_pool.admit(other, 4));
+    assert_eq!(
+        small_pool.admit(source, 4),
+        ConnectionAdmission::PerSourceLimit
+    );
+    assert_eq!(
+        small_pool.admit(other, 4),
+        ConnectionAdmission::Admitted
+    );
 
     // Below four workers no share is kept: one client can hold a blocking
     // call and still reach the ordinary slot the quota leaves it.
     let mut two_slots = ActiveConnections::default();
-    assert!(two_slots.admit(source, 2));
-    assert!(two_slots.admit(source, 2));
-    assert!(!two_slots.admit(other, 2), "the pool is full");
+    assert_eq!(two_slots.admit(source, 2), ConnectionAdmission::Admitted);
+    assert_eq!(two_slots.admit(source, 2), ConnectionAdmission::Admitted);
+    assert_eq!(
+        two_slots.admit(other, 2),
+        ConnectionAdmission::PoolFull,
+        "the pool is full"
+    );
 }
 
 #[test]
@@ -511,6 +527,7 @@ fn oversized_unterminated_head_is_rejected_before_newline() -> std::io::Result<(
                 &handler,
                 false,
                 core::time::Duration::from_secs(5),
+                ListenerRole::All,
             )
         });
 
@@ -546,6 +563,7 @@ fn exact_request_head_budget_is_accepted() -> std::io::Result<()> {
             &handler,
             false,
             core::time::Duration::from_secs(5),
+            ListenerRole::All,
         )
     });
 
@@ -625,6 +643,7 @@ fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
             &handler,
             false,
             core::time::Duration::from_secs(1),
+            ListenerRole::All,
         )
     });
 
@@ -1194,6 +1213,7 @@ fn exchange(request: &[u8]) -> io::Result<Exchange> {
             &Handler::new(Arc::new(Context::new())),
             false,
             Duration::from_secs(30),
+            ListenerRole::All,
         )
     });
     let started = Instant::now();
@@ -1442,6 +1462,7 @@ fn authorized_request_proceeds_to_body_framing() -> io::Result<()> {
             &Handler::new(Arc::new(Context::new())),
             false,
             Duration::from_secs(30),
+            ListenerRole::All,
         )
     });
     let mut request = json_rpc_head(Some(GOOD_TOKEN), 16);
@@ -1556,5 +1577,311 @@ fn invalid_listener_errors_are_returned() -> io::Result<()> {
         assert_eq!(result.expect_err("fatal listener error").kind(), kind);
         assert_eq!(attempts, 1);
     }
+    Ok(())
+}
+
+#[test]
+fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
+    let ctx = Arc::new(Context::new());
+    let auth = Arc::new(Auth::basic("alice", "secret"));
+
+    let public_server = RpcServer::bind_with_role(
+        "127.0.0.1:0",
+        Arc::clone(&auth),
+        Arc::new(Handler::new(Arc::clone(&ctx))),
+        16,
+        Duration::from_secs(5),
+        true,
+        ListenerRole::Public,
+    )?;
+    let public_addr = public_server.local_addr()?;
+    let public_shutdown = Arc::new(AtomicBool::new(false));
+    let pub_sd = Arc::clone(&public_shutdown);
+    let pub_handle = thread::spawn(move || public_server.serve_with_shutdown(pub_sd));
+
+    let mgmt_server = RpcServer::bind_with_role(
+        "127.0.0.1:0",
+        Arc::clone(&auth),
+        Arc::new(Handler::new(Arc::clone(&ctx))),
+        16,
+        Duration::from_secs(5),
+        true,
+        ListenerRole::Management,
+    )?;
+    let mgmt_addr = mgmt_server.local_addr()?;
+    let mgmt_shutdown = Arc::new(AtomicBool::new(false));
+    let mgmt_sd = Arc::clone(&mgmt_shutdown);
+    let mgmt_handle = thread::spawn(move || mgmt_server.serve_with_shutdown(mgmt_sd));
+
+    let send_req = |addr: SocketAddr, req: &[u8]| -> io::Result<String> {
+        let mut client = TcpStream::connect(addr)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.write_all(req)?;
+        let mut resp = String::new();
+        client.read_to_string(&mut resp)?;
+        Ok(resp)
+    };
+
+    // Public POST / without credentials -> 404 (never 401)
+    let resp = send_req(
+        public_addr,
+        b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public POST / without auth must be 404: {resp}");
+
+    // Public POST / with valid credentials -> 404 (never dispatch)
+    let resp = send_req(
+        public_addr,
+        b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public POST / with auth must be 404: {resp}");
+
+    // Public REST -> 404
+    let resp = send_req(
+        public_addr,
+        b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "public REST must be 404: {resp}");
+
+    // Public Esplora GET -> 200
+    let resp = send_req(
+        public_addr,
+        b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "public Esplora GET must be 200: {resp}");
+
+    // Public Esplora preflight OPTIONS -> 204
+    let resp = send_req(
+        public_addr,
+        b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 204 No Content"), "public preflight must be 204: {resp}");
+
+    // Management Esplora GET -> 404
+    let resp = send_req(
+        mgmt_addr,
+        b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "management Esplora GET must be 404: {resp}");
+
+    // Management Esplora POST -> 404
+    let resp = send_req(
+        mgmt_addr,
+        b"POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "management Esplora POST must be 404: {resp}");
+
+    // Management JSON-RPC POST / without auth -> 401
+    let resp = send_req(
+        mgmt_addr,
+        b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 401 Unauthorized"), "management POST / without auth must be 401: {resp}");
+
+    // Management JSON-RPC POST / with auth -> 200
+    let rpc_body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        rpc_body.len(),
+        rpc_body
+    );
+    let resp = send_req(mgmt_addr, req.as_bytes())?;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "management JSON-RPC with auth must be 200: {resp}");
+
+    // Management REST -> 200
+    let resp = send_req(
+        mgmt_addr,
+        b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "management REST must be 200: {resp}");
+
+    public_shutdown.store(true, Ordering::Release);
+    mgmt_shutdown.store(true, Ordering::Release);
+    pub_handle.join().expect("public join")?;
+    mgmt_handle.join().expect("mgmt join")?;
+    Ok(())
+}
+
+static PROMETHEUS: parking_lot::Mutex<Option<metrics_exporter_prometheus::PrometheusHandle>> =
+    parking_lot::Mutex::new(None);
+
+fn test_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
+    let mut slot = PROMETHEUS.lock();
+    if let Some(handle) = slot.as_ref() {
+        return handle.clone();
+    }
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("install test recorder");
+    *slot = Some(handle.clone());
+    handle
+}
+
+#[test]
+fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query() -> io::Result<()> {
+    let metrics_handle = test_prometheus_handle();
+    let ctx = Arc::new(Context::new());
+    let auth = Arc::new(Auth::basic("alice", "secret"));
+
+    let public_server = RpcServer::bind_with_role(
+        "127.0.0.1:0",
+        Arc::clone(&auth),
+        Arc::new(Handler::new(Arc::clone(&ctx))),
+        4,
+        Duration::from_secs(30),
+        false,
+        ListenerRole::Public,
+    )?;
+    let public_addr = public_server.local_addr()?;
+
+    let mgmt_server = RpcServer::bind_with_role(
+        "127.0.0.1:0",
+        Arc::clone(&auth),
+        Arc::new(Handler::new(Arc::clone(&ctx))),
+        16,
+        Duration::from_secs(30),
+        false,
+        ListenerRole::Management,
+    )?;
+    let mgmt_addr = mgmt_server.local_addr()?;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let pub_sd = Arc::clone(&shutdown);
+    let pub_handle = thread::spawn(move || public_server.serve_with_shutdown(pub_sd));
+    let mgmt_sd = Arc::clone(&shutdown);
+    let mgmt_handle = thread::spawn(move || mgmt_server.serve_with_shutdown(mgmt_sd));
+
+    fn connect_distinct(server_addr: SocketAddr, index: u8) -> io::Result<TcpStream> {
+        #[cfg(unix)]
+        {
+            use rustix::net::{AddressFamily, SocketAddrV4, SocketType};
+            let fd = rustix::net::socket_with(
+                AddressFamily::INET,
+                SocketType::STREAM,
+                rustix::net::SocketFlags::empty(),
+                None,
+            )?;
+            rustix::net::bind(
+                &fd,
+                &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, index), 0),
+            )?;
+            let server_v4 = match server_addr {
+                SocketAddr::V4(v4) => v4,
+                _ => unreachable!(),
+            };
+            rustix::net::connect(&fd, &server_v4)?;
+            Ok(TcpStream::from(fd))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = index;
+            TcpStream::connect(server_addr)
+        }
+    }
+
+    // Hold 4 public keep-alive sockets
+    let mut held_sockets = Vec::new();
+    for i in 1..=4 {
+        let mut client = connect_distinct(public_addr, i)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.write_all(b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")?;
+        let mut buf = [0u8; 512];
+        let n = client.read(&mut buf)?;
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "held socket {i} got: {resp}");
+        held_sockets.push(client);
+    }
+
+    // 5th public request must return 503 Service Unavailable ("busy")
+    let mut fifth_client = connect_distinct(public_addr, 5)?;
+    fifth_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut fifth_resp = String::new();
+    fifth_client.read_to_string(&mut fifth_resp)?;
+    assert!(fifth_resp.starts_with("HTTP/1.1 503 Service Unavailable"), "5th request must be 503: {fifth_resp}");
+    assert!(fifth_resp.contains("busy"), "503 body must be busy");
+
+    // Pool-full metric counter is incremented with closed labels surface=esplora_public, reason=pool_full
+    let scrape = metrics_handle.render();
+    assert!(
+        scrape.contains("node_rpc_connection_rejections_total"),
+        "scrape must contain node_rpc_connection_rejections_total: {scrape}"
+    );
+    assert!(
+        scrape.contains(r#"reason="pool_full""#),
+        "scrape must contain reason=\"pool_full\": {scrape}"
+    );
+    assert!(
+        scrape.contains(r#"surface="esplora_public""#),
+        "scrape must contain surface=\"esplora_public\": {scrape}"
+    );
+
+    // Concurrently, management listener serves authenticated JSON-RPC getblockcount as 200 OK
+    let mut mgmt_client = TcpStream::connect(mgmt_addr)?;
+    mgmt_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let rpc_body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        rpc_body.len(),
+        rpc_body
+    );
+    mgmt_client.write_all(req.as_bytes())?;
+    let mut mgmt_resp = String::new();
+    mgmt_client.read_to_string(&mut mgmt_resp)?;
+    assert!(mgmt_resp.starts_with("HTTP/1.1 200 OK"), "management must be 200: {mgmt_resp}");
+
+    // Release ONE held public socket
+    drop(held_sockets.pop());
+    thread::sleep(Duration::from_millis(100));
+
+    // Public admission is restored!
+    let mut restored_client = connect_distinct(public_addr, 5)?;
+    restored_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    restored_client.write_all(b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut restored_resp = String::new();
+    restored_client.read_to_string(&mut restored_resp)?;
+    assert!(restored_resp.starts_with("HTTP/1.1 200 OK"), "restored public request must be 200: {restored_resp}");
+
+    // Close remaining held sockets
+    drop(held_sockets);
+
+    // Public /api/tx broadcast is visible via management getrawtransaction
+    let (tx, _) = crate::esplora::tests::transaction_with_funded_input(&ctx, 10_000);
+    let raw_hex = bitcoin_rs_primitives::consensus_bytes(&tx).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let txid = tx.txid();
+
+    let mut broadcast_client = TcpStream::connect(public_addr)?;
+    broadcast_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let post_req = format!(
+        "POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        raw_hex.len(),
+        raw_hex
+    );
+    broadcast_client.write_all(post_req.as_bytes())?;
+    let mut broadcast_resp = String::new();
+    broadcast_client.read_to_string(&mut broadcast_resp)?;
+    assert!(broadcast_resp.starts_with("HTTP/1.1 200 OK"), "broadcast must be 200: {broadcast_resp}");
+    assert!(broadcast_resp.contains(&txid.to_string()), "broadcast response must contain txid");
+
+    let mut query_client = TcpStream::connect(mgmt_addr)?;
+    query_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let query_body = format!(
+        r#"{{"jsonrpc":"2.0","method":"getrawtransaction","params":["{}"],"id":2}}"#,
+        txid
+    );
+    let query_req = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        query_body.len(),
+        query_body
+    );
+    query_client.write_all(query_req.as_bytes())?;
+    let mut query_resp = String::new();
+    query_client.read_to_string(&mut query_resp)?;
+    assert!(query_resp.starts_with("HTTP/1.1 200 OK"), "management getrawtransaction must be 200: {query_resp}");
+    assert!(query_resp.contains(&raw_hex), "management getrawtransaction must return raw tx hex");
+
+    // Both listeners join on shutdown
+    shutdown.store(true, Ordering::Release);
+    pub_handle.join().expect("public join")?;
+    mgmt_handle.join().expect("management join")?;
     Ok(())
 }

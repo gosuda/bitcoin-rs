@@ -107,7 +107,7 @@ fn strip_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod tests {
+pub(crate) mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::cell::RefCell;
@@ -221,7 +221,7 @@ mod tests {
         block
     }
 
-    fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
+    pub(crate) fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         // OP_TRUE: an anyone-can-spend funding script, so the broadcast
         // fixture's empty scriptSig satisfies script verification. The output
         // stays P2WPKH: standardness only allows known output templates.

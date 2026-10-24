@@ -86,6 +86,7 @@ mod tests {
         }
     }
     use std::ffi::OsString;
+    use std::net::SocketAddr;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
@@ -213,6 +214,30 @@ mod tests {
         .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
 
         assert_eq!(config.storage.prune_target_mb, 100);
+    }
+
+    #[test]
+    fn rpc_public_bind_resolves_from_cli_and_conf() {
+        let config = resolved(
+            &["bitcoin-rs", "--rpc-public-bind=127.0.0.1:8336"],
+            &[],
+        );
+        assert_eq!(
+            config.rpc.public_bind,
+            Some(SocketAddr::from(([127, 0, 0, 1], 8336)))
+        );
+
+        let config = load_file(
+            "--bitcoin-conf",
+            "rpcpublicbind=127.0.0.1:8337\n",
+            &[],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        assert_eq!(
+            config.rpc.public_bind,
+            Some(SocketAddr::from(([127, 0, 0, 1], 8337)))
+        );
     }
 
     #[test]

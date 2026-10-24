@@ -29,8 +29,10 @@ stay in the external process.
 
 ### `WF-02`: Operations a wallet actually issues
 
-Esplora lives at `/api` on the JSON-RPC listener. That directory is the
-electrs/mempool.space base URL. Relative routes below are appended to it.
+Esplora lives at `/api` on the JSON-RPC listener (or on the dedicated public
+listener when `rpc_public_bind` is configured; see `API-08`). That directory
+is the electrs/mempool.space base URL. Relative routes below are appended to it.
+On the public listener, `POST /` returns 404, never 401 or dispatch.
 Every read captures the applied-tip publication and answers from one coherent view. A
 moved chain generation returns the declared unavailable response, never a
 mixed-tip page.
@@ -120,8 +122,9 @@ the applied-tip fence across GET and read-only POST requests.
   `POST /api/tx` remains the broadcast route; neither unsupported request
   reaches JSON-RPC. Evidence: the running-node assertions in
   `external_wallet_can_scan_estimate_and_broadcast` (the `HEAD /api/tx` and
-  `PUT /` exchanges) and the
-  corresponding CI test log.
+  `PUT /` exchanges), `rpc::server::tests::listener_role_filtering_and_public_post_is_404_not_401`,
+  `rpc::server::tests::public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query`,
+  and the corresponding CI test log.
 - **Closed namespaces:** `/api` and `/esplora` accept only their documented
   GET/POST routes, and unprefixed explorer paths remain 404. Evidence: the
   same integration test plus `listener_directory_table_is_closed_over_http`;

@@ -535,3 +535,34 @@ p2p_noban = ["192.0.2.99/24", "::1"]
     );
     Ok(())
 }
+
+#[test]
+fn rpc_public_bind_defaults_none_and_resolves_across_layers() -> Result<()> {
+    let default_config = resolve(&[])?;
+    assert_eq!(default_config.rpc.public_bind, None);
+
+    let toml_layer: UserConfig = toml::from_str("rpc_public_bind = \"127.0.0.1:8334\"\n")?;
+    let config = resolve(&[&toml_layer])?;
+    let expected = std::net::SocketAddr::from(([127, 0, 0, 1], 8334));
+    assert_eq!(config.rpc.public_bind, Some(expected));
+
+    let mut env_layer = UserConfig::default();
+    env_layer.apply_env(
+        "BITCOIN_RS_RPC_PUBLIC_BIND",
+        std::ffi::OsStr::new("127.0.0.1:8335"),
+    )?;
+    let config = resolve(&[&toml_layer, &env_layer])?;
+    let expected_env = std::net::SocketAddr::from(([127, 0, 0, 1], 8335));
+    assert_eq!(config.rpc.public_bind, Some(expected_env));
+
+    // Equality with rpc.bind is rejected.
+    let conflicting: UserConfig = toml::from_str(&format!(
+        "rpc_bind = \"127.0.0.1:8332\"\nrpc_public_bind = \"127.0.0.1:8332\"\n"
+    ))?;
+    let err = resolve(&[&conflicting]);
+    assert!(
+        err.is_err_and(|e| e.to_string().contains("public RPC bind must not equal rpc.bind")),
+        "conflicting binds must fail validation"
+    );
+    Ok(())
+}

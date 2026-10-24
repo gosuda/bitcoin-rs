@@ -514,6 +514,8 @@ dependencies = [
  "corepc-types",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "metrics",
+ "metrics-exporter-prometheus",
  "miniscript",
  "parking_lot",
  "rustix",

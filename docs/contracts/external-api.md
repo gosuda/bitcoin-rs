@@ -538,6 +538,16 @@ pinned source).
 - Administrative RPC stays private and authenticated by default. Public
   read and broadcast exposure, allowed hosts and origins, and rate and
   concurrency limits are independently configured.
+- When `rpc_public_bind` (`--rpc-public-bind`, env `BITCOIN_RS_RPC_PUBLIC_BIND`,
+  TOML `rpc_public_bind`, conf `rpcpublicbind`) is configured, public queries are
+  isolated onto a dedicated public listener with 128 connections while the
+  management listener becomes restricted to JSON-RPC and REST with 16
+  connections. Route filtering runs after reading the request head and before
+  authentication: `Public` allows Esplora GET/POST, preflight, and not-found;
+  `Management` allows JSON-RPC, REST GET/POST, and not-found; `All` preserves
+  legacy unified listener behavior when `rpc_public_bind` is unset. Public `POST /`
+  returns 404, never 401 or dispatch. Both listeners operate over the same
+  `Context` with independent `ActiveConnections` pools and blocking quotas.
 - Request bodies, batch size, response assembly, scan rows, in-flight
   work, and long-poll clients are bounded. A public explorer read cannot
   consume the CPU or memory quota needed to validate new blocks.
@@ -1121,8 +1131,10 @@ evidence does not establish mainnet memory or throughput qualifications.
     `keep_alive_wait_is_not_bounded_by_the_head_budget`,
     `body_arriving_across_reads_is_received_whole`,
     `declared_but_unsent_body_allocates_only_received_bytes`,
-    `full_body_capacity_stays_within_the_declared_length` and
-    `declared_but_unsent_body_is_a_framing_error`.
+    `full_body_capacity_stays_within_the_declared_length`,
+    `declared_but_unsent_body_is_a_framing_error`,
+    `listener_role_filtering_and_public_post_is_404_not_401`, and
+    `public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query`.
 - Admission exhaustion is the intentional `-1` error
   `RPC blocking request limit reached`. HTTP requests containing a classified
   blocking call close keep-alive after their response, including refusals, so

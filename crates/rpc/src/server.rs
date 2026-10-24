@@ -44,6 +44,48 @@ const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
 
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
+/// Operating role of an RPC listener socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListenerRole {
+    /// Accepts all routes (legacy unified listener).
+    All,
+    /// Accepts only public query routes: Esplora GET/POST, preflight, and not-found.
+    Public,
+    /// Accepts only management routes: JSON-RPC, REST GET/POST, and not-found.
+    Management,
+}
+
+impl ListenerRole {
+    /// Checks whether a route is permitted by this listener role.
+    pub(crate) fn allows(self, route: &HttpRoute<'_>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Public => matches!(
+                route,
+                HttpRoute::EsploraGet { .. }
+                    | HttpRoute::EsploraPost { .. }
+                    | HttpRoute::Preflight { .. }
+                    | HttpRoute::NotFound
+            ),
+            Self::Management => matches!(
+                route,
+                HttpRoute::JsonRpc
+                    | HttpRoute::Rest { .. }
+                    | HttpRoute::RestPost { .. }
+                    | HttpRoute::NotFound
+            ),
+        }
+    }
+
+    /// Surface label for connection-level accounting.
+    pub const fn surface(self) -> &'static str {
+        match self {
+            Self::Public => "esplora_public",
+            Self::Management | Self::All => "json_rpc",
+        }
+    }
+}
+
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
     /// Bound TCP listener.
@@ -58,17 +100,20 @@ pub struct RpcServer {
     pub idle_timeout: Duration,
     /// Whether Bitcoin Core-compatible REST routes are enabled.
     pub rest_enabled: bool,
+    /// Operating role for this listener instance.
+    pub role: ListenerRole,
 }
 
 impl RpcServer {
-    /// Binds a new RPC server.
-    pub fn bind<A: ToSocketAddrs>(
+    /// Binds a new RPC server with a specific operating role.
+    pub fn bind_with_role<A: ToSocketAddrs>(
         address: A,
         auth: Arc<Auth>,
         handler: Arc<Handler>,
         max_connections: usize,
         idle_timeout: Duration,
         rest_enabled: bool,
+        role: ListenerRole,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
         // A binding owns its dispatcher cancellation latch. Rebinding the
@@ -85,7 +130,28 @@ impl RpcServer {
             max_connections,
             idle_timeout,
             rest_enabled,
+            role,
         })
+    }
+
+    /// Binds a new RPC server with [`ListenerRole::All`].
+    pub fn bind<A: ToSocketAddrs>(
+        address: A,
+        auth: Arc<Auth>,
+        handler: Arc<Handler>,
+        max_connections: usize,
+        idle_timeout: Duration,
+        rest_enabled: bool,
+    ) -> io::Result<Self> {
+        Self::bind_with_role(
+            address,
+            auth,
+            handler,
+            max_connections,
+            idle_timeout,
+            rest_enabled,
+            ListenerRole::All,
+        )
     }
 
     /// Returns the local socket address.
@@ -166,26 +232,49 @@ impl RpcServer {
                 return Ok(());
             }
         };
-        let should_accept = active.lock().admit(peer, self.max_connections);
-        if !should_accept {
-            write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
-            return Ok(());
+        let surface = self.role.surface();
+        let admission = active.lock().admit(peer, self.max_connections);
+        match admission {
+            ConnectionAdmission::Admitted => {}
+            ConnectionAdmission::PoolFull => {
+                metrics::counter!(
+                    "node.rpc.connection_rejections_total",
+                    "surface" => surface,
+                    "reason" => "pool_full",
+                )
+                .increment(1);
+                write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
+                return Ok(());
+            }
+            ConnectionAdmission::PerSourceLimit => {
+                metrics::counter!(
+                    "node.rpc.connection_rejections_total",
+                    "surface" => surface,
+                    "reason" => "per_source_limit",
+                )
+                .increment(1);
+                write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
+                return Ok(());
+            }
         }
 
+        metrics::gauge!("node.rpc.connections", "surface" => surface).increment(1.0);
         let permit = ConnectionPermit {
             active: Arc::clone(active),
             peer,
+            surface,
         };
         let auth = Arc::clone(&self.auth);
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
         let idle_timeout = self.idle_timeout;
+        let role = self.role;
         thread::Builder::new()
             .name("rpc-connection".to_owned())
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
-                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
+                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, role)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
@@ -203,29 +292,38 @@ fn per_source_limit(max_connections: usize) -> usize {
     max_connections - max_connections / RESERVED_POOL_DIVISOR
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConnectionAdmission {
+    Admitted,
+    PoolFull,
+    PerSourceLimit,
+}
+
 #[derive(Default)]
-struct ActiveConnections {
+pub(crate) struct ActiveConnections {
     total: usize,
     per_ip: HashMap<IpAddr, usize>,
 }
 
 impl ActiveConnections {
-    fn admit(&mut self, peer: IpAddr, max_connections: usize) -> bool {
+    pub(crate) fn admit(&mut self, peer: IpAddr, max_connections: usize) -> ConnectionAdmission {
+        if self.total >= max_connections {
+            return ConnectionAdmission::PoolFull;
+        }
         let per_source_limit = per_source_limit(max_connections);
-        if self.total >= max_connections
-            || self
-                .per_ip
-                .get(&peer)
-                .is_some_and(|&count| count >= per_source_limit)
+        if self
+            .per_ip
+            .get(&peer)
+            .is_some_and(|&count| count >= per_source_limit)
         {
-            return false;
+            return ConnectionAdmission::PerSourceLimit;
         }
         self.total += 1;
         *self.per_ip.entry(peer).or_default() += 1;
-        true
+        ConnectionAdmission::Admitted
     }
 
-    fn release(&mut self, peer: IpAddr) {
+    pub(crate) fn release(&mut self, peer: IpAddr) {
         let Some(count) = self.per_ip.get_mut(&peer) else {
             unreachable!("connection released without admission");
         };
@@ -240,11 +338,13 @@ impl ActiveConnections {
 struct ConnectionPermit {
     active: Arc<Mutex<ActiveConnections>>,
     peer: IpAddr,
+    surface: &'static str,
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.lock().release(self.peer);
+        metrics::gauge!("node.rpc.connections", "surface" => self.surface).decrement(1.0);
     }
 }
 
@@ -307,12 +407,14 @@ impl Read for RequestDeadlineStream {
     }
 }
 
+#[expect(clippy::too_many_lines)]
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
     handler: &Handler,
     rest_enabled: bool,
     idle_timeout: Duration,
+    role: ListenerRole,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
@@ -357,13 +459,20 @@ fn serve_connection(
                 return Err(error);
             }
         };
+        // Route filtering runs after read_request_head and before authentication.
+        // Public allows Esplora GET/POST, preflight, and not-found.
+        // Management allows JSON-RPC, REST GET/POST, and not-found.
+        // All preserves current behavior. Public POST / returns 404, never 401 or dispatch.
+        let route = classify(&head.method, &head.path);
+        let allowed = role.allows(&route);
+
         // Authentication runs from the head alone, before any body byte is
         // read: a 16 MiB declared body without credentials gets its 401 at
         // once instead of after its upload (Core `httprpc.cpp` checks inside
         // the handler, after libevent has buffered the whole body). REST and
         // Esplora stay unauthenticated, and framing errors keep the 400
         // answer, so only the JSON-RPC route defers its body.
-        if authenticate_json_rpc_head(auth, &mut reader, &head)? {
+        if allowed && authenticate_json_rpc_head(auth, &mut reader, &head)? {
             return Ok(());
         }
         let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
@@ -400,12 +509,25 @@ fn serve_connection(
             return Ok(());
         }
         let keep_alive = request.keep_alive;
-        if dispatch_http_request(
+        if !allowed {
+            write_not_found(reader.get_mut().socket_mut(), keep_alive)?;
+            if !keep_alive {
+                return Ok(());
+            }
+            continue;
+        }
+        let started = Instant::now();
+        let (close, surface) = dispatch_http_request(
             reader.get_mut().socket_mut(),
             &request,
             handler,
             rest_enabled,
-        )? {
+        )?;
+        if let Some(surface) = surface {
+            metrics::histogram!("node.rpc.request_seconds", "surface" => surface)
+                .record(started.elapsed().as_secs_f64());
+        }
+        if close {
             return Ok(());
         }
         if !keep_alive {
@@ -492,17 +614,19 @@ fn dispatch_http_request(
     request: &HttpRequest,
     handler: &Handler,
     rest_enabled: bool,
-) -> io::Result<bool> {
+) -> io::Result<(bool, Option<&'static str>)> {
     let keep_alive = request.keep_alive;
     match classify(&request.method, &request.path) {
         HttpRoute::Rest { path, query } => {
             let response = crate::rest::route(handler.context(), path, query, rest_enabled);
             write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
+            Ok((false, Some("rest")))
         }
         HttpRoute::RestPost { path } => {
             let response =
                 crate::rest::route_post(handler.context(), path, &request.body, rest_enabled);
             write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
+            Ok((false, Some("rest")))
         }
         HttpRoute::EsploraGet {
             surface,
@@ -512,12 +636,22 @@ fn dispatch_http_request(
             let esplora_surface = esplora_surface(surface);
             let response = crate::esplora::route(handler, esplora_surface, path, query);
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            let label = match surface {
+                HttpSurface::EsploraPublic => "esplora_public",
+                HttpSurface::EsploraBackend => "esplora_backend",
+            };
+            Ok((false, Some(label)))
         }
         HttpRoute::EsploraPost { surface, path } => {
             let esplora_surface = esplora_surface(surface);
             let response =
                 crate::esplora::route_post(handler, esplora_surface, path, &request.body);
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            let label = match surface {
+                HttpSurface::EsploraPublic => "esplora_public",
+                HttpSurface::EsploraBackend => "esplora_backend",
+            };
+            Ok((false, Some(label)))
         }
         HttpRoute::Preflight { surface } => {
             let response = crate::rest::Response {
@@ -527,9 +661,15 @@ fn dispatch_http_request(
                 body: Vec::new(),
             };
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            let label = match surface {
+                HttpSurface::EsploraPublic => "esplora_public",
+                HttpSurface::EsploraBackend => "esplora_backend",
+            };
+            Ok((false, Some(label)))
         }
         HttpRoute::NotFound => {
             write_not_found(stream, keep_alive)?;
+            Ok((false, None))
         }
         // The head gate already answered every unauthenticated JSON-RPC
         // request before its body was read; whatever survives it is
@@ -542,12 +682,9 @@ fn dispatch_http_request(
             } else {
                 write_status(stream, 204, "No Content", b"", keep_alive)?;
             }
-            if response.close {
-                return Ok(true);
-            }
+            Ok((response.close, Some("json_rpc")))
         }
     }
-    Ok(false)
 }
 
 // Authorization lives on the head, which the authentication gate consumes
@@ -1160,7 +1297,7 @@ fn split_path_query(path: &str) -> (&str, &str) {
 
 /// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
 #[derive(Debug, Eq, PartialEq)]
-enum HttpRoute<'a> {
+pub(crate) enum HttpRoute<'a> {
     RestPost {
         path: &'a str,
     },
@@ -1185,7 +1322,7 @@ enum HttpRoute<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HttpSurface {
+pub(crate) enum HttpSurface {
     EsploraPublic,
     EsploraBackend,
 }

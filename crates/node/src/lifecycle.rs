@@ -4,6 +4,7 @@
 //! The daemon and embedding surfaces both enter this lifecycle directly.
 
 use core::num::NonZeroU32;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,8 @@ mod shutdown {
 pub(crate) const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 const RPC_MAX_CONNECTIONS: usize = 128;
+const RPC_MANAGEMENT_MAX_CONNECTIONS: usize = 16;
+const RPC_PUBLIC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -165,7 +168,7 @@ fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-) -> Result<(Arc<Context>, RpcServer)> {
+) -> Result<(Arc<Context>, RpcServer, Arc<bitcoin_rs_rpc::Auth>)> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
@@ -215,15 +218,42 @@ fn bind_rpc(
     .with_esplora_derived_index(state.esplora_derived_index_query());
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
-    let server = RpcServer::bind(
+    let (max_connections, role) = if state.config().rpc.public_bind.is_some() {
+        (
+            RPC_MANAGEMENT_MAX_CONNECTIONS,
+            bitcoin_rs_rpc::ListenerRole::Management,
+        )
+    } else {
+        (RPC_MAX_CONNECTIONS, bitcoin_rs_rpc::ListenerRole::All)
+    };
+    let server = RpcServer::bind_with_role(
         state.config().rpc.bind,
-        rpc_auth,
+        Arc::clone(&rpc_auth),
         handler,
-        RPC_MAX_CONNECTIONS,
+        max_connections,
         RPC_IDLE_TIMEOUT,
         state.config().rpc.rest,
+        role,
     )?;
-    Ok((context, server))
+    Ok((context, server, rpc_auth))
+}
+
+fn bind_public_rpc(
+    public_bind: SocketAddr,
+    context: &Arc<Context>,
+    rpc_auth: Arc<bitcoin_rs_rpc::Auth>,
+) -> Result<RpcServer> {
+    let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(context)));
+    let server = RpcServer::bind_with_role(
+        public_bind,
+        rpc_auth,
+        handler,
+        RPC_PUBLIC_MAX_CONNECTIONS,
+        RPC_IDLE_TIMEOUT,
+        false,
+        bitcoin_rs_rpc::ListenerRole::Public,
+    )?;
+    Ok(server)
 }
 
 // Records that teardown reached the bootstrap join on the current thread.
@@ -289,6 +319,7 @@ pub(crate) struct NodeServices {
     /// Stops and joins its listener in Drop.
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    public_rpc_thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     /// Chainstate idle maintenance (journal flush, retention); joined
     /// before the final clean checkpoint publication.
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
@@ -380,6 +411,21 @@ impl NodeServices {
                 Err(_) => {
                     tracing::error!("rpc listener panicked");
                     set_first_error(first_error, anyhow::anyhow!("rpc listener thread panicked"));
+                }
+            }
+        }
+        if let Some(handle) = self.public_rpc_thread.take() {
+            match handle.join() {
+                Ok(Ok(())) => tracing::info!("public rpc listener exited cleanly"),
+                // RPC listener returned an I/O error.
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "public rpc listener exited with i/o error");
+                    set_first_error(first_error, anyhow::Error::new(error));
+                }
+                // RPC listener thread panic.
+                Err(_) => {
+                    tracing::error!("public rpc listener panicked");
+                    set_first_error(first_error, anyhow::anyhow!("public rpc listener thread panicked"));
                 }
             }
         }
@@ -774,7 +820,7 @@ pub(crate) fn start_node(
     // state.
     crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
         .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
-    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
+    let (context, rpc_server, rpc_auth) = bind_rpc(state, &mining_control, block_body_source)?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
     let rpc_shutdown = state.shutdown_reader();
@@ -789,6 +835,23 @@ pub(crate) fn start_node(
                 result
             })?,
     );
+    if let Some(public_addr) = state.config().rpc.public_bind {
+        let public_server = bind_public_rpc(public_addr, &context, rpc_auth)?;
+        let public_local_addr = public_server.local_addr()?;
+        tracing::info!(addr = %public_local_addr, "public rpc listener bound");
+        let public_shutdown = state.shutdown_reader();
+        guard.services.public_rpc_thread = Some(
+            std::thread::Builder::new()
+                .name("bitcoin-rs-public-rpc".into())
+                .spawn(move || {
+                    let result = public_server.serve_with_shutdown(public_shutdown.clone());
+                    if !public_shutdown.is_triggered() {
+                        tracing::error!(error = ?result.as_ref().err(), "public rpc listener exited before shutdown");
+                    }
+                    result
+                })?,
+        );
+    }
     let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
         Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {
             peer_ready_sync.on_peer_ready(source);

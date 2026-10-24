@@ -38,6 +38,7 @@ arc-swap.workspace = true
 crossbeam-channel.workspace = true
 compact_str.workspace = true
 hashbrown.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
@@ -55,10 +56,11 @@ bitcoin-rs-node = { workspace = true, default-features = false, features = ["fja
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }
+metrics-exporter-prometheus = { workspace = true, default-features = false }
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["net"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 cap-std.workspace = true

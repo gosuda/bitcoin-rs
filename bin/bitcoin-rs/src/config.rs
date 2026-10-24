@@ -291,6 +291,14 @@ impl CoreValue for Option<PathBuf> {
     }
 }
 
+impl CoreValue for Option<SocketAddr> {
+    fn apply(value: &str, slot: &mut Self) {
+        if let Ok(addr) = value.parse() {
+            *slot = Some(addr);
+        }
+    }
+}
+
 /// Sets the one Core key that no table row can express: `listen` is a boolean
 /// switch over the bind list, not an address, and only its false value is an
 /// override. Returns whether it consumed `key`.
@@ -400,6 +408,7 @@ mod compat_tests {
     use anyhow::Result;
     use bitcoin_rs_node::{Auth, Network, NodeConfig, resolve};
     use std::fs;
+    use std::net::SocketAddr;
 
     fn load_conf(text: &str, network: Network) -> Result<NodeConfig> {
         let temp = tempfile::tempdir()?;
@@ -431,6 +440,15 @@ mod compat_tests {
         assert_eq!(config.p2p.listen, []);
         assert!(config.indexes.txindex);
         assert_eq!(config.storage.dbcache_mb, 768);
+
+        let conf_with_public_bind = load_conf(
+            "rpcpublicbind=127.0.0.1:8334\n",
+            Network::Mainnet,
+        )?;
+        assert_eq!(
+            conf_with_public_bind.rpc.public_bind,
+            Some(SocketAddr::from(([127, 0, 0, 1], 8334)))
+        );
         Ok(())
     }
 

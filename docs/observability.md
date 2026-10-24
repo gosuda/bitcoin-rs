@@ -30,7 +30,11 @@ Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, closed reason taxonomies
 (see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
-for the pattern), and the enum capability states of `node.capability.txindex_readiness`.
+and `node.rpc.connection_rejections_total{surface,reason}` where `surface` in
+`{json_rpc, rest, esplora_public, esplora_backend}` and `reason` in
+`{pool_full, per_source_limit}` for the pattern), the closed surface labels of
+`node.rpc.connections{surface}` and `node.rpc.request_seconds{surface}`, and
+the enum capability states of `node.capability.txindex_readiness`.
 No speculative instrumentation: a signal earns its place by an operator
 decision (alert, dashboard, SLO) or a named contract hook (below).
 Benchmark evidence identity (binary/configuration/corpus digests and hardware)

@@ -230,6 +230,18 @@ fn describe_node_metrics() {
         TXINDEX_READINESS_GAUGE,
         "txindex capability readiness from the live getcapabilities source; 1 for the active state label, 0 for the others"
     );
+    metrics::describe_gauge!(
+        "node.rpc.connections",
+        "concurrent RPC connections by surface"
+    );
+    metrics::describe_counter!(
+        "node.rpc.connection_rejections_total",
+        "RPC connection rejections by surface and reason"
+    );
+    metrics::describe_histogram!(
+        "node.rpc.request_seconds",
+        "RPC request duration in seconds by surface"
+    );
 }
 
 static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> = Mutex::new(None);

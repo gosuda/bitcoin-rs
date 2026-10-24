@@ -159,6 +159,7 @@ pub struct P2pConfig {
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub bind: SocketAddr,
+    pub public_bind: Option<SocketAddr>,
     pub rest: bool,
     /// Optional experimental keyless BIP352 read service, off by default.
     pub silent_payments: bool,
@@ -290,6 +291,7 @@ impl NodeConfig {
             },
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
+                public_bind: settings.rpc.public_bind,
                 rest: settings.rpc.rest.unwrap_or(false),
                 silent_payments: settings.rpc.silent_payments.unwrap_or(false),
                 compressed_transactions: settings.rpc.compressed_transactions.unwrap_or(false),
@@ -363,6 +365,12 @@ impl NodeConfig {
             anyhow::ensure!(
                 password != "bitcoin-rs",
                 "RPC password must not use the publicly known legacy default"
+            );
+        }
+        if let Some(public_bind) = self.rpc.public_bind {
+            anyhow::ensure!(
+                public_bind != self.rpc.bind,
+                "public RPC bind must not equal rpc.bind"
             );
         }
         anyhow::ensure!(
