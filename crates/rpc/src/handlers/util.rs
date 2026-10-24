@@ -71,7 +71,12 @@ pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
         .as_ref()
         .ok_or_else(|| RpcError::Internal("debug log path is not configured".to_owned()))?;
     typed_to_sonic(&v31::GetRpcInfo {
-        active_commands: Vec::new(),
+        active_commands: ctx
+            .active_calls
+            .snapshot()
+            .into_iter()
+            .map(|(method, duration)| v31::ActiveCommand { method, duration })
+            .collect(),
         log_path: path.to_string_lossy().into_owned(),
     })
 }
@@ -1407,6 +1412,78 @@ mod tests {
         assert_eq!(
             result.get("logpath").and_then(|value| value.as_str()),
             Some("/tmp/debug.log")
+        );
+    }
+
+    #[test]
+    fn getrpcinfo_reports_held_calls_oldest_first_and_removes_by_identity() {
+        let mut ctx = Context::new();
+        ctx.debug_log_path = Some(std::path::PathBuf::from("/tmp/debug.log"));
+        let ctx = Arc::new(ctx);
+
+        let first = ctx.active_calls.begin("getblock");
+        let second = ctx.active_calls.begin("getblock");
+        let result =
+            getrpcinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getrpcinfo failed: {err}"));
+        let commands = result
+            .get("active_commands")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("active_commands missing: {result:?}"));
+        assert_eq!(commands.len(), 2, "both held calls are active: {result:?}");
+        for command in commands.iter() {
+            assert_eq!(
+                command.get("method").and_then(Value::as_str),
+                Some("getblock")
+            );
+            assert!(
+                command.get("duration").and_then(JsonValueTrait::as_u64).is_some(),
+                "duration is elapsed microseconds: {command:?}"
+            );
+        }
+
+        drop(first);
+        let result =
+            getrpcinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getrpcinfo failed: {err}"));
+        let commands = result
+            .get("active_commands")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("active_commands missing: {result:?}"));
+        assert_eq!(
+            commands.len(),
+            1,
+            "dropping one guard removes exactly its own entry: {result:?}"
+        );
+        drop(second);
+        assert!(ctx.active_calls.snapshot().is_empty());
+    }
+
+    #[test]
+    fn dispatch_registers_the_call_and_unknown_methods_never_register() {
+        let mut ctx = Context::new();
+        ctx.debug_log_path = Some(std::path::PathBuf::from("/tmp/debug.log"));
+        let handler = crate::handlers::Handler::new(Arc::new(ctx));
+
+        let result = handler
+            .dispatch("getrpcinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getrpcinfo dispatch failed: {err}"));
+        let commands = result
+            .get("active_commands")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("active_commands missing: {result:?}"));
+        assert_eq!(commands.len(), 1, "getrpcinfo includes itself: {result:?}");
+        assert_eq!(
+            commands[0].get("method").and_then(Value::as_str),
+            Some("getrpcinfo")
+        );
+        assert!(
+            handler.context().active_calls.snapshot().is_empty(),
+            "no residue after the call returns"
+        );
+
+        assert!(handler.dispatch("nosuchmethod", &json!([])).is_err());
+        assert!(
+            handler.context().active_calls.snapshot().is_empty(),
+            "unknown methods never register"
         );
     }
 

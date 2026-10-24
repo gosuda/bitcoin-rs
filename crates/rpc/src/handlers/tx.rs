@@ -362,18 +362,40 @@ fn proof_from_block_log(
 ) -> Result<Value, RpcError> {
     let len = ctx.chain.blocks.read().len();
     let mut saw_pruned_block = false;
+    // Scan-cost instrumentation: any future bound on this fallback must be
+    // adopted from these counters on representative successful scans, not
+    // from a guess (ENG-74). The scan is forward from genesis, so a
+    // late-window txid costs nearly the whole log and its bodies.
+    let mut records_scanned: u64 = 0;
+    let mut body_bytes_scanned: u64 = 0;
     for index in 0..len {
         let Some(record) = ctx.chain.blocks.read().get(index).cloned() else {
             break;
         };
+        records_scanned += 1;
         let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
             saw_pruned_block = true;
             continue;
         };
+        body_bytes_scanned =
+            body_bytes_scanned.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         if let Some(proof) = proof_from_body(&bytes, wanted) {
+            tracing::debug!(
+                records_scanned,
+                body_bytes_scanned,
+                found = true,
+                "gettxoutproof fallback scan"
+            );
             return Ok(proof);
         }
     }
+    tracing::debug!(
+        records_scanned,
+        body_bytes_scanned,
+        found = false,
+        saw_pruned_block,
+        "gettxoutproof fallback scan"
+    );
 
     if saw_pruned_block {
         Err(RpcError::NotFound("block data pruned"))

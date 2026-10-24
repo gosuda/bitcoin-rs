@@ -27,7 +27,7 @@ use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, Script};
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 #[cfg(any(test, feature = "test-seam"))]
@@ -561,6 +561,72 @@ pub struct Context {
     server_bound_at: Mutex<Option<Instant>>,
     /// Limits concurrent full-block and spent-output response materializations.
     block_render_budget: Arc<BlockRenderBudget>,
+    /// Calls currently executing through `Handler::dispatch`, oldest first.
+    pub(crate) active_calls: ActiveCalls,
+}
+
+/// One in-flight JSON-RPC call, tracked for `getrpcinfo`.
+///
+/// Registration happens in `Handler::dispatch` only after registry
+/// resolution and blocking-quota acquisition, so unknown or refused
+/// methods never appear. Removal is by the unique `id`, never by method
+/// name, so two concurrent calls to one method settle independently.
+pub(crate) struct ActiveCalls {
+    entries: Mutex<Vec<ActiveCallEntry>>,
+    next_id: AtomicU64,
+}
+
+struct ActiveCallEntry {
+    id: u64,
+    method: String,
+    started: Instant,
+}
+
+/// RAII registration of one active call; dropping removes exactly its entry.
+pub(crate) struct ActiveCallGuard<'a> {
+    calls: &'a ActiveCalls,
+    id: u64,
+}
+
+impl Drop for ActiveCallGuard<'_> {
+    fn drop(&mut self) {
+        self.calls
+            .entries
+            .lock()
+            .retain(|entry| entry.id != self.id);
+    }
+}
+
+impl ActiveCalls {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Registers `method` as started now and returns its removal guard.
+    pub(crate) fn begin(&self, method: &str) -> ActiveCallGuard<'_> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().push(ActiveCallEntry {
+            id,
+            method: method.to_owned(),
+            started: Instant::now(),
+        });
+        ActiveCallGuard { calls: self, id }
+    }
+
+    /// `(method, elapsed_micros)` rows, oldest first.
+    pub(crate) fn snapshot(&self) -> Vec<(String, u64)> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|entry| {
+                let micros = u64::try_from(entry.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                (entry.method.clone(), micros)
+            })
+            .collect()
+    }
 }
 
 impl fmt::Debug for Context {
@@ -760,6 +826,7 @@ impl Context {
             debug_log_path,
             server_bound_at: Mutex::new(None),
             block_render_budget: Arc::new(BlockRenderBudget::new()),
+            active_calls: ActiveCalls::new(),
         }
     }
 

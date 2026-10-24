@@ -51,7 +51,7 @@ fn assert_dripped_request_expires(prefix: &[u8]) -> io::Result<()> {
     let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
     reader.get_mut().reset_deadline(Duration::from_millis(200));
     let start = Instant::now();
-    let result = read_request(
+    let result = read_whole_request(
         &mut reader,
         Duration::from_millis(200),
         Duration::from_millis(200),
@@ -102,7 +102,7 @@ fn keep_alive_wait_is_not_bounded_by_the_head_budget() -> io::Result<()> {
 
     let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
     reader.get_mut().reset_deadline(Duration::from_secs(3));
-    let result = read_request(
+    let result = read_whole_request(
         &mut reader,
         Duration::from_millis(100),
         Duration::from_millis(100),
@@ -401,7 +401,7 @@ fn read_fed_request(
         client.shutdown(Shutdown::Write)
     });
     let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
-    let result = read_request(&mut reader, Duration::from_secs(3), Duration::from_secs(3));
+    let result = read_whole_request(&mut reader, Duration::from_secs(3), Duration::from_secs(3));
     // Close the server end first: after a failed read, a writer blocked on
     // a full socket buffer would otherwise never return. The writer's
     // resulting error must not hide the read's.
@@ -1224,14 +1224,15 @@ fn exchange(request: &[u8]) -> io::Result<Exchange> {
 
 /// `Authorization` tokens for `alice:secret` and `alice:bad`.
 const GOOD_TOKEN: &str = "YWxpY2U6c2VjcmV0";
-
 const BAD_TOKEN: &str = "YWxpY2U6YmFk";
 
 /// Core's 401 for JSON-RPC: the challenge, its default error type, an empty
 /// body, a close, and no `Date`.
 const CORE_UNAUTHORIZED: &str = "HTTP/1.1 401 Unauthorized\r\n\
     WWW-Authenticate: Basic realm=\"jsonrpc\"\r\n\
-    Content-Type: text/html;
+    Content-Type: text/html; charset=ISO-8859-1\r\n\
+    Content-Length: 0\r\n\
+    Connection: close\r\n\r\n";
 
 fn json_rpc_head(token: Option<&str>, content_length: usize) -> Vec<u8> {
     let authorization = token.map_or_else(String::new, |token| {
@@ -1284,6 +1285,48 @@ fn unauthorized_request_never_serves_pipelined_bytes() -> io::Result<()> {
 #[test]
 fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut client = TcpStream::connect(listener.local_addr()?)?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (server, _) = listener.accept()?;
+    let mut request = json_rpc_head(None, 1);
+    request.extend_from_slice(b"X");
+    client.write_all(&request)?;
+    let mut reader =
+        BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(30)));
+    let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+        Ok(Some(head)) => head,
+        Ok(None) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head")),
+        Err(RequestReadError::Io(error)) => return Err(error),
+        Err(RequestReadError::RestBodyTooLarge) => {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
+        }
+    };
+    assert_eq!(head.content_length, 1);
+    reader.get_mut().reset_deadline(REQUEST_HEAD_TIMEOUT);
+    assert_eq!(
+        reader.fill_buf()?,
+        b"X".as_slice(),
+        "declared byte must be prebuffered before the 401"
+    );
+    let started = Instant::now();
+    let handled =
+        authenticate_json_rpc_head(&Auth::basic("alice", "secret"), &mut reader, &head)?;
+    let elapsed = started.elapsed();
+    assert!(handled, "unauthorized head must be handled");
+    assert!(
+        reader.buffer().is_empty(),
+        "drain must consume the prebuffered byte: {:?}",
+        reader.buffer()
+    );
+    assert!(
+        elapsed < DRAIN_BUDGET,
+        "a buffered body must not wait out the drain budget: {elapsed:?}"
+    );
+    let mut response = String::new();
+    client.read_to_string(&mut response)?;
+    assert_eq!(response, CORE_UNAUTHORIZED);
+    Ok(())
+}
 
 /// Runs the unauthorized path on the server side of one loopback pair and
 /// returns the client's view of the response plus the next `take` bytes
@@ -1292,6 +1335,37 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
 /// buffer the other has not drained.
 fn serve_unauthorized(request: &[u8], take: usize) -> io::Result<(String, Vec<u8>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let (stream, _) = listener.accept()?;
+        let mut reader =
+            BufReader::new(RequestDeadlineStream::new(stream, Duration::from_secs(30)));
+        let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+            Ok(Some(head)) => head,
+            Ok(None) => {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head"));
+            }
+            Err(RequestReadError::Io(error)) => return Err(error),
+            Err(RequestReadError::RestBodyTooLarge) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
+            }
+        };
+        let handled =
+            authenticate_json_rpc_head(&Auth::basic("alice", "secret"), &mut reader, &head)?;
+        assert!(handled, "unauthorized head must be handled");
+        let mut next = vec![0_u8; take];
+        reader.read_exact(&mut next)?;
+        Ok(next)
+    });
+    let mut client = TcpStream::connect(addr)?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    client.write_all(request)?;
+    client.shutdown(Shutdown::Write)?;
+    let mut response = String::new();
+    client.read_to_string(&mut response)?;
+    let next = server.join().expect("server thread")?;
+    Ok((response, next))
+}
 
 /// The drain consumes exactly the declared body, even at the cap, so the
 /// bytes pipelined behind it are still on the stream for the next read.
@@ -1393,6 +1467,8 @@ fn accept_test_server() -> io::Result<RpcServer> {
     )
 }
 
+// Inject at the syscall boundary, without exhausting the test process's
+// descriptors. The listener and subsequent HTTP worker remain real.
 #[test]
 fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
     let server = accept_test_server()?;
