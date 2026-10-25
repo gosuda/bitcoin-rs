@@ -486,9 +486,18 @@ mod tests {
         SYNC_CALLS.with(|count| count.set(0));
         let mut publication = Publication::with_sync(dir.path(), fail_first_sync);
         let (artifact, manifest) = stage(&mut publication, dir.path())?;
-        assert!(matches!(publication.commit(), Err(IndexBundleError::Io { .. })));
-        assert!(!manifest.exists(), "a manifest must not survive a failed commit");
-        assert!(!artifact.exists(), "the artifact is removed after the manifest");
+        assert!(matches!(
+            publication.commit(),
+            Err(IndexBundleError::Io { .. })
+        ));
+        assert!(
+            !manifest.exists(),
+            "a manifest must not survive a failed commit"
+        );
+        assert!(
+            !artifact.exists(),
+            "the artifact is removed after the manifest"
+        );
         assert_eq!(calls(), 3, "commit, then one fsync per durable removal");
         assert_eq!(fs::read(&operator)?, b"keep");
         Ok(())
