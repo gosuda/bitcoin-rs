@@ -477,7 +477,7 @@ use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
-    let max_feerate = optional_max_feerate(params, 1)?;
+    let max_feerate = send_max_feerate(params, 1)?;
     let tx = decode_tx(
         raw,
         "TX decode failed. Make sure the tx has at least one input.".to_owned(),
@@ -958,6 +958,31 @@ fn scale_digits_to_sats(
     }
 
     Ok(sats)
+}
+
+/// `sendrawtransaction`'s fee argument: Core's `maxfeerate` amount, or the
+/// one pre-0.19 `allowhighfees` value that btcd's RPC client still emits.
+///
+/// Core 31.1 takes only an amount here and refuses any boolean as a type
+/// error; `testmempoolaccept` and `submitpackage` keep that strictness. btcd's
+/// client (pinned by LND v0.21.4 through btcwallet) picks the argument shape by
+/// stripping `/Satoshi:` and the trailing `/` from `getnetworkinfo.subversion`
+/// and string-comparing the rest to `0.19.0`. This node's honest
+/// `/bitcoin-rs:…/` user agent sorts below that, so LND broadcasts every
+/// wallet transaction as `["<hex>", false]`, `allowHighFees = false`. Only
+/// that value is accepted, and it means the default ceiling, exactly as an
+/// omitted or null argument. `true` would switch the fee guard off through a
+/// type Core refuses; nothing observed sends it, so it stays a type error.
+fn send_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
+    let legacy_default = params_array(params)?
+        .get(index)
+        .and_then(JsonValueTrait::as_bool)
+        == Some(false);
+    if legacy_default {
+        Ok(Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB))
+    } else {
+        optional_max_feerate(params, index)
+    }
 }
 
 fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
