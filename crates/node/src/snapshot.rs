@@ -966,7 +966,7 @@ mod tests {
             state.snapshots.export(&output, &cancelled),
             Err(SnapshotExportError::Interrupted)
         ));
-        assert!(entry_names(&out)?.is_empty());
+        assert_eq!(entry_names(&out)?, Vec::<String>::new());
 
         // The second poll is the encoder's own, after the staged file exists
         // and the chain locks are held.
@@ -988,7 +988,7 @@ mod tests {
             SnapshotControlError::from(error),
             SnapshotControlError::Interrupted
         ));
-        assert!(entry_names(&out)?.is_empty());
+        assert_eq!(entry_names(&out)?, Vec::<String>::new());
 
         // The locks were released: a later export succeeds.
         state

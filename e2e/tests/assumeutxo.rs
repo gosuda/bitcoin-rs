@@ -324,14 +324,29 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
     // The RPC argument is UTF-8, but canonicalization can resolve its symlink
     // to a non-UTF-8 filename. Response serialization must still succeed after
     // activation; it must not report a post-commit error.
+    //
+    // Only the `core-\xff.dat` entry name needs a filesystem that accepts
+    // arbitrary non-NUL filename bytes; others (APFS, ZFS with `utf8only`)
+    // fail it with EILSEQ. The datadir can sit on such a filesystem under a
+    // disk-backed `TMPDIR`, so the target lives in its own directory under
+    // `/tmp` while the UTF-8 `core200.dat` symlink stays in the datadir: a
+    // symlink's contents are not an entry name. `rename` cannot cross
+    // filesystems, hence copy then remove. This binding owns the directory and
+    // removes it at test end, after the node has stopped, or on an early error.
     #[cfg(unix)]
-    {
+    let _non_utf8_target_dir = {
         use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
-        let target =
-            snapshot.with_file_name(std::ffi::OsString::from_vec(b"core-\xff.dat".to_vec()));
-        std::fs::rename(&snapshot, &target)?;
+        let dir = tempfile::Builder::new()
+            .prefix("assumeutxo-non-utf8-")
+            .tempdir_in("/tmp")?;
+        let target = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"core-\xff.dat".to_vec()));
+        std::fs::copy(&snapshot, &target)?;
+        std::fs::remove_file(&snapshot)?;
         symlink(&target, &snapshot)?;
-    }
+        dir
+    };
     let imported = node.rpc("loadtxoutset", &json!({"path":"core200.dat"}))?;
     assert_eq!(
         imported["path"],
