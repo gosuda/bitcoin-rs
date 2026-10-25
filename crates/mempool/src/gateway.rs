@@ -473,6 +473,10 @@ use crate::rbf::{LimitEnforcement, RbfError};
 pub trait MempoolObserver: Send + Sync {
     /// Called once per committed, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
+
+    /// Opts into retaining accepted transaction bodies until ordered publication.
+    /// Metadata-only observers deliberately leave this disabled.
+    fn wants_accepted_transactions(&self) -> bool;
 }
 
 /// Fans one committed mutation out to several named observers.
@@ -526,6 +530,13 @@ fn panic_message_and_dispose(panic_payload: Box<dyn core::any::Any + Send>) -> (
 }
 
 impl MempoolObserver for CompositeObserver {
+    fn wants_accepted_transactions(&self) -> bool {
+        self.legs
+            .lock()
+            .iter()
+            .any(|(_, leg)| leg.wants_accepted_transactions())
+    }
+
     fn on_mutation(&self, envelope: &MutationEnvelope) {
         let legs = self.legs.lock().clone();
         for (name, leg) in &legs {
@@ -1508,7 +1519,14 @@ impl MempoolGateway {
         let mut elected = false;
         let outcome = {
             let mut pool = self.pool.write();
-            let outcome = mutate(&mut pool)?;
+            pool.accepted_capture = self
+                .observer
+                .as_ref()
+                .filter(|observer| observer.wants_accepted_transactions())
+                .map(|_| Vec::new());
+            let outcome = mutate(&mut pool);
+            let captured = pool.accepted_capture.take().unwrap_or_default();
+            let outcome = outcome?;
             if let Some(result) = mutation(&outcome) {
                 if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Esplora) {
                     for change in &result.changes {
@@ -1523,10 +1541,26 @@ impl MempoolGateway {
                 }
                 self.update_admission_lifecycle(&pool, result);
                 if !result.changes.is_empty() && self.observer.is_some() {
+                    let mut captured = captured;
+                    let transactions = result
+                        .changes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, change)| {
+                            if !matches!(change.outcome, crate::MutationOutcome::Accepted) {
+                                return None;
+                            }
+                            captured
+                                .iter()
+                                .position(|(txid, _)| *txid == Txid(change.txid))
+                                .map(|position| (index, captured.swap_remove(position).1))
+                        })
+                        .collect();
                     let mut publish = self.publish.lock();
                     publish.queue.push_back(MutationEnvelope {
                         origin,
                         result: result.clone(),
+                        accepted_transactions: transactions,
                     });
                     elected = !publish.draining;
                     publish.draining = true;
@@ -1969,6 +2003,9 @@ mod tests {
     }
 
     impl MempoolObserver for RecordingObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             self.origins.lock().push(envelope.origin);
             let mut seen = self.seen.lock();
@@ -1978,9 +2015,117 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PayloadObserver(Mutex<Vec<MutationEnvelope>>);
+
+    impl MempoolObserver for PayloadObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            true
+        }
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            self.0.lock().push(envelope.clone());
+        }
+    }
+
+    #[test]
+    fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PayloadObserver::default());
+        let gateway = gateway_with(Some(observer.clone()));
+        let expired = tx(181);
+        let surviving = tx(182);
+        let expired_entry = entry(&expired);
+        let expired_body = Arc::clone(&expired_entry.tx);
+        let mut surviving_entry = entry(&surviving);
+        surviving_entry.time = crate::policy::MEMPOOL_EXPIRY_SECS + 2;
+        let surviving_body = Arc::clone(&surviving_entry.tx);
+        let plan = gateway
+            .read()
+            .prepare_package(vec![expired_entry, surviving_entry], 1)?;
+        let result = gateway.commit(
+            AdmissionOrigin::Rpc,
+            |pool| pool.commit_package(plan),
+            |result| Some(result),
+        )?;
+        assert_eq!(result.changes.len(), 3);
+        assert_eq!(result.changes[0].outcome, MutationOutcome::Accepted);
+        assert_eq!(result.changes[1].outcome, MutationOutcome::Accepted);
+        assert_eq!(
+            result.changes[2].outcome,
+            MutationOutcome::Removed(RemovalReason::Expiry)
+        );
+        assert_eq!(result.changes[2].txid, hash(&expired.txid()));
+        assert!(gateway.read().entry_by_txid(&expired.txid()).is_none());
+        assert_eq!(gateway.read().len(), 1);
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        let envelopes = observer.0.lock();
+        assert_eq!(envelopes.len(), 1);
+        let envelope = &envelopes[0];
+        assert_eq!(envelope.result, result);
+        assert_eq!(envelope.accepted_transactions.len(), 2);
+        for ((index, body), expected) in envelope
+            .accepted_transactions
+            .iter()
+            .zip([&expired_body, &surviving_body])
+        {
+            assert!(
+                Arc::ptr_eq(body, expected),
+                "retain the admitted allocation"
+            );
+            assert_eq!(hash(&body.txid()), envelope.result.changes[*index].txid);
+            assert_eq!(
+                envelope.result.changes[*index].outcome,
+                MutationOutcome::Accepted
+            );
+        }
+        assert_eq!(envelope.accepted_transactions[0].0, 0);
+        assert_eq!(envelope.accepted_transactions[1].0, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_mutation_clears_capture_scope_before_the_next_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PayloadObserver::default());
+        let gateway = gateway_with(Some(observer.clone()));
+        let stale = Arc::new(tx(183));
+        // Fault-inject capture without mutating membership: failures must leave
+        // neither a queued envelope nor writer-local capture for the next call.
+        let mut capture_enabled = false;
+        let failure: Result<crate::MutationResult, ()> = gateway.commit(
+            AdmissionOrigin::Rpc,
+            |pool| {
+                let capture = pool.accepted_capture.as_mut().ok_or(())?;
+                capture_enabled = true;
+                capture.push((stale.txid(), Arc::clone(&stale)));
+                Err(())
+            },
+            |result| Some(result),
+        );
+        assert!(capture_enabled);
+        assert!(failure.is_err());
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        assert!(observer.0.lock().is_empty());
+        assert_eq!(gateway.read().len(), 0);
+        let next = tx(184);
+        gateway.insert_entry(AdmissionOrigin::Rpc, entry(&next))?;
+        let envelopes = observer.0.lock();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].accepted_transactions.len(), 1);
+        let (index, body) = &envelopes[0].accepted_transactions[0];
+        assert_eq!(*index, 0);
+        assert_eq!(body.txid(), next.txid());
+        assert!(!Arc::ptr_eq(body, &stale));
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        Ok(())
+    }
+
     struct PanickingObserver;
 
     impl MempoolObserver for PanickingObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, _envelope: &MutationEnvelope) {
             panic!("observer exploded");
         }
@@ -2394,6 +2539,9 @@ mod tests {
     }
 
     impl MempoolObserver for GatedObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let result = &envelope.result;
             let mut stream = self.stream.lock();
@@ -2519,6 +2667,9 @@ mod tests {
     }
 
     impl MempoolObserver for ReentrantObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let result = &envelope.result;
             {
@@ -2617,6 +2768,9 @@ mod tests {
     }
 
     impl MempoolObserver for ContiguityObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let result = &envelope.result;
             {
@@ -2714,6 +2868,9 @@ mod tests {
     }
 
     impl MempoolObserver for SequenceStreamObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let result = &envelope.result;
             let mut stream = self.stream.lock();

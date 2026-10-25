@@ -20,6 +20,9 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);
 
 impl crate::MempoolObserver for Seen {
+    fn wants_accepted_transactions(&self) -> bool {
+        false
+    }
     fn on_mutation(&self, envelope: &crate::MutationEnvelope) {
         self.0.lock().push(envelope.clone());
     }
@@ -96,6 +99,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         seen.0.lock().as_slice(),
         &[crate::MutationEnvelope {
             origin: AdmissionOrigin::Rpc,
+            accepted_transactions: Vec::new(),
             result
         }]
     );

@@ -129,6 +129,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     struct Stream(Mutex<Vec<(Txid, bitcoin_rs_mempool::MutationOutcome, AdmissionOrigin)>>);
 
     impl MempoolObserver for Stream {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let mut seen = self.0.lock();
             for change in &envelope.result.changes {

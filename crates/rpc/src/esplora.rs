@@ -1326,6 +1326,9 @@ pub(crate) mod tests {
     struct BroadcastObserver(parking_lot::Mutex<Vec<MutationEnvelope>>);
 
     impl MempoolObserver for BroadcastObserver {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             self.0.lock().push(envelope.clone());
         }

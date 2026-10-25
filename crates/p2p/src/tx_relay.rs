@@ -171,6 +171,9 @@ impl LocalTxRelayObserver {
 }
 
 impl MempoolObserver for LocalTxRelayObserver {
+    fn wants_accepted_transactions(&self) -> bool {
+        false
+    }
     fn on_mutation(&self, envelope: &MutationEnvelope) {
         if !matches!(
             envelope.origin,
@@ -930,6 +933,7 @@ mod tests {
     ) -> MutationEnvelope {
         MutationEnvelope {
             origin,
+            accepted_transactions: Vec::new(),
             result: bitcoin_rs_mempool::MutationResult {
                 changes: vec![bitcoin_rs_mempool::MutationChange { txid, outcome }],
                 sequence_base: 1,
@@ -1124,6 +1128,9 @@ mod tests {
     }
 
     impl MempoolObserver for MutateBeforeLocalRelay {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             let Some(entry) = self.next.lock().take() else {
                 return;

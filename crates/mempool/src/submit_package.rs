@@ -649,6 +649,9 @@ mod tests {
     struct Seen(parking_lot::Mutex<Vec<MutationEnvelope>>);
 
     impl MempoolObserver for Seen {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             self.0.lock().push(envelope.clone());
         }
@@ -810,6 +813,7 @@ mod tests {
             seen.0.lock().as_slice(),
             &[MutationEnvelope {
                 origin: AdmissionOrigin::Peer(source()),
+                accepted_transactions: Vec::new(),
                 result
             }]
         );

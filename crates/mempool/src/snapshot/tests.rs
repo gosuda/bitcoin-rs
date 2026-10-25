@@ -51,6 +51,9 @@ impl AdmissionChain for Coins {
 #[derive(Default)]
 struct Seen(Mutex<Vec<crate::MutationEnvelope>>);
 impl crate::MempoolObserver for Seen {
+    fn wants_accepted_transactions(&self) -> bool {
+        false
+    }
     fn on_mutation(&self, batch: &crate::MutationEnvelope) {
         self.0.lock().push(batch.clone());
     }

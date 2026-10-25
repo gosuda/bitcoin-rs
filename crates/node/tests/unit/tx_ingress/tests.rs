@@ -121,6 +121,9 @@ fn consumer_preserves_exact_connection_id() {
         captured: Arc<Mutex<Option<bitcoin_rs_mempool::AdmissionOrigin>>>,
     }
     impl MempoolObserver for OriginRecorder {
+        fn wants_accepted_transactions(&self) -> bool {
+            false
+        }
         fn on_mutation(&self, envelope: &MutationEnvelope) {
             if envelope
                 .result

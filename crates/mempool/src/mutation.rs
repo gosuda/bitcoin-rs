@@ -203,6 +203,9 @@ pub struct MutationEnvelope {
     pub origin: AdmissionOrigin,
     /// The committed mutation, in commit order.
     pub result: MutationResult,
+    /// Accepted bodies retained under the commit writer, keyed by change index.
+    /// Empty when no observer requests transaction payloads.
+    pub accepted_transactions: Vec<(usize, alloc::sync::Arc<bitcoin_rs_primitives::Tx>)>,
 }
 
 #[cfg(test)]

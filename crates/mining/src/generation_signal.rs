@@ -77,6 +77,9 @@ impl MiningGenerationSignal {
 }
 
 impl MempoolObserver for MiningGenerationSignal {
+    fn wants_accepted_transactions(&self) -> bool {
+        false
+    }
     fn on_mutation(&self, envelope: &MutationEnvelope) {
         let result = &envelope.result;
         let wake_sequence = result

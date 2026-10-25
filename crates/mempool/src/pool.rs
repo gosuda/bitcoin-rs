@@ -175,6 +175,8 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+    /// Commit-local observer capture, enabled only by the gateway's writer.
+    pub(crate) accepted_capture: Option<Vec<(Txid, Arc<Tx>)>>,
     /// Core rolling minimum fee (`GetMinFee`/`trackPackageRemoved`/
     /// `removeForBlock` state). Locked after the pool lock and never held
     /// across another call: a capacity eviction or replacement trim raises
@@ -623,6 +625,7 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            accepted_capture: None,
             rolling_min_fee: parking_lot::Mutex::new(
                 crate::rolling_min_fee::RollingMinFee::default(),
             ),
@@ -902,6 +905,9 @@ impl Mempool {
     pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) -> MutationResult {
         let entry = prepared.entry;
         let txid = entry.txid;
+        if let Some(capture) = &mut self.accepted_capture {
+            capture.push((txid, Arc::clone(&entry.tx)));
+        }
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
         let parents = self.in_pool_parents(&entry.tx);

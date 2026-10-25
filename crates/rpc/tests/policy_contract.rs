@@ -674,6 +674,9 @@ struct RecordingGatewayObserver {
 }
 
 impl MempoolObserver for RecordingGatewayObserver {
+    fn wants_accepted_transactions(&self) -> bool {
+        false
+    }
     fn on_mutation(&self, envelope: &MutationEnvelope) {
         let result = &envelope.result;
         let mut changes = self.changes.lock();
