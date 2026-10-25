@@ -5,7 +5,9 @@ use hashbrown::HashSet;
 
 use crate::{
     Mempool,
-    standardness::{AcceptanceRejectReason, MAX_PACKAGE_COUNT, TxAcceptanceFact},
+    standardness::{
+        AcceptanceRejectReason, MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT, TxAcceptanceFact,
+    },
 };
 
 pub(crate) fn check_structure(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
@@ -18,7 +20,7 @@ pub(crate) fn check_structure(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> 
     let weight = txs
         .iter()
         .try_fold(0_u64, |sum, tx| sum.checked_add(tx.weight()));
-    if weight.is_none_or(|weight| weight > 404_000) {
+    if weight.is_none_or(|weight| weight > MAX_PACKAGE_WEIGHT) {
         return Err(AcceptanceRejectReason::PackageTooLarge);
     }
     let mut later: HashSet<_> = txs.iter().map(Tx::txid).collect();

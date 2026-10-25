@@ -89,6 +89,18 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
+// Bounds the bytes retained for BIP331 `pkgtxns` bodies between the listener
+// threads and the single ingress consumer: the encoded frames queued on the
+// channel above plus each package's planned decoded heap. One package is at
+// most `MAX_PACKAGE_WEIGHT` weight units, so a full channel of them is the
+// cap. It is a charged lower-bound ledger of what the decoder requests, not a
+// physical heap ceiling: allocator rounding stays outside it.
+pub(crate) const PACKAGE_INGRESS_MAX_BYTES: u64 =
+    1_024 * bitcoin_rs_mempool::standardness::MAX_PACKAGE_WEIGHT;
+
+const _: () = assert!(PACKAGE_INGRESS_MAX_BYTES == 413_696_000);
+const _: () = assert!(INBOUND_TX_CHANNEL_LIMIT == 1_024);
+
 /// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
@@ -105,8 +117,11 @@ pub struct NodeState {
     p2p: Arc<bitcoin_rs_p2p::P2pService>,
     /// Node-owned P2P-to-mempool ingress bridge. Unlike the service-owned
     /// header/block channels, this receiver is drained by node orchestration.
-    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
-    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
+    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
+    /// The one ledger of retained `pkgtxns` bytes, shared by every listener
+    /// thread and the ingress consumer.
+    package_capacity: bitcoin_rs_p2p::PackageCapacity,
     /// The transition domain minted for this node.
     ///
     /// Composition splits it: chainstate holds the mutation role, and every
@@ -291,16 +306,22 @@ impl NodeState {
     }
 
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
-    /// transactions into for mempool admission.
-    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundTx> {
+    /// transactions and charged package frames into for mempool admission.
+    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
-    /// Takes the inbound transaction receiver for the single ingress consumer.
+    /// Takes the inbound body receiver for the single ingress consumer.
     /// Returns `None` if the receiver has already been claimed.
     #[must_use]
-    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
+    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundBody>> {
         self.inbound_tx_rx.lock().take()
+    }
+
+    /// Returns the shared ledger of retained `pkgtxns` bytes.
+    #[must_use]
+    pub fn package_capacity(&self) -> bitcoin_rs_p2p::PackageCapacity {
+        self.package_capacity.clone()
     }
 
     /// Takes the block announcement receiver for worker execution.

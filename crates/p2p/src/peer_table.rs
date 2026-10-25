@@ -101,6 +101,9 @@ pub(crate) struct PeerAnnouncementState {
     pub(crate) selected_high_bandwidth: bool,
     /// Whether this peer negotiated BIP332 stale-tip relay, and its `prefers_blocks` flag.
     pub(crate) stale_tip_prefers_blocks: Option<bool>,
+    /// The BIP331 `PKG_RELAY_*` bits the connection owner negotiated; `0`
+    /// until published and whenever nothing was agreed.
+    pub(crate) package_relay: u64,
 }
 
 #[derive(Debug)]
@@ -612,8 +615,45 @@ impl PeerTable {
         true
     }
 
-    /// Raises the compact-block relay preference for `source` — its live
-    /// connection accepted a post-verack `sendcmpct` with a known version.
+    /// Publishes the BIP331 `PKG_RELAY_*` bits the connection owner negotiated
+    /// ([`crate::Peer::package_relay_versions`]), so other threads can tell
+    /// whether `source` relays ancestor packages without owning its session.
+    ///
+    /// PRE: the caller is the owner of `source`'s live connection and its
+    ///   handshake completed.
+    /// POST: `true` and the snapshot replaces the previous one when `source`
+    ///   is the current, uncancelled connection; otherwise `false` and nothing
+    ///   changes, so a replacement connection never inherits another's bits.
+    /// INVARIANT: the `Peer` stays the one owner of the negotiation; this is
+    ///   a copy of its answer.
+    pub(crate) fn note_package_relay(&self, source: PeerSource, versions: u64) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&SessionKey::from_source(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.package_relay = versions;
+        true
+    }
+
+    /// The `PKG_RELAY_*` bits published for the current published connection
+    /// `source`, or `0` when it published none, is not live, or is not the
+    /// current connection.
+    pub(crate) fn package_relay_versions(&self, source: PeerSource) -> u64 {
+        self.announcement_state(source)
+            .map_or(0, |state| state.package_relay)
+    }
+
+    /// Publishes `versions` as `source`'s negotiated package-relay bits
+    /// without a handshake, for cross-crate tests of the consumers of the
+    /// snapshot. The listener owns the real publication.
+    #[cfg(feature = "test-seam")]
+    pub fn seed_package_relay(&self, source: PeerSource, versions: u64) -> bool {
+        self.note_package_relay(source, versions)
+    }
+
     /// Records that the live connection negotiated BIP332 stale-tip relay
     /// with the remote peer's `prefers_blocks` preference.
     pub(crate) fn note_stale_tip_relay(&self, source: PeerSource, prefers_blocks: bool) -> bool {
@@ -628,6 +668,8 @@ impl PeerTable {
         true
     }
 
+    /// Raises the compact-block relay preference for `source` — its live
+    /// connection accepted a post-verack `sendcmpct` with a known version.
     pub(crate) fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&SessionKey::from_source(source)) {

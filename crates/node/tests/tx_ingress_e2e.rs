@@ -44,8 +44,8 @@ use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{
-    DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundTx, Message, Peer, PeerLease, PeerRelaySink,
-    TxRelayQueue, spawn_tx_relay_worker,
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, InboundTx, Message, Peer, PeerLease,
+    PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
@@ -231,7 +231,7 @@ fn loopback_skip() -> Option<String> {
 struct PeerWiring {
     magic: Magic,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    ingress_tx: Sender<InboundTx>,
+    ingress_tx: Sender<InboundBody>,
     stop: Arc<AtomicBool>,
 }
 
@@ -402,7 +402,9 @@ fn serve_connection(
             Ok((message, _raw)) => {
                 if let Message::Tx(tx) = message {
                     let source = lease.source_ip(peer_addr);
-                    let _ = wiring.ingress_tx.try_send(InboundTx::new(tx, source));
+                    let _ = wiring
+                        .ingress_tx
+                        .try_send(InboundBody::from(InboundTx::new(tx, source)));
                     continue;
                 }
                 let mut send = |response: Message| {
@@ -766,7 +768,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Re
     )?;
 
     let observed = ingress_tx
-        .try_send(InboundTx::new(tx, source))
+        .try_send(InboundBody::from(InboundTx::new(tx, source)))
         .map_err(|error| anyhow!("failed to queue peer transaction: {error}"))
         .and_then(|()| {
             wait_until(OBSERVE_TIMEOUT, || {

@@ -1,8 +1,11 @@
-//! Wires inbound peer transactions to mempool admission and committed outcomes.
+//! Wires inbound peer transactions and packages to mempool admission and
+//! committed outcomes.
 //!
 //! Mempool owns preparation, policy, orphan/reject state and retry progress.
-//! P2P owns inventory, parent requests and the bounded relay worker. This loop
-//! owns only channel draining and ordering admission results before consumers.
+//! P2P owns inventory, parent requests, the package request claims and charge
+//! ledger, and the bounded relay worker. This loop owns only channel draining
+//! and ordering admission results before consumers. It is the single decoder
+//! of package bodies: one package at a time is decoded and admitted here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +33,7 @@ pub fn spawn_tx_ingress_consumer(
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
-    tx_rx: Receiver<bitcoin_rs_p2p::InboundTx>,
+    tx_rx: Receiver<bitcoin_rs_p2p::InboundBody>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let shutdown = shutdown.into();
@@ -63,7 +66,7 @@ pub fn spawn_tx_ingress_consumer(
                 };
                 let recv = tx_rx.recv_timeout(timeout);
                 match recv {
-                    Ok(inbound) => consumer.process_one(inbound),
+                    Ok(body) => consumer.process_body(body),
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
@@ -90,6 +93,95 @@ impl TxIngressConsumer {
             self.block_tree.clone(),
             self.network,
         )
+    }
+
+    fn process_body(&self, body: bitcoin_rs_p2p::InboundBody) {
+        match body {
+            bitcoin_rs_p2p::InboundBody::Tx(inbound) => self.process_one(inbound),
+            bitcoin_rs_p2p::InboundBody::Package(package) => self.process_package(*package),
+        }
+    }
+
+    /// Decodes and admits one peer package, then releases it exactly once.
+    ///
+    /// PRE: `package` was accepted by the listener: its claim is `Enqueued`
+    ///   and its frame and decoded bytes are charged.
+    /// POST: the package reached the gateway once (`submit_peer_package`) or
+    ///   never; either way its charge and claim are released through exactly
+    ///   one of `package_response_rejected` / `package_response_completed`.
+    /// INVARIANT: the gateway receives the peer-supplied order and decides
+    ///   atomically; a refusal leaves membership and observer order unchanged.
+    fn process_package(&self, package: bitcoin_rs_p2p::InboundPackage) {
+        let source = package.source();
+        let opened = match package.open() {
+            bitcoin_rs_p2p::PackageOpening::Opened(opened) => opened,
+            bitcoin_rs_p2p::PackageOpening::Refused(rejection) => {
+                tracing::debug!(refusal = %rejection.refusal, "peer package refused before admission");
+                self.peer_table
+                    .package_response_rejected(rejection.token, self.mempool_gateway.as_ref());
+                return;
+            }
+        };
+        if opened.overrun() > 0 {
+            metrics::counter!("node.package_charge_overrun").increment(opened.overrun());
+        }
+        let (token, txs) = opened.into_parts();
+        let identities: Vec<(Txid, Wtxid)> = txs.iter().map(|tx| (tx.txid(), tx.wtxid())).collect();
+        let peer: PeerToken = source.into();
+        let outcome = self.mempool_gateway.submit_peer_package(
+            &txs,
+            peer,
+            bitcoin_rs_primitives::unix_time_secs(),
+            &self.chain_view(),
+        );
+        drop(txs);
+        // The gateway has answered, `Ok` or `Err`: the body is finished with.
+        self.peer_table
+            .package_response_completed(token, self.mempool_gateway.as_ref());
+        match outcome {
+            Ok(result) => {
+                if self.announce_package(&identities, peer, &result) {
+                    self.peer_table.note_useful_transaction(source);
+                }
+            }
+            Err(error) => tracing::debug!(?error, "peer package not admitted"),
+        }
+    }
+
+    /// Announces every member the package committed and returns whether its
+    /// subject (the last member) is among them.
+    fn announce_package(
+        &self,
+        identities: &[(Txid, Wtxid)],
+        source: PeerToken,
+        result: &bitcoin_rs_mempool::MutationResult,
+    ) -> bool {
+        let mut subject_accepted = false;
+        let mut published = false;
+        for (index, change) in result.changes.iter().enumerate() {
+            if !matches!(
+                change.outcome,
+                bitcoin_rs_mempool::MutationOutcome::Accepted
+            ) {
+                continue;
+            }
+            let Some((txid, wtxid)) = identities
+                .iter()
+                .find(|(txid, _)| Hash256::from(*txid) == change.txid)
+            else {
+                continue;
+            };
+            if let Some(sequence) = result.sequence_of(index) {
+                self.relay
+                    .announce(*txid, *wtxid, Some(source.connection_id), sequence);
+                published = true;
+            }
+            subject_accepted |= identities.last().is_some_and(|(last, _)| last == txid);
+        }
+        if published {
+            self.mining_control.publish_generation();
+        }
+        subject_accepted
     }
 
     fn process_one(&self, inbound: bitcoin_rs_p2p::InboundTx) {

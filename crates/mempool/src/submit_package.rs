@@ -5,10 +5,12 @@ use crate::admission::{
 use crate::gateway::AdmissionMode;
 use crate::standardness::AcceptanceRejectReason;
 use crate::{
-    AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, SubmitError,
+    AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, PeerToken,
+    SubmitError,
 };
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::{Tx, Wtxid, unix_time_secs};
+use bitcoin_rs_primitives::{Tx, Txid, Wtxid, unix_time_secs};
 
 /// One submitted transaction's result. Identities follow the submitted order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +85,26 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     Ok(txs)
 }
 
+/// BIP331 ancestor shape over a package that already passed
+/// [`crate::package::check_structure`]: the last transaction is the subject
+/// and every other member is a transitive ancestor of it. Walking from the
+/// subject backwards, a member is admissible only when something later spends
+/// it, directly or through another member.
+fn check_ancestor_shape(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
+    let Some(subject) = txs.last() else {
+        return Err(AcceptanceRejectReason::PackageCount);
+    };
+    let mut needed: hashbrown::HashSet<Txid> = hashbrown::HashSet::new();
+    needed.insert(subject.txid());
+    for tx in txs.iter().rev() {
+        if !needed.contains(&tx.txid()) {
+            return Err(AcceptanceRejectReason::PackageTopology);
+        }
+        needed.extend(tx.inputs.iter().map(|input| input.previous_output.txid));
+    }
+    Ok(())
+}
+
 impl MempoolGateway {
     /// Core's individual-then-aggregate submission for a singleton or 1p1c.
     /// Wider packages and replacement are explicitly unsupported. The atomic
@@ -135,7 +157,7 @@ impl MempoolGateway {
         for (index, tx) in txs.iter().enumerate() {
             let row = match self.submit_package_attempt(
                 core::slice::from_ref(tx),
-                LocalOrigin::Rpc,
+                AdmissionOrigin::Rpc,
                 max_rate,
                 |_| time,
                 chain,
@@ -167,7 +189,7 @@ impl MempoolGateway {
             let pending: Vec<_> = reconsider.iter().map(|&index| txs[index].clone()).collect();
             match self.submit_package_attempt(
                 &pending,
-                LocalOrigin::Rpc,
+                AdmissionOrigin::Rpc,
                 max_rate,
                 |_| time,
                 chain,
@@ -246,6 +268,64 @@ impl MempoolGateway {
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
         crate::package::check_structure(txs)?;
+        self.submit_package_atomic(txs, AdmissionOrigin::from(origin), max_rate, time, chain)
+    }
+
+    /// Atomically submits a BIP331 ancestor package relayed by `source`: the
+    /// subject last, preceded by its unconfirmed ancestors in the peer's
+    /// topological order. The order is never changed, members are never
+    /// submitted individually, and nothing is replaced or evicted for
+    /// capacity. Structure and shape failures leave the pool, observers and
+    /// the orphan and reject caches untouched. An admission refusal commits
+    /// nothing and hands only the individually refused members, in dependency
+    /// order, to the existing bounded orphan hold or reject cache.
+    pub fn submit_peer_package(
+        &self,
+        txs: &[Tx],
+        source: PeerToken,
+        time: u64,
+        chain: &dyn AdmissionChain,
+    ) -> Result<MutationResult, SubmitError> {
+        crate::package::check_structure(txs)?;
+        check_ancestor_shape(txs)?;
+        self.submit_package_atomic(txs, AdmissionOrigin::Peer(source), None, |_| time, chain)
+    }
+
+    /// The resident BIP331 ancestor package of `tip`: its unconfirmed
+    /// ancestors in topological order, then `tip`. `None` when `tip` is not
+    /// resident or the package would exceed
+    /// [`MAX_PACKAGE_COUNT`](crate::standardness::MAX_PACKAGE_COUNT)
+    /// transactions. Orphans and recent rejects are never served.
+    #[must_use]
+    pub fn ancestor_package_wtxids(&self, tip: Wtxid) -> Option<Vec<Wtxid>> {
+        self.read().ancestor_package_wtxids(&tip)
+    }
+
+    /// The resident bodies of `wtxids`, in the requested order and from one
+    /// pool read view, all or none: `None` when any wtxid is not resident.
+    /// Orphans, recent rejects and the reconstruction ring are never served.
+    /// The bodies are the pool's own `Arc<Tx>`, so no transaction is cloned.
+    /// The caller bounds `wtxids.len()`; duplicates yield duplicate handles.
+    #[must_use]
+    pub fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+        let pool = self.read();
+        let mut bodies = Vec::with_capacity(wtxids.len());
+        for wtxid in wtxids {
+            bodies.push(Arc::clone(&pool.entry_by_wtxid(wtxid)?.tx));
+        }
+        Some(bodies)
+    }
+
+    /// The one atomic owner behind local and peer package submission. The
+    /// caller has already verified the package's structure and shape.
+    fn submit_package_atomic(
+        &self,
+        txs: &[Tx],
+        origin: AdmissionOrigin,
+        max_rate: Option<u64>,
+        time: impl Fn(&Tx) -> u64,
+        chain: &dyn AdmissionChain,
+    ) -> Result<MutationResult, SubmitError> {
         let attempt = self.submit_package_attempt(
             txs,
             origin,
@@ -267,13 +347,12 @@ impl MempoolGateway {
     fn submit_package_attempt(
         &self,
         txs: &[Tx],
-        origin: LocalOrigin,
+        origin: AdmissionOrigin,
         max_rate: Option<u64>,
         time: impl Fn(&Tx) -> u64,
         chain: &dyn AdmissionChain,
         mode: AdmissionMode,
     ) -> Result<PackageAttempt, SubmitError> {
-        let origin = AdmissionOrigin::from(origin);
         'attempt: for _ in 0..MAX_ADMISSION_RETRIES {
             let Some(generation) = self.stable_generation() else {
                 continue;
@@ -485,6 +564,9 @@ impl MempoolGateway {
                         Some(stamp),
                     )?;
                     if let Some(error) = verdict {
+                        // A peer refusal reaches the bounded lifecycle in this
+                        // same revalidated interval; other origins record nothing.
+                        self.record_peer_package_refusal(pool, &requests, &prepared);
                         return Err(error);
                     }
                     let plan = plan.map_err(crate::AdmitError::Policy)?;
@@ -545,5 +627,435 @@ impl MempoolGateway {
             }
         }
         Err(SubmitError::RetryExhausted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ChainAdmissionSnapshot, Mempool, MempoolLimits, MempoolObserver, MutationEnvelope,
+    };
+    use bitcoin::hashes::{Hash as _, sha256};
+    use bitcoin_rs_consensus::ValidationEngine;
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, PeerEndpoint, Script, Sequence, TxIn, TxOut, Witness,
+    };
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Records every published envelope in order.
+    #[derive(Default)]
+    struct Seen(parking_lot::Mutex<Vec<MutationEnvelope>>);
+
+    impl MempoolObserver for Seen {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            self.0.lock().push(envelope.clone());
+        }
+    }
+
+    struct Coins(Vec<(OutPoint, TxOut)>);
+
+    impl AdmissionChain for Coins {
+        fn snapshot(&self, _: &Tx) -> Option<ChainAdmissionSnapshot> {
+            Some(ChainAdmissionSnapshot {
+                prevouts: self.0.clone(),
+                height: 200,
+                csv_active: true,
+                ..ChainAdmissionSnapshot::default()
+            })
+        }
+    }
+
+    fn source() -> PeerToken {
+        PeerToken {
+            endpoint: Some(PeerEndpoint::Ip(core::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8333,
+            )))),
+            connection_id: 7,
+        }
+    }
+
+    fn coin(tag: u32) -> OutPoint {
+        let mut bytes = [0_u8; 32];
+        bytes[..4].copy_from_slice(&tag.to_le_bytes());
+        OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0)
+    }
+
+    /// A chain that confirms each tagged coin at 100,000 sat behind an anyone-can-spend script.
+    fn funded(tags: &[u32]) -> Coins {
+        Coins(
+            tags.iter()
+                .map(|tag| {
+                    (
+                        coin(*tag),
+                        TxOut {
+                            value: Amount::from_sat(100_000),
+                            script_pubkey: Script::from_bytes(vec![0x51]),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn output(value: u64) -> TxOut {
+        let hash = sha256::Hash::hash(&[0x51]);
+        TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: Script::from_bytes(
+                [vec![0, 32], hash.to_byte_array().to_vec()].concat(),
+            ),
+        }
+    }
+
+    /// A version-2 spend of confirmed coins behind the bare anyone-can-spend script.
+    fn spend_coins(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
+        spend_with(inputs, outputs, &Witness::new())
+    }
+
+    /// A version-2 spend of outputs made by `output`, which need the script as witness.
+    fn spend_outputs(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
+        spend_with(inputs, outputs, &Witness::from_stack(vec![vec![0x51]]))
+    }
+
+    fn spend_with(inputs: &[OutPoint], outputs: &[u64], witness: &Witness) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: inputs
+                .iter()
+                .map(|outpoint| TxIn {
+                    previous_output: *outpoint,
+                    sequence: Sequence::MAX,
+                    script_sig: Script::new(),
+                    witness: witness.clone(),
+                })
+                .collect(),
+            outputs: outputs.iter().copied().map(output).collect(),
+        }
+    }
+
+    fn gateway(min_relay: u64, observer: Option<Arc<dyn MempoolObserver>>) -> MempoolGateway {
+        MempoolGateway::new(
+            Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: min_relay,
+                ..MempoolLimits::default()
+            }))),
+            observer,
+            ValidationEngine::Native,
+            None,
+        )
+    }
+
+    fn txids(result: &MutationResult) -> Vec<Hash256> {
+        result.changes.iter().map(|change| change.txid).collect()
+    }
+
+    fn ids(txs: &[Tx]) -> Vec<Hash256> {
+        txs.iter().map(|tx| Hash256::from(tx.txid())).collect()
+    }
+
+    /// A zero-conflict chain of `length` transactions, each paying 1,000 sat.
+    fn chain_of(length: usize) -> Vec<Tx> {
+        let mut txs: Vec<Tx> = Vec::with_capacity(length);
+        let mut value = 100_000_u64;
+        for index in 0..length {
+            let input = txs
+                .last()
+                .map_or_else(|| coin(1), |previous| OutPoint::new(previous.txid(), 0));
+            value -= 1_000;
+            txs.push(if index > 0 {
+                spend_outputs(&[input], &[value])
+            } else {
+                spend_coins(&[input], &[value])
+            });
+        }
+        txs
+    }
+
+    #[test]
+    fn peer_ancestor_package_commits_an_unpaid_chain_under_its_paying_subject() -> TestResult {
+        let seen = Arc::new(Seen::default());
+        let gateway = gateway(1_000, Some(seen.clone()));
+        let chain = funded(&[1]);
+        let grandparent = spend_coins(&[coin(1)], &[100_000]);
+        let parent = spend_outputs(&[OutPoint::new(grandparent.txid(), 0)], &[100_000]);
+        let subject = spend_outputs(&[OutPoint::new(parent.txid(), 0)], &[96_000]);
+        let now = unix_time_secs();
+
+        // The unpaid prefix fails the aggregate floor alone. Nothing about it is cached.
+        assert_eq!(
+            gateway.submit_peer_package(
+                &[grandparent.clone(), parent.clone()],
+                source(),
+                now,
+                &chain
+            ),
+            Err(SubmitError::Policy(
+                AcceptanceRejectReason::MinRelayFeeNotMet
+            ))
+        );
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert!(seen.0.lock().is_empty());
+
+        let package = vec![grandparent.clone(), parent.clone(), subject.clone()];
+        let result = gateway.submit_peer_package(&package, source(), now, &chain)?;
+        assert_eq!(txids(&result), ids(&package));
+        assert_eq!(gateway.read().len(), 3);
+        assert_eq!(
+            seen.0.lock().as_slice(),
+            &[MutationEnvelope {
+                origin: AdmissionOrigin::Peer(source()),
+                result
+            }]
+        );
+        assert_eq!(
+            gateway.ancestor_package_wtxids(subject.wtxid()),
+            Some(vec![grandparent.wtxid(), parent.wtxid(), subject.wtxid()])
+        );
+        assert_eq!(
+            gateway.ancestor_package_wtxids(grandparent.wtxid()),
+            Some(vec![grandparent.wtxid()])
+        );
+        let outsider = spend_coins(&[coin(2)], &[100_000]);
+        assert_eq!(gateway.ancestor_package_wtxids(outsider.wtxid()), None);
+
+        // Bodies come back in the requested order, repeats included, all or none.
+        let requested = [subject.wtxid(), grandparent.wtxid(), subject.wtxid()];
+        let bodies = gateway
+            .resident_package(&requested)
+            .ok_or("every member is resident")?;
+        assert_eq!(
+            bodies.iter().map(|tx| tx.wtxid()).collect::<Vec<_>>(),
+            requested
+        );
+        assert!(
+            gateway
+                .resident_package(&[grandparent.wtxid(), outsider.wtxid()])
+                .is_none()
+        );
+        assert!(
+            gateway
+                .resident_package(&[])
+                .is_some_and(|bodies| bodies.is_empty())
+        );
+
+        // A replay finds every member resident: no mutation and no new envelope.
+        assert!(
+            gateway
+                .submit_peer_package(&package, source(), now, &chain)?
+                .is_empty()
+        );
+        assert_eq!(seen.0.lock().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_package_keeps_the_senders_order_where_the_local_path_sorts() -> TestResult {
+        let chain = funded(&[1, 2]);
+        let mut parents = [
+            spend_coins(&[coin(1)], &[100_000]),
+            spend_coins(&[coin(2)], &[100_000]),
+        ];
+        parents.sort_by_key(Tx::txid);
+        let subject = spend_outputs(
+            &[
+                OutPoint::new(parents[0].txid(), 0),
+                OutPoint::new(parents[1].txid(), 0),
+            ],
+            &[196_000],
+        );
+        let descending = vec![parents[1].clone(), parents[0].clone(), subject.clone()];
+        let ascending = vec![parents[0].clone(), parents[1].clone(), subject];
+        let now = unix_time_secs();
+
+        let peer = gateway(1_000, None);
+        let result = peer.submit_peer_package(&descending, source(), now, &chain)?;
+        assert_eq!(txids(&result), ids(&descending));
+
+        let local = gateway(1_000, None);
+        let result = local.submit_local_package(descending, LocalOrigin::Rpc, None, now, &chain)?;
+        assert_eq!(txids(&result), ids(&ascending));
+        Ok(())
+    }
+
+    #[test]
+    fn peer_package_structure_failures_touch_nothing() -> TestResult {
+        let seen = Arc::new(Seen::default());
+        let gateway = gateway(0, Some(seen.clone()));
+        let chain = funded(&[1, 2]);
+        let parent = spend_coins(&[coin(1)], &[100_000]);
+        let child = spend_outputs(&[OutPoint::new(parent.txid(), 0)], &[96_000]);
+        let unrelated = spend_coins(&[coin(2)], &[100_000]);
+        let oversized: Vec<_> = (10..=10 + u32::try_from(crate::standardness::MAX_PACKAGE_COUNT)?)
+            .map(|tag| spend_coins(&[coin(tag)], &[100_000]))
+            .collect();
+        assert_eq!(oversized.len(), crate::standardness::MAX_PACKAGE_COUNT + 1);
+        let cases = [
+            (vec![], AcceptanceRejectReason::PackageCount),
+            (oversized, AcceptanceRejectReason::PackageCount),
+            (
+                vec![child.clone(), parent.clone()],
+                AcceptanceRejectReason::PackageOrder,
+            ),
+            (
+                vec![parent.clone(), parent.clone()],
+                AcceptanceRejectReason::PackageDuplicates,
+            ),
+            (
+                vec![parent.clone(), unrelated.clone()],
+                AcceptanceRejectReason::PackageTopology,
+            ),
+            (
+                vec![parent, child, unrelated],
+                AcceptanceRejectReason::PackageTopology,
+            ),
+        ];
+        let sequence = gateway.read().sequence_number();
+        for (txs, reason) in cases {
+            assert_eq!(
+                gateway.submit_peer_package(&txs, source(), 1, &chain),
+                Err(SubmitError::Policy(reason))
+            );
+        }
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert!(seen.0.lock().is_empty());
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn refused_peer_package_rolls_back_and_caches_only_the_member_it_refused() -> TestResult {
+        let seen = Arc::new(Seen::default());
+        let gateway = gateway(0, Some(seen.clone()));
+        let chain = funded(&[1]);
+        let parent = spend_coins(&[coin(1)], &[100_000]);
+        let child = spend_outputs(&[OutPoint::new(parent.txid(), 0)], &[96_000]);
+        let mut inflating = child.clone();
+        inflating.outputs[0].value = Amount::from_sat(200_000);
+        let sequence = gateway.read().sequence_number();
+        let now = unix_time_secs();
+
+        assert_eq!(
+            gateway.submit_peer_package(
+                &[parent.clone(), inflating.clone()],
+                source(),
+                now,
+                &chain
+            ),
+            Err(SubmitError::Consensus)
+        );
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert!(seen.0.lock().is_empty());
+        assert!(gateway.is_rejected(Hash256::from(inflating.wtxid())));
+        assert!(!gateway.is_rejected(Hash256::from(parent.wtxid())));
+        assert_eq!(gateway.recent_rejects_count(), 1);
+        assert_eq!(gateway.orphan_count(), 0);
+
+        // The parent rolled back with its child, so the valid package still commits whole.
+        let result = gateway.submit_peer_package(&[parent, child], source(), now, &chain)?;
+        assert_eq!(result.len(), 2);
+        assert_eq!(seen.0.lock().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_package_with_an_unavailable_input_holds_the_orphan_and_reports_the_first_refusal() {
+        let seen = Arc::new(Seen::default());
+        let gateway = gateway(0, Some(seen.clone()));
+        let chain = funded(&[1]);
+        let parent = spend_coins(&[coin(1)], &[100_000]);
+        let orphaned = spend_outputs(&[OutPoint::new(parent.txid(), 0), coin(9)], &[96_000]);
+        let sequence = gateway.read().sequence_number();
+
+        assert_eq!(
+            gateway.submit_peer_package(
+                &[parent, orphaned.clone()],
+                source(),
+                unix_time_secs(),
+                &chain
+            ),
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert!(seen.0.lock().is_empty());
+        assert_eq!(gateway.orphan_count(), 1);
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert!(gateway.have_tx(Hash256::from(orphaned.wtxid()), true));
+        // An orphan is never served as part of an ancestor package or its bodies.
+        assert_eq!(gateway.ancestor_package_wtxids(orphaned.wtxid()), None);
+        assert!(gateway.resident_package(&[orphaned.wtxid()]).is_none());
+
+        // Rows are judged in dependency order: the first refusal wins, and a
+        // later member that was never evaluated is not cached.
+        let first = spend_outputs(&[coin(9)], &[100_000]);
+        let second = spend_outputs(&[OutPoint::new(first.txid(), 0)], &[200_000]);
+        let fresh = self::gateway(0, None);
+        assert_eq!(
+            fresh.submit_peer_package(&[first, second], source(), unix_time_secs(), &chain),
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert_eq!(fresh.orphan_count(), 1);
+        assert_eq!(fresh.recent_rejects_count(), 0);
+    }
+
+    #[test]
+    fn peer_package_admits_exactly_the_count_bound_atomically_and_serves_no_more() -> TestResult {
+        let seen = Arc::new(Seen::default());
+        let gateway = gateway(0, Some(seen.clone()));
+        let chain = funded(&[1]);
+        let count = crate::standardness::MAX_PACKAGE_COUNT;
+        let txs = chain_of(count);
+        let result = gateway.submit_peer_package(&txs, source(), unix_time_secs(), &chain)?;
+        assert_eq!(txids(&result), ids(&txs));
+        assert_eq!(seen.0.lock().len(), 1);
+        assert_eq!(seen.0.lock()[0].result.len(), count);
+
+        let tip = txs.last().ok_or("chain is not empty")?;
+        let served = gateway
+            .ancestor_package_wtxids(tip.wtxid())
+            .ok_or("the 25-member package is servable")?;
+        assert_eq!(
+            served,
+            txs.iter().map(Tx::wtxid).collect::<Vec<_>>(),
+            "ancestors then the tip"
+        );
+
+        // One more descendant makes the tip's package 26 deep: nothing is served.
+        let next = spend_outputs(&[OutPoint::new(tip.txid(), 0)], &[74_000]);
+        let extended = gateway.submit_peer_package(
+            std::slice::from_ref(&next),
+            source(),
+            unix_time_secs(),
+            &chain,
+        )?;
+        assert_eq!(extended.len(), 1);
+        assert_eq!(gateway.ancestor_package_wtxids(next.wtxid()), None);
+        assert_eq!(
+            gateway
+                .ancestor_package_wtxids(tip.wtxid())
+                .map(|served| served.len()),
+            Some(count)
+        );
+
+        let refused = self::gateway(0, None).submit_peer_package(
+            &chain_of(count + 1),
+            source(),
+            unix_time_secs(),
+            &chain,
+        );
+        assert_eq!(
+            refused,
+            Err(SubmitError::Policy(AcceptanceRejectReason::PackageCount))
+        );
+        Ok(())
     }
 }

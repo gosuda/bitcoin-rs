@@ -54,6 +54,10 @@ pub const COMMANDS: &[&str] = &[
     "addrv2",
     "sendaddrv2",
     "feature",
+    "sendpackages",
+    "ancpkginfo",
+    "getpkgtxns",
+    "pkgtxns",
     "staletip",
 ];
 

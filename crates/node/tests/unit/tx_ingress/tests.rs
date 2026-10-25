@@ -325,3 +325,123 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
     assert_eq!(gateway.orphan_count(), 0);
     assert!(!gateway.have_tx(Hash256::from(txid), false));
 }
+
+#[test]
+fn consumer_processes_admitted_package_and_publishes_generation() {
+    use bitcoin_rs_p2p::{InboundBody, PackageCapacity};
+    use bitcoin_rs_primitives::encode::ConsensusEncode;
+
+    let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    })));
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::clone(&pool),
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
+    let mining = Arc::new(FakeMiningControl::default());
+    let consumer = make_consumer(&gateway, &mining);
+    let table = Arc::clone(&consumer.peer_table);
+
+    // Ancestor package: the parent spends UTXO 0xAA:0 into a P2SH `OP_TRUE`
+    // output, which the child spends by revealing its redeem script. The
+    // `OP_RETURN` output of `spending_tx` cannot be spent.
+    let mut parent = spending_tx();
+    parent.outputs[0].script_pubkey = Script::from_bytes(vec![
+        0xA9, 0x14, 0xDA, 0x17, 0x45, 0xE9, 0xB5, 0x49, 0xBD, 0x0B, 0xFA, 0x1A, 0x56, 0x99, 0x71,
+        0xC7, 0x7E, 0xBA, 0x30, 0xCD, 0x5A, 0x4B, 0x87,
+    ]);
+    let parent_txid = parent.txid();
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: Script::from_bytes(vec![0x01, 0x51]),
+            sequence: Sequence::from_consensus(0xFFFF_FFFF),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(48_000),
+            script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0x11, 0x22, 0x33, 0x44]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let child_wtxid = child.wtxid();
+    let child_txid = child.txid();
+
+    // Register the peer that will own the solicited package.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19_333);
+    let (queue, _frames) = crossbeam_channel::unbounded();
+    let lease = bitcoin_rs_p2p::PeerLease::new(queue);
+    let source = lease.source_ip(addr);
+    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
+    table.register(endpoint, lease.clone());
+    let version = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: bitcoin::p2p::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    table.publish_info(
+        endpoint,
+        &lease,
+        bitcoin_rs_p2p::PeerInfo::inbound_from_version(
+            addr,
+            addr,
+            &version,
+            0,
+            0,
+            std::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        ),
+    );
+
+    // The ancestor-package lifecycle: the node solicits `ancpkginfo` for the
+    // subject, the answer names the missing ancestors, and `getpkgtxns` claims
+    // the request for exactly that sequence.
+    assert!(table.request_package_info(source, child_wtxid));
+    assert!(table.request_package_transactions(
+        source,
+        child_wtxid,
+        vec![parent.wtxid(), child_wtxid]
+    ));
+
+    // Encode package payload.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(2));
+    parent.consensus_encode(&mut payload);
+    child.consensus_encode(&mut payload);
+    let payload = bytes::Bytes::from(payload);
+
+    let capacity = PackageCapacity::new(100_000);
+    let inbound = table
+        .admit_package(
+            &capacity,
+            consumer.mempool_gateway.as_ref(),
+            source,
+            payload,
+        )
+        .expect("package admission must succeed");
+    assert_eq!(capacity.held(), 1);
+    assert!(capacity.reserved() > 0);
+
+    // Deliver through the consumer.
+    consumer.process_body(InboundBody::Package(Box::new(inbound)));
+
+    // Both parent and child must now be in the mempool.
+    assert!(gateway.read().contains_txid(&parent_txid));
+    assert!(gateway.read().contains_txid(&child_txid));
+    assert_eq!(mining.publish_count(), 1);
+
+    // Post-admission release must have returned the capacity and cleared the claim.
+    assert_eq!(capacity.reserved(), 0);
+    assert_eq!(capacity.held(), 0);
+    let teardown = table.clear_package_claims(&capacity);
+    assert_eq!(teardown.claims_cleared, 0);
+}

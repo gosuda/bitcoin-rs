@@ -44,6 +44,9 @@ pub(crate) mod netgroup;
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
 
+/// BIP331 ancestor package relay codec and combined package hash.
+pub mod packages;
+
 /// Peer state and DNS resolution types.
 pub(crate) mod peer;
 /// Peer metadata published after a successful handshake.
@@ -103,7 +106,7 @@ pub use feature::{
 };
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
-pub use listener::ListenerExtras;
+pub use listener::{ListenerExtras, RelayOffers};
 pub use peer::{
     CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState, WtxidRelayState,
 };
@@ -116,6 +119,11 @@ pub use service::{
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tor_control::TorControlTarget;
 pub use transport::{TransportFailure, TransportProtocol};
+pub use tx_policy::{
+    InboundBody, InboundPackage, MAX_DECODED_PACKAGES_PER_PEER, OpenedPackage, PackageCapacity,
+    PackageCharge, PackageOpening, PackagePlan, PackageRefusal, PackageRejection, PackageTeardown,
+    PackageToken, plan_package_charge,
+};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
     RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,

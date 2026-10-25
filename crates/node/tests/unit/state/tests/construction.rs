@@ -116,10 +116,14 @@ fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
     };
     for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
         sender
-            .try_send(bitcoin_rs_p2p::InboundTx::new(tx.clone(), source))
+            .try_send(bitcoin_rs_p2p::InboundBody::from(
+                bitcoin_rs_p2p::InboundTx::new(tx.clone(), source),
+            ))
             .unwrap_or_else(|error| panic!("send within the bound must succeed: {error}"));
     }
-    let overflow = sender.try_send(bitcoin_rs_p2p::InboundTx::new(tx, source));
+    let overflow = sender.try_send(bitcoin_rs_p2p::InboundBody::from(
+        bitcoin_rs_p2p::InboundTx::new(tx, source),
+    ));
     assert!(
         matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
         "channel must reject txs past INBOUND_TX_CHANNEL_LIMIT, got {overflow:?}",

@@ -154,13 +154,11 @@ pub struct P2pConfig {
     /// `NODE_P2P_V2` is advertised. On by default, as Core's `-v2transport` is;
     /// off keeps every connection on v1.
     pub v2_transport: bool,
-    /// Whether BIP332 stale-tip relay is negotiated with peers. Off by
-    /// default on every network; setting it on a test network is the
-    /// explicit test override.
-    pub stale_tip_relay: bool,
-    /// Whether the BIP332 negotiation tells peers this node prefers stale-tip
-    /// blocks to headers. Meaningful only with [`Self::stale_tip_relay`].
-    pub stale_tip_prefers_blocks: bool,
+    /// The opt-in relay capabilities offered to peers. Every switch is off by
+    /// default and peers relay packages or stale tips only after both sides
+    /// negotiate them. BIP332 stale-tip relay is off by default on every
+    /// network; setting it on a test network is the explicit test override.
+    pub relay_offers: bitcoin_rs_p2p::RelayOffers,
     /// Overlay transport configuration (Tor/I2P). Defaults disable every
     /// overlay and preserve direct IP behavior.
     pub overlay: bitcoin_rs_p2p::OverlayConfig,
@@ -321,8 +319,14 @@ impl NodeConfig {
                 connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
                 fast_sync: settings.p2p.fast_sync.unwrap_or(false),
                 v2_transport: settings.p2p.v2_transport.unwrap_or(true),
-                stale_tip_relay: settings.p2p.stale_tip_relay.unwrap_or(false),
-                stale_tip_prefers_blocks: settings.p2p.stale_tip_prefers_blocks.unwrap_or(false),
+                relay_offers: bitcoin_rs_p2p::RelayOffers {
+                    package_relay: settings.p2p.package_relay.unwrap_or(false),
+                    stale_tip_relay: settings.p2p.stale_tip_relay.unwrap_or(false),
+                    stale_tip_prefers_blocks: settings
+                        .p2p
+                        .stale_tip_prefers_blocks
+                        .unwrap_or(false),
+                },
                 overlay,
             },
             rpc: RpcConfig {
@@ -426,7 +430,8 @@ impl NodeConfig {
         );
         self.validate_overlay()?;
         anyhow::ensure!(
-            !self.p2p.stale_tip_prefers_blocks || self.p2p.stale_tip_relay,
+            !self.p2p.relay_offers.stale_tip_prefers_blocks
+                || self.p2p.relay_offers.stale_tip_relay,
             "--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay"
         );
         if self.p2p.magic != self.network.magic() {

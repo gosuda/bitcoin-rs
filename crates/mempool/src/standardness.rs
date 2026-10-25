@@ -102,6 +102,10 @@ pub fn is_standard_tx(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standa
 /// Bitcoin Core `MAX_PACKAGE_COUNT` for package acceptance / `testmempoolaccept`.
 pub const MAX_PACKAGE_COUNT: usize = 25;
 
+/// Bitcoin Core `MAX_PACKAGE_WEIGHT`: the aggregate weight-unit bound of a
+/// multi-transaction package.
+pub const MAX_PACKAGE_WEIGHT: u64 = 404_000;
+
 /// Caller-resolved fee and prevout context for one package transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageTxContext {

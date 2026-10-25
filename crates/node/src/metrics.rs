@@ -181,6 +181,10 @@ fn describe_node_metrics() {
         "node.mempool.observer_failures_total",
         "mempool observer callback failures"
     );
+    metrics::describe_counter!(
+        "node.package_charge_overrun",
+        "bytes by which a decoded peer package's measured heap exceeded its planned charge"
+    );
     metrics::describe_histogram!(
         "node.event_loop.tick_seconds",
         "event loop tick latency seconds"

@@ -157,6 +157,14 @@ impl TxInventory for ScriptedTxs {
             .find(|tx| tx.wtxid().as_bytes() == wtxid.as_bytes())
             .cloned()
     }
+
+    fn resident_ancestor_package(&self, _wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+        None
+    }
+
+    fn resident_package(&self, _wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+        None
+    }
 }
 
 /// A transaction as small as the codec allows, distinct per `byte`.

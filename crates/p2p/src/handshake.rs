@@ -135,7 +135,9 @@ pub(crate) fn send_post_verack_messages<S: Read + Write>(
 ///   the services this node provides.
 /// POST: the first message advertises relay per `role` and the supplied
 ///   service set.
-/// INVARIANT: feature negotiation is identical for both roles.
+/// INVARIANT: feature negotiation is identical for both roles, except that a
+///   role advertising `relay = false` offers no BIP331 package relay: that
+///   handshake requires `fRelay` from both sides.
 pub fn start<S>(
     peer: &mut Peer<S>,
     nonce: u64,
@@ -144,6 +146,9 @@ pub fn start<S>(
     local_services: ServiceFlags,
 ) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
+    if !role.relays_transactions() {
+        peer.package_relay.withdraw_offer();
+    }
     let mut messages = Vec::with_capacity(4);
     messages.push(Message::Version(version_message(
         nonce,
@@ -293,6 +298,7 @@ mod tests {
         version_message,
     };
     use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
+    use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
     use crate::wire::{PROTOCOL_VERSION, read_message, write_message};
 
     struct ScriptedStream {
@@ -351,23 +357,16 @@ mod tests {
     fn inbound_handshake_over(
         remote: &[Message],
     ) -> Result<(Peer<ScriptedStream>, Result<(), PeerError>), PeerError> {
-        let magic = Magic::BITCOIN;
-        let mut inbound = Vec::new();
-        for message in remote {
-            write_message(&mut inbound, magic, message)?;
-        }
-        let mut peer = Peer::new(ScriptedStream::new(inbound), magic);
-        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new_inbound(lease_tx);
-        let outcome = run_inbound_handshake(
-            &mut peer,
-            1,
-            0,
-            services(),
-            &lease,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-        );
-        Ok((peer, outcome))
+        inbound_handshake_offering(0, remote)
+    }
+
+    /// [`inbound_handshake_over`] on a node that offers package relay with
+    /// `offer`.
+    fn inbound_handshake_offering(
+        offer: u64,
+        remote: &[Message],
+    ) -> Result<(Peer<ScriptedStream>, Result<(), PeerError>), PeerError> {
+        inbound_handshake_with(|peer| peer.offer_package_relay(offer), remote)
     }
 
     /// [`inbound_handshake_over`] on a node `configure` set up before the
@@ -405,6 +404,95 @@ mod tests {
         Ok(sent)
     }
 
+    fn send_packages(versions: u64) -> Message {
+        Message::SendPackages(SendPackages { versions })
+    }
+
+    #[test]
+    fn inbound_handshake_sends_one_sendpackages_before_verack_and_activates_the_common_bits()
+    -> Result<(), PeerError> {
+        let both = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
+        let (peer, outcome) = inbound_handshake_offering(
+            both,
+            &[
+                remote_version(PROTOCOL_VERSION),
+                Message::WtxidRelay,
+                send_packages(PKG_RELAY_ANC | (1 << 40)),
+                Message::Verack,
+            ],
+        )?;
+        outcome?;
+
+        let mut expected = vec![Message::Version(version_message(
+            1,
+            0,
+            PeerRole::FullRelay,
+            services(),
+        ))];
+        expected.extend(feature_messages());
+        expected.extend(
+            negotiated_features(&peer, PROTOCOL_VERSION)
+                .into_iter()
+                .map(Message::Feature),
+        );
+        expected.push(send_packages(both));
+        expected.push(Message::Verack);
+        expected.extend(post_verack_messages());
+        assert_eq!(sent_messages(&peer.stream.written)?, expected);
+        assert_eq!(peer.package_relay_versions(), PKG_RELAY_ANC);
+        assert!(
+            peer.remote_features.is_empty(),
+            "sendpackages is not mapped onto BIP434"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_handshake_offers_nothing_by_default_and_never_activates() -> Result<(), PeerError> {
+        let (peer, outcome) = inbound_handshake_over(&[
+            remote_version(PROTOCOL_VERSION),
+            Message::WtxidRelay,
+            send_packages(PKG_RELAY_PKGTXNS | PKG_RELAY_ANC),
+            Message::Verack,
+        ])?;
+        outcome?;
+
+        assert!(
+            !sent_messages(&peer.stream.written)?
+                .iter()
+                .any(|message| matches!(message, Message::SendPackages(_)))
+        );
+        assert_eq!(peer.package_relay_versions(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_handshake_rejects_sendpackages_before_version() -> Result<(), PeerError> {
+        let (peer, outcome) = inbound_handshake_offering(
+            PKG_RELAY_ANC,
+            &[send_packages(PKG_RELAY_ANC), Message::Verack],
+        )?;
+
+        assert!(matches!(outcome, Err(PeerError::Misbehavior(_))));
+        assert_eq!(peer.package_relay_versions(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_start_offers_package_relay_only_on_relaying_roles() {
+        for (role, offered) in [
+            (PeerRole::FullRelay, Some(PKG_RELAY_ANC)),
+            (PeerRole::BlockRelayOnly, None),
+        ] {
+            let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+            peer.offer_package_relay(PKG_RELAY_ANC);
+
+            start(&mut peer, 7, 0, role, services());
+
+            assert_eq!(peer.package_relay.unsent_offer(), offered, "{role:?}");
+        }
+    }
+
     #[test]
     fn announcements_go_only_to_peers_at_the_feature_version() {
         let local = vec![
@@ -414,18 +502,18 @@ mod tests {
                 vec![1, 2],
             ),
         ];
-        assert!(announceable_to(FEATURE_VERSION - 1, local.clone()).is_empty());
+        assert_eq!(announceable_to(FEATURE_VERSION - 1, local.clone()), []);
         assert_eq!(announceable_to(FEATURE_VERSION, local.clone()), local);
         assert_eq!(announceable_to(u32::MAX, local.clone()), local);
         let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
-        assert!(negotiated_features(&peer, FEATURE_VERSION).is_empty());
+        assert_eq!(negotiated_features(&peer, FEATURE_VERSION), []);
 
         peer.offer_stale_tip_relay(true);
         assert_eq!(
             negotiated_features(&peer, FEATURE_VERSION),
             vec![FeatureAnnouncement::bip332(true)]
         );
-        assert!(negotiated_features(&peer, FEATURE_VERSION - 1).is_empty());
+        assert_eq!(negotiated_features(&peer, FEATURE_VERSION - 1), []);
     }
 
     #[test]

@@ -604,6 +604,12 @@ macro_rules! option_rows {
                         toml native("v2_transport")
                         conf["v2transport"]
                     }
+                    /// Offer BIP331 ancestor package relay to peers. Off by default.
+                    package_relay as p2p_package_relay: Option<bool> {
+                        cli[#[arg(long = "p2p-package-relay", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_P2P_PACKAGE_RELAY", parse_bool]
+                        toml native("p2p_package_relay")
+                    }
                     /// Announce and accept BIP332 stale-tip headers. Off by default; setting
                     /// it on a test network is the explicit test override.
                     stale_tip_relay as p2p_stale_tip_relay: Option<bool> {

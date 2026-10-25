@@ -572,3 +572,69 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
         }
     }
 }
+
+#[cfg(test)]
+mod feature_option_tests {
+    use std::ffi::OsString;
+
+    use anyhow::Result;
+    use bitcoin_rs_node::NodeConfig;
+    use clap::Parser as _;
+
+    use super::{CliArgs, resolve};
+
+    fn load(args: &[&str], vars: &[(&str, &str)]) -> Result<NodeConfig> {
+        let argv = std::iter::once("bitcoin-rs").chain(args.iter().copied());
+        let cli = CliArgs::try_parse_from(argv)?;
+        resolve(
+            cli,
+            vars.iter()
+                .map(|(key, value)| (OsString::from(*key), OsString::from(*value))),
+        )
+    }
+
+    fn refusal(args: &[&str], vars: &[(&str, &str)]) -> String {
+        match load(args, vars) {
+            Ok(_) => panic!("configuration must be refused"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn relay_switches_are_bare_cli_flags_and_the_command_line_beats_environment() -> Result<()> {
+        let off = load(&[], &[])?.p2p;
+        assert!(
+            !off.relay_offers.package_relay
+                && !off.relay_offers.stale_tip_relay
+                && !off.relay_offers.stale_tip_prefers_blocks
+        );
+
+        let on = load(
+            &[
+                "--p2p-package-relay",
+                "--p2p-stale-tip-relay",
+                "--p2p-stale-tip-prefers-blocks",
+            ],
+            &[],
+        )?
+        .p2p;
+        assert!(
+            on.relay_offers.package_relay
+                && on.relay_offers.stale_tip_relay
+                && on.relay_offers.stale_tip_prefers_blocks
+        );
+
+        let env_on = load(&[], &[("BITCOIN_RS_P2P_PACKAGE_RELAY", "true")])?.p2p;
+        assert!(env_on.relay_offers.package_relay);
+        let cli_off = load(
+            &["--p2p-package-relay=false"],
+            &[("BITCOIN_RS_P2P_PACKAGE_RELAY", "true")],
+        )?
+        .p2p;
+        assert!(!cli_off.relay_offers.package_relay);
+
+        let dangling = refusal(&["--p2p-stale-tip-prefers-blocks"], &[]);
+        assert!(dangling.contains("--p2p-stale-tip-relay"));
+        Ok(())
+    }
+}

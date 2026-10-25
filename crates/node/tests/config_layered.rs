@@ -583,13 +583,52 @@ fn refusal(layers: &[&UserConfig]) -> String {
 }
 
 #[test]
+fn relay_features_are_opt_in_per_flag_and_follow_layer_precedence() -> Result<()> {
+    let off = resolve(&[])?.p2p.relay_offers;
+    assert!(!off.package_relay && !off.stale_tip_relay && !off.stale_tip_prefers_blocks);
+
+    // Each switch is its own slot: turning one on never turns another on.
+    let package: UserConfig = toml::from_str("p2p_package_relay = true")?;
+    let offers = resolve(&[&package])?.p2p.relay_offers;
+    assert!(offers.package_relay && !offers.stale_tip_relay && !offers.stale_tip_prefers_blocks);
+
+    let stale: UserConfig = toml::from_str("p2p_stale_tip_relay = true")?;
+    let offers = resolve(&[&stale])?.p2p.relay_offers;
+    assert!(!offers.package_relay && offers.stale_tip_relay && !offers.stale_tip_prefers_blocks);
+
+    // A higher layer's explicit false beats a lower layer's true.
+    let disabled = environment("BITCOIN_RS_P2P_PACKAGE_RELAY", "false")?;
+    assert!(
+        !resolve(&[&package, &disabled])?
+            .p2p
+            .relay_offers
+            .package_relay
+    );
+    let enabled = environment("BITCOIN_RS_P2P_STALE_TIP_RELAY", "on")?;
+    assert!(resolve(&[&enabled])?.p2p.relay_offers.stale_tip_relay);
+
+    // An explicit setting on a test network is honored, not silently dropped.
+    let regtest: UserConfig = toml::from_str("network = \"regtest\"")?;
+    assert!(
+        resolve(&[&regtest, &stale])?
+            .p2p
+            .relay_offers
+            .stale_tip_relay
+    );
+
+    assert!(environment("BITCOIN_RS_P2P_PACKAGE_RELAY", "maybe").is_err());
+    assert!(toml::from_str::<UserConfig>("p2p_stale_tip_relay = \"yes\"").is_err());
+    Ok(())
+}
+
+#[test]
 fn stale_tip_prefers_blocks_needs_the_relay_it_modifies() -> Result<()> {
     let prefers = environment("BITCOIN_RS_P2P_STALE_TIP_PREFERS_BLOCKS", "true")?;
     assert!(refusal(&[&prefers]).contains("requires --p2p-stale-tip-relay"));
 
     let relay: UserConfig = toml::from_str("p2p_stale_tip_relay = true")?;
-    let p2p = resolve(&[&relay, &prefers])?.p2p;
-    assert!(p2p.stale_tip_relay && p2p.stale_tip_prefers_blocks);
+    let offers = resolve(&[&relay, &prefers])?.p2p.relay_offers;
+    assert!(offers.stale_tip_relay && offers.stale_tip_prefers_blocks);
 
     // The relay switch folds across layers before the check: a higher layer
     // that turns the relay off leaves the lower layer's preference dangling.
@@ -597,6 +636,11 @@ fn stale_tip_prefers_blocks_needs_the_relay_it_modifies() -> Result<()> {
     assert!(refusal(&[&relay, &prefers, &relay_off]).contains("requires --p2p-stale-tip-relay"));
 
     // Relay without a preference is the default announcement of headers.
-    assert!(!resolve(&[&relay])?.p2p.stale_tip_prefers_blocks);
+    assert!(
+        !resolve(&[&relay])?
+            .p2p
+            .relay_offers
+            .stale_tip_prefers_blocks
+    );
     Ok(())
 }

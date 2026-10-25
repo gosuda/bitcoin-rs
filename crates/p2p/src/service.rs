@@ -103,13 +103,12 @@ pub struct P2pServiceConfig {
     ///
     /// [`ConnectionShared::v2_transport`]: crate::listener::ConnectionShared::v2_transport
     pub v2_transport: bool,
-    /// Whether connections negotiate BIP332 stale-tip relay. Off by default.
+    /// The opt-in relay capabilities connections offer: BIP331 ancestor
+    /// package relay and BIP332 stale-tip relay. Both are off by default; a
+    /// peer relays packages or stale tips only after both sides negotiate it.
     /// The value is final: the node resolves any network policy before it
     /// reaches the service, and nothing below re-checks the network.
-    pub stale_tip_relay: bool,
-    /// Whether the BIP332 negotiation tells peers this node prefers stale-tip
-    /// blocks to headers. Meaningful only with [`Self::stale_tip_relay`].
-    pub stale_tip_prefers_blocks: bool,
+    pub relay_offers: crate::RelayOffers,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     pub outbound_block_relay_slots: usize,
@@ -143,8 +142,7 @@ impl Default for P2pServiceConfig {
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
-            stale_tip_relay: false,
-            stale_tip_prefers_blocks: false,
+            relay_offers: crate::RelayOffers::default(),
             overlay: crate::OverlayConfig::default(),
         }
     }
@@ -194,8 +192,7 @@ impl P2pServiceConfig {
         shared.max_inbound = self.max_inbound();
         shared.local_services = self.local_services;
         shared.v2_transport = self.v2_transport;
-        shared.stale_tip_relay = self.stale_tip_relay;
-        shared.stale_tip_prefers_blocks = self.stale_tip_prefers_blocks;
+        shared.relay_offers = self.relay_offers;
     }
 }
 
@@ -2603,33 +2600,31 @@ mod tests {
             None,
             crate::listener::ListenerExtras::default(),
         );
-        let switches = |shared: &crate::listener::ConnectionShared| {
-            (shared.stale_tip_relay, shared.stale_tip_prefers_blocks)
-        };
-
         P2pServiceConfig::default().apply_to(&mut shared);
-        assert_eq!(switches(&shared), (false, false));
+        assert_eq!(shared.relay_offers, crate::RelayOffers::default());
 
-        for (config, expected) in [
-            (
-                P2pServiceConfig {
-                    stale_tip_relay: true,
-                    ..P2pServiceConfig::default()
-                },
-                (true, false),
-            ),
-            (
-                P2pServiceConfig {
-                    stale_tip_relay: true,
-                    stale_tip_prefers_blocks: true,
-                    ..P2pServiceConfig::default()
-                },
-                (true, true),
-            ),
-            (P2pServiceConfig::default(), (false, false)),
+        for offers in [
+            crate::RelayOffers {
+                package_relay: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers {
+                stale_tip_relay: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers {
+                stale_tip_relay: true,
+                stale_tip_prefers_blocks: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers::default(),
         ] {
-            config.apply_to(&mut shared);
-            assert_eq!(switches(&shared), expected);
+            P2pServiceConfig {
+                relay_offers: offers,
+                ..P2pServiceConfig::default()
+            }
+            .apply_to(&mut shared);
+            assert_eq!(shared.relay_offers, offers);
         }
     }
 

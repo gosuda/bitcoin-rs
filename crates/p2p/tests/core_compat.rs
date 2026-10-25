@@ -1,5 +1,6 @@
 //! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -28,8 +29,8 @@ use bitcoin_rs_p2p::wire::{
     PeerError, read_message, write_message,
 };
 use bitcoin_rs_p2p::{
-    BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, ListenerExtras,
-    Message, NetworkActivity, Peer, PeerState, PeerTable,
+    BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, FEATURE_VERSION, InboundBlock, InboundHeaders,
+    ListenerExtras, Message, NetworkActivity, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
@@ -363,24 +364,130 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(buffer)
 }
 
+/// The protocol version Bitcoin Core 31.1 advertises. This node advertises
+/// [`PROTOCOL_VERSION`] instead, the one protocol-version deviation recorded in
+/// `docs/policies/p2p-compatibility.md` §4.
+const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
+
+/// The 36 commands of the Core-compatibility inventory: Core 31.1's wire set
+/// this node types, plus the legacy `reject` and `alert` that Core 31.1 no
+/// longer processes. Each decodes with a Core-style outcome.
+const CORE_COMPAT_COMMANDS: [&str; 36] = [
+    "version",
+    "verack",
+    "addr",
+    "inv",
+    "getdata",
+    "notfound",
+    "getblocks",
+    "getheaders",
+    "mempool",
+    "tx",
+    "block",
+    "headers",
+    "sendheaders",
+    "getaddr",
+    "ping",
+    "pong",
+    "merkleblock",
+    "filterload",
+    "filteradd",
+    "filterclear",
+    "getcfilters",
+    "cfilter",
+    "getcfheaders",
+    "cfheaders",
+    "getcfcheckpt",
+    "cfcheckpt",
+    "sendcmpct",
+    "cmpctblock",
+    "getblocktxn",
+    "blocktxn",
+    "reject",
+    "alert",
+    "feefilter",
+    "wtxidrelay",
+    "addrv2",
+    "sendaddrv2",
+];
+
+/// The commands this node types beyond Core 31.1's set: BIP434 `feature`,
+/// BIP331 package relay, and BIP332 `staletip`. Core 31.1 treats each as an
+/// unknown command.
+const EXTENSION_COMMANDS: [&str; 6] = [
+    "feature",
+    "sendpackages",
+    "ancpkginfo",
+    "getpkgtxns",
+    "pkgtxns",
+    "staletip",
+];
+
+/// Whether `outcome` is the typed result an extension command gives an empty
+/// payload: its own codec error, or for `pkgtxns` the raw payload surfaced for
+/// the listener to charge before any transaction is parsed.
+fn is_own_typed_empty_payload_outcome(
+    command: &str,
+    outcome: &Result<(Message, bytes::Bytes), PeerError>,
+) -> bool {
+    match (command, outcome) {
+        ("feature", Err(PeerError::Feature(_)))
+        | ("sendpackages" | "ancpkginfo" | "getpkgtxns", Err(PeerError::Package(_)))
+        | ("staletip", Err(PeerError::StaleTip(_))) => true,
+        ("pkgtxns", Ok((Message::PkgTxnsPayload(payload), _))) => payload.is_empty(),
+        _ => false,
+    }
+}
+
+#[test]
+fn command_inventory_is_the_core_compat_set_plus_the_declared_extensions() {
+    let core: BTreeSet<&str> = CORE_COMPAT_COMMANDS.iter().copied().collect();
+    let extensions: BTreeSet<&str> = EXTENSION_COMMANDS.iter().copied().collect();
+    let typed: BTreeSet<&str> = COMMANDS.iter().copied().collect();
+
+    assert_eq!(core.len(), CORE_COMPAT_COMMANDS.len());
+    assert_eq!(extensions.len(), EXTENSION_COMMANDS.len());
+    assert!(
+        core.is_disjoint(&extensions),
+        "a command is either Core-compatible or an extension"
+    );
+    assert_eq!(
+        core.union(&extensions).copied().collect::<BTreeSet<_>>(),
+        typed,
+        "COMMANDS is exactly the Core-compatibility inventory plus the declared extensions"
+    );
+    assert_eq!(COMMANDS.len(), core.len() + extensions.len());
+    for name in CORE_UNTYPED_COMMANDS {
+        assert!(
+            !typed.contains(name),
+            "{name} is a Core command this node leaves untyped, not an extension"
+        );
+    }
+}
+
 #[test]
 fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
     for spec in COMMANDS {
         let frame = raw_frame(magic, &command_field(spec)?, &[]);
-        match read_message(&mut Cursor::new(frame), magic) {
-            Ok((Message::Unknown { command, .. }, _)) => {
-                return Err(
-                    format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into(),
-                );
-            }
+        let outcome = read_message(&mut Cursor::new(frame), magic);
+        if let Ok((Message::Unknown { command, .. }, _)) = &outcome {
+            return Err(format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into());
+        }
+        if EXTENSION_COMMANDS.contains(spec) {
+            assert!(
+                is_own_typed_empty_payload_outcome(spec, &outcome),
+                "{spec}: an empty payload must give the extension's own typed outcome, got {outcome:?}"
+            );
+            continue;
+        }
+        match outcome {
             Ok(_)
             | Err(
                 PeerError::Encode(_)
                 | PeerError::Protocol(_)
                 | PeerError::Misbehavior(_)
                 | PeerError::NativeDecode(_)
-                | PeerError::Feature(_)
                 | PeerError::Varint(_),
             ) => {}
             Err(error) => {
@@ -449,9 +556,13 @@ fn version_message_pins_core_31_handshake_fields() {
 
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
-        u64::from(PROTOCOL_VERSION),
-        70_016,
-        "pinned Core 31.1 protocol version"
+        PROTOCOL_VERSION, FEATURE_VERSION,
+        "documented deviation: we advertise the BIP434 feature-negotiation threshold"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION,
+        CORE_31_1_PROTOCOL_VERSION + 1,
+        "the one protocol version above Core 31.1's, and only that"
     );
     let expected_services = {
         let mut services = ServiceFlags::NETWORK;

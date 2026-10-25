@@ -465,6 +465,19 @@ impl NodeServices {
                 set_first_error(first_error, anyhow::anyhow!("tx ingress consumer panicked"));
             }
         }
+        if let Some(state) = state {
+            // The consumer has stopped and dropped its channel, which dropped
+            // every queued package and returned its charge. Retire the claims
+            // they left behind and observe the ledger.
+            let package_teardown = state
+                .peer_table()
+                .clear_package_claims(&state.package_capacity());
+            if package_teardown.bytes_reserved != 0 || package_teardown.held != 0 {
+                tracing::warn!(?package_teardown, "package ingress held bytes at teardown");
+            } else {
+                tracing::debug!(?package_teardown, "package ingress cleared at teardown");
+            }
+        }
         if let Some(handle) = self.tx_relay.take() {
             // Tx relay worker panic.
             if matches!(handle.join(), Ok(())) {
@@ -784,6 +797,7 @@ pub(crate) fn start_node(
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
+        package_capacity: Some(state.package_capacity()),
         // The node's one latch, built with the chainstate at open and already
         // held by the block-download executor: `initialblockdownload`, the
         // transaction-relay gate, and block-peer eligibility read one signal.

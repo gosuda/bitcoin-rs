@@ -74,8 +74,12 @@ pub struct ListenerExtras {
     /// Compact-block short-ID hints (the shared mempool gateway) for BIP152
     /// reconstruction.
     pub compact_hints: CompactHintsHandle,
-    /// Bounded ingress for decoded `tx` bodies from Ready peers.
-    pub inbound_tx: Option<Sender<crate::InboundTx>>,
+    /// Bounded ingress for decoded `tx` bodies and charged `pkgtxns` frames
+    /// from Ready peers.
+    pub inbound_tx: Option<Sender<crate::InboundBody>>,
+    /// The node's one ledger of retained `pkgtxns` bytes. `None` means
+    /// package bodies are never accepted for admission.
+    pub package_capacity: Option<crate::PackageCapacity>,
     /// Chain-owned initial-block-download latch paired with the node's
     /// configured consensus network. `None` means transaction relay is open
     /// (callers without a chain, and tests). While `Some` and active,
@@ -91,6 +95,25 @@ pub struct ListenerExtras {
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
     /// Block announcer for outbound block announcements and peer capability tracking.
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
+}
+
+/// The opt-in relay capabilities a node offers in every handshake.
+///
+/// Every switch defaults off, so a node that never opts in advertises
+/// nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RelayOffers {
+    /// Whether this node offers BIP331 ancestor package relay: `sendpackages`
+    /// is written between `version` and `verack` of every handshake only when
+    /// set, so a disabled node never advertises the capability.
+    pub package_relay: bool,
+    /// Whether this node announces BIP332 stale-tip relay in its BIP434
+    /// `feature` negotiation. Final policy; this crate applies no network
+    /// check.
+    pub stale_tip_relay: bool,
+    /// The `prefers_blocks` byte of the BIP332 announcement. Read only with
+    /// [`Self::stale_tip_relay`].
+    pub stale_tip_prefers_blocks: bool,
 }
 
 /// Share the wiring for one P2P start epoch.
@@ -134,8 +157,12 @@ pub struct ConnectionShared {
     pub tx_inventory: TxInventoryHandle,
     /// Compact-block short-ID hints for BIP152 reconstruction.
     pub compact_hints: CompactHintsHandle,
-    /// Bounded ingress for decoded `tx` bodies from Ready peers.
-    pub inbound_tx: Option<Sender<crate::InboundTx>>,
+    /// Bounded ingress for decoded `tx` bodies and charged `pkgtxns` frames
+    /// from Ready peers.
+    pub inbound_tx: Option<Sender<crate::InboundBody>>,
+    /// The node's one ledger of retained `pkgtxns` bytes; see
+    /// [`ListenerExtras::package_capacity`].
+    pub package_capacity: Option<crate::PackageCapacity>,
     /// Chain-owned initial-block-download latch paired with the node's
     /// configured consensus network. `None` means transaction relay is open.
     /// The network travels with the latch because the wire magic is not an
@@ -159,13 +186,10 @@ pub struct ConnectionShared {
     /// `NODE_P2P_V2`, falling back to v1 once when unanswered. `false` keeps
     /// every connection on v1.
     pub v2_transport: bool,
-    /// Whether this node announces BIP332 stale-tip relay in its BIP434
-    /// `feature` negotiation. Final policy; this crate applies no network
-    /// check. Default `false`.
-    pub stale_tip_relay: bool,
-    /// The `prefers_blocks` byte of the BIP332 announcement. Read only with
-    /// [`Self::stale_tip_relay`]. Default `false`.
-    pub stale_tip_prefers_blocks: bool,
+    /// The opt-in relay capabilities offered in every handshake. Default
+    /// offers nothing; the P2P service copies it from its resolved
+    /// configuration.
+    pub relay_offers: RelayOffers,
     /// Aggregate outbound queued-byte budget every connection of this start
     /// epoch counts against. The P2P service owns the `Arc`; clones of this
     /// struct share it, so inbound, outbound, and manual connections of one
@@ -232,14 +256,14 @@ impl ConnectionShared {
             tx_inventory: extras.tx_inventory,
             compact_hints: extras.compact_hints,
             inbound_tx: extras.inbound_tx,
+            package_capacity: extras.package_capacity,
             ibd: extras.ibd,
             block_sync: extras.block_sync,
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
-            stale_tip_relay: false,
-            stale_tip_prefers_blocks: false,
+            relay_offers: RelayOffers::default(),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
             dial_routes: crate::DialRoutes::default(),
         }
@@ -248,14 +272,40 @@ impl ConnectionShared {
     /// Offers the opt-in relay capabilities this start epoch enabled.
     ///
     /// PRE: `peer` has written nothing yet; call before the handshake starts.
-    /// POST: with [`Self::stale_tip_relay`] set, `peer` announces BIP332
-    ///   with [`Self::stale_tip_prefers_blocks`] as the feature's data byte;
-    ///   otherwise `peer` offers nothing.
+    /// POST: with [`RelayOffers::package_relay`] set, `peer` will send one
+    ///   `sendpackages` carrying both BIP331 version bits during the
+    ///   handshake; with [`RelayOffers::stale_tip_relay`] set, it announces
+    ///   BIP332 with [`RelayOffers::stale_tip_prefers_blocks`] as the
+    ///   feature's data byte; otherwise `peer` offers nothing.
     /// INVARIANT: both the inbound and the outbound handshake go through
     ///   here, so the offer cannot depend on direction.
-    fn offer_relay_capabilities<S>(&self, peer: &mut Peer<S>) {
-        if self.stale_tip_relay {
-            peer.offer_stale_tip_relay(self.stale_tip_prefers_blocks);
+    fn offer_relay_capabilities<S>(&self, peer: &mut Peer<S>, role: crate::PeerRole) {
+        if self.relay_offers.package_relay && role.relays_transactions() {
+            peer.offer_package_relay(
+                crate::packages::PKG_RELAY_PKGTXNS | crate::packages::PKG_RELAY_ANC,
+            );
+        }
+        if self.relay_offers.stale_tip_relay {
+            peer.offer_stale_tip_relay(self.relay_offers.stale_tip_prefers_blocks);
+        }
+    }
+
+    /// Records the BIP332 `prefers_blocks` byte `peer` announced back.
+    ///
+    /// POST: stored with the peer's table entry only when this node offered
+    ///   stale-tip relay and `peer` announced BIP332; otherwise nothing.
+    fn note_peer_stale_tip_relay<S>(
+        &self,
+        peer: &Peer<S>,
+        endpoint: Option<crate::PeerEndpoint>,
+        lease: &crate::PeerLease,
+    ) {
+        if !self.relay_offers.stale_tip_relay {
+            return;
+        }
+        if let Some(feature_data) = peer.remote_feature(crate::feature::BIP332_ID) {
+            self.peer_table
+                .note_stale_tip_relay(lease.source(endpoint), feature_data == [1]);
         }
     }
 
@@ -572,24 +622,24 @@ impl ConnectionShared {
 
     /// Forwards a decoded transaction into the node's ingress channel.
     fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
-        let inbound = crate::InboundTx::new(tx, source);
+        let body = crate::InboundBody::from(crate::InboundTx::new(tx, source));
         let dropped = if let Some(channel) = &self.inbound_tx {
             if self.is_session_cancelled() {
-                Some(inbound)
+                Some(body)
             } else {
-                match channel.try_send(inbound) {
+                match channel.try_send(body) {
                     Ok(()) => None,
-                    Err(crossbeam_channel::TrySendError::Full(inbound)) => Some(inbound),
-                    Err(crossbeam_channel::TrySendError::Disconnected(inbound)) => {
+                    Err(crossbeam_channel::TrySendError::Full(body)) => Some(body),
+                    Err(crossbeam_channel::TrySendError::Disconnected(body)) => {
                         tracing::warn!(peer_addr = ?source.endpoint, "p2p inbound tx channel disconnected");
-                        Some(inbound)
+                        Some(body)
                     }
                 }
             }
         } else {
-            Some(inbound)
+            Some(body)
         };
-        if let Some(inbound) = dropped {
+        if let Some(crate::InboundBody::Tx(inbound)) = dropped {
             tracing::debug!(peer_addr = ?source.endpoint, "p2p transaction ingress unavailable; dropping body");
             self.peer_table.transaction_response_completed(
                 source,
@@ -604,6 +654,69 @@ impl ConnectionShared {
                 );
             }
         }
+    }
+}
+
+impl ConnectionShared {
+    /// Accepts one raw `pkgtxns` frame for admission and queues it, still
+    /// encoded, on the node's ingress channel.
+    ///
+    /// PRE: the sender negotiated package relay and transaction relay is
+    ///   open; `payload` is the frame as read, never decoded.
+    /// POST: `Ok` means the frame is queued with its charge and claim, or
+    ///   that nothing was accepted (unsolicited, refused, or ingress
+    ///   unavailable) and nothing is held. `Err` is a sender protocol
+    ///   violation.
+    /// INVARIANT: this thread decodes nothing. A package that cannot be
+    ///   queued (session cancelled, channel full or closed) is released
+    ///   through the one pre-admission release before the call returns.
+    fn send_package(
+        &self,
+        source: crate::PeerSource,
+        payload: bytes::Bytes,
+    ) -> Result<(), crate::wire::PeerError> {
+        let (Some(channel), Some(capacity), Some(inventory)) =
+            (&self.inbound_tx, &self.package_capacity, &self.tx_inventory)
+        else {
+            tracing::debug!(peer_addr = ?source.endpoint, "p2p package ingress unavailable; dropping body");
+            return Ok(());
+        };
+        let package = match self.peer_table.admit_package(
+            capacity,
+            inventory.as_ref(),
+            source,
+            payload,
+        ) {
+            Ok(package) => package,
+            Err(refusal) if refusal.is_peer_fault() => {
+                return Err(crate::wire::PeerError::Protocol(
+                    "malformed package in violation of protocol",
+                ));
+            }
+            Err(refusal) => {
+                tracing::debug!(peer_addr = ?source.endpoint, %refusal, "p2p package not accepted");
+                return Ok(());
+            }
+        };
+        let body = crate::InboundBody::from(package);
+        let refused = if self.is_session_cancelled() {
+            Some(body)
+        } else {
+            match channel.try_send(body) {
+                Ok(()) => None,
+                Err(crossbeam_channel::TrySendError::Full(body)) => Some(body),
+                Err(crossbeam_channel::TrySendError::Disconnected(body)) => {
+                    tracing::warn!(peer_addr = ?source.endpoint, "p2p inbound package channel disconnected");
+                    Some(body)
+                }
+            }
+        };
+        if let Some(crate::InboundBody::Package(package)) = refused {
+            tracing::debug!(peer_addr = ?source.endpoint, "p2p package ingress unavailable; dropping body");
+            self.peer_table
+                .package_response_rejected(package.into_token(), inventory.as_ref());
+        }
+        Ok(())
     }
 }
 
@@ -1283,7 +1396,7 @@ fn dial(
         role,
         manual,
     ));
-    shared.offer_relay_capabilities(&mut peer);
+    shared.offer_relay_capabilities(&mut peer, role);
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
@@ -1603,7 +1716,7 @@ fn run_handshake(
         lease.node_id(),
         peer_addr,
     ));
-    shared.offer_relay_capabilities(&mut peer);
+    shared.offer_relay_capabilities(&mut peer, lease.role());
     if let Err(error) = run_inbound_handshake(
         &mut peer,
         nonce,
@@ -1729,13 +1842,8 @@ fn run_connected_session(
         }
     };
     let ready = shared.publish_info_and_notify_ready(endpoint, &lease, &info);
-    if ready && shared.stale_tip_relay {
-        if let Some(feature_data) = peer.remote_feature(crate::feature::BIP332_ID) {
-            let prefers_blocks = feature_data == [1];
-            shared
-                .peer_table
-                .note_stale_tip_relay(lease.source(endpoint), prefers_blocks);
-        }
+    if ready {
+        shared.note_peer_stale_tip_relay(peer, endpoint, &lease);
     }
 
     let inbound = lease.is_inbound();
@@ -1824,11 +1932,26 @@ fn enforce_relay_role(
         matches!(
             item,
             Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+        ) || matches!(
+            item,
+            Inventory::Unknown { inv_type, .. } if *inv_type == crate::packages::MSG_ANCPKGINFO
         )
     };
     if matches!(message, crate::Message::Tx(_)) {
         return Err(crate::wire::PeerError::Protocol(
             "transaction sent in violation of protocol",
+        ));
+    }
+    if matches!(
+        message,
+        crate::Message::SendPackages(_)
+            | crate::Message::AncPkgInfo(_)
+            | crate::Message::GetPkgTxns(_)
+            | crate::Message::PkgTxns(_)
+            | crate::Message::PkgTxnsPayload(_)
+    ) {
+        return Err(crate::wire::PeerError::Protocol(
+            "package message sent in violation of protocol",
         ));
     }
     if let crate::Message::Inv(items) = &message
@@ -2265,19 +2388,32 @@ fn reply_bound(message: &crate::Message, getaddr_answerable: bool) -> Option<usi
         crate::Message::BlockTxn(_) => 1 + 36,
         // A shallow answer is blocktxn; a deep answer may be the full block.
         crate::Message::GetBlockTxn(_) => crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE,
+        // One `pkgtxns` of up to one frame, or exactly one `notfound`.
+        crate::Message::GetPkgTxns(_) => crate::wire::MAX_MESSAGE_PAYLOAD,
         _ => return None,
     };
     Some(crate::wire::HEADER_LEN + payload.min(crate::wire::MAX_MESSAGE_PAYLOAD))
 }
 
-/// Compact-block reconstruction messages (`CmpctBlock`, `BlockTxn`, `GetBlockTxn`)
-/// defer on local queue saturation rather than disconnecting.
+/// Requests whose reply is a bulk body, reserved from the connection's
+/// production headroom rather than as a small request-scoped reply.
+fn reserves_production(message: &crate::Message) -> bool {
+    matches!(
+        message,
+        crate::Message::GetBlockTxn(_) | crate::Message::GetPkgTxns(_)
+    )
+}
+
+/// Compact-block reconstruction messages (`CmpctBlock`, `BlockTxn`,
+/// `GetBlockTxn`) and package body requests (`GetPkgTxns`) defer on local
+/// queue saturation rather than disconnecting.
 fn defers_on_local(message: &crate::Message) -> bool {
     matches!(
         message,
         crate::Message::CmpctBlock(_)
             | crate::Message::BlockTxn(_)
             | crate::Message::GetBlockTxn(_)
+            | crate::Message::GetPkgTxns(_)
     )
 }
 
@@ -2342,7 +2478,7 @@ fn retry_deferred_request<S>(
         *parked_since = None;
         return DeferredStep::Ready(message, None);
     };
-    let bulk = matches!(message, crate::Message::GetBlockTxn(_));
+    let bulk = reserves_production(&message);
     let reservation = if bulk {
         lease.try_reserve_production()
     } else {
@@ -2593,7 +2729,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         getaddr_answerable(lease, shared, answered_getaddr),
                     );
                     let reply = match bound.map(|bound| {
-                        if matches!(message, crate::Message::GetBlockTxn(_)) {
+                        if reserves_production(&message) {
                             lease.try_reserve_production()
                         } else {
                             lease.try_reserve_reply(bound)
@@ -2674,6 +2810,32 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 continue;
             }
             return Err(error);
+        }
+        // The download an `ancpkginfo` asked for goes to its request owner
+        // under this connection's exact source, unchanged. An `ancpkginfo`
+        // that asked for nothing (or while relay is closed) releases its
+        // solicitation instead; never both.
+        if let Some(request) = peer.take_package_request() {
+            if tx_relay_open() {
+                shared.peer_table.request_package_transactions(
+                    lease.source(endpoint),
+                    request.subject,
+                    request.wtxids,
+                );
+            } else if let Some(inventory) = shared.tx_inventory.as_deref() {
+                shared.peer_table.release_package_info(
+                    lease.source(endpoint),
+                    request.subject,
+                    inventory,
+                );
+            }
+        } else if let crate::Message::AncPkgInfo(info) = &message
+            && let (Some(subject), Some(inventory)) =
+                (info.subject(), shared.tx_inventory.as_deref())
+        {
+            shared
+                .peer_table
+                .release_package_info(lease.source(endpoint), subject, inventory);
         }
         // A first filter attempt that stopped records why, so the retry
         // charges its deadline only for publication or the local queue.
@@ -2786,7 +2948,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 let negotiated = peer.remote_feature(crate::feature::BIP332_ID).is_some();
                 let ibd_active =
                     ibd.is_some_and(|(latch, network)| latch.is_active(unix_time_secs(), *network));
-                if shared.stale_tip_relay && negotiated && !ibd_active {
+                if shared.relay_offers.stale_tip_relay && negotiated && !ibd_active {
                     let now = Instant::now();
                     let elapsed = now.saturating_duration_since(last_staletip_refill);
                     let refill = u32::try_from(elapsed.as_secs() / 10).unwrap_or(u32::MAX);
@@ -2819,6 +2981,24 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 peer_addr,
                 tx_relay_open(),
             ),
+            crate::Message::PkgTxnsPayload(payload) => {
+                // Dispatch has already required the negotiated `pkgtxns` bit;
+                // the body is charged and queued only after it, still encoded.
+                if peer.package_relay_versions() & crate::packages::PKG_RELAY_PKGTXNS == 0 {
+                    return Err(crate::wire::PeerError::Protocol(
+                        "pkgtxns without negotiated package relay",
+                    ));
+                }
+                if tx_relay_open()
+                    && let Err(error) = shared.send_package(lease.source(endpoint), payload)
+                {
+                    if lease.ignores_protocol_error(&error) {
+                        shared.note_misbehavior(endpoint, lease, &error);
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
             crate::Message::SendHeaders => {
                 shared.peer_table.note_send_headers(lease.source(endpoint));
             }
@@ -3706,6 +3886,18 @@ mod transaction_poll_tests {
             &self,
             _: bitcoin_rs_primitives::Wtxid,
         ) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+        fn resident_ancestor_package(
+            &self,
+            _: bitcoin_rs_primitives::Wtxid,
+        ) -> Option<Vec<bitcoin_rs_primitives::Wtxid>> {
+            None
+        }
+        fn resident_package(
+            &self,
+            _: &[bitcoin_rs_primitives::Wtxid],
+        ) -> Option<Vec<Arc<bitcoin_rs_primitives::Tx>>> {
             None
         }
     }
@@ -5165,6 +5357,20 @@ mod writer_shutdown_tests {
             wtxid: bitcoin_rs_primitives::Wtxid,
         ) -> Option<bitcoin_rs_primitives::Tx> {
             self.gateway.get_tx_by_wtxid(wtxid)
+        }
+
+        fn resident_ancestor_package(
+            &self,
+            wtxid: bitcoin_rs_primitives::Wtxid,
+        ) -> Option<Vec<bitcoin_rs_primitives::Wtxid>> {
+            self.gateway.ancestor_package_wtxids(wtxid)
+        }
+
+        fn resident_package(
+            &self,
+            wtxids: &[bitcoin_rs_primitives::Wtxid],
+        ) -> Option<Vec<Arc<bitcoin_rs_primitives::Tx>>> {
+            self.gateway.resident_package(wtxids)
         }
     }
 
