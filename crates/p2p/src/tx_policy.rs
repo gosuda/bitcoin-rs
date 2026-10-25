@@ -626,6 +626,48 @@ impl TxPolicy {
         self.failed(key, source, now)
     }
 
+    /// Force-retires package requests during ingress teardown, including
+    /// enqueued bodies that ordinary failure paths intentionally preserve.
+    fn teardown_package_claims(&mut self, now: Instant) -> usize {
+        let keys: Vec<_> = self
+            .requests
+            .iter()
+            .filter_map(|(key, request)| request.package.is_some().then_some(*key))
+            .collect();
+        let mut cleared = 0;
+        for key in keys {
+            let Some(source) = self
+                .requests
+                .get(&key)
+                .and_then(|request| request.owner.map(|(source, _)| source))
+            else {
+                continue;
+            };
+            for kind in [key, key.same_hash_other_kind()] {
+                let owned = self
+                    .requests
+                    .get(&kind)
+                    .is_some_and(|request| request.owner.is_some_and(|(owner, _)| owner == source));
+                if !owned {
+                    continue;
+                }
+                if let Some(request) = self.requests.get_mut(&kind) {
+                    request.owner = None;
+                    request.package = None;
+                    request.package_info = false;
+                }
+                self.remove_candidate(kind, source);
+                if let Some(request) = self.requests.get_mut(&kind) {
+                    for candidate in &mut request.candidates {
+                        candidate.ready = now;
+                    }
+                }
+            }
+            cleared += 1;
+        }
+        cleared
+    }
+
     fn disconnected(&mut self, source: PeerSource, now: Instant) -> Vec<Identity> {
         let keys: Vec<_> = self
             .requests

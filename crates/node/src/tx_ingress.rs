@@ -199,7 +199,7 @@ impl TxIngressConsumer {
         // request slot before a Held outcome queues missing parent requests.
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
-        if self.dispatch_outcome(txid, wtxid, source, outcome) {
+        if self.dispatch_outcome(txid, wtxid, source, outcome, true) {
             // Core credits a peer only here, not when a retried orphan of it
             // is accepted later.
             self.peer_table.note_useful_transaction(inbound.source);
@@ -221,7 +221,7 @@ impl TxIngressConsumer {
             .iter()
             .any(|retry| matches!(retry.result, Ok(SubmitOutcome::Committed(_))));
         for retry in retries {
-            self.dispatch_outcome(retry.txid, retry.wtxid, retry.source, retry.result);
+            self.dispatch_outcome(retry.txid, retry.wtxid, retry.source, retry.result, false);
         }
         made_progress
     }
@@ -234,6 +234,7 @@ impl TxIngressConsumer {
         wtxid: Wtxid,
         source: PeerToken,
         outcome: Result<SubmitOutcome, SubmitError>,
+        allow_package_request: bool,
     ) -> bool {
         match outcome {
             Ok(SubmitOutcome::Committed(result)) => {
@@ -254,7 +255,19 @@ impl TxIngressConsumer {
                 true
             }
             Ok(SubmitOutcome::Held { missing_parents }) => {
-                bitcoin_rs_p2p::request_missing_parents(&self.peer_table, source, &missing_parents);
+                if allow_package_request
+                    && self.peer_table.package_relay_versions(source)
+                        & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
+                        != 0
+                {
+                    bitcoin_rs_p2p::inv::request_package_info(&self.peer_table, source, wtxid);
+                } else {
+                    bitcoin_rs_p2p::request_missing_parents(
+                        &self.peer_table,
+                        source,
+                        &missing_parents,
+                    );
+                }
                 false
             }
             Ok(SubmitOutcome::AlreadyConfirmed) => {

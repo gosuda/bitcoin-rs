@@ -414,16 +414,14 @@ impl ConnectionShared {
         }
     }
 
-    /// Publish ready metadata, then notify only while this lease is current.
-    ///
-    /// The table lock is not held across notify: `BlockSync` takes the
-    /// download window after checking identity, matching `tick`. Publication
-    /// and stale-predecessor rules are owned by P2P-02.
-    fn publish_info_and_notify_ready(
+    /// Publish ready metadata and the connection's negotiated package bits
+    /// before notifying consumers that the peer is ready.
+    fn publish_info_and_notify_ready_with_package(
         &self,
         endpoint: Option<crate::PeerEndpoint>,
         lease: &crate::PeerLease,
         info: &crate::PeerInfo,
+        package_relay: u64,
     ) -> bool {
         let source = lease.source(endpoint);
         let published = match endpoint {
@@ -433,6 +431,7 @@ impl ConnectionShared {
                 .publish_info_unidentified(lease, info.clone()),
         };
         if published && self.peer_table.is_current(source) {
+            self.peer_table.note_package_relay(source, package_relay);
             if let Some(announcer) = &self.block_announcer {
                 announcer.on_peer_ready();
             }
@@ -1780,6 +1779,25 @@ fn run_handshake(
     )
 }
 
+fn publish_connected_peer(
+    shared: &ConnectionShared,
+    peer: &Peer<crate::CountingStream<TcpStream>>,
+    endpoint: Option<crate::PeerEndpoint>,
+    lease: &crate::PeerLease,
+    info: &crate::PeerInfo,
+) -> bool {
+    let ready = shared.publish_info_and_notify_ready_with_package(
+        endpoint,
+        lease,
+        info,
+        peer.package_relay_versions(),
+    );
+    if ready {
+        shared.note_peer_stale_tip_relay(peer, endpoint, lease);
+    }
+    ready
+}
+
 /// Runs one established connection to completion.
 ///
 /// Teardown invariant (both exit paths, in this order):
@@ -1841,10 +1859,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    let ready = shared.publish_info_and_notify_ready(endpoint, &lease, &info);
-    if ready {
-        shared.note_peer_stale_tip_relay(peer, endpoint, &lease);
-    }
+    let ready = publish_connected_peer(shared, peer, endpoint, &lease, &info);
 
     let inbound = lease.is_inbound();
     let transport = match info.transport {
@@ -5695,18 +5710,20 @@ mod ready_notify_tests {
         shared
             .peer_table
             .register(crate::PeerEndpoint::Ip(known), lease.clone());
-        assert!(shared.publish_info_and_notify_ready(
+        assert!(shared.publish_info_and_notify_ready_with_package(
             Some(crate::PeerEndpoint::Ip(known)),
             &lease,
-            &peer_info(known, 0)
+            &peer_info(known, 0),
+            0
         ));
         assert_eq!(book.gossip(now)[0].1.services.to_u64(), 1);
         assert_eq!(book.pending_count_excluding(&[]), 0);
         book.queued(crate::PeerEndpoint::Ip(known));
-        assert!(shared.publish_info_and_notify_ready(
+        assert!(shared.publish_info_and_notify_ready_with_package(
             Some(crate::PeerEndpoint::Ip(known)),
             &lease,
-            &peer_info(known, 0)
+            &peer_info(known, 0),
+            0
         ));
         assert_eq!(
             book.pending_count_excluding(&[]),
@@ -5718,10 +5735,11 @@ mod ready_notify_tests {
         shared
             .peer_table
             .register(crate::PeerEndpoint::Ip(unknown), manual.clone());
-        assert!(shared.publish_info_and_notify_ready(
+        assert!(shared.publish_info_and_notify_ready_with_package(
             Some(crate::PeerEndpoint::Ip(unknown)),
             &manual,
-            &peer_info(unknown, 0)
+            &peer_info(unknown, 0),
+            0
         ));
         assert_eq!(book.len(), 1, "Good does not insert manual endpoints");
         assert_eq!(book.pending_count_excluding(&[]), 1);
@@ -5758,20 +5776,22 @@ mod ready_notify_tests {
             .register(crate::PeerEndpoint::Ip(addr), current.clone());
 
         assert!(
-            !shared.publish_info_and_notify_ready(
+            !shared.publish_info_and_notify_ready_with_package(
                 Some(crate::PeerEndpoint::Ip(addr)),
                 &stale,
-                &peer_info(addr, 1)
+                &peer_info(addr, 1),
+                0
             ),
             "replaced predecessor must not publish or notify"
         );
         assert_eq!(notified.load(Ordering::Relaxed), 0);
         assert_eq!(shared.peer_table.infos(), []);
 
-        assert!(shared.publish_info_and_notify_ready(
+        assert!(shared.publish_info_and_notify_ready_with_package(
             Some(crate::PeerEndpoint::Ip(addr)),
             &current,
-            &peer_info(addr, 2)
+            &peer_info(addr, 2),
+            0
         ));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos()[0].start_height, 2);
@@ -5789,10 +5809,11 @@ mod ready_notify_tests {
             .peer_table
             .register(crate::PeerEndpoint::Ip(addr), lease.clone());
 
-        assert!(shared.publish_info_and_notify_ready(
+        assert!(shared.publish_info_and_notify_ready_with_package(
             Some(crate::PeerEndpoint::Ip(addr)),
             &lease,
-            &peer_info(addr, 3)
+            &peer_info(addr, 3),
+            0
         ));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);

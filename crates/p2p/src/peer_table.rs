@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, Wtxid};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -641,9 +641,41 @@ impl PeerTable {
     /// The `PKG_RELAY_*` bits published for the current published connection
     /// `source`, or `0` when it published none, is not live, or is not the
     /// current connection.
-    pub(crate) fn package_relay_versions(&self, source: PeerSource) -> u64 {
-        self.announcement_state(source)
-            .map_or(0, |state| state.package_relay)
+    pub fn package_relay_versions(&self, source: bitcoin_rs_mempool::PeerToken) -> u64 {
+        self.entries
+            .read()
+            .iter()
+            .find_map(|(key, entry)| {
+                if entry.lease.is_cancelled() {
+                    return None;
+                }
+                let current = entry.lease.source(key.endpoint());
+                (current.endpoint() == source.endpoint
+                    && current.connection_id().get() == source.connection_id)
+                    .then_some(entry.announcement.package_relay)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Starts an ancestor-package solicitation for a peer-token source.
+    ///
+    /// This resolves the token against the current lease before entering the
+    /// policy critical section, so an old connection cannot solicit through
+    /// its replacement. Unidentified inbound sessions are supported by the
+    /// same exact-connection comparison as identified sessions.
+    pub fn request_package_info_from_token(
+        &self,
+        source: bitcoin_rs_mempool::PeerToken,
+        subject: Wtxid,
+    ) -> bool {
+        let source = self.entries.read().iter().find_map(|(key, entry)| {
+            let current = entry.lease.source(key.endpoint());
+            (current.endpoint() == source.endpoint
+                && current.connection_id().get() == source.connection_id
+                && !entry.lease.is_cancelled())
+            .then_some(current)
+        });
+        source.is_some_and(|source| self.request_package_info(source, subject))
     }
 
     /// Publishes `versions` as `source`'s negotiated package-relay bits

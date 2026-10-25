@@ -914,14 +914,10 @@ impl PeerTable {
     /// capacity still holds. Called last in node teardown, after the ingress
     /// consumer has stopped and its channel has been dropped.
     pub fn clear_package_claims(&self, capacity: &PackageCapacity) -> PackageTeardown {
-        let mut policy = self.tx_policy.lock();
-        let mut claims_cleared = 0;
-        for request in policy.requests.values_mut() {
-            if request.package.take().is_some() {
-                claims_cleared += 1;
-            }
-        }
-        drop(policy);
+        let claims_cleared = self
+            .tx_policy
+            .lock()
+            .teardown_package_claims(std::time::Instant::now());
         PackageTeardown {
             claims_cleared,
             bytes_reserved: capacity.reserved(),

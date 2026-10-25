@@ -230,6 +230,69 @@ fn accepted_tx_relays_and_wakes_mining() {
 }
 
 #[test]
+fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
+    let gateway = zero_fee_gateway();
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
+    let table = Arc::clone(&consumer.peer_table);
+
+    let anc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_334);
+    let (anc_sender, anc_receiver) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
+    let anc_lease = bitcoin_rs_p2p::PeerLease::new(anc_sender);
+    let anc_source = anc_lease.source_ip(anc_addr);
+    let anc_endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(anc_addr);
+    assert!(!table.register(anc_endpoint, anc_lease));
+    assert!(table.seed_package_relay(anc_source, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+
+    let mut anc_orphan = spending_tx();
+    let anc_parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
+    anc_orphan.inputs[0].previous_output = OutPoint::new(anc_parent, 0);
+    let anc_subject = anc_orphan.wtxid();
+    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(anc_orphan, anc_source));
+
+    let anc_message = anc_receiver
+        .try_recv()
+        .expect("negotiated peer receives ancestor solicitation")
+        .into_message();
+    assert!(matches!(
+        anc_message,
+        bitcoin_rs_p2p::Message::GetData(items)
+            if items == vec![bitcoin::p2p::message_blockdata::Inventory::Unknown {
+                inv_type: bitcoin_rs_p2p::packages::MSG_ANCPKGINFO,
+                hash: anc_subject.0.to_le_bytes(),
+            }]
+    ));
+    assert!(anc_receiver.try_recv().is_err());
+
+    let ordinary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_335);
+    let (ordinary_sender, ordinary_receiver) =
+        crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
+    let ordinary_lease = bitcoin_rs_p2p::PeerLease::new(ordinary_sender);
+    let ordinary_source = ordinary_lease.source_ip(ordinary_addr);
+    let ordinary_endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(ordinary_addr);
+    assert!(!table.register(ordinary_endpoint, ordinary_lease));
+
+    let mut ordinary_orphan = spending_tx();
+    let ordinary_parent = Txid::from(Hash256::from_le_bytes(&[0xDD; 32]));
+    ordinary_orphan.inputs[0].previous_output = OutPoint::new(ordinary_parent, 0);
+    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
+        ordinary_orphan,
+        ordinary_source,
+    ));
+
+    let ordinary_message = ordinary_receiver
+        .try_recv()
+        .expect("non-negotiated peer keeps parent fetching")
+        .into_message();
+    assert!(matches!(
+        ordinary_message,
+        bitcoin_rs_p2p::Message::GetData(items)
+            if matches!(items.as_slice(), [bitcoin::p2p::message_blockdata::Inventory::Transaction(_)])
+    ));
+    assert!(ordinary_receiver.try_recv().is_err());
+}
+
+#[test]
 fn coinbase_is_rejected_not_orphaned() {
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),

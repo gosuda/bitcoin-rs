@@ -64,6 +64,20 @@ pub fn request_missing_parents(
     retained && !lease.is_cancelled()
 }
 
+/// Requests ancestor package information from the exact live connection
+/// represented by `source`.
+///
+/// The caller gates this path on the published `PKG_RELAY_ANC` bit. This
+/// adapter only resolves the token and applies existing bounds and ownership
+/// rules.
+pub fn request_package_info(
+    peers: &crate::PeerTable,
+    source: PeerToken,
+    subject: bitcoin_rs_primitives::Wtxid,
+) -> bool {
+    peers.request_package_info_from_token(source, subject)
+}
+
 /// Applies BIP144's witness request flag to transaction vectors without
 /// changing hashes. Only getdata requests use this flag; announcements
 /// retain their own types. Block bodies are never requested through this
