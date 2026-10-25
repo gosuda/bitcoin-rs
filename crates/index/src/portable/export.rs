@@ -19,41 +19,93 @@ use super::manifest::{
 };
 use super::{BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, io_error, sync_dir};
 use crate::types::{HashPrefixRow, TxPosition, TxPositionValue};
-use crate::{IndexCapability, IndexWatermark, IndexWatermarks, TxIndexFamily, TxIndexSnapshot};
+use crate::{IndexCapability, IndexWatermark, IndexWriteFence, TxIndexFamily, TxIndexSnapshot};
 use bitcoin_rs_chain::BlockBodySource;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-/// Removes a created file on every exit path until disarmed, so no
-/// partial artifact outlives a failed, stale, or cancelled export.
-struct CreatedFile {
-    path: PathBuf,
-    armed: bool,
+/// Directory fsync used by a [`Publication`].
+type SyncDir = fn(&Path) -> Result<(), IndexBundleError>;
+
+/// Owns every file one export creates in its bundle directory.
+///
+/// Files are created with create-new, so an entry that existed before the
+/// export is never opened, replaced, or removed. Until [`Self::commit`]
+/// makes the final directory entry durable, dropping the publication removes
+/// the created files newest first: the manifest goes before the artifact it
+/// names, and the artifact is removed only once the manifest's removal is
+/// itself durable. A failed, stale, or cancelled export therefore never
+/// leaves a manifest that names a missing artifact.
+struct Publication {
+    dir: PathBuf,
+    /// Created paths, oldest first.
+    created: Vec<PathBuf>,
+    committed: bool,
+    sync: SyncDir,
 }
 
-impl CreatedFile {
-    fn create_new(path: &Path) -> Result<(Self, File), IndexBundleError> {
+impl Publication {
+    fn new(dir: &Path) -> Self {
+        Self::with_sync(dir, sync_dir)
+    }
+
+    fn with_sync(dir: &Path, sync: SyncDir) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            created: Vec::new(),
+            committed: false,
+            sync,
+        }
+    }
+
+    /// Creates `path`, refusing to overwrite anything already there, and
+    /// takes ownership of its removal.
+    fn create_new(&mut self, path: &Path) -> Result<File, IndexBundleError> {
         let file = create_new_file(path)?;
-        Ok((
-            Self {
-                path: path.to_path_buf(),
-                armed: true,
-            },
-            file,
-        ))
+        self.created.push(path.to_path_buf());
+        Ok(file)
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    /// Makes every created entry durable. Only success disarms the cleanup;
+    /// a failed directory fsync is returned, never retried, and the drop
+    /// removes the created files.
+    fn commit(mut self) -> Result<(), IndexBundleError> {
+        (self.sync)(&self.dir)?;
+        self.committed = true;
+        Ok(())
     }
 }
 
-impl Drop for CreatedFile {
+impl Drop for Publication {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
+        if self.committed {
+            return;
+        }
+        while let Some(path) = self.created.pop() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "cannot remove a file of an unpublished index bundle; leaving older files in place"
+                    );
+                    return;
+                }
+            }
+            if let Err(error) = (self.sync)(&self.dir) {
+                // The removal may not be durable; removing an older file now
+                // could leave a surviving manifest naming a missing artifact.
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "cannot make an unpublished index bundle removal durable; leaving older files in place"
+                );
+                return;
+            }
         }
     }
 }
@@ -93,17 +145,21 @@ pub(super) fn export(
     let captured = Captured::take(host)?;
     fs::create_dir_all(dir).map_err(|error| io_error(dir, error))?;
     let artifact_path = dir.join(BundleFamily::TxLookup.file_name());
-    let (mut created, file) = CreatedFile::create_new(&artifact_path)?;
+    let mut publication = Publication::new(dir);
+    let file = publication.create_new(&artifact_path)?;
     let identity = captured.identity(request);
     let artifact = captured.write_artifact(host, file, &artifact_path, &identity)?;
 
     // Abort stale output: the writer must still show exactly the captured
-    // watermarks, or the stream may describe rows the index no longer holds.
-    let (_, after) = host.writer.fenced_watermarks()?;
-    if after != captured.watermarks {
+    // fence (reset state, ordinary revision, and watermarks), or the stream
+    // may describe rows the index no longer holds; an equal watermark alone
+    // would miss a completed reset and rebuild in between.
+    let (after, _) = host.writer.fenced_watermarks()?;
+    if after != captured.fence {
         return Err(IndexBundleError::Stale);
     }
 
+    // The artifact's directory entry is durable before any manifest names it.
     sync_dir(dir)?;
     let mode = if host.enabled.contains(IndexCapability::ScriptHistory) {
         IndexMode::Full
@@ -111,8 +167,8 @@ pub(super) fn export(
         IndexMode::Utxo
     };
     let manifest = IndexBundleManifestV1::for_tx_lookup(&identity, mode, captured.floor, &artifact);
-    publish_manifest(dir, &manifest_path, &manifest.to_json()?)?;
-    created.disarm();
+    write_manifest(&mut publication, &manifest_path, &manifest.to_json()?)?;
+    publication.commit()?;
     Ok(ExportReport {
         base: IndexWatermark {
             height: captured.chain.height,
@@ -123,25 +179,24 @@ pub(super) fn export(
     })
 }
 
-/// Publishes `manifest.json` with create-new, fsync, and directory fsync.
-fn publish_manifest(dir: &Path, path: &Path, json: &[u8]) -> Result<(), IndexBundleError> {
-    let mut file = create_new_file(path)?;
-    let result = file
-        .write_all(json)
+/// Writes and fsyncs `manifest.json` with create-new. Its directory entry
+/// becomes durable only through [`Publication::commit`]; until then the
+/// publication removes it on failure.
+fn write_manifest(
+    publication: &mut Publication,
+    path: &Path,
+    json: &[u8],
+) -> Result<(), IndexBundleError> {
+    let mut file = publication.create_new(path)?;
+    file.write_all(json)
         .and_then(|()| file.sync_all())
-        .map_err(|error| io_error(path, error));
-    drop(file);
-    if let Err(error) = result {
-        let _ = fs::remove_file(path);
-        return Err(error);
-    }
-    sync_dir(dir)
+        .map_err(|error| io_error(path, error))
 }
 
 /// Everything an export fixes at its start: the exact watermarks, the chain
 /// identity of the applied tip, and one snapshot taken at that watermark.
 struct Captured<'a> {
-    watermarks: IndexWatermarks,
+    fence: IndexWriteFence,
     chain: ChainBase,
     snapshot: Box<dyn TxIndexSnapshot + 'a>,
     floor: u32,
@@ -152,7 +207,7 @@ impl<'a> Captured<'a> {
     /// Requires the `TxLookup` watermark to be exactly the applied tip and the
     /// snapshot to agree with it; otherwise nothing is written.
     fn take(host: &BundleHost<'a>) -> Result<Self, IndexBundleError> {
-        let (_, watermarks) = host.writer.fenced_watermarks()?;
+        let (fence, watermarks) = host.writer.fenced_watermarks()?;
         let base = watermarks
             .tx_lookup
             .ok_or(IndexBundleError::NotReady("txindex has no watermark"))?;
@@ -180,7 +235,7 @@ impl<'a> Captured<'a> {
         }
         let floor = snapshot.capability_floor(IndexCapability::TxLookup)?;
         Ok(Self {
-            watermarks,
+            fence,
             chain,
             snapshot,
             floor,
@@ -202,6 +257,11 @@ impl<'a> Captured<'a> {
 
     /// Streams the records, patches the final header over the placeholder,
     /// fsyncs, and returns the artifact's exact identity.
+    ///
+    /// The header's record and payload counts are known only after the row
+    /// stream, and the digest covers the header first, so the digest is taken
+    /// by one bounded hashed read of the final fsynced bytes rather than
+    /// during the write: it names exactly the file a manifest will publish.
     fn write_artifact(
         &self,
         host: &BundleHost<'_>,
@@ -363,6 +423,116 @@ impl RowExporter<'_> {
         self.located.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::error::Error;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    thread_local! {
+        static SYNC_CALLS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    fn calls() -> u32 {
+        SYNC_CALLS.with(Cell::get)
+    }
+
+    fn injected(dir: &Path) -> IndexBundleError {
+        io_error(dir, io::Error::other("injected directory fsync failure"))
+    }
+
+    /// Fails only the first directory fsync: the publication's final commit.
+    fn fail_first_sync(dir: &Path) -> Result<(), IndexBundleError> {
+        let call = calls();
+        SYNC_CALLS.with(|count| count.set(call + 1));
+        if call == 0 {
+            Err(injected(dir))
+        } else {
+            sync_dir(dir)
+        }
+    }
+
+    fn fail_every_sync(dir: &Path) -> Result<(), IndexBundleError> {
+        SYNC_CALLS.with(|count| count.set(count.get() + 1));
+        Err(injected(dir))
+    }
+
+    /// Creates the artifact and manifest the way `export` does.
+    fn stage(
+        publication: &mut Publication,
+        dir: &Path,
+    ) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+        let artifact = dir.join(BundleFamily::TxLookup.file_name());
+        let mut file = publication.create_new(&artifact)?;
+        file.write_all(b"artifact")?;
+        file.sync_all()?;
+        drop(file);
+        let manifest = dir.join(MANIFEST_FILE);
+        write_manifest(publication, &manifest, b"{}")?;
+        Ok((artifact, manifest))
+    }
+
+    #[test]
+    fn failed_final_directory_sync_removes_the_manifest_and_its_artifact() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let operator = dir.path().join("operator.dat");
+        fs::write(&operator, b"keep")?;
+        SYNC_CALLS.with(|count| count.set(0));
+        let mut publication = Publication::with_sync(dir.path(), fail_first_sync);
+        let (artifact, manifest) = stage(&mut publication, dir.path())?;
+        assert!(matches!(publication.commit(), Err(IndexBundleError::Io { .. })));
+        assert!(!manifest.exists(), "a manifest must not survive a failed commit");
+        assert!(!artifact.exists(), "the artifact is removed after the manifest");
+        assert_eq!(calls(), 3, "commit, then one fsync per durable removal");
+        assert_eq!(fs::read(&operator)?, b"keep");
+        Ok(())
+    }
+
+    #[test]
+    fn undurable_manifest_removal_keeps_the_artifact_it_names() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        SYNC_CALLS.with(|count| count.set(0));
+        let mut publication = Publication::with_sync(dir.path(), fail_every_sync);
+        let (artifact, manifest) = stage(&mut publication, dir.path())?;
+        assert!(publication.commit().is_err());
+        assert!(!manifest.exists());
+        assert!(
+            artifact.exists(),
+            "an artifact is never removed before its manifest's removal is durable"
+        );
+        assert_eq!(calls(), 2, "the failed fsync is not retried");
+        Ok(())
+    }
+
+    #[test]
+    fn committed_publication_keeps_both_files_and_never_replaces_an_entry() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut publication = Publication::new(dir.path());
+        let (artifact, manifest) = stage(&mut publication, dir.path())?;
+        publication.commit()?;
+        assert_eq!(fs::read(&artifact)?, b"artifact");
+        assert_eq!(fs::read(&manifest)?, b"{}");
+
+        let mut again = Publication::new(dir.path());
+        let refused = again.create_new(&manifest);
+        assert!(
+            matches!(&refused, Err(IndexBundleError::ExistingBundle(path)) if *path == manifest),
+            "create-new must refuse an existing manifest"
+        );
+        drop(refused);
+        drop(again);
+        assert_eq!(
+            fs::read(&manifest)?,
+            b"{}",
+            "a refused create leaves the existing entry untouched"
+        );
+        assert_eq!(fs::read(&artifact)?, b"artifact");
         Ok(())
     }
 }
