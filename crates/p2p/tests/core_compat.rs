@@ -373,6 +373,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
                 | PeerError::Protocol(_)
                 | PeerError::Misbehavior(_)
                 | PeerError::NativeDecode(_)
+                | PeerError::Feature(_)
                 | PeerError::Varint(_),
             ) => {}
             Err(error) => {

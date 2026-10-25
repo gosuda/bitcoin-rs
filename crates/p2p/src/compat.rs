@@ -53,6 +53,7 @@ pub const COMMANDS: &[&str] = &[
     "wtxidrelay",
     "addrv2",
     "sendaddrv2",
+    "feature",
 ];
 
 /// Bitcoin Core 31.1 commands this node does not type.
@@ -97,5 +98,11 @@ mod tests {
                 "{name} is typed; it belongs in COMMANDS or not in CORE_UNTYPED_COMMANDS"
             );
         }
+    }
+
+    #[test]
+    fn feature_command_is_typed() {
+        assert!(super::is_typed_command(crate::feature::FEATURE_COMMAND));
+        assert!(super::is_typed_command("feature"));
     }
 }

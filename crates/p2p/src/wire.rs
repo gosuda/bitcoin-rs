@@ -20,7 +20,14 @@ use thiserror::Error;
 use crate::inv::MAX_INV_PER_MSG;
 
 /// Latest protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u32 = 70_016;
+///
+/// Authoritative for the `version` message this node sends and for
+/// `getnetworkinfo.protocolversion`. It is at least the version at which BIP434
+/// `feature` negotiation starts, so a peer that honors our advertisement also
+/// honors the feature handshake.
+pub const PROTOCOL_VERSION: u32 = 70_017;
+
+const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
 
 /// Maximum payload length of one network message on either transport: Bitcoin
 /// Core's `MAX_PROTOCOL_MESSAGE_LENGTH`. No block serializes above it.
@@ -123,6 +130,8 @@ pub enum Message {
     AddrV2(Vec<AddrV2Message>),
     /// `sendaddrv2`
     SendAddrV2,
+    /// BIP434 `feature`
+    Feature(crate::feature::FeatureAnnouncement),
     /// Any other message.
     Unknown {
         /// The command of this message.
@@ -172,10 +181,13 @@ impl Message {
             Self::WtxidRelay => "wtxidrelay",
             Self::AddrV2(_) => "addrv2",
             Self::SendAddrV2 => "sendaddrv2",
+            Self::Feature(_) => crate::feature::FEATURE_COMMAND,
             Self::Unknown { command, .. } => return command.clone(),
         };
-        #[expect(clippy::expect_used)]
-        CommandString::try_from_static(name).expect("static P2P command")
+        match CommandString::try_from_static(name) {
+            Ok(command) => command,
+            Err(_) => unreachable!("static P2P command name is valid"),
+        }
     }
 
     /// Large relay payloads that the writer emits as their own writev.
@@ -208,7 +220,11 @@ impl Message {
             Self::GetBlocks(message) => NetworkMessage::GetBlocks(message.clone()),
             Self::GetHeaders(message) => NetworkMessage::GetHeaders(message.clone()),
             Self::MemPool => NetworkMessage::MemPool,
-            Self::Tx(_) | Self::Block(_) | Self::BlockPayload(_) | Self::Headers(_) => {
+            Self::Tx(_)
+            | Self::Block(_)
+            | Self::BlockPayload(_)
+            | Self::Headers(_)
+            | Self::Feature(_) => {
                 unreachable!("native payloads are encoded directly")
             }
             Self::SendHeaders => NetworkMessage::SendHeaders,
@@ -258,6 +274,9 @@ pub enum PeerError {
     /// Native consensus payload decoding failed.
     #[error("native consensus decode error: {0}")]
     NativeDecode(#[from] bitcoin_rs_primitives::DecodeError),
+    /// BIP434 feature announcement decoding or encoding failed.
+    #[error("feature error: {0}")]
+    Feature(#[from] crate::feature::FeatureError),
     /// Command name is not valid for a v1 P2P header.
     #[error("invalid command `{0}`")]
     InvalidCommand(String),
@@ -326,6 +345,7 @@ impl PeerError {
                     | Self::Encode(_)
                     | Self::Varint(_)
                     | Self::NativeDecode(_)
+                    | Self::Feature(_)
                     | Self::Misbehavior(_)
             ),
             _ => false,
@@ -588,6 +608,9 @@ fn pending_body(
     }
 
     let command = read_command(&header[4..16])?;
+    if command.is_empty() {
+        return Err(PeerError::InvalidCommand(String::new()));
+    }
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
@@ -628,6 +651,21 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .checked_add(entries_len)
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
+        Message::Feature(feature) => {
+            let id_len = feature.id.as_bytes().len();
+            let data_len = feature.data.len();
+            let id_len_u64 =
+                u64::try_from(id_len).map_err(|_| PeerError::PayloadTooLarge(id_len))?;
+            let data_len_u64 =
+                u64::try_from(data_len).map_err(|_| PeerError::PayloadTooLarge(data_len))?;
+            bitcoin_rs_primitives::varint::encoded_len(id_len_u64)
+                .checked_add(id_len)
+                .and_then(|l| {
+                    l.checked_add(bitcoin_rs_primitives::varint::encoded_len(data_len_u64))
+                })
+                .and_then(|l| l.checked_add(data_len))
+                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
+        }
         other => {
             let envelope = other.envelope();
             bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
@@ -654,6 +692,10 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
                 header.consensus_encode(&mut payload);
                 payload.push(0);
             }
+        }
+        Message::Feature(feature) => {
+            let encoded = crate::feature::encode(feature)?;
+            payload.extend_from_slice(&encoded);
         }
         other => payload.extend_from_slice(&encode::serialize(&other.envelope())),
     }
@@ -713,6 +755,7 @@ pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, P
         "wtxidrelay" => empty_payload(payload, Message::WtxidRelay)?,
         "addrv2" => Message::AddrV2(decode_addrv2(payload)?),
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
+        "feature" => Message::Feature(crate::feature::decode(payload)?),
         _ => {
             debug_assert!(
                 !crate::compat::is_typed_command(command),
@@ -1170,6 +1213,9 @@ mod tests {
 
     #[test]
     fn wire_len_matches_write_message_for_representative_messages() -> Result<(), PeerError> {
+        let Some(feature_id) = crate::feature::FeatureId::advertised(b"test") else {
+            return Err(PeerError::Protocol("expected valid advertised id"));
+        };
         let messages = vec![
             super::Message::Tx(bitcoin_rs_primitives::Tx::default()),
             super::Message::Ping(0x1234_5678_9abc_def0),
@@ -1181,6 +1227,10 @@ mod tests {
                 command: super::command_string("unknown")?,
                 payload: vec![7; 61],
             },
+            super::Message::Feature(crate::feature::FeatureAnnouncement::new(
+                feature_id,
+                vec![1, 2, 3],
+            )),
         ];
 
         for message in &messages {
@@ -1190,5 +1240,56 @@ mod tests {
             assert_eq!(written, buffer.len());
         }
         Ok(())
+    }
+
+    #[test]
+    fn feature_message_v1_roundtrip() -> Result<(), PeerError> {
+        let Some(feature_id) = crate::feature::FeatureId::advertised(b"BIP332") else {
+            return Err(PeerError::Protocol("expected valid advertised id"));
+        };
+        let announcement = crate::feature::FeatureAnnouncement::new(feature_id, vec![1, 2, 3, 4]);
+        let message = super::Message::Feature(announcement);
+
+        let mut wire = Vec::new();
+        let written = write_message(&mut wire, Magic::REGTEST, &message)?;
+        assert_eq!(written, wire_len(&message)?);
+
+        let mut cursor = Cursor::new(wire);
+        let (decoded, raw) = read_message(&mut cursor, Magic::REGTEST)?;
+        assert_eq!(decoded, message);
+
+        let payload = encode_payload(&message)?;
+        assert_eq!(raw.as_ref(), payload.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn feature_message_rejects_malformed_wire_payload() {
+        // Feature command with empty payload (truncated).
+        let mut frame = Vec::with_capacity(HEADER_LEN);
+        frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+        frame.extend_from_slice(b"feature\0\0\0\0\0");
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&super::checksum(&[]));
+
+        let mut cursor = Cursor::new(frame);
+        let result = read_message(&mut cursor, Magic::REGTEST);
+        assert!(matches!(
+            result,
+            Err(PeerError::Feature(crate::feature::FeatureError::Truncated))
+        ));
+    }
+
+    #[test]
+    fn empty_command_in_v1_header_is_rejected() {
+        let mut frame = Vec::with_capacity(HEADER_LEN);
+        frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+        frame.extend_from_slice(&[0u8; 12]); // all zeroes command
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&super::checksum(&[]));
+
+        let mut cursor = Cursor::new(frame);
+        let result = read_message(&mut cursor, Magic::REGTEST);
+        assert!(matches!(result, Err(PeerError::InvalidCommand(_))));
     }
 }

@@ -6,7 +6,7 @@ use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
-use crate::handshake::feature_messages;
+use crate::handshake::{feature_messages, negotiated_features};
 use crate::inv::{
     inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
 };
@@ -330,10 +330,13 @@ pub fn dispatch_inbound_full<S>(
     announce_tx: &mut dyn FnMut(Vec<Inventory>),
 ) -> Result<(), PeerError> {
     match message {
-        Message::Version(_) => {
+        Message::Version(version) => {
             step(peer, message)?;
             for response in feature_messages() {
                 send(response)?;
+            }
+            for announcement in negotiated_features(version.version) {
+                send(Message::Feature(announcement))?;
             }
             send(Message::Verack)?;
         }
@@ -713,9 +716,11 @@ mod tests {
         TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
     };
     use crate::connection::{OutboundBudget, PeerLease};
+    use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
+    use crate::handshake::{feature_messages, negotiated_features};
     use crate::inv::MAX_INV_PER_MSG;
     use crate::peer::{Peer, PeerState};
-    use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PeerError};
+    use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PROTOCOL_VERSION, PeerError};
 
     fn block_payload(block: &Block) -> Message {
         Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
@@ -2322,7 +2327,7 @@ mod tests {
     }
 
     fn ready_peer() -> Peer<Cursor<Vec<u8>>> {
-        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
         peer.state = PeerState::Ready;
         peer
     }
@@ -2452,6 +2457,75 @@ mod tests {
                 expected_end: Some(9),
             }
         );
+        Ok(())
+    }
+
+    fn version_at(version: u32) -> Message {
+        Message::Version(bitcoin::p2p::message_network::VersionMessage {
+            version,
+            ..crate::handshake::version_message(
+                1,
+                0,
+                crate::peer_info::PeerRole::FullRelay,
+                bitcoin::p2p::ServiceFlags::NETWORK,
+            )
+        })
+    }
+
+    /// The reply to a peer's `version` is the feature messages, then the
+    /// features negotiated for its protocol version, then `verack`; a peer
+    /// below BIP434's version never receives a `feature` frame.
+    #[test]
+    fn version_reply_orders_features_between_feature_messages_and_verack() -> Result<(), PeerError>
+    {
+        for version in [FEATURE_VERSION - 1, PROTOCOL_VERSION] {
+            let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+
+            let responses = dispatch_inbound(&mut peer, &version_at(version))?;
+
+            let mut expected = feature_messages().to_vec();
+            expected.extend(
+                negotiated_features(version)
+                    .into_iter()
+                    .map(Message::Feature),
+            );
+            expected.push(Message::Verack);
+            assert_eq!(responses, expected);
+            if version < FEATURE_VERSION {
+                assert!(
+                    !responses
+                        .iter()
+                        .any(|response| matches!(response, Message::Feature(_)))
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A `feature` from the peer is absorbed silently between its `version`
+    /// and `verack`, and is a protocol violation that changes nothing once the
+    /// peer is ready.
+    #[test]
+    fn remote_feature_is_accepted_before_verack_and_rejected_after() -> Result<(), PeerError> {
+        let feature = Message::Feature(FeatureAnnouncement::new(
+            FeatureId::from_raw_unchecked(b"BIP332".to_vec()),
+            vec![1],
+        ));
+        let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+        dispatch_inbound(&mut peer, &version_at(PROTOCOL_VERSION))?;
+
+        assert_eq!(dispatch_inbound(&mut peer, &feature)?, []);
+        assert_eq!(peer.remote_feature(b"BIP332"), Some([1].as_slice()));
+
+        dispatch_inbound(&mut peer, &Message::Verack)?;
+        assert_eq!(peer.state, PeerState::Ready);
+        let before = peer_snapshot(&peer);
+        assert!(matches!(
+            dispatch_inbound(&mut peer, &feature),
+            Err(PeerError::Misbehavior(_))
+        ));
+        assert_eq!(peer_snapshot(&peer), before);
+        assert_eq!(peer.remote_feature(b"BIP332"), Some([1].as_slice()));
         Ok(())
     }
 

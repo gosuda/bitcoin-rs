@@ -30,6 +30,8 @@ use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
     MiningControl, MiningControlError, MiningInfo, TemplateMutation,
 };
+use bitcoin_rs_p2p::FEATURE_VERSION;
+use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_primitives::{Block, Hash256, Network, client_version};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
@@ -179,6 +181,9 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// The `protocolversion` Bitcoin Core 31.1 reports and advertises.
+const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
+
 #[test]
 fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
@@ -189,7 +194,20 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
         network.version,
         usize::try_from(client_version()).unwrap_or(usize::MAX)
     );
-    assert_eq!(network.protocol_version, 70016);
+    assert_eq!(
+        network.protocol_version,
+        usize::try_from(PROTOCOL_VERSION).unwrap_or(usize::MAX),
+        "getnetworkinfo reports the advertised wire protocol version"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION, FEATURE_VERSION,
+        "documented deviation from Core 31.1's 70016: the BIP434 feature-negotiation threshold"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION,
+        CORE_31_1_PROTOCOL_VERSION + 1,
+        "the one protocol version above Core 31.1's, and only that"
+    );
     assert_eq!(network.connections, 0);
     assert_eq!(network.warnings, Vec::<String>::new());
 

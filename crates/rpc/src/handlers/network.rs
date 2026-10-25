@@ -210,7 +210,8 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     typed_to_sonic(&v31::GetNetworkInfo {
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
         subversion: USER_AGENT.to_owned(),
-        protocol_version: 70016,
+        protocol_version: usize::try_from(bitcoin_rs_p2p::wire::PROTOCOL_VERSION)
+            .unwrap_or(usize::MAX),
         local_services: format!("{local_services:016x}"),
         local_services_names: bitcoin_rs_p2p::service_flag_names(local_services)
             .into_iter()

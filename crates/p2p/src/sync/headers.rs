@@ -27,7 +27,6 @@ use crate::Message;
 use crate::PeerSource;
 use crate::download_window::SyncPeer;
 use crate::peer_info::PeerInfo;
-use crate::wire::PROTOCOL_VERSION;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
@@ -892,10 +891,12 @@ impl BlockSync {
             .into_iter()
             .map(|hash| bitcoin::BlockHash::from_byte_array(*hash.as_byte_array()))
             .collect();
-        let msg = Message::GetHeaders(GetHeadersMessage::new(
-            locator_hashes,
-            bitcoin::BlockHash::all_zeros(),
-        ));
+        let getheaders = GetHeadersMessage::new(locator_hashes, bitcoin::BlockHash::all_zeros());
+        // The wire version of `getheaders` is the rust-bitcoin protocol
+        // constant (70001), independent of the version this node advertises
+        // in `version`; log the field that is actually sent.
+        let getheaders_version = getheaders.version;
+        let msg = Message::GetHeaders(getheaders);
         // `send_then` holds the connection's identity through the enqueue
         // and the pending stamp under one table authority, so a replacement
         // slipping in between cannot leave a request registered to a dead
@@ -965,7 +966,7 @@ impl BlockSync {
             peer_addr = ?source.endpoint,
             our_height,
             target_height,
-            protocol_version = PROTOCOL_VERSION,
+            getheaders_version,
             "block sync: sent getheaders"
         );
         GetheadersOutcome::Sent

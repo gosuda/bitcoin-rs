@@ -7,7 +7,9 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
+use hashbrown::HashMap;
 
+use crate::feature::FeatureId;
 use crate::wire::{Message, PeerError};
 
 /// Peer connection state.
@@ -216,6 +218,17 @@ pub struct Peer<S> {
     pub compact_blocks: CompactBlockNegotiation,
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
+    /// BIP434 feature announcements the peer sent between its `version` and
+    /// `verack`, by identifier.
+    ///
+    /// This map is the sole owner of remote feature announcements and only
+    /// the FSM's `receive_feature` inserts into it. It keeps the first valid
+    /// payload of each recognised feature (see
+    /// `FeatureAnnouncement::is_supported`); unknown identifiers and invalid
+    /// payloads are never retained, so its size is bounded by the number of
+    /// recognised features, not by what the peer sends. Readers use
+    /// [`Peer::remote_feature`].
+    pub(crate) remote_features: HashMap<FeatureId, Vec<u8>>,
     /// One BIP157 request waiting for asynchronous index publication or for
     /// outbound room.
     pub(crate) pending_filter_request: Option<ParkedFilter>,
@@ -269,6 +282,7 @@ impl<S> Peer<S> {
             capabilities: PeerCapabilities::default(),
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
+            remote_features: HashMap::new(),
             pending_filter_request: None,
             deferred_inbound: None,
             pending_getdata: Vec::new(),
@@ -289,6 +303,16 @@ impl<S> Peer<S> {
     /// through this peer fail.
     pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
         self.send.take()
+    }
+
+    /// The payload the peer announced for the recognised BIP434 feature `id`,
+    /// or `None` when it announced no valid one before `verack`.
+    ///
+    /// POST: a returned payload already satisfies the feature's own validity
+    /// rules; the first valid announcement wins.
+    #[must_use]
+    pub fn remote_feature(&self, id: &[u8]) -> Option<&[u8]> {
+        self.remote_features.get(id).map(Vec::as_slice)
     }
 
     /// Whether a `getdata` is parked, tail or deferred `notfound`: the
