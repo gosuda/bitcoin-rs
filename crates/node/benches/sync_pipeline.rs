@@ -1230,7 +1230,10 @@ fn install_synthetic_peers(
             .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let (outbound_tx, outbound_rx) = unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-        peer_table.register(addr, bitcoin_rs_p2p::PeerLease::new(outbound_tx));
+        peer_table.register(
+            bitcoin_rs_primitives::PeerEndpoint::Ip(addr),
+            bitcoin_rs_p2p::PeerLease::new(outbound_tx),
+        );
         outbound_rxs.push(outbound_rx);
     }
     outbound_rxs
