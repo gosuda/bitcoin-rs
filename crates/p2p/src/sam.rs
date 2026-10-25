@@ -226,6 +226,19 @@ fn session_closed() -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, "sam session is closed")
 }
 
+/// Test builds only: `(local, bridge)` address pair of every bridge socket a
+/// session in this process opened, recorded before the socket's first write.
+///
+/// Fixture bridges listen on loopback, where any host process can connect
+/// (a local HTTP service probes every listening socket). A fixture uses this
+/// record to tell its session's connections, which stay strict, from
+/// connections no session opened. Entries are never removed: a stale pair
+/// can only make a later connection with the same addresses strict, never
+/// excuse one.
+#[cfg(test)]
+static SESSION_SOCKETS: std::sync::Mutex<Vec<(SocketAddr, SocketAddr)>> =
+    std::sync::Mutex::new(Vec::new());
+
 struct SamConn {
     reader: TcpStream,
     writer: TcpStream,
@@ -241,7 +254,17 @@ impl SamConn {
     }
 
     /// Wrap a connected bridge socket as a reader and a writer half.
+    ///
+    /// Every session socket passes through here before its first write, so
+    /// test builds record its address pair in `SESSION_SOCKETS`.
     fn from_stream(stream: TcpStream) -> io::Result<Self> {
+        #[cfg(test)]
+        if let (Ok(local), Ok(bridge)) = (stream.local_addr(), stream.peer_addr()) {
+            SESSION_SOCKETS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((local, bridge));
+        }
         let _ = stream.set_nodelay(true);
         let writer = stream.try_clone()?;
         Ok(Self {
@@ -1873,6 +1896,31 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
 
+    /// Bridge workers that have not finished serving their connection, and
+    /// the signal that the last one ended.
+    ///
+    /// The listener counts a worker in before it starts, so a waiter never
+    /// sees zero between an accept and the spawn that follows it.
+    #[derive(Default)]
+    struct LiveWorkers {
+        count: Mutex<usize>,
+        idle: parking_lot::Condvar,
+    }
+
+    /// Counts one worker out when its thread ends, on every exit path
+    /// including a panic.
+    struct WorkerExit(std::sync::Arc<LiveWorkers>);
+
+    impl Drop for WorkerExit {
+        fn drop(&mut self) {
+            let mut count = self.0.count.lock();
+            *count -= 1;
+            if *count == 0 {
+                self.0.idle.notify_all();
+            }
+        }
+    }
+
     struct FakeSam {
         addr: SocketAddr,
         commands: mpsc::Receiver<String>,
@@ -1883,14 +1931,52 @@ mod tests {
         stop: std::sync::Arc<AtomicBool>,
         listener_handle: Option<std::thread::JoinHandle<io::Result<()>>>,
         workers: std::sync::Arc<parking_lot::Mutex<Vec<std::thread::JoinHandle<io::Result<()>>>>>,
+        live: std::sync::Arc<LiveWorkers>,
+        /// Connections that no session in this process opened, each refused
+        /// unserved; see [`Peer::opened_by_a_session`].
+        strangers: mpsc::Receiver<SocketAddr>,
+        /// Client address of every connection the listener handed to a
+        /// worker, sent once that worker is counted live.
+        accepted: mpsc::Receiver<SocketAddr>,
     }
 
     impl FakeSam {
+        /// Wait until every accepted bridge connection has been served to its
+        /// end.
+        ///
+        /// Call it after the client has closed everything it owns. Each worker
+        /// then ends on its own end of stream, so `finish` stops a bridge with
+        /// no worker left mid-read; `stop` never races a connection the client
+        /// is still finishing. A connection the client still holds open fails
+        /// here, naming how many workers remain, instead of being cut down by
+        /// `finish`.
+        fn wait_idle(&self, within: Duration) -> io::Result<()> {
+            let give_up = Instant::now() + within;
+            let mut count = self.live.count.lock();
+            while *count != 0 {
+                if self.live.idle.wait_until(&mut count, give_up).timed_out() && *count != 0 {
+                    let remaining = *count;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("{remaining} fake SAM worker(s) still serving after {within:?}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        /// Stop the bridge and return the first worker error.
+        ///
+        /// Only the call that still owns the listener raises `stop` and dials
+        /// `addr` to unblock its accept. A repeat call (`Drop` after an
+        /// explicit `finish`) must not dial: the port is free by then and may
+        /// already belong to another process's fixture, whose worker would be
+        /// handed a connection it never expected.
         fn finish(&mut self) -> io::Result<()> {
-            self.stop.store(true, Ordering::Release);
-            let _ = std::net::TcpStream::connect(self.addr);
             let mut first_error: Option<io::Error> = None;
             if let Some(handle) = self.listener_handle.take() {
+                self.stop.store(true, Ordering::Release);
+                let _ = std::net::TcpStream::connect(self.addr);
                 match handle.join() {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
@@ -2260,20 +2346,51 @@ mod tests {
         }
     }
 
+    /// The two ends of one accepted bridge connection, as `accept` reported
+    /// them, so they stay known after the client resets the socket.
+    #[derive(Clone, Copy)]
+    struct Peer {
+        client: SocketAddr,
+        bridge: SocketAddr,
+    }
+
+    impl Peer {
+        /// Whether a session in this process opened this connection.
+        ///
+        /// A session records each socket before its first write, so by the
+        /// time the bridge reads a command line or a failure from it, the
+        /// record exists. A connection without one came from elsewhere: a
+        /// host service probes every listening loopback socket with
+        /// `GET / HTTP/1.1` and may reset it before a byte arrives. Such a
+        /// connection is no part of the test and is refused unserved; every
+        /// recorded connection stays strict.
+        fn opened_by_a_session(self) -> bool {
+            SESSION_SOCKETS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&(self.client, self.bridge))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn handle_fake_sam_stream(
         stream: TcpStream,
+        peer: Peer,
         tx: &mpsc::Sender<String>,
         closed_tx: &mpsc::Sender<()>,
         script: &[(String, String)],
         options: &FakeSamOptions,
         root_lost: &AtomicBool,
         stop: &AtomicBool,
+        strangers: &mpsc::Sender<SocketAddr>,
     ) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let client = peer.client;
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = stream;
         let mut pending: Vec<u8> = Vec::new();
         let mut is_root = false;
+        let mut last_command = String::new();
         loop {
             if stop.load(Ordering::Acquire) {
                 return Ok(());
@@ -2300,20 +2417,41 @@ mod tests {
                     if stop.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let site = if is_root {
-                        "reading a command on the root connection"
+                    if last_command.is_empty() && !peer.opened_by_a_session() {
+                        let _ = strangers.send(client);
+                        return Ok(());
+                    }
+                    let kind = if is_root {
+                        "the root connection"
                     } else {
-                        "reading a command on a bridge connection"
+                        "a bridge connection"
                     };
-                    return Err(worker_failure(site, &error));
+                    let after = if last_command.is_empty() {
+                        "before any command".to_owned()
+                    } else {
+                        format!("after `{last_command}`")
+                    };
+                    return Err(worker_failure(
+                        &format!(
+                            "reading a command on {kind} from {client} {after} \
+                             with {} unterminated byte(s)",
+                            pending.len()
+                        ),
+                        &error,
+                    ));
                 }
             }
             if pending.last() != Some(&b'\n') {
                 continue;
             }
+            if last_command.is_empty() && !peer.opened_by_a_session() {
+                let _ = strangers.send(client);
+                return Ok(());
+            }
             let line = String::from_utf8_lossy(&pending).trim_end().to_owned();
             pending.clear();
             let _ = tx.send(line.clone());
+            last_command.clone_from(&line);
             is_root |= line.starts_with("SESSION CREATE");
             if line.starts_with("STREAM CONNECT") || line.starts_with("STREAM ACCEPT") {
                 return handle_stream_command(
@@ -2359,13 +2497,18 @@ mod tests {
         let stop_worker = std::sync::Arc::clone(&stop);
         let workers = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let workers_listener = std::sync::Arc::clone(&workers);
+        let live = std::sync::Arc::new(LiveWorkers::default());
+        let live_listener = std::sync::Arc::clone(&live);
+        let (strangers_tx, strangers) = mpsc::channel();
+        let (accepted_tx, accepted) = mpsc::channel();
         let listener_handle = std::thread::spawn(move || -> io::Result<()> {
-            for stream in listener.incoming() {
+            loop {
+                let accepted = listener.accept();
                 if stop_listener.load(Ordering::Acquire) {
                     break;
                 }
-                let stream = match stream {
-                    Ok(s) => s,
+                let (stream, client) = match accepted {
+                    Ok(accepted) => accepted,
                     Err(err) => {
                         if stop_listener.load(Ordering::Acquire) {
                             break;
@@ -2382,9 +2525,19 @@ mod tests {
                 let options = std::sync::Arc::clone(&options);
                 let root_lost = std::sync::Arc::clone(&root_lost);
                 let stop = std::sync::Arc::clone(&stop_worker);
+                let live_worker = std::sync::Arc::clone(&live_listener);
+                let strangers = strangers_tx.clone();
+                *live_listener.count.lock() += 1;
+                let _ = accepted_tx.send(client);
                 let handle = std::thread::spawn(move || {
+                    let _exit = WorkerExit(live_worker);
+                    let peer = Peer {
+                        client,
+                        bridge: addr,
+                    };
                     handle_fake_sam_stream(
-                        stream, &tx, &closed_tx, &script, &options, &root_lost, &stop,
+                        stream, peer, &tx, &closed_tx, &script, &options, &root_lost, &stop,
+                        &strangers,
                     )
                 });
                 workers_listener.lock().push(handle);
@@ -2399,6 +2552,9 @@ mod tests {
             stop,
             listener_handle: Some(listener_handle),
             workers,
+            live,
+            strangers,
+            accepted,
         })
     }
 
@@ -3947,6 +4103,13 @@ mod tests {
         assert_eq!(session.control.lock().generation, 2);
         assert!(session.recovery.lock().pending.is_none());
         assert_eq!(session.destination(), dest_b64());
+        // The client ends the exchange: it closes the root it recovered, and
+        // the bridge is stopped only after every worker has seen that close
+        // and finished. No worker is then mid-read when `finish` raises
+        // `stop`, and the recovered root's worker does not wait out its read
+        // timeout to learn of it.
+        session.close();
+        step("pending root bridge drain", fake.wait_idle(LIVENESS))?;
         finish_bridge_after(&mut fake, "pending root resumed")?;
         Ok(())
     }
@@ -4105,6 +4268,152 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::NotConnected);
         finish_bridge_after(&mut fake, "close of a paused root")?;
         Ok(())
+    }
+
+    /// Close `stream` with a reset (`SO_LINGER` zero) instead of a FIN.
+    #[cfg(unix)]
+    fn abort(stream: TcpStream) -> io::Result<()> {
+        rustix::net::sockopt::set_socket_linger(&stream, Some(Duration::ZERO))
+            .map_err(io::Error::from)?;
+        drop(stream);
+        Ok(())
+    }
+
+    /// Wait until the bridge has refused every connection from `clients`.
+    /// A host probe may be refused meanwhile; it is skipped.
+    #[cfg(unix)]
+    fn wait_for_strangers(fake: &FakeSam, clients: &[SocketAddr]) -> io::Result<()> {
+        let mut missing = clients.to_vec();
+        while !missing.is_empty() {
+            let refused = fake.strangers.recv_timeout(LIVENESS).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("bridge never refused {missing:?}: {error}"),
+                )
+            })?;
+            missing.retain(|client| *client != refused);
+        }
+        Ok(())
+    }
+
+    /// Wait until the bridge has handed the connection from `client` to a
+    /// live worker.
+    #[cfg(unix)]
+    fn wait_accepted(fake: &FakeSam, client: SocketAddr) -> io::Result<()> {
+        loop {
+            let accepted = fake.accepted.recv_timeout(LIVENESS).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("bridge never accepted {client}: {error}"),
+                )
+            })?;
+            if accepted == client {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The observed stress failures: while a short caller's root is paused,
+    /// a host service (a Go HTTP client) connects to the bridge, sends
+    /// `GET / HTTP/1.1`, and resets; another probe resets before any byte.
+    /// Neither came from a session, so the bridge refuses both unserved and
+    /// records no command; the paused root survives and resumes, and
+    /// teardown stays strict.
+    #[cfg(unix)]
+    #[test]
+    fn probes_no_session_opened_never_disturb_a_paused_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gate = new_gate();
+        let (mut fake, mut session, _seen) = session_with_held_recovery("SESSION CREATE", &gate)?;
+        session.timeout = HELD_BUDGET;
+        let Err(error) = Verb::Accept.call(&session, HELD_BUDGET) else {
+            return Err("a caller behind a held reply must time out".into());
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "got {error:?}");
+        assert!(pending_phase_is(&session, &RootPhase::Create));
+
+        let mut http_probe = TcpStream::connect(fake.addr)?;
+        let silent_probe = TcpStream::connect(fake.addr)?;
+        let probes = [http_probe.local_addr()?, silent_probe.local_addr()?];
+        http_probe.write_all(
+            b"GET / HTTP/1.1\r\nUser-Agent: Go-http-client/1.1\r\nConnection: close\r\n\r\n",
+        )?;
+        abort(http_probe)?;
+        abort(silent_probe)?;
+        step("probes refused", wait_for_strangers(&fake, &probes))?;
+
+        assert!(
+            pending_phase_is(&session, &RootPhase::Create),
+            "the paused root survives the probes"
+        );
+        assert_eq!(session.control.lock().generation, 1);
+        open_gate(&gate);
+        session.timeout = LIVENESS;
+        let mut stream = step("resumed call", Verb::Accept.call(&session, LIVENESS))?;
+        step("resumed echo", finish_stream_exchange(&mut stream))?;
+        drop(stream);
+        assert_eq!(session.control.lock().generation, 2);
+        let commands: Vec<String> = fake.commands.try_iter().collect();
+        assert!(
+            commands.iter().all(|command| !command.starts_with("GET")),
+            "a probe's request is not a bridge command: {commands:?}"
+        );
+        session.close();
+        step("probe bridge drain", fake.wait_idle(LIVENESS))?;
+        finish_bridge_after(&mut fake, "probes during a paused root")?;
+        Ok(())
+    }
+
+    /// The refusal is limited to connections no session opened: a session
+    /// socket that resets before any command still fails the bridge.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_socket_reset_before_any_command_still_fails_the_bridge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fake = fake_sam(session_script())?;
+        let conn = SamConn::connect_with_deadline(fake.addr, Instant::now() + LIVENESS)?;
+        let stream = conn.into_stream();
+        let client = stream.local_addr()?;
+        // Reset only once a worker serves this exact socket, so the reset is
+        // the worker's to report and not a race with `finish`.
+        step("session socket accepted", wait_accepted(&fake, client))?;
+        abort(stream)?;
+        step("reset session socket drain", fake.wait_idle(LIVENESS))?;
+        let Err(error) = fake.finish() else {
+            return Err("a session socket's reset must fail the bridge".into());
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset,
+            "got {error:?}"
+        );
+        assert!(error.to_string().contains("before any command"), "{error}");
+        assert!(
+            fake.strangers.try_iter().all(|refused| refused != client),
+            "a session socket is no stranger"
+        );
+        Ok(())
+    }
+
+    /// A repeat `finish` (from `Drop`) must not dial the freed bridge port:
+    /// another process's fixture may listen there by then, and its worker
+    /// would read a connection that never sends a command.
+    #[test]
+    fn a_finished_bridge_never_dials_its_freed_address() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fake = fake_sam(session_script())?;
+        let addr = fake.addr;
+        fake.finish()?;
+        // Stand in for the next fixture to take the port.
+        let successor = TcpListener::bind(addr)?;
+        successor.set_nonblocking(true)?;
+        drop(fake);
+        match successor.accept() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok((_, peer)) => {
+                Err(format!("a finished fixture dialed its freed address from {peer}").into())
+            }
+        }
     }
 
     /// RAII gate holding `session.wake` mutex to order recovery connect before
