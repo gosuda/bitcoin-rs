@@ -149,23 +149,6 @@ impl CheckpointRoot {
         self.dir.rename(from, &self.dir, to)
     }
 
-    #[cfg(any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "redox"
-    ))]
-    pub(crate) fn rename_noreplace(&self, from: &str, to: &str) -> io::Result<()> {
-        rustix::fs::renameat_with(
-            self.dir(),
-            from,
-            self.dir(),
-            to,
-            rustix::fs::RenameFlags::NOREPLACE,
-        )
-        .map_err(Into::into)
-    }
-
     pub(crate) fn sync(&self) -> io::Result<()> {
         sync_dir(&self.dir)
     }
@@ -195,6 +178,45 @@ impl CheckpointRoot {
     pub(crate) fn remove_dir(&self, name: &str) -> io::Result<()> {
         self.dir.remove_dir(name)
     }
+}
+
+/// Whether [`rename_noreplace`] is available on this target. Callers that do
+/// expensive work before publishing consult it first so they can refuse early.
+pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+));
+
+/// Renames `from` to `to` inside `dir` in one filesystem step that fails with
+/// [`io::ErrorKind::AlreadyExists`] instead of replacing an existing `to`.
+///
+/// A prior existence check cannot provide this: another process can create
+/// `to` between the check and the rename and lose its file.
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+    rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE)
+        .map_err(Into::into)
+}
+
+/// Platforms without an atomic no-replace rename refuse rather than replace.
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+)))]
+pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no atomic no-replace rename",
+    ))
 }
 
 /// Creates a new regular file without following symlinks.

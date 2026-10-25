@@ -92,6 +92,7 @@ fn snapshot_error(error: crate::context::SnapshotControlError) -> RpcError {
         SnapshotControlError::Unavailable(message) | SnapshotControlError::Failed(message) => {
             RpcError::Internal(message)
         }
+        SnapshotControlError::Interrupted => RpcError::Misc(error.to_string()),
     }
 }
 
@@ -123,6 +124,41 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     typed_to_sonic(
         &control
             .load_txoutset(std::path::Path::new(path))
+            .map_err(snapshot_error)?,
+    )
+}
+
+/// Core 31.1 `dumptxoutset`, restricted to `type = "latest"`: the snapshot is
+/// the applied tip's UTXO set. Rollback snapshots and `options` are not served.
+pub(crate) fn dumptxoutset(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    let params = super::bind_named_params(params, &["path", "type"])?;
+    super::ensure_at_most_params(&params, 2)?;
+    let path = required_str(&params, 0, "path is required")?;
+    // Core 31.1 gives `type` the default "", which it rejects like any other
+    // value that is neither "latest" nor "rollback".
+    let snapshot_type = match params_array(&params)?.get(1) {
+        Some(value) if !value.is_null() => value
+            .as_str()
+            .ok_or_else(|| super::wrong_type_plain(value, "string"))?,
+        _ => "",
+    };
+    if snapshot_type != "latest" {
+        return Err(RpcError::InvalidParameter(format!(
+            "Invalid snapshot type \"{snapshot_type}\" specified. Only \"latest\" is supported"
+        )));
+    }
+    let control = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .ok_or_else(|| RpcError::Internal("snapshot control unavailable".to_owned()))?;
+    typed_to_sonic(
+        &control
+            .dump_txoutset(std::path::Path::new(path), cancellation)
             .map_err(snapshot_error)?,
     )
 }
@@ -6373,5 +6409,189 @@ mod scantxoutset_tests {
         .unwrap_or_else(|err| panic!("cancelled scan returned error: {err}"));
         assert_eq!(result["success"].as_bool(), Some(false));
         assert_eq!(ctx.chain.utxo.scan_progress(), None);
+    }
+}
+
+#[cfg(test)]
+mod dumptxoutset_tests {
+    use alloc::sync::Arc;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
+
+    use bitcoin_rs_primitives::Hash256;
+    use sonic_rs::{JsonValueTrait as _, json};
+
+    use crate::context::{
+        ChainControl, ChainControlError, Context, SnapshotControlError, SnapshotExport,
+    };
+    use crate::handlers::Handler;
+
+    /// Records the delegated path and answers with a chosen outcome.
+    struct Exporter {
+        seen: Mutex<Option<PathBuf>>,
+        failure: Option<fn() -> SnapshotControlError>,
+    }
+
+    impl Exporter {
+        fn handler(failure: Option<fn() -> SnapshotControlError>) -> (Arc<Self>, Handler) {
+            let exporter = Arc::new(Self {
+                seen: Mutex::new(None),
+                failure,
+            });
+            let ctx = Context::new().with_chain_control(exporter.clone());
+            (exporter, Handler::new(Arc::new(ctx)))
+        }
+
+        fn seen(&self) -> Option<PathBuf> {
+            self.seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl ChainControl for Exporter {
+        fn dump_txoutset(
+            &self,
+            path: &std::path::Path,
+            cancellation: &bitcoin_rs_chain::LatchReader,
+        ) -> Result<SnapshotExport, SnapshotControlError> {
+            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            if cancellation.is_triggered() {
+                return Err(SnapshotControlError::Interrupted);
+            }
+            if let Some(failure) = self.failure {
+                return Err(failure());
+            }
+            Ok(SnapshotExport {
+                coins_written: 3,
+                base_hash: Hash256::from_le_bytes(&[1; 32]).to_string_be(),
+                base_height: 7,
+                path: "/data/out.dat".to_owned(),
+                txoutset_hash: Hash256::from_le_bytes(&[2; 32]).to_string_be(),
+                nchaintx: 9,
+            })
+        }
+
+        fn invalidate_block(&self, _hash: Hash256) -> Result<(), ChainControlError> {
+            Err(ChainControlError::UnknownBlock)
+        }
+
+        fn verify_chain(
+            &self,
+            _check_level: u8,
+            _nblocks: u32,
+            _cancellation: &bitcoin_rs_chain::LatchReader,
+        ) -> Result<bool, ChainControlError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn positional_and_named_arguments_delegate_and_report_the_core_fields() {
+        for params in [
+            json!(["out.dat", "latest"]),
+            json!({"path": "out.dat", "type": "latest"}),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let result = handler
+                .dispatch("dumptxoutset", &params)
+                .unwrap_or_else(|error| panic!("{params}: {error}"));
+            assert_eq!(exporter.seen(), Some(PathBuf::from("out.dat")), "{params}");
+            assert_eq!(result["coins_written"].as_u64(), Some(3));
+            assert_eq!(
+                result["base_hash"].as_str(),
+                Some(Hash256::from_le_bytes(&[1; 32]).to_string_be().as_str())
+            );
+            assert_eq!(result["base_height"].as_u64(), Some(7));
+            assert_eq!(result["path"].as_str(), Some("/data/out.dat"));
+            assert_eq!(
+                result["txoutset_hash"].as_str(),
+                Some(Hash256::from_le_bytes(&[2; 32]).to_string_be().as_str())
+            );
+            assert_eq!(result["nchaintx"].as_u64(), Some(9));
+        }
+    }
+
+    #[test]
+    fn only_the_latest_type_is_served_and_refusals_never_reach_the_control() {
+        // Core 31.1 gives `type` no usable default: missing, null and empty
+        // are refused like any value other than the one served.
+        for params in [
+            json!(["out.dat"]),
+            json!(["out.dat", null]),
+            json!(["out.dat", ""]),
+            json!(["out.dat", "rollback"]),
+            json!(["out.dat", "Latest"]),
+            json!({"path": "out.dat"}),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert_eq!(error.code(), -8, "{params}: {error}");
+            assert_eq!(exporter.seen(), None, "{params}");
+        }
+        for (params, code) in [
+            (json!([]), -32602),
+            (json!([5, "latest"]), -3),
+            (json!(["out.dat", 5]), -3),
+            (json!(["out.dat", "latest", {}]), -32602),
+            (
+                json!({"path": "out.dat", "type": "latest", "rollback": 1}),
+                -8,
+            ),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert_eq!(error.code(), code, "{params}: {error}");
+            assert_eq!(exporter.seen(), None, "{params}");
+        }
+    }
+
+    #[test]
+    fn control_errors_keep_their_transport_codes_and_a_stopped_handler_interrupts() {
+        let params = json!(["out.dat", "latest"]);
+        let cases: [(fn() -> SnapshotControlError, i64); 4] = [
+            (|| SnapshotControlError::File("exists".to_owned()), -8),
+            (
+                || SnapshotControlError::Unavailable("busy".to_owned()),
+                -32603,
+            ),
+            (|| SnapshotControlError::Failed("disk".to_owned()), -32603),
+            (|| SnapshotControlError::Interrupted, -1),
+        ];
+        for (failure, code) in cases {
+            let (_exporter, handler) = Exporter::handler(Some(failure));
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("the control failure must surface"));
+            assert_eq!(error.code(), code, "{error}");
+        }
+
+        // The request latch handed to the control is the handler's stop latch.
+        let (exporter, handler) = Exporter::handler(None);
+        handler.stop();
+        let error = handler
+            .dispatch("dumptxoutset", &params)
+            .err()
+            .unwrap_or_else(|| panic!("a stopped handler must interrupt the export"));
+        assert_eq!(error.code(), -1, "{error}");
+        assert_eq!(exporter.seen(), Some(PathBuf::from("out.dat")));
+    }
+
+    #[test]
+    fn missing_chain_control_is_an_internal_error() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        let error = handler
+            .dispatch("dumptxoutset", &json!(["out.dat", "latest"]))
+            .err()
+            .unwrap_or_else(|| panic!("no control must refuse the export"));
+        assert_eq!(error.code(), -32603, "{error}");
     }
 }

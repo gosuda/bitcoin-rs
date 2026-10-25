@@ -93,6 +93,19 @@ impl ChainControl for RpcChainControl {
         self.snapshots.import(path).map_err(Into::into)
     }
 
+    fn dump_txoutset(
+        &self,
+        path: &std::path::Path,
+        cancellation: &LatchReader,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        self.snapshots
+            .export(path, cancellation)
+            .map_err(Into::into)
+    }
+
     fn chainstates(
         &self,
     ) -> core::result::Result<

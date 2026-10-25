@@ -5,14 +5,14 @@
 //! installs them into the existing UTXO set.
 //! Native bitcoin-rs v4 checkpoint serialization is a separate format.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, varint};
 use thiserror::Error;
 
 use crate::{
-    UtxoError, UtxoSet,
-    record::{OwnedUtxoOut, UtxoRecord},
+    UtxoError, UtxoSet, UtxoSetView,
+    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
     snapshot::SerializedUtxoHasher,
 };
 
@@ -97,7 +97,7 @@ pub enum SnapshotError {
     },
     /// An underlying input operation failed.
     #[error("snapshot input failed: {0}")]
-    Io(#[source] io::Error),
+    Io(#[from] io::Error),
     /// Magic does not identify a Core portable snapshot.
     #[error("invalid Bitcoin Core snapshot magic")]
     InvalidMagic,
@@ -156,6 +156,17 @@ pub enum SnapshotError {
         /// Remaining declared file coins.
         remaining: u64,
     },
+    /// Declared coins count does not match the actual number of written coins.
+    #[error("snapshot declared {declared} coins, wrote {actual}")]
+    DeclaredCoinCountMismatch {
+        /// Declared count.
+        declared: u64,
+        /// Actual written count.
+        actual: u64,
+    },
+    /// The snapshot write or read was interrupted.
+    #[error("snapshot operation interrupted")]
+    Interrupted,
     /// Core emits exactly one group per txid in bytewise order.
     #[error("snapshot transaction groups are duplicated or out of Core byte order")]
     TransactionOrder,
@@ -266,6 +277,239 @@ pub fn read_and_verify(
         hash_serialized,
         bytes_read: decoder.consumed,
     })
+}
+
+/// Report returned upon successful export of a Bitcoin Core v2 snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoreV2WriteReport {
+    /// Total bytes written to the sink, including header and coin records.
+    pub bytes: u64,
+    /// Total number of coins written.
+    pub coins: u64,
+    /// Computed `hash_serialized_3` state commitment matching Bitcoin Core.
+    pub txoutset_hash: Hash256,
+}
+
+/// Writes a complete Bitcoin Core portable snapshot v2 into `writer`.
+///
+/// Emits the fixed 51-byte header, followed by ascending internal txid-LE groups
+/// across shards 0..=255. Within each shard, entries follow the same canonical
+/// Core ordering as [`hash_serialized_3_stable_inner`]. Each group serializes:
+/// - 32-byte internal txid (LE)
+/// - `CompactSize` output count (group size)
+/// - Per output:
+///   - `CompactSize` `vout`
+///   - Core VARINT `(height << 1) | (coinbase as u32)`
+///   - Core VARINT `compress_amount(value)`
+///   - Compressed scriptPubKey (or raw length + 6 followed by raw script)
+///
+/// In the same pass, updates [`SerializedUtxoHasher`] with each coin in canonical
+/// txid/vout order, computing the exact `hash_serialized_3` commitment matching Core.
+///
+/// Polls `should_stop()` every 5,000 coins and immediately aborts with
+/// [`SnapshotError::Interrupted`]. Fails with [`SnapshotError::DeclaredCoinCountMismatch`]
+/// if the written coins count does not match `coins_count`.
+pub fn write_core_v2<W: Write + ?Sized>(
+    view: &UtxoSetView<'_>,
+    network: Network,
+    base_hash: Hash256,
+    base_height: u32,
+    coins_count: u64,
+    writer: &mut W,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<CoreV2WriteReport, SnapshotError> {
+    if should_stop() {
+        return Err(SnapshotError::Interrupted);
+    }
+
+    // 1. Fixed 51-byte Core v2 header:
+    // MAGIC (5) + VERSION (2) + network magic (4) + base block hash (32) + coins count (8)
+    writer.write_all(&MAGIC)?;
+    writer.write_all(&VERSION.to_le_bytes())?;
+    writer.write_all(&network.magic())?;
+    writer.write_all(&base_hash.to_le_bytes())?;
+    writer.write_all(&coins_count.to_le_bytes())?;
+
+    let mut total_bytes: u64 = HEADER_BYTES;
+    let mut coins_written: u64 = 0;
+    let mut last_polled_coins: u64 = 0;
+    let mut commitment = SerializedUtxoHasher::new();
+    let mut varint_buf = Vec::with_capacity(10);
+
+    for shard_idx in 0_u8..=u8::MAX {
+        view.shard(usize::from(shard_idx)).with_table(|table| {
+            let mut records: Vec<&UtxoRecord> = table.table.iter().collect();
+            records.sort_unstable_by(|left, right| {
+                left.txid().to_le_bytes().cmp(&right.txid().to_le_bytes())
+            });
+
+            for record in records {
+                let txid_bytes = record.txid().to_le_bytes();
+                let mut outputs: Vec<crate::record::OneUtxoOut<'_>> = record.outputs().collect();
+                if outputs.is_empty() {
+                    continue;
+                }
+                outputs.sort_unstable_by_key(|output| output.vout);
+
+                let group_count =
+                    u64::try_from(outputs.len()).map_err(|_| SnapshotError::LimitExceeded {
+                        resource: "coins per txid",
+                        actual: u64::MAX,
+                        limit: u64::from(u32::MAX),
+                    })?;
+
+                // Txid (32 bytes)
+                writer.write_all(&txid_bytes)?;
+                total_bytes = total_bytes
+                    .checked_add(32)
+                    .ok_or(SnapshotError::VarIntOverflow)?;
+
+                // CompactSize group count
+                let group_encoded = varint::encode(group_count);
+                writer.write_all(group_encoded.as_slice())?;
+                total_bytes = total_bytes
+                    .checked_add(u64::try_from(group_encoded.len()).unwrap_or(0))
+                    .ok_or(SnapshotError::VarIntOverflow)?;
+
+                // Per-output serialization
+                for output in outputs {
+                    let entry_bytes =
+                        write_output_entry(writer, &output, base_height, &mut varint_buf)?;
+                    total_bytes = total_bytes
+                        .checked_add(entry_bytes)
+                        .ok_or(SnapshotError::VarIntOverflow)?;
+
+                    // Accumulate state commitment
+                    commitment.add(txid_bytes, output, Some(base_height))?;
+
+                    coins_written = coins_written
+                        .checked_add(1)
+                        .ok_or(SnapshotError::VarIntOverflow)?;
+
+                    // Check declared coins count ceiling
+                    if coins_written > coins_count {
+                        return Err(SnapshotError::DeclaredCoinCountMismatch {
+                            declared: coins_count,
+                            actual: coins_written,
+                        });
+                    }
+
+                    // Poll should_stop every 5,000 coins
+                    if coins_written.saturating_sub(last_polled_coins) >= 5000 {
+                        last_polled_coins = coins_written;
+                        if should_stop() {
+                            return Err(SnapshotError::Interrupted);
+                        }
+                    }
+                }
+            }
+            Ok::<(), SnapshotError>(())
+        })?;
+    }
+
+    if coins_written != coins_count {
+        return Err(SnapshotError::DeclaredCoinCountMismatch {
+            declared: coins_count,
+            actual: coins_written,
+        });
+    }
+
+    Ok(CoreV2WriteReport {
+        bytes: total_bytes,
+        coins: coins_written,
+        txoutset_hash: commitment.finish(),
+    })
+}
+
+fn write_output_entry<W: Write + ?Sized>(
+    writer: &mut W,
+    output: &OneUtxoOut<'_>,
+    base_height: u32,
+    varint_buf: &mut Vec<u8>,
+) -> Result<u64, SnapshotError> {
+    if output.vout == u32::MAX {
+        return Err(SnapshotError::InvalidOutpoint {
+            vout: u64::from(output.vout),
+        });
+    }
+    if output.height > base_height {
+        return Err(SnapshotError::InvalidHeight {
+            height: output.height,
+            base_height,
+        });
+    }
+
+    // Core snapshot v2 format requires the packed height/coinbase code to be
+    // representable in a 32-bit field. If bit 31 of height is set (height >= 0x8000_0000),
+    // (height << 1) cannot fit in u32, causing high-bit loss in commitment hashing
+    // and incompatible wire encoding rejected by Core readers.
+    let raw_code = (u64::from(output.height) << 1) | u64::from(output.coinbase);
+    let code = u32::try_from(raw_code).map_err(|_| SnapshotError::VarIntOverflow)?;
+
+    let mut written: u64 = 0;
+
+    // CompactSize vout
+    let vout_encoded = varint::encode(u64::from(output.vout));
+    writer.write_all(vout_encoded.as_slice())?;
+    written = written
+        .checked_add(u64::try_from(vout_encoded.len()).unwrap_or(0))
+        .ok_or(SnapshotError::VarIntOverflow)?;
+
+    // Core VARINT height/coinbase: (height << 1) | (coinbase as u32)
+    varint_buf.clear();
+    crate::compress::write_core_varint(u64::from(code), varint_buf);
+    writer.write_all(varint_buf)?;
+    written = written
+        .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
+        .ok_or(SnapshotError::VarIntOverflow)?;
+
+    // Core VARINT compressed amount
+    let compressed_amount = crate::compress::compress_amount(output.value)?;
+    varint_buf.clear();
+    crate::compress::write_core_varint(compressed_amount, varint_buf);
+    writer.write_all(varint_buf)?;
+    written = written
+        .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
+        .ok_or(SnapshotError::VarIntOverflow)?;
+
+    // Compressed script
+    if let Some((script_code, payload)) = crate::compress::compress_script(output.script_pubkey) {
+        varint_buf.clear();
+        crate::compress::write_core_varint(script_code, varint_buf);
+        writer.write_all(varint_buf)?;
+        written = written
+            .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
+            .ok_or(SnapshotError::VarIntOverflow)?;
+
+        writer.write_all(payload)?;
+        written = written
+            .checked_add(u64::try_from(payload.len()).unwrap_or(0))
+            .ok_or(SnapshotError::VarIntOverflow)?;
+    } else {
+        let script_len = output.script_pubkey.len();
+        if script_len > 10_000 {
+            return Err(SnapshotError::InvalidScriptLength {
+                length: u64::try_from(script_len).unwrap_or(u64::MAX),
+            });
+        }
+        let script_code = u64::try_from(script_len)
+            .map_err(|_| SnapshotError::VarIntOverflow)?
+            .checked_add(6)
+            .ok_or(SnapshotError::VarIntOverflow)?;
+        varint_buf.clear();
+        crate::compress::write_core_varint(script_code, varint_buf);
+        writer.write_all(varint_buf)?;
+        written = written
+            .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
+            .ok_or(SnapshotError::VarIntOverflow)?;
+
+        writer.write_all(output.script_pubkey)?;
+        written = written
+            .checked_add(u64::try_from(output.script_pubkey.len()).unwrap_or(0))
+            .ok_or(SnapshotError::VarIntOverflow)?;
+    }
+
+    Ok(written)
 }
 
 fn check_limit(resource: &'static str, actual: u64, limit: u64) -> Result<(), SnapshotError> {

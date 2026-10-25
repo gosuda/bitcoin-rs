@@ -606,3 +606,30 @@ fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::err
     assert!(ensure_current_schema(&data).is_err());
     Ok(())
 }
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+#[test]
+fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    fs::write(dir.path().join("staged"), b"new")?;
+    fs::write(dir.path().join("taken"), b"operator")?;
+
+    let error = super::fs::rename_noreplace(&data, "staged", "taken")
+        .err()
+        .ok_or("rename over an existing file must fail")?;
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(dir.path().join("taken"))?, b"operator");
+    assert_eq!(fs::read(dir.path().join("staged"))?, b"new");
+
+    super::fs::rename_noreplace(&data, "staged", "free")?;
+    assert_eq!(fs::read(dir.path().join("free"))?, b"new");
+    assert!(!dir.path().join("staged").exists());
+    Ok(())
+}

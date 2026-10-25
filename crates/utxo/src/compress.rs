@@ -139,6 +139,69 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
 }
 
+/// Writes `value` as Bitcoin Core's subtract-one MSB VARINT into `out`.
+///
+/// This is the exact inverse of Core's `core_varint` decoder. Each 7-bit group has its
+/// continuation bit set on all but the last byte; because 1 is subtracted after each
+/// continuation, this is deliberately NOT LEB128.
+pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {
+    let mut buf = [0_u8; 10];
+    let mut len = 0;
+    loop {
+        buf[len] = u8::try_from(value & 0x7f).unwrap_or(0) | if len == 0 { 0 } else { 0x80 };
+        len += 1;
+        if value <= 0x7f {
+            break;
+        }
+        value = (value >> 7) - 1;
+    }
+    for i in (0..len).rev() {
+        out.push(buf[i]);
+    }
+}
+
+/// Compresses a scriptPubKey into Bitcoin Core's snapshot format.
+///
+/// Returns `Some((code, payload))` for compressible script types:
+/// - Code 0: P2PKH (25-byte `76 a9 14 <20-byte-pkh> 88 ac`, payload `script[3..23]`)
+/// - Code 1: P2SH (23-byte `a9 14 <20-byte-sh> 87`, payload `script[2..22]`)
+/// - Codes 2/3: Compressed P2PK (35-byte `21 <02|03> <32-byte-X> ac`, code `script[1]`, payload `script[2..34]`), preserving non-curve points
+/// - Codes 4/5: Valid uncompressed P2PK (67-byte `41 04 <32-byte-X> <32-byte-Y> ac`, secp256k1-validated, code `4 + (script[65] & 1)`, payload `script[2..34]`)
+///
+/// Returns `None` for any other script, or for uncompressed P2PK with an invalid curve point,
+/// prompting the caller to emit raw script length + 6.
+pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
+    if script.len() == 25
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x14
+        && script[23] == 0x88
+        && script[24] == 0xac
+    {
+        return Some((0, &script[3..23]));
+    }
+    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+        return Some((1, &script[2..22]));
+    }
+    if script.len() == 35
+        && script[0] == 0x21
+        && (script[1] == 0x02 || script[1] == 0x03)
+        && script[34] == 0xac
+    {
+        return Some((u64::from(script[1]), &script[2..34]));
+    }
+    if script.len() == 67
+        && script[0] == 0x41
+        && script[1] == 0x04
+        && script[66] == 0xac
+        && secp256k1::PublicKey::from_slice(&script[1..66]).is_ok()
+    {
+        let code = 4 + u64::from(script[65] & 1);
+        return Some((code, &script[2..34]));
+    }
+    None
+}
+
 #[cfg(test)]
 // A codec test that cannot decode its own output has failed; panicking names
 // the offending value.
@@ -172,6 +235,84 @@ mod tests {
             "varint_len disagreed with write_varint for {value}"
         );
         len
+    }
+
+    #[test]
+    fn write_core_varint_encodes_reference_boundaries() {
+        for (expected, value) in [
+            (vec![0], 0),
+            (vec![0x7f], 127),
+            (vec![0x80, 0], 128),
+            (vec![0xff, 0x7f], 16_511),
+            (vec![0x80, 0x80, 0], 16_512),
+        ] {
+            let mut out = Vec::new();
+            super::write_core_varint(value, &mut out);
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn compress_script_handles_all_codes_and_fallbacks() {
+        let pkh = [0x11; 20];
+        let mut p2pkh = vec![0x76, 0xa9, 0x14];
+        p2pkh.extend_from_slice(&pkh);
+        p2pkh.extend_from_slice(&[0x88, 0xac]);
+        assert_eq!(super::compress_script(&p2pkh), Some((0, &pkh[..])));
+
+        let mut p2sh = vec![0xa9, 0x14];
+        p2sh.extend_from_slice(&pkh);
+        p2sh.push(0x87);
+        assert_eq!(super::compress_script(&p2sh), Some((1, &pkh[..])));
+
+        let mut comp2 = vec![0x21, 0x02];
+        comp2.extend_from_slice(&[0xff; 32]);
+        comp2.push(0xac);
+        assert_eq!(super::compress_script(&comp2), Some((2, &[0xff; 32][..])));
+
+        let mut comp3 = vec![0x21, 0x03];
+        comp3.extend_from_slice(&[0xfe; 32]);
+        comp3.push(0xac);
+        assert_eq!(super::compress_script(&comp3), Some((3, &[0xfe; 32][..])));
+
+        // secp256k1 generator G
+        let gx = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let gy = [
+            0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11,
+            0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f,
+            0xfb, 0x10, 0xd4, 0xb8,
+        ];
+        let mut p2pk_g = vec![0x41, 0x04];
+        p2pk_g.extend_from_slice(&gx);
+        p2pk_g.extend_from_slice(&gy);
+        p2pk_g.push(0xac);
+        // gy has even Y (last byte 0xb8 & 1 == 0), so code 4
+        assert_eq!(super::compress_script(&p2pk_g), Some((4, &gx[..])));
+
+        // -G has odd Y
+        let neg_gy = [
+            0xb7, 0xc5, 0x25, 0x88, 0xd9, 0x5c, 0x3b, 0x9a, 0xa2, 0x5b, 0x04, 0x03, 0xf1, 0xee,
+            0xf7, 0x57, 0x02, 0xe8, 0x4b, 0xb7, 0x59, 0x7a, 0xab, 0xe6, 0x63, 0xb8, 0x2f, 0x6f,
+            0x04, 0xef, 0x27, 0x77,
+        ];
+        let mut p2pk_neg_g = vec![0x41, 0x04];
+        p2pk_neg_g.extend_from_slice(&gx);
+        p2pk_neg_g.extend_from_slice(&neg_gy);
+        p2pk_neg_g.push(0xac);
+        assert_eq!(super::compress_script(&p2pk_neg_g), Some((5, &gx[..])));
+
+        // Invalid curve point for 67-byte script -> returns None (fallback to raw)
+        let mut invalid_uncompressed = p2pk_g.clone();
+        invalid_uncompressed[2..34].fill(0xff);
+        assert_eq!(super::compress_script(&invalid_uncompressed), None);
+
+        // Raw scripts -> return None
+        assert_eq!(super::compress_script(&[0x51]), None);
+        assert_eq!(super::compress_script(&[]), None);
     }
 
     #[test]

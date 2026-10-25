@@ -181,6 +181,19 @@ pub trait ChainControl: Send + Sync {
         ))
     }
 
+    /// Writes a Core v2 snapshot of the UTXO set at the applied tip to `path`.
+    ///
+    /// A relative `path` resolves below the node data directory. The file is
+    /// created only if nothing exists at `path`; an existing entry is refused
+    /// and never replaced. A request cancelled through `cancellation`, or a
+    /// node that begins shutting down, answers
+    /// [`SnapshotControlError::Interrupted`] and leaves no file behind.
+    fn dump_txoutset(
+        &self,
+        path: &std::path::Path,
+        cancellation: &LatchReader,
+    ) -> Result<SnapshotExport, SnapshotControlError>;
+
     /// Reads one coherent view of the existing active and historical roles.
     /// Existing implementors may omit this optional capability.
     fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
@@ -226,6 +239,24 @@ pub struct SnapshotImport {
     pub path: String,
 }
 
+/// A completed, durable Core snapshot export.
+#[derive(Debug, serde::Serialize)]
+pub struct SnapshotExport {
+    /// Number of unspent outputs written, not transaction records.
+    pub coins_written: u64,
+    /// Applied tip hash the snapshot is based on, in RPC display order.
+    pub base_hash: String,
+    /// Applied tip height the snapshot is based on.
+    pub base_height: u32,
+    /// UTF-8 display of the absolute output path. Non-UTF-8 filesystem bytes
+    /// in a parent directory are replaced for JSON output only.
+    pub path: String,
+    /// `hash_serialized_3` commitment of the written coins, in RPC display order.
+    pub txoutset_hash: String,
+    /// Transactions in the chain up to and including the base block.
+    pub nchaintx: u64,
+}
+
 /// Coherent lifecycle projection supplied by the chainstate owner.
 #[derive(Debug, serde::Serialize)]
 pub struct ChainstatesInfo {
@@ -267,6 +298,10 @@ pub enum SnapshotControlError {
     /// Activation, persistence, or post-commit consumer settlement failed.
     #[error("{0}")]
     Failed(String),
+    /// The requesting caller cancelled the operation, or the node began
+    /// shutting down, before it completed. Nothing was published.
+    #[error("Snapshot export interrupted")]
+    Interrupted,
 }
 
 /// Failure from a node-owned chain mutation.

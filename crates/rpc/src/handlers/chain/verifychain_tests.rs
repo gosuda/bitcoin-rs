@@ -133,6 +133,16 @@ impl ChainControl for StubControl {
         Err(ChainControlError::UnknownBlock)
     }
 
+    fn dump_txoutset(
+        &self,
+        _path: &std::path::Path,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<crate::context::SnapshotExport, crate::context::SnapshotControlError> {
+        Err(crate::context::SnapshotControlError::Unavailable(
+            "snapshot export is not attached to this stub".to_owned(),
+        ))
+    }
+
     fn verify_chain(
         &self,
         check_level: u8,

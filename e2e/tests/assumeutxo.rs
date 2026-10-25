@@ -751,3 +751,61 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
     }
     node.stop()
 }
+
+/// The bitcoin-rs exporter against the pinned Core process: the exported file
+/// is byte-identical to the unmodified Core artifact for the same chain, an
+/// existing destination is refused, and a fresh Core datadir accepts the file.
+#[test]
+fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
+    let artifacts = tempfile::tempdir()?;
+    let export = artifacts.path().join("export.dat");
+    let blocks = core_blocks()?;
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    for block in &blocks {
+        assert!(
+            node.rpc("submitblock", &json!([serialize_hex(block)]))?
+                .is_null()
+        );
+    }
+    let refused = |node: &mut ProcessNode, params: Value, code: i64| -> Result<()> {
+        let reply =
+            node.rpc_raw(&json!({"jsonrpc":"2.0","id":1,"method":"dumptxoutset","params":params}))?;
+        assert_eq!(reply["error"]["code"], json!(code), "{reply}");
+        Ok(())
+    };
+    // Core 31.1 gives `type` no usable default, and only "latest" is served.
+    refused(&mut node, json!([export]), -8)?;
+    refused(&mut node, json!([export, "rollback"]), -8)?;
+    assert!(!export.exists());
+
+    let dumped = node.rpc("dumptxoutset", &json!([export, "latest"]))?;
+    assert_eq!(dumped["coins_written"], 200);
+    assert_eq!(dumped["base_hash"], BASE);
+    assert_eq!(dumped["base_height"], 200);
+    assert_eq!(dumped["txoutset_hash"], COMMITMENT);
+    assert_eq!(dumped["nchaintx"], 201);
+    assert_eq!(
+        dumped.str_field("path")?,
+        export.canonicalize()?.to_string_lossy()
+    );
+    assert_eq!(
+        std::fs::read(&export)?,
+        CORE_SNAPSHOT,
+        "the exporter must reproduce the unmodified Core artifact"
+    );
+    refused(&mut node, json!([export, "latest"]), -8)?;
+    assert_eq!(std::fs::read(&export)?, CORE_SNAPSHOT);
+
+    let mut core = ProcessNode::spawn(Kind::Core)?;
+    admit_headers(&mut core, &blocks)?;
+    let loaded = core.rpc("loadtxoutset", &json!([export]))?;
+    assert_eq!(loaded["coins_loaded"], 200);
+    assert_eq!(loaded["tip_hash"], BASE);
+    assert_eq!(loaded["base_height"], 200);
+    assert_eq!(
+        core.rpc("gettxoutsetinfo", &json!(["hash_serialized_3"]))?["hash_serialized_3"],
+        COMMITMENT
+    );
+    node.stop()?;
+    core.stop()
+}

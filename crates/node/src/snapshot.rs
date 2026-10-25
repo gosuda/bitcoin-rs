@@ -1,21 +1,32 @@
-//! Node-owned bounded snapshot import and fenced consumer reconciliation.
+//! Node-owned bounded snapshot import, coherent export, and fenced consumer
+//! reconciliation.
 
+use std::ffi::OsStr;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bitcoin_rs_chain::LatchReader;
 use bitcoin_rs_chainstate::{
-    AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate, ChainstateRole,
+    ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
+    ChainstateRole,
 };
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::{Hash256, Network};
 use bitcoin_rs_rpc::context::{
-    ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotImport,
+    ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
-use bitcoin_rs_utxo::core_snapshot::{SnapshotLimits, read_and_verify};
+use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
+use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
+use bitcoin_rs_utxo::core_snapshot::{
+    CoreV2WriteReport, SnapshotError, SnapshotLimits, read_and_verify, write_core_v2,
+};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
+
+/// Bytes buffered between the encoder and the output file.
+const EXPORT_BUFFER_BYTES: usize = 64 * 1024;
 
 /// The import budget and activation effects shared by embedding and RPC.
 pub(crate) struct SnapshotControl {
@@ -27,6 +38,121 @@ pub(crate) struct SnapshotControl {
     // One imported UTXO set may be materialized at a time. This is a resource
     // permit, not a second lifecycle state. No chain write lock spans decoding.
     import: Mutex<()>,
+    // One export may wait for chain-transition exclusion and hold it while it
+    // encodes. A second request is refused rather than queued behind it.
+    export: Mutex<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SnapshotExportError {
+    #[error("another snapshot export is in progress")]
+    ExportInProgress,
+    #[error("Snapshot export interrupted")]
+    Interrupted,
+    #[error("snapshot output path needs a final UTF-8 file name")]
+    OutputName,
+    #[error("could not prepare snapshot output: {0}")]
+    Output(std::io::Error),
+    #[error(
+        "{0} already exists. If you are sure this is what you want, move it out of the way first"
+    )]
+    Exists(String),
+    #[error("snapshot output cannot be in the node's snapshot recovery namespace")]
+    RecoveryOutput,
+    #[error("this platform has no atomic no-replace rename, so a snapshot cannot be published")]
+    NoAtomicPublish,
+    #[error("chain is not accepting a snapshot export: {0}")]
+    Admission(#[from] ApplyError),
+    #[error("no applied tip to export")]
+    NoAppliedTip,
+    #[error("the applied tip has no established chain transaction count")]
+    ChainTxCountUnknown,
+    #[error("could not encode snapshot: {0}")]
+    Codec(#[from] SnapshotError),
+    #[error("could not write snapshot: {0}")]
+    Write(std::io::Error),
+    #[error("snapshot file holds {actual} bytes but the encoder wrote {expected}")]
+    Length { expected: u64, actual: u64 },
+    #[error("snapshot was published but its directory entry could not be made durable: {0}")]
+    DirectorySync(std::io::Error),
+}
+
+impl From<SnapshotExportError> for SnapshotControlError {
+    fn from(error: SnapshotExportError) -> Self {
+        match error {
+            SnapshotExportError::Interrupted
+            | SnapshotExportError::Codec(SnapshotError::Interrupted) => Self::Interrupted,
+            SnapshotExportError::OutputName
+            | SnapshotExportError::Output(_)
+            | SnapshotExportError::Exists(_)
+            | SnapshotExportError::RecoveryOutput => Self::File(error.to_string()),
+            SnapshotExportError::ExportInProgress
+            | SnapshotExportError::NoAtomicPublish
+            | SnapshotExportError::Admission(_)
+            | SnapshotExportError::NoAppliedTip
+            | SnapshotExportError::ChainTxCountUnknown => Self::Unavailable(error.to_string()),
+            SnapshotExportError::Codec(_)
+            | SnapshotExportError::Write(_)
+            | SnapshotExportError::Length { .. }
+            | SnapshotExportError::DirectorySync(_) => Self::Failed(error.to_string()),
+        }
+    }
+}
+
+/// A resolved output: the capability for its directory and the names in it.
+struct ExportTarget {
+    dir: cap_std::fs::Dir,
+    name: String,
+    temp: String,
+    path: PathBuf,
+}
+
+/// Removes the staged file unless it was published, so every error,
+/// interruption and panic path leaves no partial snapshot behind.
+struct StagedFile<'a> {
+    dir: &'a cap_std::fs::Dir,
+    name: &'a str,
+    published: bool,
+}
+
+impl<'a> StagedFile<'a> {
+    fn create(
+        dir: &'a cap_std::fs::Dir,
+        name: &'a str,
+    ) -> std::io::Result<(Self, cap_std::fs::File)> {
+        let file = create_file(dir, name)?;
+        Ok((
+            Self {
+                dir,
+                name,
+                published: false,
+            },
+            file,
+        ))
+    }
+
+    fn published(mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for StagedFile<'_> {
+    fn drop(&mut self) {
+        if !self.published
+            && let Err(error) = self.dir.remove_file(self.name)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(file = self.name, %error, "could not remove unpublished snapshot export");
+        }
+    }
+}
+
+/// What one locked encode certifies about the snapshot it wrote.
+struct Encoded {
+    report: CoreV2WriteReport,
+    base_hash: Hash256,
+    base_height: u32,
+    nchaintx: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,7 +248,192 @@ impl SnapshotControl {
             data_dir,
             network,
             import: Mutex::new(()),
+            export: Mutex::new(()),
         }
+    }
+
+    /// Writes the UTXO set at the applied tip as a Core v2 snapshot.
+    ///
+    /// The request latch or the chainstate shutdown latch stops the encode
+    /// within the writer's polling interval; either answers
+    /// [`SnapshotExportError::Interrupted`] and leaves no file.
+    pub(crate) fn export(
+        &self,
+        output: &Path,
+        cancellation: &LatchReader,
+    ) -> Result<SnapshotExport, SnapshotExportError> {
+        let shutdown = self.chainstate.shutdown_reader();
+        self.export_until(output, &|| {
+            cancellation.is_triggered() || shutdown.is_triggered()
+        })
+    }
+
+    fn export_until(
+        &self,
+        output: &Path,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<SnapshotExport, SnapshotExportError> {
+        // Refuse before any lock or byte: publication needs the no-replace
+        // rename, and discovering its absence after the encode would have
+        // blocked block commits for nothing.
+        if !HAS_ATOMIC_NOREPLACE_RENAME {
+            return Err(SnapshotExportError::NoAtomicPublish);
+        }
+        let _permit = self
+            .export
+            .try_lock()
+            .ok_or(SnapshotExportError::ExportInProgress)?;
+        let target = self.resolve_output(output)?;
+        if stop() {
+            return Err(SnapshotExportError::Interrupted);
+        }
+        let (staged, file) =
+            StagedFile::create(&target.dir, &target.temp).map_err(SnapshotExportError::Output)?;
+        let mut sink = BufWriter::with_capacity(EXPORT_BUFFER_BYTES, file);
+        let encoded = self.encode_at_applied_tip(&mut sink, stop)?;
+        sink.flush().map_err(SnapshotExportError::Write)?;
+        let file = sink
+            .into_inner()
+            .map_err(|error| SnapshotExportError::Write(error.into_error()))?;
+        file.sync_all().map_err(SnapshotExportError::Write)?;
+        let actual = file.metadata().map_err(SnapshotExportError::Write)?.len();
+        if actual != encoded.report.bytes {
+            return Err(SnapshotExportError::Length {
+                expected: encoded.report.bytes,
+                actual,
+            });
+        }
+        drop(file);
+        if stop() {
+            return Err(SnapshotExportError::Interrupted);
+        }
+        // A prior existence check cannot exclude another creator of the
+        // destination, so publication is the filesystem's no-replace rename.
+        match rename_noreplace(&target.dir, &target.temp, &target.name) {
+            Ok(()) => staged.published(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(SnapshotExportError::Exists(
+                    target.path.to_string_lossy().into_owned(),
+                ));
+            }
+            Err(error) => return Err(SnapshotExportError::Write(error)),
+        }
+        sync_dir(&target.dir).map_err(SnapshotExportError::DirectorySync)?;
+        Ok(SnapshotExport {
+            coins_written: encoded.report.coins,
+            base_hash: encoded.base_hash.to_string_be(),
+            base_height: encoded.base_height,
+            // JSON cannot serialize arbitrary filesystem bytes; only this
+            // display replaces them, never the path that was written.
+            path: target.path.to_string_lossy().into_owned(),
+            txoutset_hash: encoded.report.txoutset_hash.to_string_be(),
+            nchaintx: encoded.nchaintx,
+        })
+    }
+
+    /// Resolves `output` below the data directory when relative, refusing an
+    /// existing entry and the node's snapshot recovery namespace.
+    fn resolve_output(&self, output: &Path) -> Result<ExportTarget, SnapshotExportError> {
+        let joined = if output.is_absolute() {
+            output.to_path_buf()
+        } else {
+            self.data_dir.join(output)
+        };
+        let name = joined
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or(SnapshotExportError::OutputName)?
+            .to_owned();
+        let parent = joined
+            .parent()
+            .ok_or(SnapshotExportError::OutputName)?
+            .canonicalize()
+            .map_err(SnapshotExportError::Output)?;
+        // Activation publishes native recovery files in this namespace and may
+        // replace entries there, so an exported snapshot cannot live in it.
+        let recovery = self
+            .data_dir
+            .canonicalize()
+            .map_err(SnapshotExportError::Output)?
+            .join("assumeutxo");
+        if parent.starts_with(recovery) {
+            return Err(SnapshotExportError::RecoveryOutput);
+        }
+        let dir = open_data_dir(&parent).map_err(SnapshotExportError::Output)?;
+        let path = parent.join(&name);
+        match dir.symlink_metadata(&name) {
+            Ok(_) => {
+                return Err(SnapshotExportError::Exists(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(SnapshotExportError::Output(error)),
+        }
+        Ok(ExportTarget {
+            temp: format!("{name}.{}.incomplete", std::process::id()),
+            dir,
+            name,
+            path,
+        })
+    }
+
+    /// Encodes the applied tip's UTXO set into `sink`.
+    ///
+    /// The transition lock is taken before the stable view, matching block
+    /// apply, and both are held across the whole encode because the set has no
+    /// immutable capture: no commit can interleave between the tip read, the
+    /// coin count and the last coin. Commit-blocking time, from the permit
+    /// to its release, is logged for every outcome.
+    fn encode_at_applied_tip<W: Write>(
+        &self,
+        sink: &mut W,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Encoded, SnapshotExportError> {
+        let transition = self.chainstate.lock_transition()?;
+        let permitted = quanta::Instant::now();
+        let encoded = self.encode_under_view(sink, stop);
+        drop(transition);
+        let held_us = permitted.elapsed().as_micros();
+        match &encoded {
+            Ok(done) => tracing::info!(
+                held_us,
+                coins = done.report.coins,
+                bytes = done.report.bytes,
+                base_height = done.base_height,
+                "snapshot export released the chain transition"
+            ),
+            Err(error) => tracing::warn!(
+                held_us,
+                %error,
+                "snapshot export released the chain transition without a snapshot"
+            ),
+        }
+        encoded
+    }
+
+    fn encode_under_view<W: Write>(
+        &self,
+        sink: &mut W,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Encoded, SnapshotExportError> {
+        let utxo = self.chainstate.utxo_reader();
+        let view = utxo.lock_stable_view();
+        let snapshot = self.chainstate.snapshot();
+        let tip = snapshot.applied.ok_or(SnapshotExportError::NoAppliedTip)?;
+        let nchaintx = snapshot
+            .chain_tx_count
+            .get()
+            .ok_or(SnapshotExportError::ChainTxCountUnknown)?;
+        let coins = u64::try_from(view.len())
+            .map_err(|error| SnapshotExportError::Write(std::io::Error::other(error)))?;
+        let report = write_core_v2(&view, self.network, tip.hash, tip.height, coins, sink, stop)?;
+        Ok(Encoded {
+            report,
+            base_hash: tip.hash,
+            base_height: tip.height,
+            nchaintx,
+        })
     }
 
     // Both input formats claim the same resource permit and refuse a second
@@ -555,6 +866,168 @@ mod tests {
             Some(200)
         );
         assert!(gateway.stable_generation().is_some());
+        Ok(())
+    }
+
+    fn entry_names(dir: &Path) -> anyhow::Result<Vec<String>> {
+        let mut names = std::fs::read_dir(dir)?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        names.sort();
+        Ok(names)
+    }
+
+    #[test]
+    fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+        state.snapshots.import(&core_path)?;
+        let core_bytes = std::fs::read(&core_path)?;
+        let pin = Network::Regtest
+            .assume_utxo_for_height(200)
+            .ok_or_else(|| anyhow::anyhow!("the regtest 200-height pin is compiled"))?;
+        let coins = read_and_verify(
+            &mut core_bytes.as_slice(),
+            Network::Regtest,
+            SnapshotLimits::default(),
+        )?
+        .metadata
+        .coins_count;
+        let never = LatchReader::fixture_never();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out)?;
+        let output = out.join("export.dat");
+
+        let exported = state.snapshots.export(&output, &never)?;
+        assert_eq!(std::fs::read(&output)?, core_bytes);
+        assert_eq!(exported.coins_written, coins);
+        assert_eq!(exported.base_height, 200);
+        assert_eq!(exported.base_hash, pin.block_hash.to_string_be());
+        assert_eq!(exported.txoutset_hash, pin.hash_serialized.to_string_be());
+        assert_eq!(exported.nchaintx, pin.chain_tx_count);
+        assert_eq!(
+            exported.path,
+            output.canonicalize()?.to_string_lossy().into_owned()
+        );
+        assert_eq!(entry_names(&out)?, ["export.dat"]);
+
+        // The published file and an operator's file both survive a second
+        // export, and no temporary file is left beside them.
+        assert!(matches!(
+            state.snapshots.export(&output, &never),
+            Err(SnapshotExportError::Exists(_))
+        ));
+        let operator = out.join("operator.dat");
+        std::fs::write(&operator, b"operator")?;
+        assert!(matches!(
+            state.snapshots.export(&operator, &never),
+            Err(SnapshotExportError::Exists(_))
+        ));
+        assert_eq!(std::fs::read(&operator)?, b"operator");
+        assert_eq!(std::fs::read(&output)?, core_bytes);
+        assert_eq!(entry_names(&out)?, ["export.dat", "operator.dat"]);
+
+        // A relative path resolves below the data directory.
+        let relative = state.snapshots.export(Path::new("relative.dat"), &never)?;
+        assert_eq!(
+            std::fs::read(dir.path().join("node/relative.dat"))?,
+            core_bytes
+        );
+        assert_eq!(
+            relative.path,
+            dir.path()
+                .join("node/relative.dat")
+                .canonicalize()?
+                .to_string_lossy()
+        );
+
+        // Activation may replace entries in the recovery namespace, so an
+        // export cannot be placed there.
+        let recovery = dir.path().join("node/assumeutxo/export.dat");
+        assert!(matches!(
+            state.snapshots.export(&recovery, &never),
+            Err(SnapshotExportError::RecoveryOutput)
+        ));
+        assert!(!recovery.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+        state.snapshots.import(&core_path)?;
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out)?;
+        let output = out.join("interrupted.dat");
+
+        let cancelled = LatchReader::new(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        assert!(matches!(
+            state.snapshots.export(&output, &cancelled),
+            Err(SnapshotExportError::Interrupted)
+        ));
+        assert!(entry_names(&out)?.is_empty());
+
+        // The second poll is the encoder's own, after the staged file exists
+        // and the chain locks are held.
+        let polls = std::cell::Cell::new(0_u32);
+        let stop = || {
+            polls.set(polls.get() + 1);
+            polls.get() > 1
+        };
+        let error = state
+            .snapshots
+            .export_until(&output, &stop)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("an interrupted export must fail"))?;
+        assert!(matches!(
+            error,
+            SnapshotExportError::Codec(SnapshotError::Interrupted)
+        ));
+        assert!(matches!(
+            SnapshotControlError::from(error),
+            SnapshotControlError::Interrupted
+        ));
+        assert!(entry_names(&out)?.is_empty());
+
+        // The locks were released: a later export succeeds.
+        state
+            .snapshots
+            .export(&output, &LatchReader::fixture_never())?;
+        assert_eq!(entry_names(&out)?, ["interrupted.dat"]);
+
+        // Node shutdown interrupts like the request latch does.
+        state.chainstate().request_shutdown();
+        assert!(matches!(
+            state
+                .snapshots
+                .export(&out.join("shutdown.dat"), &LatchReader::fixture_never()),
+            Err(SnapshotExportError::Interrupted)
+        ));
+        assert_eq!(entry_names(&out)?, ["interrupted.dat"]);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_export_is_refused_while_the_permit_is_held() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+        state.snapshots.import(&core_path)?;
+        let output = dir.path().join("busy.dat");
+        {
+            let _permit = state.snapshots.export.lock();
+            let error = state
+                .snapshots
+                .export(&output, &LatchReader::fixture_never())
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("a held permit must refuse the export"))?;
+            assert!(matches!(error, SnapshotExportError::ExportInProgress));
+            assert!(matches!(
+                SnapshotControlError::from(error),
+                SnapshotControlError::Unavailable(_)
+            ));
+        }
+        assert!(!output.exists());
         Ok(())
     }
 }

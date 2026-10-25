@@ -979,7 +979,7 @@ owned by [wallet-facing.md](wallet-facing.md).
   handler retains O(number of requested outputs) rows and transaction
   references. It never scans or clones the full mempool.
 
-### `API-33`: Core snapshot import and lifecycle reporting
+### `API-33`: Core snapshot import, export and lifecycle reporting
 
 `loadtxoutset(path)` synchronously reads an unmodified Bitcoin Core v2
 `dumptxoutset` file. Positional `[path]` and named `{ "path": path }` parameters
@@ -1044,10 +1044,88 @@ fields are omitted because this projection does not expose corresponding
 owner facts. Role state and progress survive restart through the durable head
 and the existing checkpoint/replay contract.
 
-`dumptxoutset` export remains unimplemented and is a separate producer feature.
-The process contract is exercised by `e2e/tests/assumeutxo.rs`, using an actual
-Core 31.1 dump of the deterministic, compiled regtest 200-height pin. Regtest
-evidence does not establish mainnet memory or throughput qualifications.
+`dumptxoutset(path, "latest")` writes the applied tip's UTXO set as an
+unmodified Core v2 snapshot. Positional `[path, type]` and named
+`{ "path": path, "type": "latest" }` parameters are accepted.
+
+The registry marks `dumptxoutset` as a Deviation from Core 31.1. Its note
+records that only `type` `"latest"` is served, so rollback snapshots and the
+`options` object (`rollback`, `in_memory`) are not accepted, and that the encode
+holds chain-transition and stable-view exclusion for its whole duration, so
+block commits wait. The note also states the cancellation and output rules
+below.
+
+`type` is required and MUST be `"latest"`, as in Core 31.1. A missing, null or
+empty `type`, any other string, and an unknown named parameter such as
+`rollback` return -8.
+
+A relative `path` resolves below the configured datadir, and its final
+component MUST be UTF-8. Nothing is ever replaced: an existing destination of
+any kind, including a named pipe, is refused with -8, as is a destination under
+the node's `assumeutxo` recovery namespace (activation may replace entries
+there).
+
+The export is one coherent view. It takes chain-transition exclusion and then
+the stable UTXO view, reads the applied tip and its chain transaction count
+while holding both, and holds both until the last coin is encoded. No immutable
+capture of the set exists, so block commits wait for the whole encode. Once the
+node holds chain-transition exclusion, it logs the hold, measured to the release
+of both guards, for every outcome: an info message `snapshot export released the
+chain transition` with the coin and byte counts on success, and a warning
+`snapshot export released the chain transition without a snapshot` on failure.
+This contract does not claim the hold is harmless on a large set.
+
+The writer accumulates the `txoutset_hash` in the same pass that writes the
+coins, and no second hashing or read-back pass runs. At most one export runs at
+a time; a second request is refused with -32603 instead of queueing behind the
+first. There is no producer-side check of the base against a compiled anchor:
+the importing node supplies that trust.
+
+The request latch (the dispatcher's cancellation latch) or node shutdown stops
+the export. The node polls them before it creates the temporary file, the
+encoder polls them before its first write and every 5,000 coins, and the node
+polls them again before publication. Waiting for chain-transition exclusion and
+sorting one shard are not polled, so a cancelled request can wait for an
+in-flight chain transition before it stops. An interrupted export answers -1 and
+publishes nothing. The call is classified as blocking: it takes one slot of the
+dispatcher's bounded blocking quota (see `API-34`), and a full quota answers -1.
+
+The output is a sibling temporary file (`<name>.<pid>.incomplete`) created with
+`create_new`, written through a 64 KiB buffer, fsynced, and length-checked
+against the encoder's byte count. The node then renames it into place with the
+filesystem's atomic no-replace rename, because a prior existence check cannot
+exclude a concurrent creator, and fsyncs the directory. A drop guard tries to
+remove the temporary file whenever the export returns without publishing it. A
+crash, kill, abort, power loss or failed removal (logged as a warning) can leave
+one behind. A failure of the final directory fsync is reported although the file
+is already in place. Only Linux, Android, Apple and Redox targets have an
+atomic no-replace rename; other platforms refuse the export before it takes any
+lock.
+
+The result contains `coins_written` (unspent **outputs**), `base_hash` and
+`base_height` of the applied tip, the absolute `path` (parent directory
+canonicalized; non-UTF-8 bytes in it are replaced only in this JSON display),
+`txoutset_hash` (`hash_serialized_3` in display order) and `nchaintx` (chain
+transactions through the base block).
+
+Error codes: -8 for a refused destination (including one created between the
+existence check and the rename), an unusable output directory, a temporary file
+that cannot be created, and the `type` and named-parameter refusals above. -1
+for an interrupted export or a full blocking quota. -32603 for a platform
+without an atomic no-replace rename, a closed admission, a missing applied tip,
+an unestablished chain transaction count, a concurrent export, and any encode,
+write, length or sync failure.
+
+Evidence for the export needs the pinned Core 31.1 `bitcoind`. The test
+`bitcoin_rs_export_is_accepted_by_a_fresh_core_node` in
+`e2e/tests/assumeutxo.rs` submits the 200 blocks of the Core v2 fixture to this
+node and checks that its export equals the committed
+`crates/utxo/tests/fixtures/core-v2/core200.dat`, the unmodified Core 31.1
+`dumptxoutset` output (fixture README). It then loads the export into a fresh
+Core node, which accepts it. The test fails, not skips, when the pinned binary is
+missing or its digest differs from the one in `crates/rpc/core-compat.toml`.
+`scripts/install-bitcoind.sh` installs it. The evidence is regtest height 200
+only. It does not establish mainnet memory, throughput, or commit-blocking time.
 
 ### `API-34`: Active-tip waits
 
@@ -1084,10 +1162,13 @@ evidence does not establish mainnet memory or throughput qualifications.
   latch; an old server's shutdown cannot cancel or revive the new service.
 - Registry execution metadata classifies the three wait methods,
   `scantxoutset`'s `start` action, and a template `getblocktemplate` request
-  carrying a string `longpollid`. Every `Handler::dispatch`, including direct
-  callers, batch entries and notifications, acquires its dispatcher's
-  bounded blocking quota. A bound listener permits one fewer such call than
-  one source address may hold (`max_connections - max_connections / 4 - 1`,
+  carrying a string `longpollid`. The registry rows of `verifychain`,
+  `compressrawtransaction`, `decompressrawtransaction` and `dumptxoutset` carry
+  the same `Blocking` class; the proof tests below pin only the wait,
+  scan-start and long-poll classes. Every `Handler::dispatch` of a classified
+  call, including direct callers, batch entries and notifications, acquires its
+  dispatcher's bounded blocking quota. A bound listener permits one fewer such
+  call than one source address may hold (`max_connections - max_connections / 4 - 1`,
   95 of the node's 128; zero with one worker). Blocking calls therefore never
   take a source's last connection or the whole pool. The total connection
   bound is unchanged: once the pool is full, every source is refused, as
@@ -1217,12 +1298,62 @@ evidence does not establish mainnet memory or throughput qualifications.
   `crates/storage/tests/bounded_value_read.rs` covers borrowed/pinned copy
   limits and unsupported defaults across the supported storage engines.
 
-- `API-33`: `e2e/tests/assumeutxo.rs` covers a freshly Core-produced portable
-  snapshot, both chainstate roles, restart/finalization, non-UTF-8 symlink
-  targets, corrupt recovery, and orphan cleanup while preserving source hard
-  links. Node snapshot tests cover lifecycle provenance and bounded FIFO
-  rejection; chainstate snapshot tests cover unknown progress and live-writer
-  exclusion during cleanup.
+- `API-33` import and lifecycle, in `e2e/tests/assumeutxo.rs`:
+  - `core_snapshot_import_syncs_both_roles_and_recovers` imports a snapshot that
+    the pinned Core process dumped. It checks both chainstate roles, a repeated
+    import refused with -32603, restart recovery, and convergence to one
+    validated role that keeps `snapshot_blockhash`. It needs the pinned Core
+    binary.
+  - `invalid_core_snapshots_fail_without_activating` checks that an import
+    without trusted headers returns -32603, that six malformed or untrusted
+    variants of the fixture (truncated, wrong network, unpinned base, wrong
+    commitment, trailing byte, duplicated body) return -22 and leave one
+    chainstate, and, on Unix, that a symlink resolving to a non-UTF-8 filename
+    imports and reports the lossy absolute path.
+  - `corrupt_snapshot_recovery_fails_closed` checks that a corrupted committed
+    archive refuses startup and leaves the source file unchanged.
+  - `core_import_preserves_source_hardlinked_to_archive_staging` checks that
+    hard links of the source in the archive directory survive an import, that a
+    restart removes abandoned native reservations, and that a reservation-named
+    hard link of the source is kept.
+- `API-33` lifecycle and import inputs, in the unit tests:
+  - `active_origin_survives_failure_and_validated_provenance_survives_finalization`
+    in `crates/node/src/snapshot.rs` checks the reported snapshot base for a
+    failed assumed role and a finalized ordinary role, and none when no
+    snapshot exists.
+  - `input_fifo_is_rejected_without_waiting_for_a_writer` in the same file
+    checks that a named-pipe import input is refused as non-regular without
+    blocking (Unix, not Apple).
+  - `lifecycle_progress_omits_missing_and_unauthenticated_counts` in
+    `crates/chainstate/tests/unit/assumeutxo_tests.rs` checks that verification
+    progress is omitted when the transaction count is missing or unknown.
+  - `live_archive_reservation_is_not_reclaimed`,
+    `abandoned_native_reservations_are_reclaimed_without_touching_unknowns` and
+    `fifo_replacement_after_entry_check_is_preserved_without_blocking` in
+    `crates/chainstate/src/assumeutxo_snapshot.rs` check that reservation
+    cleanup keeps a live writer's file, removes only abandoned native
+    reservations, and does not block on a named pipe (the pipe test is
+    Unix-only).
+- `API-33` export:
+  - `bitcoin_rs_export_is_accepted_by_a_fresh_core_node` in
+    `e2e/tests/assumeutxo.rs` needs the pinned Core binary (see the export
+    evidence above).
+  - `export_reproduces_the_core_snapshot_and_never_replaces_an_entry` in
+    `crates/node/src/snapshot.rs` checks Core-equal bytes and reported
+    commitment, a relative path, no replacement of an existing or operator file,
+    and recovery-namespace refusal.
+  - `interrupted_export_publishes_nothing_and_removes_its_staged_file` checks
+    that a triggered request latch, an encoder-time stop and node shutdown leave
+    no staged file. `concurrent_export_is_refused_while_the_permit_is_held`
+    checks the one-export permit.
+  - The `dumptxoutset_tests` module in `crates/rpc/src/handlers/chain.rs` covers
+    parameter binding, refusals and error codes.
+  - `writer_emits_byte_identical_core200_snapshot_and_roundtrips_read_and_verify`
+    and `writer_cancellation_polls_every_5000_coins` in
+    `crates/utxo/src/core_snapshot/tests.rs`, and
+    `rename_noreplace_refuses_an_existing_destination_and_keeps_both_files` in
+    `crates/storage/src/checkpoint/tests.rs`, cover the encoder and the
+    no-replace rename.
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
   `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:

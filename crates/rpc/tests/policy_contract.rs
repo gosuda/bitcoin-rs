@@ -1560,8 +1560,22 @@ impl ChainControl for NodeInvalidator {
             })
     }
 
-    // This fixture routes only invalidation through the node; with no block
-    // verifier wired, the chain cannot be declared verified.
+    // This fixture routes only invalidation through the node; it has no
+    // snapshot exporter wired.
+    fn dump_txoutset(
+        &self,
+        _path: &std::path::Path,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::SnapshotControlError::Unavailable(
+            "snapshot export is not attached to this fixture".to_owned(),
+        ))
+    }
+
+    // With no block verifier wired, the chain cannot be declared verified.
     fn verify_chain(
         &self,
         _check_level: u8,

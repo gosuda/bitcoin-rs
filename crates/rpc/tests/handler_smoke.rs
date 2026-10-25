@@ -14,6 +14,7 @@ use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapsh
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
+use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
@@ -263,7 +264,7 @@ fn network_and_wallet_expectations(
         (
             "getnetworkinfo",
             json!([]),
-            json!({"protocolversion": 70016, "connections": 0, "networkactive": true}),
+            json!({"protocolversion": PROTOCOL_VERSION, "connections": 0, "networkactive": true}),
         ),
         ("getpeerinfo", json!([]), json!([])),
         ("getconnectioncount", json!([]), json!(0)),
@@ -394,6 +395,20 @@ impl ChainControl for RecordingChainControl {
             Some(error) => Err(error.clone()),
             None => Ok(()),
         }
+    }
+
+    // No snapshot exporter is wired into this fixture.
+    fn dump_txoutset(
+        &self,
+        _path: &std::path::Path,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::SnapshotControlError::Unavailable(
+            "snapshot export is not attached to this fixture".to_owned(),
+        ))
     }
 
     // No block verifier is wired, so the chain cannot be declared verified.
