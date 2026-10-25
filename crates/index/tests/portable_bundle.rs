@@ -374,7 +374,9 @@ struct CrashAfterBulkImport {
 impl CrashAfterBulkImport {
     fn admit(&self, batch: BufferedWriteBatch) -> Result<(Vec<BatchOp>, bool), StorageError> {
         if self.crashed.load(Ordering::Acquire) {
-            return Err(StorageError::backend("injected crash after a bulk import batch"));
+            return Err(StorageError::backend(
+                "injected crash after a bulk import batch",
+            ));
         }
         let ops = batch.into_ops();
         let tx_rows = ops
@@ -431,7 +433,8 @@ impl KvStore for CrashAfterBulkImport {
         start: &[u8],
         limit: PrefixScanLimit,
     ) -> Result<PrefixScan, StorageError> {
-        self.inner.scan_prefix_from_bounded(cf, prefix, start, limit)
+        self.inner
+            .scan_prefix_from_bounded(cf, prefix, start, limit)
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -772,8 +775,14 @@ fn exported_bundle(fixture: &ChainFixture, source: &Path, bundle: &Path) {
     );
     node.wait_reconciling();
     node.stop();
-    assert!(bundle.join(MANIFEST).is_file(), "export published no manifest");
-    assert!(bundle.join(ARTIFACT).is_file(), "export published no artifact");
+    assert!(
+        bundle.join(MANIFEST).is_file(),
+        "export published no manifest"
+    );
+    assert!(
+        bundle.join(ARTIFACT).is_file(),
+        "export published no artifact"
+    );
 }
 
 fn assert_untouched_fresh(receiver: &Path) {
@@ -844,7 +853,11 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
     source_node.stop();
 
     assert_eq!(durable(&receiver), source_state);
-    assert_eq!(read_dir_files(&bundle), bundle_files, "restore mutated the bundle");
+    assert_eq!(
+        read_dir_files(&bundle),
+        bundle_files,
+        "restore mutated the bundle"
+    );
 
     exported_bundle(&fixture, &receiver, &again);
     assert_eq!(
@@ -876,7 +889,9 @@ fn damaged_bundles_are_refused_before_any_write_or_reset() {
         ("payload-bit-flip", |dir, len| {
             flip_byte(&dir.join(ARTIFACT), len - 1);
         }),
-        ("header-bit-flip", |dir, _| flip_byte(&dir.join(ARTIFACT), 10)),
+        ("header-bit-flip", |dir, _| {
+            flip_byte(&dir.join(ARTIFACT), 10)
+        }),
         ("artifact-truncated", |dir, len| {
             fs::OpenOptions::new()
                 .write(true)
@@ -920,7 +935,11 @@ fn damaged_bundles_are_refused_before_any_write_or_reset() {
         );
         node.stop();
         assert_untouched_fresh(&receiver);
-        assert_eq!(read_dir_files(&damaged), damaged_files, "{name}: bundle rewritten");
+        assert_eq!(
+            read_dir_files(&damaged),
+            damaged_files,
+            "{name}: bundle rewritten"
+        );
 
         // A ready index is never reset by a refused bundle.
         let ready = Node::start(
@@ -935,7 +954,11 @@ fn damaged_bundles_are_refused_before_any_write_or_reset() {
         ready.wait_reconciling();
         ready.wait_synced(fixture.tip.height);
         ready.stop();
-        assert_eq!(durable(&source), source_state, "{name}: ready index changed");
+        assert_eq!(
+            durable(&source),
+            source_state,
+            "{name}: ready index changed"
+        );
     }
 }
 
@@ -1024,7 +1047,11 @@ fn cancelled_export_removes_only_its_own_staging() {
         staged.load(Ordering::Acquire),
         "export was cancelled before it created its artifact"
     );
-    assert_eq!(read_dir_files(&bundle), before, "cancelled export left staging");
+    assert_eq!(
+        read_dir_files(&bundle),
+        before,
+        "cancelled export left staging"
+    );
     assert_eq!(durable(&source), source_state);
 
     exported_bundle(&fixture, &source, &bundle);
