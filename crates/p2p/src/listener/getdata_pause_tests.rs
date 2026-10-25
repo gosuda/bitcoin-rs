@@ -45,6 +45,13 @@ pub(super) struct ScriptedChain {
 }
 
 impl ChainQuery for ScriptedChain {
+    fn stale_tip_announcement(
+        &self,
+        _tip: bitcoin_rs_primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<crate::dispatch::StaleTipHeaders> {
+        None
+    }
     fn headers_after(
         &self,
         _locator_hashes: &[BlockHash],

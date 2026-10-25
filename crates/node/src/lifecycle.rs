@@ -106,15 +106,20 @@ impl ChainControl for RpcChainControl {
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> core::result::Result<(), ChainControlError> {
-        let invalidated = crate::reorg::invalidate_block(&self.handles, &self.followers, hash)
+        let outcome = crate::reorg::invalidate_block(&self.handles, &self.followers, hash)
             .map_err(|error| match error {
                 crate::reorg::ReorgError::UnknownBlock(_) => ChainControlError::UnknownBlock,
                 crate::reorg::ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
                 other => ChainControlError::Failed(other.to_string()),
             })?;
         // The transition is already released; the invalid descendants must
-        // not keep occupying bounded download staging.
-        self.sync.purge_invalidated(&invalidated);
+        // not keep occupying bounded download staging. A valid tip the
+        // invalidation displaced is recorded afterwards, outside the
+        // transition, because recording reads the block tree.
+        self.sync.purge_invalidated(&outcome.invalid);
+        if let Some(demoted) = outcome.demoted_tip {
+            self.sync.record_demoted_tip(demoted);
+        }
         Ok(())
     }
 
@@ -753,7 +758,8 @@ pub(crate) fn start_node(
             bitcoin_rs_p2p::BlockAnnounceConfig::default(),
         )
         .with_ibd(state.ibd(), state.config().network)
-        .with_recent_block(recent_block),
+        .with_recent_block(recent_block)
+        .with_stale_tips(peer_ready_sync.stale_tips(), chainstate.block_tree_reader()),
     );
     // Early compact-block announce: connect fires this hook after block rules
     // pass for a tip child, before the durable commit. The hook only hands

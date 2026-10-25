@@ -132,6 +132,8 @@ pub enum Message {
     SendAddrV2,
     /// BIP434 `feature`
     Feature(crate::feature::FeatureAnnouncement),
+    /// BIP332 `staletip`
+    StaleTip(crate::staletip::StaleTipAnnouncement),
     /// Any other message.
     Unknown {
         /// The command of this message.
@@ -182,6 +184,7 @@ impl Message {
             Self::AddrV2(_) => "addrv2",
             Self::SendAddrV2 => "sendaddrv2",
             Self::Feature(_) => crate::feature::FEATURE_COMMAND,
+            Self::StaleTip(_) => crate::staletip::STALETIP_COMMAND,
             Self::Unknown { command, .. } => return command.clone(),
         };
         match CommandString::try_from_static(name) {
@@ -224,7 +227,8 @@ impl Message {
             | Self::Block(_)
             | Self::BlockPayload(_)
             | Self::Headers(_)
-            | Self::Feature(_) => {
+            | Self::Feature(_)
+            | Self::StaleTip(_) => {
                 unreachable!("native payloads are encoded directly")
             }
             Self::SendHeaders => NetworkMessage::SendHeaders,
@@ -277,6 +281,9 @@ pub enum PeerError {
     /// BIP434 feature announcement decoding or encoding failed.
     #[error("feature error: {0}")]
     Feature(#[from] crate::feature::FeatureError),
+    /// BIP332 stale-tip announcement decoding or encoding failed.
+    #[error("staletip error: {0}")]
+    StaleTip(#[from] crate::staletip::StaleTipError),
     /// Command name is not valid for a v1 P2P header.
     #[error("invalid command `{0}`")]
     InvalidCommand(String),
@@ -346,6 +353,7 @@ impl PeerError {
                     | Self::Varint(_)
                     | Self::NativeDecode(_)
                     | Self::Feature(_)
+                    | Self::StaleTip(_)
                     | Self::Misbehavior(_)
             ),
             _ => false,
@@ -651,6 +659,9 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .checked_add(entries_len)
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
+        // At most `MAX_PAYLOAD_LEN` bytes; measuring by encoding shares the
+        // encoder's bounds exactly.
+        Message::StaleTip(announcement) => crate::staletip::encode(announcement)?.len(),
         Message::Feature(feature) => {
             let id_len = feature.id.as_bytes().len();
             let data_len = feature.data.len();
@@ -696,6 +707,9 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
         Message::Feature(feature) => {
             let encoded = crate::feature::encode(feature)?;
             payload.extend_from_slice(&encoded);
+        }
+        Message::StaleTip(announcement) => {
+            payload.extend_from_slice(&crate::staletip::encode(announcement)?);
         }
         other => payload.extend_from_slice(&encode::serialize(&other.envelope())),
     }
@@ -756,6 +770,18 @@ pub(crate) fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, P
         "addrv2" => Message::AddrV2(decode_addrv2(payload)?),
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
         "feature" => Message::Feature(crate::feature::decode(payload)?),
+        "staletip" => match crate::staletip::decode(payload) {
+            Ok(announcement) => Message::StaleTip(announcement),
+            // BIP332: an announcement over its header limit is ignored, not
+            // punished. It surfaces as an `Unknown` `staletip` without its
+            // payload, which a ready peer's dispatch ignores like any other
+            // unknown command.
+            Err(error) if error.is_policy_limit() => Message::Unknown {
+                command: command_string(crate::staletip::STALETIP_COMMAND)?,
+                payload: Vec::new(),
+            },
+            Err(error) => return Err(error.into()),
+        },
         _ => {
             debug_assert!(
                 !crate::compat::is_typed_command(command),
@@ -1278,6 +1304,73 @@ mod tests {
             result,
             Err(PeerError::Feature(crate::feature::FeatureError::Truncated))
         ));
+    }
+
+    fn frame_of(command: &[u8], payload: &[u8]) -> Result<Vec<u8>, PeerError> {
+        let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+        frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+        let mut field = [0u8; super::COMMAND_LEN];
+        field[..command.len()].copy_from_slice(command);
+        frame.extend_from_slice(&field);
+        let len =
+            u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+        frame.extend_from_slice(&len.to_le_bytes());
+        frame.extend_from_slice(&super::checksum(payload));
+        frame.extend_from_slice(payload);
+        Ok(frame)
+    }
+
+    #[test]
+    fn staletip_roundtrips_and_over_limit_is_ignored_not_punished() -> Result<(), PeerError> {
+        use crate::staletip::{CompressedHeader, StaleTipAnnouncement, StaleTipError};
+
+        let announcement = StaleTipAnnouncement {
+            fork_point: bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
+            headers: vec![
+                CompressedHeader {
+                    version: 0x2000_0000,
+                    merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]),
+                    time: 1_700_000_000,
+                    bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff),
+                    nonce: 9,
+                };
+                2
+            ],
+            have_block: true,
+        };
+        let message = super::Message::StaleTip(announcement);
+        assert_eq!(message.command().as_ref(), "staletip");
+
+        let mut wire = Vec::new();
+        let written = write_message(&mut wire, Magic::REGTEST, &message)?;
+        assert_eq!(written, wire_len(&message)?);
+        let (decoded, raw) = read_message(&mut Cursor::new(wire), Magic::REGTEST)?;
+        assert_eq!(decoded, message);
+        assert_eq!(raw.as_ref(), encode_payload(&message)?.as_slice());
+
+        // 21 headers: over the BIP332 limit, decided from the count alone.
+        let mut over = vec![0u8; 32];
+        over.push(21);
+        let (ignored, _) = read_message(
+            &mut Cursor::new(frame_of(b"staletip", &over)?),
+            Magic::REGTEST,
+        )?;
+        assert!(
+            matches!(&ignored, super::Message::Unknown { command, payload }
+                if command.as_ref() == "staletip" && payload.is_empty()),
+            "{ignored:?}"
+        );
+
+        // Any other defect is a malformed payload.
+        let result = read_message(
+            &mut Cursor::new(frame_of(b"staletip", &[0u8; 31])?),
+            Magic::REGTEST,
+        );
+        assert!(matches!(
+            result,
+            Err(PeerError::StaleTip(StaleTipError::Truncated))
+        ));
+        Ok(())
     }
 
     #[test]

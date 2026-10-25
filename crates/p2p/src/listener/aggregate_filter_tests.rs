@@ -59,6 +59,13 @@ impl FilterChain {
 }
 
 impl ChainQuery for FilterChain {
+    fn stale_tip_announcement(
+        &self,
+        _: bitcoin_rs_primitives::Hash256,
+        _: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<crate::dispatch::StaleTipHeaders> {
+        None
+    }
     fn serve_compact_filters(
         &self,
         request: &FilterRequest,

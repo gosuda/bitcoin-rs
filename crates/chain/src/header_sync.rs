@@ -7,7 +7,7 @@ use pow::{compact_to_target, target_to_compact};
 use crate::{
     ChainError,
     node::{BlockHeader, ChainWork, NodeId, NodeStatus},
-    tree::BlockTree,
+    tree::{BlockTree, Inserted},
 };
 
 // Maximum live future drift from the caller's network-adjusted clock.
@@ -39,6 +39,9 @@ pub enum HeaderAdmission {
         announced_tip: Option<Hash256>,
         /// Height of `announced_tip` on the active chain, when resolvable.
         active_height: Option<i32>,
+        /// The active tip this batch moved onto another branch, when it did;
+        /// see [`AcceptHeaders::demoted_tip`].
+        demoted_tip: Option<Hash256>,
     },
     /// Header validation rejected the batch (peer-fault classification stays
     /// with the caller).
@@ -46,6 +49,30 @@ pub enum HeaderAdmission {
     /// Admission refused before validation (chain transition lock
     /// unavailable); batch dropped.
     Refused(Box<dyn core::error::Error + Send + Sync>),
+}
+
+/// Facts of one batch admitted by [`accept_headers`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AcceptHeaders {
+    /// One node id per input header, in input order, including idempotent
+    /// duplicates.
+    pub ids: Vec<NodeId>,
+    /// The active tip this batch moved onto another branch, when it did: the
+    /// tip that was active before the batch, now a stale side-branch tip.
+    /// `None` when the batch extended the active tip or left it unchanged.
+    ///
+    /// A contiguous batch displaces at most one tip, because once the tip lies
+    /// on the batch's own chain every later header extends it. A batch the
+    /// validation rejects after a prefix moved the tip returns `Err`, so that
+    /// displacement is not reported; the old tip stays a stale leaf.
+    pub demoted_tip: Option<Hash256>,
+}
+
+impl AcceptHeaders {
+    fn push_inserted(&mut self, inserted: Inserted) {
+        self.ids.push(inserted.id);
+        self.demoted_tip = self.demoted_tip.or(inserted.demoted_tip);
+    }
 }
 
 /// Accepts a contiguous batch of headers after proof-of-work validation.
@@ -61,15 +88,18 @@ pub fn accept_headers(
     network: Network,
     now_secs: u32,
     mode: HeaderValidationMode,
-) -> Result<Vec<NodeId>, ChainError> {
-    let mut accepted = Vec::with_capacity(headers.len());
+) -> Result<AcceptHeaders, ChainError> {
+    let mut accepted = AcceptHeaders {
+        ids: Vec::with_capacity(headers.len()),
+        demoted_tip: None,
+    };
     for header in headers {
         let hash = Hash256::from(header.compute_hash());
         if let Some(existing_id) = tree.lookup(hash) {
             if matches!(tree.node(existing_id)?.status, NodeStatus::Invalid) {
                 return Err(ChainError::KnownInvalidHeader { hash });
             }
-            accepted.push(existing_id);
+            accepted.ids.push(existing_id);
             continue;
         }
         validate_pow(header, hash, network)?;
@@ -82,8 +112,8 @@ pub fn accept_headers(
             }
             // The validated genesis root: the tree is empty, so the
             // header has no parent and no contextual rule applies.
-            let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
-            accepted.push(id);
+            let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+            accepted.push_inserted(inserted);
             continue;
         }
         let prev_hash = Hash256::from(header.prev_blockhash);
@@ -96,8 +126,8 @@ pub fn accept_headers(
             return Err(ChainError::InvalidParent { parent: parent_id });
         }
         validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
-        let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
-        accepted.push(id);
+        let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+        accepted.push_inserted(inserted);
     }
     Ok(accepted)
 }

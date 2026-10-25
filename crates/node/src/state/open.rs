@@ -412,6 +412,8 @@ impl NodeState {
                     }
                 },
                 v2_transport: config.p2p.v2_transport,
+                stale_tip_relay: config.p2p.stale_tip_relay,
+                stale_tip_prefers_blocks: config.p2p.stale_tip_prefers_blocks,
                 overlay: config.p2p.overlay.clone(),
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },

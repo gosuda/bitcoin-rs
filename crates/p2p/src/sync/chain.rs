@@ -99,6 +99,11 @@ pub trait SyncChain: Send + Sync {
 
     /// Admits a headers batch (header tip move + assume-valid re-evaluation
     /// happen inside, under the implementation's transition lock).
+    ///
+    /// POST: `HeaderAdmission::Accepted::demoted_tip` is the chain-owned
+    ///   fact, forwarded unchanged: the valid header tip this batch moved onto
+    ///   another branch. It is `None` for a linear advance and when no tip was
+    ///   displaced; the seam never derives or defaults it.
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
     /// Cumulative chain work a peer's header chain must demonstrate before
@@ -139,6 +144,10 @@ pub trait SyncChain: Send + Sync {
     /// resolves connect-side bodies from bounded staging; `connected_body`
     /// runs once per committed connect so the executor can retire download
     /// accounting.
+    ///
+    /// A failed connect reports the valid header tip its invalidation
+    /// displaced, if any, in `ReorgError::ConnectFailed::demoted_tip`; the
+    /// implementation forwards it unchanged.
     fn switch_to_branch(
         &self,
         target: NodeId,

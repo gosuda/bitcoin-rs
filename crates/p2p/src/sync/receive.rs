@@ -109,7 +109,9 @@ impl BlockSync {
             }
         }
 
-        self.switch_branch_if_outweighed();
+        if let Some(demoted_tip) = self.switch_branch_if_outweighed() {
+            self.record_demoted_tip(demoted_tip);
+        }
         // The gate recheck runs after the branch switch so admissibility
         // reads the settled applied tip: a body on a winning branch that
         // just replaced the applied tip must not be judged against the old
@@ -268,8 +270,10 @@ impl BlockSync {
                 HeaderAdmission::Accepted {
                     announced_tip: Some(tip_hash),
                     active_height,
+                    demoted_tip,
                     ..
                 } => {
+                    self.record_admitted_tips(demoted_tip, Some(tip_hash), source);
                     // A staged retry that now admits is the same
                     // announcement the headers drain credits — the
                     // delivering connection demonstrated the tip even if

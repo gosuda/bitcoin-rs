@@ -103,6 +103,13 @@ pub struct P2pServiceConfig {
     ///
     /// [`ConnectionShared::v2_transport`]: crate::listener::ConnectionShared::v2_transport
     pub v2_transport: bool,
+    /// Whether connections negotiate BIP332 stale-tip relay. Off by default.
+    /// The value is final: the node resolves any network policy before it
+    /// reaches the service, and nothing below re-checks the network.
+    pub stale_tip_relay: bool,
+    /// Whether the BIP332 negotiation tells peers this node prefers stale-tip
+    /// blocks to headers. Meaningful only with [`Self::stale_tip_relay`].
+    pub stale_tip_prefers_blocks: bool,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     pub outbound_block_relay_slots: usize,
@@ -136,6 +143,8 @@ impl Default for P2pServiceConfig {
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
+            stale_tip_relay: false,
+            stale_tip_prefers_blocks: false,
             overlay: crate::OverlayConfig::default(),
         }
     }
@@ -176,13 +185,17 @@ impl P2pServiceConfig {
     ///
     /// PRE: `shared` was built by `ConnectionShared::new` for this start.
     /// POST: every connection cloned from `shared` reads the configured
-    ///   inbound capacity, services, and transport choice.
+    ///   inbound capacity, services, transport choice, and relay-feature
+    ///   switches.
     /// INVARIANT: this is the only place the service configuration reaches
-    ///   these `ConnectionShared` fields.
+    ///   these `ConnectionShared` fields, and each switch maps to exactly its
+    ///   own field.
     fn apply_to(&self, shared: &mut crate::listener::ConnectionShared) {
         shared.max_inbound = self.max_inbound();
         shared.local_services = self.local_services;
         shared.v2_transport = self.v2_transport;
+        shared.stale_tip_relay = self.stale_tip_relay;
+        shared.stale_tip_prefers_blocks = self.stale_tip_prefers_blocks;
     }
 }
 
@@ -2572,6 +2585,55 @@ mod tests {
     }
 
     #[test]
+    fn relay_feature_switches_default_off_and_reach_connections_independently() {
+        let (headers, _) = crossbeam_channel::bounded(1);
+        let (blocks, _) = crossbeam_channel::bounded(1);
+        let mut shared = crate::listener::ConnectionShared::new(
+            Arc::new(crate::PeerTable::new()),
+            BannedReader::fixture_empty(),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::new(
+                AtomicBool::new(true),
+            ))),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Magic::REGTEST,
+            headers,
+            blocks,
+            None,
+            None,
+            crate::listener::ListenerExtras::default(),
+        );
+        let switches = |shared: &crate::listener::ConnectionShared| {
+            (shared.stale_tip_relay, shared.stale_tip_prefers_blocks)
+        };
+
+        P2pServiceConfig::default().apply_to(&mut shared);
+        assert_eq!(switches(&shared), (false, false));
+
+        for (config, expected) in [
+            (
+                P2pServiceConfig {
+                    stale_tip_relay: true,
+                    ..P2pServiceConfig::default()
+                },
+                (true, false),
+            ),
+            (
+                P2pServiceConfig {
+                    stale_tip_relay: true,
+                    stale_tip_prefers_blocks: true,
+                    ..P2pServiceConfig::default()
+                },
+                (true, true),
+            ),
+            (P2pServiceConfig::default(), (false, false)),
+        ] {
+            config.apply_to(&mut shared);
+            assert_eq!(switches(&shared), expected);
+        }
+    }
+
+    #[test]
     fn start_fails_when_listener_cannot_bind() {
         let occupied =
             TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("occupy port");
@@ -4392,6 +4454,13 @@ mod tests {
         pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
     }
     impl crate::ChainQuery for ServiceTip {
+        fn stale_tip_announcement(
+            &self,
+            _: bitcoin_rs_primitives::Hash256,
+            _: &[bitcoin_rs_primitives::Hash256],
+        ) -> Option<crate::dispatch::StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _: &[bitcoin_rs_primitives::BlockHash],

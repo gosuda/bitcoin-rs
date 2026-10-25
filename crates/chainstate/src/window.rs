@@ -375,7 +375,10 @@ fn invalidate_permanent_failure(
     hash: Hash256,
 ) -> (Box<[Hash256]>, WindowApplyDisposition) {
     match crate::reorg::invalidate_and_republish(handles, hash) {
-        Ok(invalidated) => (invalidated, WindowApplyDisposition::Permanent),
+        Ok(outcome) => (
+            outcome.invalid.into_boxed_slice(),
+            WindowApplyDisposition::Permanent,
+        ),
         Err(crate::reorg::InvalidationError::UnknownBlock(_)) => {
             (Box::default(), WindowApplyDisposition::Permanent)
         }

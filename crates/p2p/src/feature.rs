@@ -105,6 +105,15 @@ impl FeatureAnnouncement {
         Self { id, data }
     }
 
+    /// This node's BIP332 stale-tip relay announcement; `prefers_blocks` is
+    /// its single data byte.
+    pub(crate) fn bip332(prefers_blocks: bool) -> Self {
+        Self::new(
+            FeatureId::from_raw_unchecked(BIP332_ID.to_vec()),
+            vec![u8::from(prefers_blocks)],
+        )
+    }
+
     /// Whether this node implements the announced feature and `data` is valid
     /// for it.
     ///
@@ -398,6 +407,22 @@ mod tests {
             decode(&[4, b'a', b'b', b'c', b'd', 5, 1, 2]),
             Err(FeatureError::Truncated)
         );
+    }
+
+    #[test]
+    fn local_bip332_announcement_is_advertisable_supported_and_one_byte() -> Result<(), FeatureError>
+    {
+        for prefers_blocks in [false, true] {
+            let local = FeatureAnnouncement::bip332(prefers_blocks);
+            assert!(local.is_supported());
+            assert_eq!(local.data, vec![u8::from(prefers_blocks)]);
+            assert!(
+                FeatureId::advertised(local.id.as_bytes()).is_some(),
+                "a locally advertised id is printable ASCII within the length bounds"
+            );
+            assert_eq!(decode(&encode(&local)?)?, local);
+        }
+        Ok(())
     }
 
     fn announcement(id: &[u8], data: &[u8]) -> FeatureAnnouncement {

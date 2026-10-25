@@ -159,6 +159,13 @@ pub struct ConnectionShared {
     /// `NODE_P2P_V2`, falling back to v1 once when unanswered. `false` keeps
     /// every connection on v1.
     pub v2_transport: bool,
+    /// Whether this node announces BIP332 stale-tip relay in its BIP434
+    /// `feature` negotiation. Final policy; this crate applies no network
+    /// check. Default `false`.
+    pub stale_tip_relay: bool,
+    /// The `prefers_blocks` byte of the BIP332 announcement. Read only with
+    /// [`Self::stale_tip_relay`]. Default `false`.
+    pub stale_tip_prefers_blocks: bool,
     /// Aggregate outbound queued-byte budget every connection of this start
     /// epoch counts against. The P2P service owns the `Arc`; clones of this
     /// struct share it, so inbound, outbound, and manual connections of one
@@ -231,8 +238,24 @@ impl ConnectionShared {
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
+            stale_tip_relay: false,
+            stale_tip_prefers_blocks: false,
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
             dial_routes: crate::DialRoutes::default(),
+        }
+    }
+
+    /// Offers the opt-in relay capabilities this start epoch enabled.
+    ///
+    /// PRE: `peer` has written nothing yet; call before the handshake starts.
+    /// POST: with [`Self::stale_tip_relay`] set, `peer` announces BIP332
+    ///   with [`Self::stale_tip_prefers_blocks`] as the feature's data byte;
+    ///   otherwise `peer` offers nothing.
+    /// INVARIANT: both the inbound and the outbound handshake go through
+    ///   here, so the offer cannot depend on direction.
+    fn offer_relay_capabilities<S>(&self, peer: &mut Peer<S>) {
+        if self.stale_tip_relay {
+            peer.offer_stale_tip_relay(self.stale_tip_prefers_blocks);
         }
     }
 
@@ -391,6 +414,18 @@ impl ConnectionShared {
             wire_response,
         }) {
             tracing::warn!(peer_addr = ?source.endpoint, %error, "p2p inbound headers channel disconnected");
+        } else {
+            wake_sync(self.wake_tx.as_ref());
+        }
+    }
+
+    fn send_sourceless_headers(&self, headers: Vec<bitcoin_rs_primitives::Header>) {
+        if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
+            headers,
+            source: None,
+            wire_response: false,
+        }) {
+            tracing::debug!(%error, "p2p sourceless inbound headers dropped");
         } else {
             wake_sync(self.wake_tx.as_ref());
         }
@@ -1248,6 +1283,7 @@ fn dial(
         role,
         manual,
     ));
+    shared.offer_relay_capabilities(&mut peer);
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
@@ -1567,6 +1603,7 @@ fn run_handshake(
         lease.node_id(),
         peer_addr,
     ));
+    shared.offer_relay_capabilities(&mut peer);
     if let Err(error) = run_inbound_handshake(
         &mut peer,
         nonce,
@@ -1692,6 +1729,14 @@ fn run_connected_session(
         }
     };
     let ready = shared.publish_info_and_notify_ready(endpoint, &lease, &info);
+    if ready && shared.stale_tip_relay {
+        if let Some(feature_data) = peer.remote_feature(crate::feature::BIP332_ID) {
+            let prefers_blocks = feature_data == [1];
+            shared
+                .peer_table
+                .note_stale_tip_relay(lease.source(endpoint), prefers_blocks);
+        }
+    }
 
     let inbound = lease.is_inbound();
     let transport = match info.transport {
@@ -2382,6 +2427,8 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
     let mut address_budget = 32_u64;
     let mut last_address_refill = crate::addrman::now();
+    let mut staletip_budget = 10_u32;
+    let mut last_staletip_refill = Instant::now();
     let mut answered_getaddr = false;
     // The one `getaddr` an outbound relay connection asks for. It stays owed
     // while the node's aggregate budget is full and is sent on a later pass.
@@ -2734,6 +2781,33 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             crate::Message::Headers(headers) => {
                 shared.send_headers(lease.source(endpoint), headers, true);
+            }
+            crate::Message::StaleTip(announcement) => {
+                let negotiated = peer.remote_feature(crate::feature::BIP332_ID).is_some();
+                let ibd_active =
+                    ibd.is_some_and(|(latch, network)| latch.is_active(unix_time_secs(), *network));
+                if shared.stale_tip_relay && negotiated && !ibd_active {
+                    let now = Instant::now();
+                    let elapsed = now.saturating_duration_since(last_staletip_refill);
+                    let refill = u32::try_from(elapsed.as_secs() / 10).unwrap_or(u32::MAX);
+                    if refill > 0 {
+                        staletip_budget = staletip_budget.saturating_add(refill).min(10);
+                        last_staletip_refill = now;
+                    }
+                    if staletip_budget > 0 {
+                        staletip_budget -= 1;
+                        let headers = announcement.reconstruct();
+                        if let Some(tip_header) = headers.last() {
+                            let tip_hash =
+                                bitcoin_rs_primitives::Hash256::from(tip_header.compute_hash());
+                            let source = lease.source(endpoint);
+                            if let Some(sync) = &shared.block_sync {
+                                sync.stale_tips().note_heard(source, tip_hash);
+                            }
+                            shared.send_sourceless_headers(headers);
+                        }
+                    }
+                }
             }
             crate::Message::Block(block) => {
                 shared.send_block(lease, endpoint, block, raw);

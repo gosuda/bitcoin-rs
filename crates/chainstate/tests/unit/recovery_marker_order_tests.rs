@@ -38,14 +38,14 @@ fn arm_full_revalidation_marker(data_dir: &Path) {
 fn genesis_tip() -> Result<(RwLock<BlockTree>, TipSnapshot), Box<dyn std::error::Error>> {
     let genesis = NETWORK.genesis_block().header;
     let mut tree = BlockTree::new();
-    let ids = accept_headers(
+    let accepted = accept_headers(
         &mut tree,
         core::slice::from_ref(&genesis),
         NETWORK,
         bitcoin_rs_chain::current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
     )?;
-    let tip_id = ids[0];
+    let tip_id = accepted.ids[0];
     let node = tree.node(tip_id)?;
     let tip = TipSnapshot {
         tip_id,

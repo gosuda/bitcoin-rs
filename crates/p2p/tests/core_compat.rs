@@ -123,6 +123,13 @@ impl FakeChain {
 }
 
 impl ChainQuery for FakeChain {
+    fn stale_tip_announcement(
+        &self,
+        _tip: bitcoin_rs_primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<bitcoin_rs_p2p::StaleTipHeaders> {
+        None
+    }
     fn headers_after(
         &self,
         locator_hashes: &[NativeBlockHash],

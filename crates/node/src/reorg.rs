@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
-use bitcoin_rs_chain::NodeId;
+use bitcoin_rs_chain::{InvalidationOutcome, NodeId};
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_chainstate::reorg::ReorgObserver;
 use bitcoin_rs_chainstate::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
@@ -181,10 +181,10 @@ fn settle_node_reorg(
     outcome
 }
 
-fn settle_checkpoint_debt(
+fn settle_checkpoint_debt<T>(
     handles: &Chainstate,
-    outcome: core::result::Result<(), ReorgError>,
-) -> core::result::Result<(), ReorgError> {
+    outcome: core::result::Result<T, ReorgError>,
+) -> core::result::Result<T, ReorgError> {
     if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
         return outcome;
     }
@@ -206,13 +206,15 @@ fn settle_checkpoint_debt(
 
 /// Invalidates one block through chainstate while node-owned followers remain fenced.
 ///
-/// On success returns the hashes chainstate marked `Invalid`; the caller purges
-/// staged and download state after the transition has settled.
+/// On success returns chainstate's [`InvalidationOutcome`]: the hashes marked
+/// `Invalid`, which the caller purges from staged and download state after the
+/// transition has settled, and any valid tip the invalidation displaced onto
+/// another branch.
 pub fn invalidate_block(
     handles: &Chainstate,
     followers: &ChainFollowers,
     hash: Hash256,
-) -> core::result::Result<Box<[Hash256]>, ReorgError> {
+) -> core::result::Result<InvalidationOutcome, ReorgError> {
     let mut mempool_change = followers
         .begin_mempool_change()
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
@@ -224,8 +226,7 @@ pub fn invalidate_block(
         hash,
         |observer, outcome| settle_node_reorg(handles, observer, &mut mempool_change, outcome),
     );
-    let invalidated = outcome.as_ref().ok().cloned().unwrap_or_default();
-    settle_checkpoint_debt(handles, outcome.map(|_| ())).map(|()| invalidated)
+    settle_checkpoint_debt(handles, outcome)
 }
 
 /// Switches the applied branch through chainstate while node-owned followers remain fenced.

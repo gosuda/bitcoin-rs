@@ -83,6 +83,15 @@ pub enum FilterServing {
     Pending(FilterRequest),
 }
 
+/// Header response for a BIP332 stale tip announcement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StaleTipHeaders {
+    /// The stale branch headers starting immediately after `fork_point`.
+    Headers(crate::staletip::StaleTipAnnouncement),
+    /// The stale branch is longer than [`crate::staletip::MAX_STALETIP_HEADERS`].
+    TooMany,
+}
+
 /// Read-only active-chain view used by server-side P2P responders.
 pub trait ChainQuery: Send + Sync {
     /// Whether the optional filter index currently covers the applied chain.
@@ -199,6 +208,16 @@ pub trait ChainQuery: Send + Sync {
     fn committed_tip(&self) -> Option<CommittedTip> {
         None
     }
+
+    /// Returns the BIP332 stale-tip headers for `tip` given the peer's
+    /// demonstrated tips, or `None` if the tip is unknown, not stale, or
+    /// not an ancestor of any demonstrated tip. Returns `TooMany` if the
+    /// branch exceeds [`crate::staletip::MAX_STALETIP_HEADERS`].
+    fn stale_tip_announcement(
+        &self,
+        tip: Hash256,
+        peer_tips: &[Hash256],
+    ) -> Option<StaleTipHeaders>;
 }
 
 /// Transaction inventory view and successful-getdata acknowledgement seam,
@@ -335,7 +354,7 @@ pub fn dispatch_inbound_full<S>(
             for response in feature_messages() {
                 send(response)?;
             }
-            for announcement in negotiated_features(version.version) {
+            for announcement in negotiated_features(peer, version.version) {
                 send(Message::Feature(announcement))?;
             }
             send(Message::Verack)?;
@@ -713,7 +732,7 @@ mod tests {
 
     use super::{
         ChainQuery, FilterRequest, FilterServing, InventoryServing, MAX_LOCATOR_HASHES,
-        TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
+        StaleTipHeaders, TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
     };
     use crate::connection::{OutboundBudget, PeerLease};
     use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
@@ -756,6 +775,13 @@ mod tests {
     }
 
     impl ChainQuery for FakeChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn serve_compact_filters(
             &self,
             request: &FilterRequest,
@@ -828,6 +854,13 @@ mod tests {
     }
 
     impl ChainQuery for GreedyHeaders {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _locator_hashes: &[BlockHash],
@@ -1024,6 +1057,13 @@ mod tests {
     fn getblocktxn_is_answered_with_blocktxn_from_the_chain() -> Result<(), PeerError> {
         struct ServingChain;
         impl ChainQuery for ServingChain {
+            fn stale_tip_announcement(
+                &self,
+                _tip: Hash256,
+                _peer_tips: &[Hash256],
+            ) -> Option<StaleTipHeaders> {
+                None
+            }
             fn headers_after(
                 &self,
                 _locator_hashes: &[BlockHash],
@@ -1110,6 +1150,13 @@ mod tests {
             loads: AtomicUsize,
         }
         impl ChainQuery for GatedChain {
+            fn stale_tip_announcement(
+                &self,
+                _tip: Hash256,
+                _peer_tips: &[Hash256],
+            ) -> Option<StaleTipHeaders> {
+                None
+            }
             fn headers_after(
                 &self,
                 _locator_hashes: &[BlockHash],
@@ -1200,6 +1247,13 @@ mod tests {
         load_tripwire: Option<usize>,
     }
     impl ChainQuery for StreamingChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _locator_hashes: &[BlockHash],
@@ -2327,7 +2381,7 @@ mod tests {
     }
 
     fn ready_peer() -> Peer<Cursor<Vec<u8>>> {
-        let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.state = PeerState::Ready;
         peer
     }
@@ -2370,6 +2424,13 @@ mod tests {
     struct NarrowingChain;
 
     impl ChainQuery for NarrowingChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn serve_compact_filters(
             &self,
             request: &FilterRequest,
@@ -2480,24 +2541,22 @@ mod tests {
     {
         for version in [FEATURE_VERSION - 1, PROTOCOL_VERSION] {
             let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+            peer.offer_stale_tip_relay(true);
 
             let responses = dispatch_inbound(&mut peer, &version_at(version))?;
 
             let mut expected = feature_messages().to_vec();
             expected.extend(
-                negotiated_features(version)
+                negotiated_features(&peer, version)
                     .into_iter()
                     .map(Message::Feature),
             );
             expected.push(Message::Verack);
             assert_eq!(responses, expected);
-            if version < FEATURE_VERSION {
-                assert!(
-                    !responses
-                        .iter()
-                        .any(|response| matches!(response, Message::Feature(_)))
-                );
-            }
+            let announced = responses
+                .iter()
+                .any(|response| matches!(response, Message::Feature(_)));
+            assert_eq!(announced, version >= FEATURE_VERSION);
         }
         Ok(())
     }

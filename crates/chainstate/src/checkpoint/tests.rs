@@ -129,7 +129,8 @@ fn chain_with_applied_height(
         NETWORK,
         bitcoin_rs_chain::current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?[0];
+    )?
+    .ids[0];
     for height in 1..=best_height {
         let prev = BlockHash(tree.node(current)?.hash);
         let header = mined_regtest_header(prev, height)?;
@@ -139,7 +140,8 @@ fn chain_with_applied_height(
             NETWORK,
             bitcoin_rs_chain::current_unix_seconds(),
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-        )?[0];
+        )?
+        .ids[0];
     }
     let applied_id = tree
         .node_at_height_from(current, applied_height)

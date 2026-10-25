@@ -99,6 +99,8 @@ pub(crate) struct PeerAnnouncementState {
     /// the worker; the table is the snapshot rpc reads, so promotions and
     /// demotions are written through here.
     pub(crate) selected_high_bandwidth: bool,
+    /// Whether this peer negotiated BIP332 stale-tip relay, and its `prefers_blocks` flag.
+    pub(crate) stale_tip_prefers_blocks: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -612,6 +614,20 @@ impl PeerTable {
 
     /// Raises the compact-block relay preference for `source` — its live
     /// connection accepted a post-verack `sendcmpct` with a known version.
+    /// Records that the live connection negotiated BIP332 stale-tip relay
+    /// with the remote peer's `prefers_blocks` preference.
+    pub(crate) fn note_stale_tip_relay(&self, source: PeerSource, prefers_blocks: bool) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&SessionKey::from_source(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.stale_tip_prefers_blocks = Some(prefers_blocks);
+        true
+    }
+
     pub(crate) fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&SessionKey::from_source(source)) {

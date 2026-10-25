@@ -245,14 +245,14 @@ pub(crate) fn read_headers<R: Read + Seek>(
         // become invalid solely because the host clock rolled backwards after
         // publication. All other contextual checks (PoW, nBits, MTP, version
         // floors, ancestry, chainwork) still run.
-        let ids = accept_headers(
+        let accepted = accept_headers(
             &mut tree,
             core::slice::from_ref(&header),
             config.network,
             0,
             bitcoin_rs_chain::HeaderValidationMode::HistoricalReplay,
         )?;
-        let id = ids[0];
+        let id = accepted.ids[0];
         let node = tree.node(id)?;
         if node.height != height || tree.len() != index + 1 {
             return Err(HeaderCheckpointError::MalformedAncestry { height });

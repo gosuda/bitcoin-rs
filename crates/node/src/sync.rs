@@ -200,6 +200,7 @@ impl SyncChain for NodeSyncChain {
                 accepted: outcome.accepted,
                 announced_tip: outcome.announced_tip,
                 active_height: outcome.active_height,
+                demoted_tip: outcome.demoted_tip,
             },
             Err(bitcoin_rs_chainstate::HeaderAdmissionError::Rejected(error)) => {
                 HeaderAdmission::Rejected(error)

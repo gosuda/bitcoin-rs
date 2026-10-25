@@ -60,7 +60,7 @@ Rules, each enforced by the FSM (`crates/p2p/src/fsm.rs`) and identical to Core'
 
 ## 5. Message Surface
 
-The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**37**). That table is the authority for names; this section owns each command's status and is the Core-comparison commentary, kept in sync with `COMMANDS` by hand in the same change-set.
+The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**38**). That table is the authority for names; this section owns each command's status and is the Core-comparison commentary, kept in sync with `COMMANDS` by hand in the same change-set.
 
 | Command | Behavior and Core 31.1 comparison |
 | :--- | :--- | :--- |
@@ -70,6 +70,7 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendaddrv2` | negotiated | BIP155. Sent in handshake; inbound tracked. |
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `feature` | negotiated | BIP434, draft. One announcement carries a feature identifier and its data, each behind a minimal `CompactSize`; BIP324 short ID 37, no Core 31.1 equivalent. Exchanged between `version` and `verack` with peers at `70017` or higher; only a valid `BIP332` announcement is retained per peer (first valid wins), every other identifier is ignored, and this node announces none (§4). Core 31.1 does not support BIP434, so there is no Core comparison. |
+| `staletip` | BIP332 draft, no Core 31.1 equivalent. Typed wire codec in `crates/p2p/src/staletip.rs`, carried by its 12-byte name on both transports (no BIP324 short ID). A payload over the header limit is ignored without punishment; any other malformed payload is an invalid decoded payload (§6). |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only. No latency telemetry is kept. |
 | `pong` | ignored | No ping RTT accounting exists; the pong body is unused. |
 | `inv` | Missing transaction vectors enter the connection-bound transaction request owner; only the selected eligible source receives `getdata`. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |

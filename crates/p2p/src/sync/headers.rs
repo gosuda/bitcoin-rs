@@ -94,6 +94,9 @@ impl BlockSync {
             if !feeds_live_sync
                 && let Some((tip_hash, active_height)) = self.known_batch_outcome(&headers)
             {
+                // A known batch displaces nothing, but its newest header can
+                // be a stale branch tip the retainer has not seen.
+                self.record_admitted_tips(None, Some(tip_hash), source);
                 if let Some(source) = source {
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
@@ -120,7 +123,12 @@ impl BlockSync {
                     accepted,
                     announced_tip,
                     active_height,
+                    demoted_tip,
                 } => {
+                    // The tip this batch displaced and the batch's own tip
+                    // are the stale-tip relay's candidates; the retainer
+                    // re-reads the tree for every fact it ranks by.
+                    self.record_admitted_tips(demoted_tip, announced_tip, source);
                     if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
                         self.peer_table
                             .note_announced_tip(source, tip_hash, active_height);

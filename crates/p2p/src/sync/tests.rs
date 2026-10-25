@@ -210,8 +210,9 @@ impl SyncChain for TestChain {
             bitcoin_rs_chain::current_unix_seconds(),
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
         ) {
-            Ok(node_ids) => {
-                let announced_tip = node_ids
+            Ok(admitted) => {
+                let announced_tip = admitted
+                    .ids
                     .last()
                     .and_then(|id| tree.node(*id).ok())
                     .map(|node| node.hash);
@@ -223,9 +224,10 @@ impl SyncChain for TestChain {
                             .and_then(|height| i32::try_from(height).ok())
                     });
                 HeaderAdmission::Accepted {
-                    accepted: node_ids.len(),
+                    accepted: admitted.ids.len(),
                     announced_tip,
                     active_height,
+                    demoted_tip: admitted.demoted_tip,
                 }
             }
             Err(error) => HeaderAdmission::Rejected(error),
@@ -296,7 +298,7 @@ impl SyncChain for TestChain {
             if !block.txs.is_empty() && block.txs.iter().skip(1).any(coinbase_shaped) {
                 let invalidated = tree
                     .invalidate_subtree(node_id)
-                    .map(Vec::into_boxed_slice)
+                    .map(|outcome| outcome.invalid.into_boxed_slice())
                     .unwrap_or_default();
                 return Err(WindowCommitError {
                     applied,
@@ -2682,6 +2684,85 @@ mod frontier_model;
 mod head_sync;
 mod limited_peers;
 mod stale_tip;
+
+/// A permanently failed connect hands the executor the valid tip its
+/// invalidation displaced, once: with the heavier branch invalid, the next
+/// call finds no outweighed branch and reports no tip.
+#[test]
+fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
+    let genesis = genesis_header();
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+    let side = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
+        .or_fail("regtest fixture header");
+    let side_id = tree.insert_node(Some(genesis_id), side, NodeStatus::HeaderValid)?;
+    let first = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
+        .or_fail("regtest fixture header");
+    let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::HeaderValid)?;
+    let second = regtest_fixture::mined_regtest_header(first.compute_hash(), 102)
+        .or_fail("regtest fixture header");
+    tree.insert_node(Some(first_id), second, NodeStatus::HeaderValid)?;
+    // A valid stale leaf that survives the invalidation: the displaced tip
+    // must be neither the applied tip nor part of the invalid subtree.
+    let other = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 201)
+        .or_fail("regtest fixture header");
+    tree.insert_node(Some(genesis_id), other, NodeStatus::HeaderValid)?;
+    let applied = {
+        let node = tree.node(side_id)?;
+        TipSnapshot {
+            tip_id: side_id,
+            chain_tx_count: node.chain_tx_count,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    let displaced = Hash256::from(other.compute_hash());
+    let invalidated = vec![
+        Hash256::from(first.compute_hash()),
+        Hash256::from(second.compute_hash()),
+    ];
+
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::from_pointee(applied));
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    ));
+    *chain.scripted_branch_switch.lock() = Some(ScriptedBranchSwitch {
+        connected: Vec::new(),
+        error: ReorgError::ConnectFailed {
+            disconnected: 1,
+            connected: 0,
+            hash: invalidated[0],
+            stopped_at: 0,
+            source: Box::new(bitcoin_rs_chainstate::ApplyError::Shutdown),
+            disposition: WindowApplyDisposition::Permanent,
+            invalidated: invalidated.into(),
+            demoted_tip: Some(displaced),
+        },
+    });
+    let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded();
+    let sync = BlockSync::new(
+        chain,
+        Arc::new(PeerTable::new()),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    );
+
+    assert!(sync.outweighed_branch_target().is_some());
+    assert_eq!(sync.switch_branch_if_outweighed(), Some(displaced));
+    assert_eq!(
+        sync.switch_branch_if_outweighed(),
+        None,
+        "the invalidated branch no longer outweighs the applied tip"
+    );
+    Ok(())
+}
 
 /// A sync loop over an applied chain whose commit fails on command for one
 /// hash, with block 2 announced and its body owed to one live connection.

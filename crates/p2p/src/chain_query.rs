@@ -24,7 +24,12 @@ use parking_lot::Mutex;
 #[cfg(test)]
 use parking_lot::RwLock;
 
-use crate::dispatch::{ChainQuery, CommittedTip, FilterRequest, FilterServing, InventoryServing};
+use crate::dispatch::{
+    ChainQuery, CommittedTip, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders,
+};
+use crate::staletip::{
+    CompressedHeader, MAX_STALETIP_HEADERS, STALETIP_RECENT_WINDOW, StaleTipAnnouncement,
+};
 use crate::wire::{Message, PeerError};
 
 /// Depth from the active tip for which a `getdata` of a block is still worth
@@ -640,6 +645,87 @@ impl ChainQuery for ActiveChainQuery {
             return Ok(Some(Message::BlockPayload(payload)));
         }
         Self::blocktxn_message(payload.as_ref(), request, compact_version)
+    }
+
+    fn stale_tip_announcement(
+        &self,
+        tip: Hash256,
+        peer_tips: &[Hash256],
+    ) -> Option<StaleTipHeaders> {
+        if peer_tips.is_empty() {
+            return None;
+        }
+        let tree = self.block_tree.read();
+        let tip_node_id = tree.lookup(tip)?;
+        let tip_node = tree.node(tip_node_id).ok()?;
+        if tip_node.status == NodeStatus::Invalid {
+            return None;
+        }
+        let active_tip = tree.tip()?;
+        if active_tip.height.saturating_sub(tip_node.height) > STALETIP_RECENT_WINDOW {
+            return None;
+        }
+        let active_fork = tree.find_common_ancestor(active_tip.tip_id, tip_node_id)?;
+        if active_fork == tip_node_id || active_fork == active_tip.tip_id {
+            return None;
+        }
+
+        let mut best_ancestor = None;
+        for peer_tip_hash in peer_tips {
+            let Some(peer_tip_id) = tree.lookup(*peer_tip_hash) else {
+                continue;
+            };
+            let Some(ancestor_id) = tree.find_common_ancestor(tip_node_id, peer_tip_id) else {
+                continue;
+            };
+            let Ok(ancestor_node) = tree.node(ancestor_id) else {
+                continue;
+            };
+            if best_ancestor.is_none_or(|(max_height, _)| ancestor_node.height > max_height) {
+                best_ancestor = Some((ancestor_node.height, ancestor_id));
+            }
+        }
+
+        let (_, fork_id) = best_ancestor?;
+        if fork_id == tip_node_id {
+            return None;
+        }
+        let fork_node = tree.node(fork_id).ok()?;
+        let distance = tip_node.height.checked_sub(fork_node.height)?;
+        if distance > u32::try_from(MAX_STALETIP_HEADERS).unwrap_or(u32::MAX) {
+            return Some(StaleTipHeaders::TooMany);
+        }
+
+        let mut headers =
+            Vec::with_capacity(usize::try_from(distance).unwrap_or(MAX_STALETIP_HEADERS));
+        let mut cursor = tip_node_id;
+        while cursor != fork_id {
+            let node = tree.node(cursor).ok()?;
+            headers.push(CompressedHeader::from_header(&node.header));
+            cursor = node.parent?;
+        }
+        headers.reverse();
+
+        let fork_point = fork_node.hash;
+        let tip_height = tip_node.height;
+        drop(tree);
+
+        let have_block = self
+            .block_body_source
+            .as_ref()
+            .and_then(|source| {
+                source
+                    .block_body(tip_height, BlockHash::from(tip))
+                    .ok()
+                    .flatten()
+            })
+            .is_some();
+
+        Some(StaleTipHeaders::Headers(StaleTipAnnouncement {
+            fork_point,
+            headers,
+            have_block,
+        }))
     }
 }
 
@@ -3400,6 +3486,101 @@ mod tests {
         assert!(
             matches!(served.as_slice(), [Message::BlockPayload(_)]),
             "a deep held body must fall back to the full block, got {served:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_tip_announcement_reconstructs_demoted_fork() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+        let mut tree = BlockTree::new();
+        let genesis = Network::Regtest.genesis_block().header;
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+
+        let mut main_parent = genesis_id;
+        let mut main_headers = Vec::new();
+        for i in 1..=5 {
+            let prev = tree.node(main_parent)?.hash;
+            let header = mined_regtest_header(BlockHash::from(prev), i)?;
+            let id = tree.insert_node(Some(main_parent), header, NodeStatus::HeaderValid)?;
+            main_parent = id;
+            main_headers.push(header);
+        }
+
+        let fork_id = tree
+            .lookup(Hash256::from(main_headers[2].compute_hash()))
+            .ok_or("fork header missing")?;
+        let mut stale_parent = fork_id;
+        let mut stale_headers = Vec::new();
+        for i in 101..=102 {
+            let prev = tree.node(stale_parent)?.hash;
+            let header = mined_regtest_header(BlockHash::from(prev), i)?;
+            let id = tree.insert_node(Some(stale_parent), header, NodeStatus::HeaderValid)?;
+            stale_parent = id;
+            stale_headers.push(header);
+        }
+        let stale_tip_hash = Hash256::from(stale_headers[1].compute_hash());
+
+        let query = query_over(tree, Network::Regtest);
+
+        let peer_tips = vec![Hash256::from(main_headers[4].compute_hash())];
+        let outcome = query.stale_tip_announcement(stale_tip_hash, &peer_tips);
+        let Some(StaleTipHeaders::Headers(announcement)) = outcome else {
+            panic!("expected StaleTipHeaders::Headers, got {outcome:?}");
+        };
+        assert_eq!(
+            announcement.fork_point,
+            Hash256::from(main_headers[2].compute_hash())
+        );
+        assert_eq!(announcement.headers.len(), 2);
+        let reconstructed = announcement.reconstruct();
+        assert_eq!(reconstructed, stale_headers);
+
+        let peer_knows = vec![stale_tip_hash];
+        assert_eq!(
+            query.stale_tip_announcement(stale_tip_hash, &peer_knows),
+            None
+        );
+
+        assert_eq!(query.stale_tip_announcement(stale_tip_hash, &[]), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn stale_tip_announcement_reports_too_many_above_twenty_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+        let mut tree = BlockTree::new();
+        let genesis = Network::Regtest.genesis_block().header;
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+
+        let mut parent = genesis_id;
+        let mut headers = Vec::new();
+        for i in 1..=25 {
+            let prev = tree.node(parent)?.hash;
+            let header = mined_regtest_header(BlockHash::from(prev), i)?;
+            let id = tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?;
+            parent = id;
+            headers.push(header);
+        }
+
+        let mut stale_parent = genesis_id;
+        let mut stale_tip = Hash256::default();
+        for i in 1001..=1022 {
+            let prev = tree.node(stale_parent)?.hash;
+            let header = mined_regtest_header(BlockHash::from(prev), i)?;
+            let id = tree.insert_node(Some(stale_parent), header, NodeStatus::HeaderValid)?;
+            stale_parent = id;
+            stale_tip = Hash256::from(header.compute_hash());
+        }
+
+        let query = query_over(tree, Network::Regtest);
+        let peer_tips = vec![Hash256::from(headers[24].compute_hash())];
+        assert_eq!(
+            query.stale_tip_announcement(stale_tip, &peer_tips),
+            Some(StaleTipHeaders::TooMany)
         );
         Ok(())
     }

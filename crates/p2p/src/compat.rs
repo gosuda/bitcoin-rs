@@ -54,6 +54,7 @@ pub const COMMANDS: &[&str] = &[
     "addrv2",
     "sendaddrv2",
     "feature",
+    "staletip",
 ];
 
 /// Bitcoin Core 31.1 commands this node does not type.

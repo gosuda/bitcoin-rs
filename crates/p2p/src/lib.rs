@@ -58,6 +58,8 @@ pub(crate) mod sam;
 pub(crate) mod service;
 /// SOCKS5 client for proxied IP and onion transports.
 pub(crate) mod socks;
+/// BIP332 `staletip` message codec.
+pub mod staletip;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
@@ -87,7 +89,9 @@ pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, OutboundRefusal, PeerLease, PeerSource, QueuedFrame};
 pub use counters::{CountingStream, PeerCounters};
-pub use dispatch::{ChainQuery, FilterRequest, FilterServing, InventoryServing, TxInventory};
+pub use dispatch::{
+    ChainQuery, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders, TxInventory,
+};
 pub use endpoint::{
     DialFailure, DialRoutes, OverlayConfig, TransportRemote, accepted_ip_identity,
     addrv2_gossip_enabled, connect_peer_stream, dialed_ip_identity, endpoint_from_addrv2,
@@ -119,6 +123,7 @@ pub use tx_relay::{
 pub use wire::{Message, PeerError};
 
 pub use download_window::default_sync_budget;
+pub use sync::StaleTipRetainer;
 
 /// Bounded automatic reconnect avoidance; manual bans retain their owner.
 pub mod discouragement;

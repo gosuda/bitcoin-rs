@@ -332,15 +332,19 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     );
     assert!(gateway.read().contains_txid(&nonfinal_txid));
 
-    let invalidated = crate::reorg::invalidate_block(
+    let invalidation = crate::reorg::invalidate_block(
         &handles,
         &followers,
         Hash256::from_le_bytes(tip.block_hash().as_bytes()),
     )
     .map_err(|error| std::io::Error::other(format!("invalidate failed: {error:?}")))?;
     assert_eq!(
-        *invalidated.first().ok_or("nothing invalidated")?,
+        *invalidation.invalid.first().ok_or("nothing invalidated")?,
         Hash256::from_le_bytes(tip.block_hash().as_bytes())
+    );
+    assert_eq!(
+        invalidation.demoted_tip, None,
+        "an invalidated old tip is Invalid, never a stale-tip candidate"
     );
     assert_eq!(
         handles.applied_tip().load_full().map(|tip| tip.height),
@@ -374,6 +378,56 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             ),
         ],
         "one ordered stream: dependency-ordered re-admission, then the sweep"
+    );
+    Ok(())
+}
+
+/// The adapter relays the chain-owned displaced tip unchanged: a linear
+/// extension displaces nothing, and a heavier fork reports the tip it moved
+/// onto another branch.
+#[test]
+fn admit_headers_reports_the_tip_a_heavier_fork_displaced() -> Result<(), Box<dyn std::error::Error>>
+{
+    use bitcoin_rs_p2p::sync::chain::HeaderAdmission;
+    let genesis = Network::Regtest.genesis_block();
+    let mut tree = BlockTree::new();
+    tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+    let handles = Arc::new(apply_handles(
+        tree.tip_handle(),
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(RwLock::new(tree)),
+    ));
+    let adapter = super::super::NodeSyncChain {
+        block_tree: handles.block_tree_reader(),
+        handles: Arc::clone(&handles),
+        followers: crate::chain_effects::ChainFollowers::noop(),
+        assumeutxo: None,
+    };
+    let headers = |heights: std::ops::RangeInclusive<u32>| -> Vec<Header> {
+        let mut prev = genesis.block_hash();
+        heights
+            .map(|height| {
+                let header = regtest_fixture::mined_regtest_header(prev, height)
+                    .unwrap_or_else(|error| panic!("regtest header must mine: {error}"));
+                prev = header.compute_hash();
+                header
+            })
+            .collect()
+    };
+    let main = headers(1..=2);
+    let fork = headers(11..=13);
+    let demoted = |batch: &[Header]| match adapter.admit_headers(batch) {
+        HeaderAdmission::Accepted { demoted_tip, .. } => demoted_tip,
+        HeaderAdmission::Rejected(_) | HeaderAdmission::Refused(_) => {
+            panic!("fixture headers must be accepted")
+        }
+    };
+
+    assert_eq!(demoted(&main), None, "a linear extension displaces no tip");
+    assert_eq!(
+        demoted(&fork),
+        Some(Hash256::from(main[1].compute_hash())),
+        "the heavier fork displaces the tip it overtook"
     );
     Ok(())
 }

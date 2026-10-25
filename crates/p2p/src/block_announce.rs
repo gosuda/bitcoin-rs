@@ -149,6 +149,8 @@ pub struct BlockAnnouncer {
     )>,
     state: Mutex<AnnounceState>,
     recent: RecentBlockSlot,
+    stale_tips: Option<Arc<crate::sync::StaleTipRetainer>>,
+    block_tree: Option<bitcoin_rs_chain::BlockTreeReader>,
 }
 
 impl BlockAnnouncer {
@@ -166,7 +168,22 @@ impl BlockAnnouncer {
             ibd: None,
             state: Mutex::new(AnnounceState::default()),
             recent: RecentBlockSlot::default(),
+            stale_tips: None,
+            block_tree: None,
         }
+    }
+
+    /// Attaches the stale-tip retainer and block tree reader so the announcer
+    /// can relay recent stale tips to peers that negotiated BIP332.
+    #[must_use]
+    pub fn with_stale_tips(
+        mut self,
+        stale_tips: Arc<crate::sync::StaleTipRetainer>,
+        block_tree: bitcoin_rs_chain::BlockTreeReader,
+    ) -> Self {
+        self.stale_tips = Some(stale_tips);
+        self.block_tree = Some(block_tree);
+        self
     }
 
     /// Attaches the early-announce body rendezvous shared with the chain
@@ -224,6 +241,9 @@ impl BlockAnnouncer {
 
     /// Called when a peer disconnects: cleans up its announcement state.
     pub fn on_peer_disconnected(&self, source: PeerSource) {
+        if let Some(stale_tips) = &self.stale_tips {
+            stale_tips.forget_peer(source);
+        }
         let mut state = self.state.lock();
         state
             .high_bandwidth_requested_peers
@@ -555,6 +575,25 @@ impl BlockAnnouncer {
             let (source, peer_state, known_position) = self.peer_anchor(session);
 
             if known_position.is_some_and(|(_, height)| height >= tip.height) {
+                // If this peer already knows a block at or above our active tip,
+                // normal announcement is suppressed. For stale-tip relay peers,
+                // however, BIP332 requires always announcing the active tip so peers
+                // track our tip for fork point selection. We fall back to an `inv`.
+                let stale_relay = self
+                    .peers
+                    .announcement_state(source)
+                    .and_then(|s| s.stale_tip_prefers_blocks)
+                    .is_some();
+                if stale_relay {
+                    let block_inv = Inventory::Block(bitcoin::BlockHash::from_byte_array(
+                        tip_hash.to_le_bytes(),
+                    ));
+                    planned.push(PlannedAnnouncement {
+                        source,
+                        message: Message::Inv(vec![block_inv]),
+                        confirms_tip: false,
+                    });
+                }
                 continue;
             }
 
@@ -738,6 +777,83 @@ impl BlockAnnouncer {
     }
 
     /// Synchronously drains the queue, coalesces to the latest tip, and processes it.
+    /// Relays recent stale tips to ready peers that negotiated BIP332.
+    ///
+    /// PRE: none.
+    /// POST: sends at most [`crate::staletip::MAX_ADVERTISED_STALETIPS`] stale-tip announcements
+    ///   per peer, respecting peer `prefers_blocks`, rate bounds, and repeat/echo
+    ///   suppression. Sent tips are marked known via [`crate::sync::StaleTipRetainer::mark_known`]
+    ///   only after `peers.send` returns `Ok`.
+    pub fn process_stale_tips(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
+        if self.in_ibd() {
+            return Vec::new();
+        }
+        let (Some(stale_tips), Some(block_tree)) = (&self.stale_tips, &self.block_tree) else {
+            return Vec::new();
+        };
+
+        {
+            let tree = block_tree.read();
+            stale_tips.prune(&tree);
+        }
+
+        let live_sessions = self.ready_sessions();
+        let mut sent = Vec::new();
+
+        for session in live_sessions {
+            let source = session.lease.source(session.endpoint);
+            let Some(announcement_state) = self.peers.announcement_state(source) else {
+                continue;
+            };
+            let Some(prefers_blocks) = announcement_state.stale_tip_prefers_blocks else {
+                continue;
+            };
+            if session.demonstrated_tips.is_empty() {
+                continue;
+            }
+
+            let pending = stale_tips.pending_for(source, |tip_hash| {
+                match self
+                    .chain_query
+                    .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
+                {
+                    Some(crate::dispatch::StaleTipHeaders::Headers(a)) => {
+                        !prefers_blocks || a.have_block
+                    }
+                    Some(crate::dispatch::StaleTipHeaders::TooMany) | None => false,
+                }
+            });
+
+            for tip_hash in pending {
+                if stale_tips.knows(source, tip_hash) {
+                    continue;
+                }
+                let Some(crate::dispatch::StaleTipHeaders::Headers(announcement)) = self
+                    .chain_query
+                    .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
+                else {
+                    continue;
+                };
+
+                let message = Message::StaleTip(announcement);
+                match self.peers.send(source, message.clone()) {
+                    Ok(()) => {
+                        stale_tips.mark_known(source, tip_hash);
+                        sent.push((session.endpoint, message));
+                    }
+                    Err(refusal) => {
+                        if !refusal.is_saturated() {
+                            stale_tips.forget_peer(source);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        sent
+    }
+
     pub fn drain_queue_and_process(&self, rx: &BlockAnnounceReceiver) -> usize {
         if rx.try_recv() {
             self.process_tip();
@@ -762,10 +878,12 @@ pub fn spawn_block_announce_worker(
                 match rx.recv_timeout(ANNOUNCE_POLL) {
                     Ok(()) => {
                         announcer.process_tip();
+                        announcer.process_stale_tips();
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         announcer.reconcile_high_bandwidth_peers();
                         announcer.process_tip_retry();
+                        announcer.process_stale_tips();
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
@@ -804,6 +922,7 @@ mod tests {
         active_len: usize,
         committed_height: AtomicU32,
         orphan_hashes: Vec<BlockHash>,
+        stale_announcement: Mutex<Option<crate::staletip::StaleTipAnnouncement>>,
     }
 
     impl MockAnnounceChain {
@@ -829,6 +948,7 @@ mod tests {
                     u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX),
                 ),
                 orphan_hashes: Vec::new(),
+                stale_announcement: Mutex::new(None),
             }
         }
 
@@ -846,6 +966,16 @@ mod tests {
     }
 
     impl ChainQuery for MockAnnounceChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<crate::dispatch::StaleTipHeaders> {
+            self.stale_announcement
+                .lock()
+                .clone()
+                .map(crate::dispatch::StaleTipHeaders::Headers)
+        }
         fn serve_inventory_blocks(
             &self,
             _items: &[Inventory],
@@ -2535,5 +2665,129 @@ mod tests {
                 "post-commit must not resend cmpctblock to the early peer"
             );
         }
+    }
+
+    #[test]
+    fn stale_tip_relayed_to_bip332_peer_and_suppressed_on_repeat() {
+        use crate::staletip::{CompressedHeader, StaleTipAnnouncement};
+        use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+        let table = Arc::new(PeerTable::new());
+        let chain = Arc::new(MockAnnounceChain::new(5));
+        let addr = test_addr(1401);
+
+        let mut tree = BlockTree::new();
+        let genesis = Network::Regtest.genesis_block().header;
+        let g_id = tree
+            .insert_node(None, genesis, NodeStatus::HeaderValid)
+            .unwrap();
+        let h1 = mined_regtest_header(genesis.compute_hash(), 1).unwrap();
+        let fork_node = tree
+            .insert_node(Some(g_id), h1, NodeStatus::HeaderValid)
+            .unwrap();
+        let fork_hash = Hash256::from(h1.compute_hash());
+
+        let dummy_announcement = StaleTipAnnouncement {
+            fork_point: fork_hash,
+            headers: vec![CompressedHeader {
+                version: 1,
+                merkle_root: Hash256::default(),
+                time: 12345,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
+                nonce: 42,
+            }],
+            have_block: true,
+        };
+        *chain.stale_announcement.lock() = Some(dummy_announcement);
+
+        let h2 = mined_regtest_header(BlockHash::from(fork_hash), 2).unwrap();
+        let old_active_id = tree
+            .insert_node(Some(fork_node), h2, NodeStatus::HeaderValid)
+            .unwrap();
+        let demoted_hash = Hash256::from(h2.compute_hash());
+        assert_eq!(
+            tree.tip().map(|t| t.hash),
+            Some(demoted_hash),
+            "h2 starts as active tip"
+        );
+
+        let b1 = mined_regtest_header(BlockHash::from(fork_hash), 101).unwrap();
+        let b1_id = tree
+            .insert_node(Some(fork_node), b1, NodeStatus::HeaderValid)
+            .unwrap();
+        let b2 = mined_regtest_header(b1.compute_hash(), 102).unwrap();
+        let _b2_id = tree
+            .insert_node(Some(b1_id), b2, NodeStatus::HeaderValid)
+            .unwrap();
+
+        assert_eq!(
+            tree.node(old_active_id).unwrap().status,
+            NodeStatus::Stale,
+            "h2 must be demoted to Stale"
+        );
+        assert_eq!(
+            tree.tip().map(|t| t.hash),
+            Some(Hash256::from(b2.compute_hash())),
+            "heavier branch became active"
+        );
+
+        let reader = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let retainer = Arc::new(crate::sync::StaleTipRetainer::default());
+        assert!(
+            retainer.learn(&reader.read(), demoted_hash, None),
+            "demoted tip must be learned"
+        );
+
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        )
+        .with_stale_tips(Arc::clone(&retainer), reader);
+
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        let src = source(&table, addr);
+        table.note_stale_tip_relay(src, false);
+        table.note_announced_tip(src, fork_hash, Some(1));
+
+        let sent = announcer.process_stale_tips();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(sent[0].1, Message::StaleTip(_)));
+        assert_eq!(sent[0].0, Some(addr));
+
+        let msg = rx.try_recv().expect("message delivered");
+        assert!(matches!(msg, Message::StaleTip(_)));
+
+        let sent_again = announcer.process_stale_tips();
+        assert!(sent_again.is_empty(), "repeat stale tip must be suppressed");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn origin_peer_receives_inv_fallback_even_when_known_position_meets_tip() {
+        let table = Arc::new(PeerTable::new());
+        let chain = Arc::new(MockAnnounceChain::new(5));
+        let addr = test_addr(1402);
+        let tip_hash = chain.hash_at(4);
+
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        );
+
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        let src = source(&table, addr);
+
+        table.note_stale_tip_relay(src, false);
+        table.note_announced_tip(src, tip_hash, Some(4));
+
+        let sent = announcer.process_tip();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            matches!(sent[0].1, Message::Inv(_)),
+            "origin peer must get inv fallback"
+        );
+        let msg = rx.try_recv().expect("inv received");
+        assert!(matches!(msg, Message::Inv(_)));
     }
 }

@@ -229,6 +229,9 @@ pub struct Peer<S> {
     /// recognised features, not by what the peer sends. Readers use
     /// [`Peer::remote_feature`].
     pub(crate) remote_features: HashMap<FeatureId, Vec<u8>>,
+    /// Whether this node announces BIP332 stale-tip relay to the peer, and
+    /// its `prefers_blocks` byte; `None`, the default, announces nothing.
+    pub(crate) stale_tip_offer: Option<bool>,
     /// One BIP157 request waiting for asynchronous index publication or for
     /// outbound room.
     pub(crate) pending_filter_request: Option<ParkedFilter>,
@@ -283,6 +286,7 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             remote_features: HashMap::new(),
+            stale_tip_offer: None,
             pending_filter_request: None,
             deferred_inbound: None,
             pending_getdata: Vec::new(),
@@ -303,6 +307,18 @@ impl<S> Peer<S> {
     /// through this peer fail.
     pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
         self.send.take()
+    }
+
+    /// Announce BIP332 stale-tip relay to this peer, with `prefers_blocks` as
+    /// the feature's single data byte.
+    ///
+    /// PRE: called before the handshake sends our `version` reply.
+    /// POST: the BIP434 `feature` goes only to a peer at protocol version
+    ///   70017 or above ([`crate::handshake`]); by default nothing is announced.
+    ///   Whether the peer relays stale tips back is
+    ///   [`Peer::remote_feature`]`(b"BIP332")`.
+    pub fn offer_stale_tip_relay(&mut self, prefers_blocks: bool) {
+        self.stale_tip_offer = Some(prefers_blocks);
     }
 
     /// The payload the peer announced for the recognised BIP434 feature `id`,

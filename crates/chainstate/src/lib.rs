@@ -397,6 +397,12 @@ pub struct HeaderAdmissionOutcome {
     pub announced_tip: Option<Hash256>,
     /// Height of `announced_tip` on the active header chain, when resolvable.
     pub active_height: Option<i32>,
+    /// The active header tip this batch moved onto another branch, when it did:
+    /// the tip that was active before the batch, now a stale side-branch tip.
+    /// `None` for ordinary extension. A batch rejected after a valid prefix
+    /// moved the tip returns [`HeaderAdmissionError::Rejected`] and reports no
+    /// displaced tip.
+    pub demoted_tip: Option<Hash256>,
 }
 
 /// Failure to admit a batch at the authoritative header-tree boundary.
@@ -1140,8 +1146,9 @@ impl Chainstate {
         // A rejected batch can still have inserted a valid prefix and moved
         // the tip; the gate follows whatever active chain exists now.
         self.assume_valid_gate.evaluate(&tree);
-        let node_ids = acceptance.map_err(HeaderAdmissionError::Rejected)?;
-        let announced_tip = node_ids
+        let bitcoin_rs_chain::AcceptHeaders { ids, demoted_tip } =
+            acceptance.map_err(HeaderAdmissionError::Rejected)?;
+        let announced_tip = ids
             .last()
             .and_then(|id| tree.node(*id).ok())
             .map(|node| node.hash);
@@ -1153,9 +1160,10 @@ impl Chainstate {
                     .and_then(|height| i32::try_from(height).ok())
             });
         Ok(HeaderAdmissionOutcome {
-            accepted: node_ids.len(),
+            accepted: ids.len(),
             announced_tip,
             active_height,
+            demoted_tip,
         })
     }
 

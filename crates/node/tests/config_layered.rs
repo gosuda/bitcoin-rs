@@ -567,3 +567,36 @@ fn rpc_public_bind_defaults_none_and_resolves_across_layers() -> Result<()> {
     );
     Ok(())
 }
+
+/// Resolves one environment entry as its own layer.
+fn environment(key: &str, value: &str) -> Result<UserConfig> {
+    let mut layer = UserConfig::default();
+    layer.apply_env(key, std::ffi::OsStr::new(value))?;
+    Ok(layer)
+}
+
+fn refusal(layers: &[&UserConfig]) -> String {
+    match resolve(layers) {
+        Ok(_) => panic!("configuration must be refused"),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[test]
+fn stale_tip_prefers_blocks_needs_the_relay_it_modifies() -> Result<()> {
+    let prefers = environment("BITCOIN_RS_P2P_STALE_TIP_PREFERS_BLOCKS", "true")?;
+    assert!(refusal(&[&prefers]).contains("requires --p2p-stale-tip-relay"));
+
+    let relay: UserConfig = toml::from_str("p2p_stale_tip_relay = true")?;
+    let p2p = resolve(&[&relay, &prefers])?.p2p;
+    assert!(p2p.stale_tip_relay && p2p.stale_tip_prefers_blocks);
+
+    // The relay switch folds across layers before the check: a higher layer
+    // that turns the relay off leaves the lower layer's preference dangling.
+    let relay_off = environment("BITCOIN_RS_P2P_STALE_TIP_RELAY", "false")?;
+    assert!(refusal(&[&relay, &prefers, &relay_off]).contains("requires --p2p-stale-tip-relay"));
+
+    // Relay without a preference is the default announcement of headers.
+    assert!(!resolve(&[&relay])?.p2p.stale_tip_prefers_blocks);
+    Ok(())
+}
