@@ -191,7 +191,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
             && let Ok(vout) = usize::try_from(vout_u32)
             && let Some(output) = tx.outputs.get(vout)
         {
-            return txout_typed(ctx, output, 0, false, best_block);
+            return Ok(txout_json(ctx, output, 0, false, best_block));
         }
     }
 
@@ -208,31 +208,31 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         return Ok(Value::new_null());
     };
     let confirmations = view.height().saturating_sub(live.height).saturating_add(1);
-    txout_typed(
+    Ok(txout_json(
         ctx,
         &live.txout,
         confirmations,
         live.coinbase,
         view.hash(ctx.chain.chain_network),
-    )
+    ))
 }
 
-fn txout_typed(
+fn txout_json(
     ctx: &Context,
     output: &TxOut,
     confirmations: u32,
     coinbase: bool,
     best_block: Hash256,
-) -> Result<Value, RpcError> {
-    typed_to_sonic_omitting_nulls(&v31::GetTxOut {
-        best_block: best_block.to_string(),
-        confirmations,
-        value: sat_to_btc(output.value.to_sat()),
-        script_pubkey: convert::script_pub_key_typed(
+) -> Value {
+    json!({
+        "bestblock": best_block.to_string(),
+        "confirmations": confirmations,
+        "value": sat_to_btc(output.value.to_sat()),
+        "scriptPubKey": crate::tx_render::script_pub_key_json(
             &output.script_pubkey,
             ctx.chain.chain_network,
-        )?,
-        coinbase,
+        ),
+        "coinbase": coinbase,
     })
 }
 
@@ -2169,6 +2169,64 @@ mod tests {
 #[cfg(test)]
 mod gettxout_via_utxo_tests {
     use super::*;
+
+    #[test]
+    fn gettxout_preserves_script_schema_and_omits_unset_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let txid = Txid(Hash256::from_le_bytes(&[0x42; 32]));
+        let best_block = ctx.chain.applied_hash();
+        let mut scripts: Vec<_> = convert::fixtures::by_shape()
+            .into_iter()
+            .map(|(_, script)| script)
+            .collect();
+        // A truncated push must retain Core's malformed-instruction ASM too.
+        scripts.push(vec![0x02, 0x01]);
+        for (index, script) in scripts.into_iter().enumerate() {
+            let vout = u32::try_from(index)?;
+            let (satoshis, btc) = [
+                (0, 0.0_f64),
+                (1, 0.000_000_01),
+                (123_456_789, 1.234_567_89),
+                (2_100_000_000_000_000, 21_000_000.0),
+            ][index % 4];
+            let script_hex = script.to_lower_hex_string();
+            let coinbase = index % 2 == 0;
+            let mut changes = BlockChanges::default();
+            changes.add(UtxoAdd::new(
+                OutPoint::new(txid, vout),
+                TxOut {
+                    value: Amount::from_sat(satoshis),
+                    script_pubkey: Script::from_bytes(script),
+                },
+                coinbase,
+                0,
+            ));
+            commit_block_changes(&ctx.chain.utxo.fixture_set(), &changes, &best_block)?;
+            let value = handler.dispatch("gettxout", &json!([txid.to_string(), vout, false]))?;
+            let text = sonic_rs::to_string(&value)?;
+            // The pinned DTO remains an independent wire-schema oracle, without
+            // deserializing and reserializing scripts on the production path.
+            let typed: v31::GetTxOut = serde_json::from_str(&text)?;
+            assert_eq!(typed.best_block, best_block.to_string());
+            assert_eq!(typed.confirmations, 1);
+            assert_eq!(typed.value.to_bits(), btc.to_bits());
+            assert_eq!(typed.coinbase, coinbase);
+            assert_eq!(typed.script_pubkey.hex, script_hex);
+            if script_hex == "0201" {
+                assert_eq!(typed.script_pubkey.asm, "[error]");
+            }
+            assert!(typed.script_pubkey.descriptor.is_some());
+            let script = &value["scriptPubKey"];
+            assert!(script.get("reqSigs").is_none());
+            assert!(script.get("addresses").is_none());
+            assert!(!text.contains(":null"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn gettxout_returns_null_for_unknown_outpoint() {

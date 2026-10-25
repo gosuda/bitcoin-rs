@@ -2782,7 +2782,7 @@ mod tests {
         ctx.chain.add_block(BlockRecord::from_block(1, &block));
         let record = ctx
             .chain
-            .record_for_hash(Hash256::from(a1_hash))
+            .block_by_hash(Hash256::from(a1_hash))
             .expect("fixture record resolves through the tree");
         ctx.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
 

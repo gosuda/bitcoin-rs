@@ -22,6 +22,7 @@ use bitcoin_rs_script::{
 use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use crate::error::RpcError;
+#[cfg(test)]
 use crate::tx_render;
 
 /// Maps a native network onto the rust-bitcoin network for the sanctioned
@@ -297,15 +298,6 @@ fn omit_json_nulls(value: &mut Value) {
             omit_json_nulls(item);
         }
     }
-}
-
-/// Projects one output script into the versioned `scriptPubKey` object,
-/// reusing the transport renderer and validating against the pinned type.
-pub(crate) fn script_pub_key_typed(
-    script: &[u8],
-    network: Network,
-) -> Result<corepc_types::ScriptPubKey, RpcError> {
-    sonic_rs::from_value(&tx_render::script_pub_key_json(script, network)).map_err(RpcError::from)
 }
 
 /// The coinbase transaction object carried by verbose block responses.
