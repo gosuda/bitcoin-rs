@@ -37,7 +37,38 @@ fn startup_reports_regtest_identity() -> Result<()> {
 fn node_info_rpcs_answer() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let rpcinfo = node.rpc("getrpcinfo", &json!([]))?;
-    assert_eq!(rpcinfo.field("active_commands")?, &json!([]));
+    let active = rpcinfo
+        .field("active_commands")?
+        .as_array()
+        .ok_or_else(|| Error::Assertion("active_commands is not an array".to_owned()))?;
+    assert_eq!(
+        active.len(),
+        1,
+        "getrpcinfo self-reports as active during execution"
+    );
+    assert_eq!(active[0].str_field("method")?, "getrpcinfo");
+    let _duration = active[0].u64_field("duration")?;
+
+    // A completed call must not linger: subsequent RPC queries report no residual commands.
+    let _ = node.rpc("getblockcount", &json!([]))?;
+    let rpcinfo2 = node.rpc("getrpcinfo", &json!([]))?;
+    let active2 = rpcinfo2
+        .field("active_commands")?
+        .as_array()
+        .ok_or_else(|| Error::Assertion("active_commands is not an array".to_owned()))?;
+    assert_eq!(
+        active2.len(),
+        1,
+        "completed commands are removed when their call finishes"
+    );
+    assert_eq!(active2[0].str_field("method")?, "getrpcinfo");
+    let _duration2 = active2[0].u64_field("duration")?;
+
+    let uptime = node.rpc("uptime", &json!([]))?;
+    uptime
+        .as_u64()
+        .ok_or_else(|| Error::Assertion(format!("uptime is not an unsigned integer: {uptime}")))?;
+
     let datadir = node.take_datadir()?;
     assert_eq!(
         rpcinfo.str_field("logpath")?,

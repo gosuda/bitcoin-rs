@@ -97,7 +97,14 @@ fn restart_reconnects(
     let datadir = learner.stop_keep_datadir()?;
     let bytes = std::fs::read(datadir.path().join("node/peers-fabfb5da.dat"))?;
     let book: serde_json::Value = serde_json::from_slice(&bytes[..bytes.len() - 32])?;
-    assert_eq!(book["version"], 8);
+    let records = book["records"]
+        .as_array()
+        .ok_or_else(|| Error::Assertion("missing records array in persisted book".to_owned()))?;
+    if !records.iter().any(|entry| entry["addr"] == expected) {
+        return Err(Error::Assertion(format!(
+            "persisted address book must retain learned peer {expected}: {records:?}"
+        )));
+    }
     assert_eq!(
         book["asmap_id"],
         json!(expected_map),
