@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.3** (2026-10-18)
+**Contract version: 1.4** (2026-10-25)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
@@ -31,6 +31,11 @@ Owners:
   `crates/index/src/runtime.rs` mapped by `DerivedIndexCapability` onto the
   wire types in `crates/index/src/capabilities.rs`. There is no parallel
   status enum.
+- Portable index bundles: export and restore in `crates/index/src/portable.rs`
+  and its `portable/` modules, run by the worker in `runtime/startup.rs`.
+  The node owns only the one-shot request: option parsing in
+  `crates/node/src/options.rs`, validation in `crates/node/src/config.rs`, and
+  the directive in `crates/node/src/state.rs`.
 
 ## Clauses
 
@@ -343,6 +348,148 @@ Proof: these tests establish the memo-retention rule:
   undo read fails the worker with its own error while an absent record
   resets and reseeds.
 
+### `IDX-11`: Portable index bundle
+
+- **Request**: A bundle operation is an explicit one-shot request. CLI
+  `--index-bundle-import <dir>` (env `BITCOIN_RS_INDEX_BUNDLE_IMPORT`,
+  configuration `index_bundle_import`) requests a restore. CLI
+  `--index-bundle-export <dir>` (env `BITCOIN_RS_INDEX_BUNDLE_EXPORT`,
+  configuration `index_bundle_export`) requests an export. Neither has a
+  default, and `bitcoin.conf` cannot set either.
+- Configuration validation refuses a request that sets both options, a request
+  without `--txindex`, and a blank or NUL-bearing directory. It opens no path;
+  existence and permissions are checked only when the request runs.
+  `NodeState` turns the resolved fields into one `IndexBundleDirective`. The
+  index worker runs it once, after the store opens and before its first
+  reconcile pass. The node does not exit after the request. The request is not
+  stored and nothing removes the option: the operator removes it after the run,
+  and a later start that still sets it runs the request again.
+- **Format identity**: A bundle is a directory with `txlookup-v1.dat` and, written
+  last, `manifest.json`. The manifest carries `format` =
+  `bitcoin-rs-index-bundle` and `version` = 1, and it denies unknown fields.
+  A manifest larger than 1 MiB is refused unread. The manifest binds the
+  network, the genesis hash, the base (height, hash, chainwork, cumulative
+  transaction count), the index format version, one `tx_lookup` coverage entry
+  with its first covered height (`floor`), and one artifact (name, SHA-256,
+  byte length, record count). The base must carry `validated: true`. Restore
+  does not read `index.mode`; export sets it to `full` when its worker had
+  `ScriptHistory` enabled and to `utxo` otherwise.
+- The artifact has a 73-byte `BRSIXART` header that repeats the family, the
+  artifact version, the index format version, the network magic, and the base.
+  Each record is `txid (32 bytes) || height (4 bytes, big-endian) || count
+  (1 byte) || count x 6-byte TxPosition`. Records carry full transaction ids,
+  never raw key-value rows. They appear in strictly ascending
+  `(txid[..8], height, txid[8..])` order. Ids that share an 8-byte prefix inside
+  one block fold into one stored row on restore.
+- **Coverage**: A bundle carries the `TxLookup` family only, as the
+  `TxConfirmed` rows of one snapshot at the applied tip. Export never writes a
+  `ScriptHistory` artifact, and restore refuses a manifest that declares one
+  (`UnsupportedCapability`). `ScriptLive` is never a bundle capability and is
+  reseeded from the UTXO set. `CompactFilters` is not a bundle family. A bundle
+  carries no block bodies, undo records, or chainstate.
+- **Export** publishes a manifest only when all of these hold:
+  - `TxLookup` is enabled (`TxLookupDisabled`).
+  - The destination holds no `manifest.json` (`ExistingBundle`); the artifact is
+    created with create-new semantics and never overwrites a file.
+  - The `TxLookup` watermark equals the applied tip exactly, a block body source
+    exists, and the base block is not marked invalid (`NotReady`). The request
+    runs before the first reconcile pass, so an index that lags the applied tip
+    at start is refused, not caught up first.
+  - The snapshot watermark equals the fenced watermark at capture, and the
+    fenced watermarks are unchanged after the stream (`Stale`).
+  - Every stored position resolves, through the active-chain block body at the
+    row height, to a transaction whose id carries the row prefix
+    (`BodyUnavailable` for an absent body, `SourceRow` for any other mismatch).
+- Export fsyncs the artifact, fsyncs the directory, then publishes the manifest
+  with create-new, fsync, and a directory fsync. Directory sync is a no-op off
+  Unix. An export that returns an error attempts to remove the artifact it
+  created, and a manifest that fails to write or fsync is removed. A failure of
+  the final directory sync is a known gap (see Live gaps).
+- **Restore validation** completes before any write. Faults are reported in this
+  order: manifest fields, artifact length, SHA-256, artifact header, record
+  framing and order, chain identity, a fresh `TxLookup`, locator mismatch.
+  - Chain identity requires the same network, the same index format version as
+    the compiled code, an applied tip, a base at or below that tip, the same
+    genesis hash, the base hash at the base height on the applied tip's
+    ancestry (the tip may be ahead of the base), and equal chainwork and
+    cumulative transaction count at the base. A bundle with a different index
+    format version is refused; the bundle is not a migration path
+    ([db-migration.md](../policies/db-migration.md)).
+  - Restore needs a fresh capability. It refuses (`NotFresh`) only when
+    `TxLookup` already has a watermark, and it never resets a ready index.
+    `TxConfirmed` rows without a `TxLookup` watermark are leftovers of an
+    interrupted import; a reset of the `TxLookup` capability clears them
+    before the import writes. Restore checks no other capability's state.
+  - Record framing requires the declared record count and payload length, no
+    trailing bytes, one to 255 positions per record, heights inside
+    `[floor, base]`, and strictly ascending, non-overlapping, non-empty
+    positions that lie inside one serialized block of at most 4,000,000 bytes.
+  - Every record is resolved through the receiver's own block body at the
+    recorded position, and the full 32-byte transaction id must equal the
+    recorded id. A prefix match never resolves a locator. The first terminal
+    locator outcome in record order decides: a mismatch found before any
+    unavailable body is a refusal (`Locator`); an unavailable body found first
+    withholds the bundle.
+  - If the receiver has no block body source, or a body a locator needs is
+    absent or pruned, the bundle is withheld, not refused: restore writes
+    nothing, logs a warning, and ordinary backfill proceeds.
+- **Restore apply**: The row stream writes the receiver's own 80-byte header for
+  every height from 0 to the base (from its block tree, not from the bundle)
+  and then the `TxConfirmed` rows. A batch commits after 65,536 rows (headers
+  included) or 8 MiB, and each batch is an ordinary fenced write. The
+  `TxLookup` watermark (base height and hash) and the floor are written only in
+  the final commit, so the watermark appears with that commit or not at all. The
+  apply pass hashes the artifact again and aborts before the final commit if
+  the bytes differ from the validated bytes.
+- A failed or interrupted apply leaves rows without a watermark, and queries
+  refuse the capability. A failed attempt clears them at once when the
+  capability still has no watermark. On every start with `TxLookup` enabled,
+  `reset_interrupted_import` clears `TxConfirmed` rows that have no `TxLookup`
+  watermark, before the bundle request or any derivation runs.
+- After a restore, reconciliation proceeds as for any capability with a
+  watermark; a forward pass starts at the watermark height plus one.
+- **Failure handling**: A refused request is logged at error level and ordinary
+  reconciliation proceeds. A one-shot setting left in place, a lagging export,
+  or a bad bundle never keeps the index from reaching the tip. Only a
+  writer or reader failure (`IndexBundleError::Index`) fails the index worker,
+  and the node's validation and chainstate progress continue as in `IDX-07`.
+  Shutdown during the request stops the worker (`Cancelled`). The request polls
+  for cancellation every 4,096 records or heights.
+- **Non-claims**:
+  - No bundle carries `ScriptHistory`, `ScriptLive`, or `CompactFilters` rows.
+    An operator who needs those indexes builds them through `IDX-01`.
+  - The bundle carries no signature. The SHA-256 binds the artifact to the
+    manifest that sits beside it. Restore binds each record to the receiver's
+    chain by the locator check, not to the exporter's identity.
+  - Restore proves that every record present resolves in the receiver's chain.
+    It does not prove that no record is missing: no check compares the record
+    count with the chain's transaction count.
+  - No test compares restored rows with rows an ordinary derivation writes.
+  - The clause makes no performance, interoperability with other
+    implementations, or cross-version claim.
+- Executable proof covers only the manifest and artifact codec and the
+  configuration surface. The export, restore, apply, cleanup, and
+  failure-handling rules above are stated from the code and have no executable
+  proof (see Live gaps).
+- Proof (codec and configuration only): the `crates/index/src/portable/manifest.rs`
+  tests `manifest_round_trips_through_json_and_validates`,
+  `unknown_fields_are_denied_at_every_level`,
+  `script_live_is_never_a_capability_and_script_history_is_refused`, and
+  `malformed_values_are_refused`; the `crates/index/src/portable/artifact.rs`
+  tests `header_is_73_bytes_with_a_big_endian_height_and_round_trips`,
+  `prefix_collisions_order_by_full_txid_and_fold_into_one_sorted_row`,
+  `framing_refuses_each_violation`, and
+  `hashing_reader_digest_equals_the_one_shot_digest`; the
+  `crates/node/tests/config_layered.rs` tests
+  `index_bundle_is_an_explicit_one_shot_request`,
+  `index_bundle_import_and_export_never_resolve_by_precedence`,
+  `index_bundle_requires_the_transaction_index_it_moves`, and
+  `index_bundle_rejects_empty_and_unusable_directories_on_every_surface`; and the
+  `bin/bitcoin-rs/src/config.rs` tests
+  `index_bundle_directories_resolve_from_the_command_line_and_stay_exclusive`,
+  `empty_index_bundle_directories_are_refused_by_clap_and_the_environment`, and
+  `bitcoin_conf_cannot_request_a_bundle_or_relay_feature`.
+
 ### Compact-filter data and serving
 
 `index/filters.rs` selects BIP158 basic-filter scripts and owns BIP157 hash/header
@@ -418,6 +565,20 @@ Core/Kyoto runner are described in
   checkpoints, block bodies, and derived indexes is normative in
   [recovery.md](recovery.md) (`RCV-01`–`RCV-04`); a `kill -9` gate that
   re-applies real block bodies through it is not yet exercised.
+- **Portable bundle end to end**: No test runs an export, a restore, a
+  withheld restore, or an interrupted import against a store (`IDX-11`). The
+  export, restore, and cleanup rules in that clause rest on the code paths
+  `portable/export.rs`, `portable/restore.rs`, `index/write.rs`
+  `import_tx_lookup_stream`, and `runtime/startup.rs` `open_and_run`, plus the
+  codec and configuration tests it lists.
+- **Orphan manifest after a failed export**: `publish_manifest` ends with a
+  directory sync (`portable/export.rs`). If that sync fails after
+  `manifest.json` exists, the export returns an error, the artifact is removed,
+  and the manifest stays. Restore of that directory then fails reading the
+  artifact, and a new export into it is refused as `ExistingBundle` until the
+  operator clears the directory. The code does not remove the manifest on this
+  path.
+
 ## Proven by
 
 - `crates/index/tests/index_roundtrip.rs`

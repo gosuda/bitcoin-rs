@@ -203,6 +203,102 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
+    /// Imports verified `TxLookup` rows and block identities for a portable
+    /// bundle restore.
+    ///
+    /// `produce` emits every row of the bundle. Each bounded batch is an
+    /// ordinary fenced write: reset state, ordinary revision, and every
+    /// capability watermark must still match the capture, so a lost fence is
+    /// [`IndexError::StaleIndexState`] or [`IndexError::ResetInProgress`]. The
+    /// `TxLookup` watermark and coverage floor are written only in the final
+    /// commit, after `produce` has returned, so an error, crash, or aborted
+    /// source leaves the capability un-watermarked (and therefore
+    /// `Unavailable`) with partial rows the caller resets.
+    ///
+    /// An existing `TxLookup` watermark is never reset or overwritten:
+    /// the import refuses with [`IndexError::WatermarkMismatch`] naming it.
+    /// Leftover rows without a watermark are an interrupted earlier attempt
+    /// and are cleared through the capability reset before any row is written.
+    ///
+    /// Returns the number of `TxLookup` rows written.
+    pub(crate) fn import_tx_lookup_stream<F>(
+        &self,
+        mut produce: F,
+        base: IndexWatermark,
+        floor: u32,
+    ) -> Result<usize, IndexError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
+        ) -> Result<(), IndexError>,
+    {
+        const IMPORT_BATCH_ROWS: usize = 65_536;
+        const IMPORT_BATCH_BYTES: usize = 8 << 20;
+        let refuse_populated = |fence: &IndexWriteFence| match fence.watermarks.tx_lookup {
+            Some(actual) => Err(IndexError::WatermarkMismatch {
+                expected: None,
+                actual: Some(actual),
+            }),
+            None => Ok(()),
+        };
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_populated(&existing)?;
+        // Recapture after the reset: the claim advances the fence, so a
+        // pre-reset capture cannot commit.
+        self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
+        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_populated(&fence)?;
+        let mut written = 0_usize;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        let mut in_batch = 0_usize;
+        let mut in_bytes = 0_usize;
+        let mut add = |row: PortableImportRow<'_>| -> Result<(), IndexError> {
+            match row {
+                PortableImportRow::Header(header) => {
+                    batch.put(ColumnFamily::BlockHeaders, header, &[]);
+                    in_bytes = in_bytes.saturating_add(header.len());
+                }
+                PortableImportRow::TxLookup { row, value } => {
+                    batch.put(ColumnFamily::TxConfirmed, &row.to_db_row(), value);
+                    in_bytes = in_bytes
+                        .saturating_add(crate::HASH_PREFIX_ROW_SIZE)
+                        .saturating_add(value.len());
+                    written += 1;
+                }
+            }
+            in_batch += 1;
+            if in_batch >= IMPORT_BATCH_ROWS || in_bytes >= IMPORT_BATCH_BYTES {
+                let next = self.indexer.store.new_batch();
+                let old = std::mem::replace(&mut batch, next);
+                commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
+                fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+                refuse_populated(&fence)?;
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION_VALUE,
+                );
+                in_batch = 0;
+                in_bytes = 0;
+            }
+            Ok(())
+        };
+        produce(&mut add)?;
+        put_selected_watermarks(&mut batch, IndexCapabilities::TX_LOOKUP, Some(base));
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            floor,
+        );
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
+        Ok(written)
+    }
+
     /// Marks selected derived rows unavailable, deletes them in bounded batches,
     /// and leaves their durable cursors empty so the worker can rebuild from genesis.
     ///
@@ -637,6 +733,25 @@ impl<S: KvStore> IndexWriter<S> {
             store_batch,
         )
     }
+}
+
+/// One verified row of a portable `TxLookup` import.
+pub(crate) enum PortableImportRow<'a> {
+    /// The 80-byte header identity of an active-chain block at or below the
+    /// bundle base, so ordinary rollback can unseat the base later.
+    Header(&'a [u8; crate::types::HEADER_ROW_SIZE]),
+    /// One `TxConfirmed` row and its packed `TxPosition` value.
+    TxLookup {
+        /// Stored key: txid prefix and big-endian height.
+        row: crate::types::HashPrefixRow,
+        /// Sorted, packed positions of every transaction filed under the key.
+        value: &'a [u8],
+    },
+}
+
+/// The compiled on-disk index format number a portable bundle must carry.
+pub(crate) const fn index_format_version() -> u32 {
+    u32::from_le_bytes(FORMAT_VERSION_VALUE)
 }
 
 fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {

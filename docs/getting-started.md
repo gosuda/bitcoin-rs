@@ -137,6 +137,8 @@ clients; Basic auth is not encrypted without a TLS-terminating proxy.
 
 `--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
 
+`--index-bundle-export <dir>` saves the `--txindex` lookup data to a bundle directory, and `--index-bundle-import <dir>` loads a bundle into a `--txindex` that has not started building. The environment variables are `BITCOIN_RS_INDEX_BUNDLE_EXPORT` and `BITCOIN_RS_INDEX_BUNDLE_IMPORT`, the TOML keys are `index_bundle_export` and `index_bundle_import`, and `bitcoin.conf` cannot set them. Both need `--txindex`, and you cannot use both in one run. Each is a one-shot request that runs when the index opens, so remove the setting after the run. A bundle holds only the lookup data, not script-index or block-filter data. The rules, including how an import is checked, are in the [indexing contract](contracts/indexing.md#idx-11-portable-index-bundle).
+
 The optional `silent-payments` build feature plus `--silent-payments` enables
 the authenticated, experimental `getblocktweaks` RPC. It needs retained certified
 block inputs rather than txindex; see [Silent Payments usage and limits](silent-payments.md).

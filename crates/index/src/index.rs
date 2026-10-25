@@ -19,9 +19,14 @@ pub use filters::BasicFilter;
 pub use prepared::{PreparedBatch, PreparedBatchLimits, PreparedBlock};
 pub use reader::Indexer;
 pub use rows::IndexRowCounts;
-pub use snapshot::{IndexReader, ScriptLiveScan, TxIndexScan, TxIndexScanRow, TxIndexSnapshot};
+#[cfg(test)]
+pub(crate) use snapshot::RowVisitor;
+pub use snapshot::{
+    IndexReader, ScriptLiveScan, TxIndexFamily, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+};
 pub use state::{ConsumerCursorUpdate, IndexWriteFence};
 pub use write::IndexWriter;
+pub(crate) use write::{PortableImportRow, index_format_version};
 
 #[cfg(all(test, feature = "rocksdb"))]
 mod tests;

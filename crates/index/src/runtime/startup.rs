@@ -15,8 +15,9 @@ use super::Worker;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
 use crate::PreparedBatchLimits;
+use crate::portable::{BundleHost, BundleOutcome, IndexBundleError, Withheld};
 use crate::writer::TxIndexWriter;
-use crate::{IndexError, IndexWriter};
+use crate::{IndexCapability, IndexError, IndexWriter};
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
@@ -234,7 +235,7 @@ pub(super) fn open_and_run(
 
     let query_engine = Arc::new(DerivedIndexQueryEngine::new(
         Arc::clone(runtime),
-        open.reader,
+        Arc::clone(&open.reader),
         block_tree.clone(),
         applied_tip.clone(),
         body_source.clone(),
@@ -253,6 +254,45 @@ pub(super) fn open_and_run(
     );
 
     // Check shutdown immediately after publication.
+    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
+        return Ok(());
+    }
+
+    // Rows without a `TxLookup` watermark exist only after an interrupted
+    // portable import. Clear them through the capability reset before the
+    // directive or any derivation runs; the engine already refuses the
+    // un-watermarked capability.
+    if spec.enabled.contains(IndexCapability::TxLookup)
+        && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
+            .map_err(DerivedIndexWorkerError::Index)?
+    {
+        tracing::warn!("cleared rows left by an interrupted portable index import");
+    }
+    let cancelled = || shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop();
+    let host = BundleHost {
+        writer: open.writer.as_ref(),
+        reader: open.reader.as_ref(),
+        block_tree,
+        applied_tip,
+        body_source: body_source.as_deref(),
+        enabled: spec.enabled,
+        cancelled: &cancelled,
+    };
+    // A refused request wrote nothing the index serves, so ordinary
+    // reconciliation proceeds and the operator reads the refusal in the log:
+    // a one-shot key left set, a lagging export, or a bad bundle must never
+    // keep the index from reaching the tip. Only writer or reader failures,
+    // which can leave the store uncertain, fail the worker.
+    match crate::portable::run(&host, &spec.bundle) {
+        Ok(None) => {}
+        Ok(Some(outcome)) => log_bundle_outcome(&outcome),
+        Err(IndexBundleError::Cancelled) => return Err(DerivedIndexWorkerError::Stopped),
+        Err(IndexBundleError::Index(error)) => return Err(DerivedIndexWorkerError::Index(error)),
+        Err(error) => tracing::error!(
+            %error,
+            "portable txindex bundle request refused; ordinary reconciliation proceeds"
+        ),
+    }
     if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
         return Ok(());
     }
@@ -277,6 +317,31 @@ pub(super) fn open_and_run(
     };
 
     worker.run()
+}
+
+/// Reports how a bundle directive ended.
+fn log_bundle_outcome(outcome: &BundleOutcome) {
+    match outcome {
+        BundleOutcome::Exported(report) => tracing::info!(
+            height = report.base.height,
+            records = report.records,
+            bytes = report.bytes,
+            "exported portable txindex bundle"
+        ),
+        BundleOutcome::Restored(report) => tracing::info!(
+            height = report.base.height,
+            records = report.records,
+            rows = report.rows,
+            "restored portable txindex bundle; ordinary reconciliation continues from its base"
+        ),
+        BundleOutcome::RestoreWithheld(Withheld::NoBodySource) => tracing::warn!(
+            "portable txindex bundle not activated: no block body source to verify locators; ordinary backfill proceeds"
+        ),
+        BundleOutcome::RestoreWithheld(Withheld::BodyUnavailable { height }) => tracing::warn!(
+            height,
+            "portable txindex bundle not activated: a block body its locators need is unavailable; ordinary backfill proceeds"
+        ),
+    }
 }
 
 /// Opens the txindex store with a bounded deadline.
@@ -572,6 +637,7 @@ mod tests {
             open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
             utxo: None,
             chain_transition: None,
+            bundle: crate::portable::IndexBundleDirective::None,
         };
         let result =
             open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);

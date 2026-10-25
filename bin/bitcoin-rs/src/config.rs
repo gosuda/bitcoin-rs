@@ -576,12 +576,13 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
 #[cfg(test)]
 mod feature_option_tests {
     use std::ffi::OsString;
+    use std::path::Path;
 
     use anyhow::Result;
-    use bitcoin_rs_node::NodeConfig;
+    use bitcoin_rs_node::{Network, NodeConfig};
     use clap::Parser as _;
 
-    use super::{CliArgs, resolve};
+    use super::{CliArgs, parse_for_network, resolve};
 
     fn load(args: &[&str], vars: &[(&str, &str)]) -> Result<NodeConfig> {
         let argv = std::iter::once("bitcoin-rs").chain(args.iter().copied());
@@ -602,12 +603,8 @@ mod feature_option_tests {
 
     #[test]
     fn relay_switches_are_bare_cli_flags_and_the_command_line_beats_environment() -> Result<()> {
-        let off = load(&[], &[])?.p2p;
-        assert!(
-            !off.relay_offers.package_relay
-                && !off.relay_offers.stale_tip_relay
-                && !off.relay_offers.stale_tip_prefers_blocks
-        );
+        let off = load(&[], &[])?.p2p.relay_offers;
+        assert!(!off.package_relay && !off.stale_tip_relay && !off.stale_tip_prefers_blocks);
 
         let on = load(
             &[
@@ -617,24 +614,83 @@ mod feature_option_tests {
             ],
             &[],
         )?
-        .p2p;
-        assert!(
-            on.relay_offers.package_relay
-                && on.relay_offers.stale_tip_relay
-                && on.relay_offers.stale_tip_prefers_blocks
-        );
+        .p2p
+        .relay_offers;
+        assert!(on.package_relay && on.stale_tip_relay && on.stale_tip_prefers_blocks);
 
-        let env_on = load(&[], &[("BITCOIN_RS_P2P_PACKAGE_RELAY", "true")])?.p2p;
-        assert!(env_on.relay_offers.package_relay);
+        let env_on = load(&[], &[("BITCOIN_RS_P2P_PACKAGE_RELAY", "true")])?
+            .p2p
+            .relay_offers;
+        assert!(env_on.package_relay);
         let cli_off = load(
             &["--p2p-package-relay=false"],
             &[("BITCOIN_RS_P2P_PACKAGE_RELAY", "true")],
         )?
-        .p2p;
-        assert!(!cli_off.relay_offers.package_relay);
+        .p2p
+        .relay_offers;
+        assert!(!cli_off.package_relay);
 
         let dangling = refusal(&["--p2p-stale-tip-prefers-blocks"], &[]);
         assert!(dangling.contains("--p2p-stale-tip-relay"));
         Ok(())
+    }
+
+    #[test]
+    fn index_bundle_directories_resolve_from_the_command_line_and_stay_exclusive() -> Result<()> {
+        let import = load(&["--txindex=true", "--index-bundle-import", "/srv/in"], &[])?.indexes;
+        assert_eq!(import.bundle_import.as_deref(), Some(Path::new("/srv/in")));
+        assert_eq!(import.bundle_export, None);
+
+        let export = load(
+            &["--txindex=true"],
+            &[("BITCOIN_RS_INDEX_BUNDLE_EXPORT", "/srv/out")],
+        )?
+        .indexes;
+        assert_eq!(export.bundle_export.as_deref(), Some(Path::new("/srv/out")));
+
+        // A command-line request never overrides a conflicting environment one.
+        let conflict = refusal(
+            &["--txindex=true", "--index-bundle-import", "/srv/in"],
+            &[("BITCOIN_RS_INDEX_BUNDLE_EXPORT", "/srv/out")],
+        );
+        assert!(conflict.contains("mutually exclusive"));
+        assert!(refusal(&["--index-bundle-export", "/srv/out"], &[]).contains("--txindex"));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_index_bundle_directories_are_refused_by_clap_and_the_environment() {
+        for flag in ["--index-bundle-import", "--index-bundle-export"] {
+            assert!(CliArgs::try_parse_from(["bitcoin-rs", flag, ""]).is_err());
+            assert!(CliArgs::try_parse_from(["bitcoin-rs", flag, "  "]).is_err());
+            assert!(CliArgs::try_parse_from(["bitcoin-rs", flag]).is_err());
+        }
+        for key in [
+            "BITCOIN_RS_INDEX_BUNDLE_IMPORT",
+            "BITCOIN_RS_INDEX_BUNDLE_EXPORT",
+        ] {
+            assert!(load(&["--txindex=true"], &[(key, "")]).is_err());
+        }
+    }
+
+    /// A one-shot restore or export is operator opt-in on the options the
+    /// table names; the Core-compatible file has no spelling for it.
+    #[test]
+    fn bitcoin_conf_cannot_request_a_bundle_or_relay_feature() {
+        let layers = parse_for_network(
+            "
+index-bundle-import=/srv/in
+indexbundleexport=/srv/out
+p2p-package-relay=1
+p2p-stale-tip-relay=1
+",
+            Network::Regtest,
+        );
+        for layer in &layers {
+            assert_eq!(layer.indexes.bundle_import, None);
+            assert_eq!(layer.indexes.bundle_export, None);
+            assert_eq!(layer.p2p.package_relay, None);
+            assert_eq!(layer.p2p.stale_tip_relay, None);
+        }
     }
 }

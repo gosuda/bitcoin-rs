@@ -269,7 +269,7 @@ const QUERY_SCAN_COUNT_LIMIT: usize = 4_096;
 
 const QUERY_BODY_READ_LIMIT: usize = 4_096;
 
-const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
+pub(crate) const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
 
 /// Writer-side batch limits.
 ///
@@ -450,6 +450,10 @@ pub struct DerivedIndexOpenSpec {
     /// Callers constructing this spec can also supply an unrelated domain, so
     /// matching provenance is required for live queries.
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    /// One-shot portable index bundle request, run by the worker after the
+    /// writer and reader exist and before the first reconcile pass.
+    /// [`crate::portable::IndexBundleDirective::None`] does nothing.
+    pub bundle: crate::portable::IndexBundleDirective,
 }
 
 /// Handle used to spawn and join the supervised reconciliation worker.

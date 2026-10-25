@@ -1,6 +1,6 @@
 //! Node configuration DTOs, resolution, and validation.
 
-use crate::options::{ChainstateJournalOverrides, UserConfig};
+use crate::options::{ChainstateJournalOverrides, UserConfig, check_index_bundle_path};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -184,6 +184,12 @@ pub struct IndexConfig {
     /// Optional basic compact-filter index; disabled by default.
     pub blockfilterindex: bool,
     pub script_index: ScriptIndexMode,
+    /// One-shot startup restore of a portable index bundle from this
+    /// directory. Never set by default; excludes [`Self::bundle_export`].
+    pub bundle_import: Option<PathBuf>,
+    /// One-shot startup export of a portable index bundle into this
+    /// directory. Never set by default; excludes [`Self::bundle_import`].
+    pub bundle_export: Option<PathBuf>,
 }
 
 /// Resolved observability configuration.
@@ -344,6 +350,8 @@ impl NodeConfig {
                     .indexes
                     .script_index
                     .unwrap_or(ScriptIndexMode::Disabled),
+                bundle_import: settings.indexes.bundle_import.clone(),
+                bundle_export: settings.indexes.bundle_export.clone(),
             },
             observability: ObservabilityConfig {
                 log_level: settings
@@ -434,6 +442,7 @@ impl NodeConfig {
                 || self.p2p.relay_offers.stale_tip_relay,
             "--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay"
         );
+        self.validate_index_bundle()?;
         if self.p2p.magic != self.network.magic() {
             anyhow::ensure!(
                 self.network == Network::Mainnet,
@@ -474,6 +483,33 @@ impl NodeConfig {
             journal.max_lag_seconds > 0,
             "chainstate_journal.max_lag_seconds must be positive"
         );
+        Ok(())
+    }
+
+    /// Validates the portable index bundle request.
+    ///
+    /// PRE: none; this reads only resolved fields and opens no path.
+    /// POST: at most one nonempty bundle directory is set, and it is set only
+    /// when the transaction index it moves is enabled.
+    /// INVARIANT: the bundle is an explicit one-shot operator request, so a
+    /// request this node cannot honor fails before any worker starts instead
+    /// of being dropped.
+    fn validate_index_bundle(&self) -> Result<()> {
+        let indexes = &self.indexes;
+        anyhow::ensure!(
+            indexes.bundle_import.is_none() || indexes.bundle_export.is_none(),
+            "--index-bundle-import and --index-bundle-export are mutually exclusive"
+        );
+        for (flag, dir) in [
+            ("--index-bundle-import", &indexes.bundle_import),
+            ("--index-bundle-export", &indexes.bundle_export),
+        ] {
+            let Some(dir) = dir else {
+                continue;
+            };
+            check_index_bundle_path(dir).map_err(|error| anyhow::anyhow!("{flag}: {error}"))?;
+            anyhow::ensure!(indexes.txindex, "{flag} requires --txindex");
+        }
         Ok(())
     }
 

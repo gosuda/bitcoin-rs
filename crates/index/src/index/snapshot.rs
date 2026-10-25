@@ -10,6 +10,31 @@ use crate::{
 };
 use bitcoin_rs_primitives::{OutPoint, Txid};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
+use std::ops::ControlFlow;
+
+/// Per-row visitor of [`TxIndexSnapshot::for_each_row`]: the parsed key, the
+/// raw value, and [`ControlFlow::Break`] to stop the stream early.
+pub(crate) type RowVisitor<'a> =
+    dyn FnMut(HashPrefixRow, &[u8]) -> Result<ControlFlow<()>, IndexError> + 'a;
+
+/// One persisted `TxIndex` row family that [`TxIndexSnapshot::for_each_row`] streams.
+///
+/// `ScriptHistory` occurrences are intentionally absent: that family has no
+/// qualified portable layout yet, and a variant is added only with its codec.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TxIndexFamily {
+    /// Confirmed-transaction rows: `txid prefix (8) || height (4, BE)` keys
+    /// carrying packed `TxPosition` values.
+    TxConfirmed,
+}
+
+impl TxIndexFamily {
+    const fn column_family(self) -> ColumnFamily {
+        match self {
+            Self::TxConfirmed => ColumnFamily::TxConfirmed,
+        }
+    }
+}
 
 /// One typed row from a `TxIndex` prefix scan, including its raw value.
 #[derive(Debug)]
@@ -53,6 +78,18 @@ pub trait TxIndexSnapshot: Send + Sync {
         &self,
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError>;
+    /// Streams every row of `family` in ascending stored-key order from this
+    /// snapshot, one row at a time.
+    ///
+    /// There is no seek, paging cursor, or family-sized vector: `visit`
+    /// receives each parsed key and its raw value and answers
+    /// [`ControlFlow::Break`] to stop early. A malformed key or a storage
+    /// failure ends the stream with an error.
+    fn for_each_row(
+        &self,
+        family: TxIndexFamily,
+        visit: &mut RowVisitor<'_>,
+    ) -> Result<(), IndexError>;
     /// Loads one capability's coverage floor: the first height its committed
     /// rows cover. `0` means complete coverage from genesis.
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
@@ -130,6 +167,22 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
 
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
         crate::index::capability::read_coverage_floor(self.snapshot.as_ref(), capability)
+    }
+
+    fn for_each_row(
+        &self,
+        family: TxIndexFamily,
+        visit: &mut RowVisitor<'_>,
+    ) -> Result<(), IndexError> {
+        for item in self.snapshot.iter_prefix(family.column_family(), &[])? {
+            let (key, value) = item?;
+            let row = zerocopy::FromBytes::read_from_bytes(&key)
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            if visit(row, &value)?.is_break() {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn transaction_rows(

@@ -10,10 +10,15 @@ use parking_lot::RwLock;
 use crate::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
     IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, ScriptHash, SpentCoinScripts,
+    index::PortableImportRow,
 };
 
 /// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
 pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
+    + 'a;
+
+/// Object-safe row producer used by [`TxIndexWriter::import_tx_lookup_stream`].
+pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
     + 'a;
 
 /// Erased prepared-index writer used by derived-index reconciliation.
@@ -42,6 +47,14 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         &self,
         produce: &mut ScriptLiveSeedProduce<'_>,
         tip: IndexWatermark,
+    ) -> Result<usize, IndexError>;
+    /// Imports verified portable `TxLookup` rows through bounded fenced commits,
+    /// stamping `base` and `floor` only in the final commit.
+    fn import_tx_lookup_stream(
+        &self,
+        produce: &mut PortableImportProduce<'_>,
+        base: IndexWatermark,
+        floor: u32,
     ) -> Result<usize, IndexError>;
     /// Commits prepared rows and the consumer cursor under one exact fence.
     fn commit_forward_with_cursor(
@@ -128,6 +141,15 @@ where
         tip: IndexWatermark,
     ) -> Result<usize, IndexError> {
         self.write().seed_script_live_stream(produce, tip)
+    }
+
+    fn import_tx_lookup_stream(
+        &self,
+        produce: &mut PortableImportProduce<'_>,
+        base: IndexWatermark,
+        floor: u32,
+    ) -> Result<usize, IndexError> {
+        self.write().import_tx_lookup_stream(produce, base, floor)
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(

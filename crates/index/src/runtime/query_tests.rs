@@ -78,6 +78,32 @@ impl TxIndexSnapshot for QuerySnapshot {
         Ok(Some(self.watermark))
     }
 
+    fn for_each_row(
+        &self,
+        family: crate::TxIndexFamily,
+        visit: &mut crate::index::RowVisitor<'_>,
+    ) -> Result<(), IndexError> {
+        let cf = match family {
+            crate::TxIndexFamily::TxConfirmed => ColumnFamily::TxConfirmed,
+        };
+        let mut rows: Vec<_> = self
+            .scans
+            .iter()
+            .filter(|response| response.cf == cf)
+            .flat_map(|response| response.scan.rows.iter().cloned())
+            .collect();
+        rows.sort();
+        rows.dedup_by(|left, right| left.0 == right.0);
+        for (key, value) in rows {
+            let row = zerocopy::FromBytes::read_from_bytes(&key)
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            if visit(row, &value)?.is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn transaction_rows(
         &self,
         txid: &Txid,

@@ -44,6 +44,7 @@ secp256k1 = { workspace = true, optional = true }
 hashbrown.workspace = true
 zerocopy.workspace = true
 serde.workspace = true
+sonic-rs.workspace = true
 metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

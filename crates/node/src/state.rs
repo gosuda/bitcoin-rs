@@ -553,7 +553,30 @@ fn build_derived_index_open_spec(
         }),
         utxo: None,
         chain_transition: None,
+        bundle: index_bundle_directive(config)?,
     }))
+}
+
+/// The portable-bundle action the operator asked for, or `None`.
+///
+/// Configuration validation already rejects both directories together; a
+/// caller that bypassed it is refused here rather than guessing which wins.
+fn index_bundle_directive(
+    config: &NodeConfig,
+) -> Result<bitcoin_rs_index::portable::IndexBundleDirective> {
+    use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
+    let request = |dir: &std::path::PathBuf| IndexBundleRequest {
+        dir: dir.clone(),
+        network: config.network,
+    };
+    match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
+        (None, None) => Ok(IndexBundleDirective::None),
+        (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
+        (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
+        (Some(_), Some(_)) => {
+            bail!("--index-bundle-import and --index-bundle-export are mutually exclusive")
+        }
+    }
 }
 
 struct DerivedIndexComposer {

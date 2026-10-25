@@ -55,6 +55,54 @@ pub fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, S
     })
 }
 
+/// Verifies that a portable index bundle path is non-empty, not merely
+/// whitespace, and contains no NUL byte.
+///
+/// PRE: none; operates only on the path's encoded bytes, without filesystem I/O.
+/// POST: returns `Ok(())` when `path` is usable; returns the specific reason
+///   when it is not.
+/// INVARIANT: this is the single authority for index bundle path validity,
+///   shared by process-input parsers and the post-resolution configuration
+///   validator.
+pub fn check_index_bundle_path(
+    path: &std::path::Path,
+) -> std::result::Result<(), IndexBundleDirError> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.is_empty() || bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err(IndexBundleDirError::Empty);
+    }
+    if bytes.contains(&0) {
+        return Err(IndexBundleDirError::Nul);
+    }
+    Ok(())
+}
+
+/// Parses a portable index bundle directory: any nonblank path without a NUL.
+///
+/// PRE: `value` is the operator's text for `index_bundle_import` or
+/// `index_bundle_export`.
+/// POST: the path is returned verbatim; no filesystem access happens here, so
+/// existence and writability are checked only when the bundle directive runs.
+/// INVARIANT: an empty or blank value is an error on every surface rather than
+/// a quiet "unset", because an operator who wrote the key meant to run a
+/// bundle operation.
+pub fn parse_index_bundle_dir(value: &str) -> std::result::Result<PathBuf, IndexBundleDirError> {
+    let path = PathBuf::from(value);
+    check_index_bundle_path(&path)?;
+    Ok(path)
+}
+
+/// Why an index bundle directory value was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum IndexBundleDirError {
+    /// The value was empty or only whitespace.
+    #[error("index bundle directory must not be empty")]
+    Empty,
+    /// The value contained a NUL byte, which no path can hold.
+    #[error("index bundle directory must not contain a NUL byte")]
+    Nul,
+}
+
 /// Parses a validation mode.
 pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, String> {
     ValidationMode::parse(value).ok_or_else(|| {
@@ -762,6 +810,22 @@ macro_rules! option_rows {
                         cli[#[arg(long = "scriptindex", visible_alias = "script-index", num_args = 0..=1, default_missing_value = "true", value_parser = parse_script_index)]]
                         env["BITCOIN_RS_SCRIPTINDEX", parse_script_index]
                         toml text("script_index", parse_script_index)
+                    }
+                    /// One-shot startup restore of a portable index bundle from this
+                    /// directory. Requires `txindex` and excludes `index_bundle_export`;
+                    /// remove it after the run.
+                    bundle_import as index_bundle_import: Option<PathBuf> {
+                        cli[#[arg(long = "index-bundle-import", value_parser = $crate::options::parse_index_bundle_dir)]]
+                        env["BITCOIN_RS_INDEX_BUNDLE_IMPORT", parse_index_bundle_dir]
+                        toml text("index_bundle_import", parse_index_bundle_dir)
+                    }
+                    /// One-shot startup export of a portable index bundle into this
+                    /// directory. Requires `txindex` and excludes `index_bundle_import`;
+                    /// remove it after the run.
+                    bundle_export as index_bundle_export: Option<PathBuf> {
+                        cli[#[arg(long = "index-bundle-export", value_parser = $crate::options::parse_index_bundle_dir)]]
+                        env["BITCOIN_RS_INDEX_BUNDLE_EXPORT", parse_index_bundle_dir]
+                        toml text("index_bundle_export", parse_index_bundle_dir)
                     }
                 }
                 /// User-supplied observability overrides.
