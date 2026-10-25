@@ -215,7 +215,23 @@ fn describe_node_metrics() {
     );
     metrics::describe_gauge!(
         "node.sync.staged_bytes_high_water",
-        "highest staged byte total observed"
+        "highest staged serialized byte total observed"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_decoded_bytes",
+        "decoded heap capacity bytes owned by staged blocks, excluding allocator rounding"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_retained_bytes",
+        "attributed staged bytes: decoded heap capacity plus preserved serialized buffers, excluding allocator rounding; not process RSS"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_retained_bytes_high_water",
+        "highest attributed staged retained byte total observed"
+    );
+    metrics::describe_gauge!(
+        "node.sync.inbound_block_queue_depth",
+        "block bodies queued in the bounded inbound channel when the sync drain pass emitted its gauges, after it emptied the receiver; a residual, not a peak"
     );
     metrics::describe_counter!(
         "storage.writes_total",

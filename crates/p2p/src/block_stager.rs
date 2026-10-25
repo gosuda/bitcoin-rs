@@ -24,12 +24,21 @@ pub(crate) struct BlockStager {
     budget: SyncBudget,
     received: HashMap<Hash256, ReceivedBlock>,
     received_order: VecDeque<Hash256>,
+    /// Serialized bytes of staged bodies. This is the admission fact: the byte
+    /// budget and `staged_byte_headroom` read it and never the attribution
+    /// totals below.
     received_bytes: usize,
+    /// Sum of `ReceivedBlock::decoded_bytes` over staged bodies. Attribution
+    /// only: nothing admits or evicts on it.
+    decoded_bytes: usize,
     next_received_deadline: Option<Instant>,
     /// Highest staged-block population observed; feeds the high-water gauge.
     received_blocks_high_water: usize,
     /// Highest staged-byte total observed; feeds the high-water gauge.
     received_bytes_high_water: usize,
+    /// Highest `decoded_bytes + received_bytes` observed; feeds the
+    /// retained-bytes high-water gauge.
+    retained_bytes_high_water: usize,
     /// Live count of staged bodies still awaiting the admission clauses
     /// because the tree could not resolve their hash at arrival. The shared
     /// quota on this count bounds orphan floods (`MAX_UNRESOLVED_STAGED_BODIES`).
@@ -41,13 +50,20 @@ struct ReceivedBlock {
     block: Block,
     // Preserved P2P wire payload, reused by the unified `apply_block` to
     // skip reserialization. This is a second buffer (~block size) held next to
-    // the decoded `block` while it waits for its predecessor, so a fully
-    // out-of-order staging window holds roughly twice `bytes` per entry; both
-    // are still bounded by the received-block budget (max_received_blocks /
-    // max_received_bytes).
+    // the decoded `block` while it waits for its predecessor. The
+    // received-block budget (max_received_blocks / max_received_bytes) counts
+    // only `bytes`; `decoded_bytes` attributes the decoded side and admits
+    // nothing.
     serialized: bytes::Bytes,
     received_at: Instant,
     bytes: usize,
+    /// `block.retained_heap_bytes()` measured once when the stager took
+    /// ownership of this `Block` allocation (`insert`, or `restore_many` for
+    /// the allocation it receives). The staged block is never mutated, so the
+    /// measurement stays exact until the entry leaves. It excludes the inline
+    /// `Block` value, allocator rounding, and the `serialized` buffer, which
+    /// `bytes` already counts.
+    decoded_bytes: usize,
     /// Delivering connection, retained so a header-admission fault on the
     /// staged body can blame the right peer.
     source: Option<PeerSource>,
@@ -114,9 +130,11 @@ impl BlockStager {
             received: HashMap::with_capacity(budget.max_received_blocks),
             received_order: VecDeque::with_capacity(budget.max_received_blocks),
             received_bytes: 0,
+            decoded_bytes: 0,
             next_received_deadline: None,
             received_blocks_high_water: 0,
             received_bytes_high_water: 0,
+            retained_bytes_high_water: 0,
             gate_pending_count: 0,
         }
     }
@@ -131,6 +149,28 @@ impl BlockStager {
     #[must_use]
     pub(crate) fn received_bytes(&self) -> usize {
         self.received_bytes
+    }
+
+    /// Decoded heap bytes owned by currently staged blocks (capacity-based,
+    /// excluding allocator rounding and the preserved serialized buffers).
+    #[must_use]
+    pub(crate) const fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes
+    }
+
+    /// Attributed retained bytes of currently staged bodies: decoded heap
+    /// bytes plus the preserved serialized buffers. Excludes allocator
+    /// rounding and says nothing about process RSS.
+    #[must_use]
+    pub(crate) const fn retained_attributed_bytes(&self) -> usize {
+        self.decoded_bytes.saturating_add(self.received_bytes)
+    }
+
+    /// Highest attributed retained total ever observed this run; feeds the
+    /// retained-bytes high-water gauge.
+    #[must_use]
+    pub(crate) const fn retained_attributed_bytes_high_water(&self) -> usize {
+        self.retained_bytes_high_water
     }
 
     /// Highest staged-block population ever observed this run.
@@ -201,16 +241,18 @@ impl BlockStager {
             return StagedBlock::DroppedForRetry { hash };
         }
 
+        let decoded_bytes = block.retained_heap_bytes();
         entry.insert(ReceivedBlock {
             block,
             serialized,
             received_at: now,
             bytes,
+            decoded_bytes,
             source,
             gate_pending: false,
         });
         self.received_order.push_back(hash);
-        self.received_bytes = self.received_bytes.saturating_add(bytes);
+        self.count_staged(bytes, decoded_bytes);
         self.received_blocks_high_water = self.received_blocks_high_water.max(self.received.len());
         self.received_bytes_high_water = self.received_bytes_high_water.max(self.received_bytes);
         self.track_received_deadline(now);
@@ -303,6 +345,11 @@ impl BlockStager {
     pub(crate) fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
             let gate_pending = drained.gate_pending;
+            // Measured here instead of carried from the drain: the committer
+            // restores clones, and a cloned block's vectors are exactly
+            // sized, so the original's measurement would misattribute the
+            // allocation this entry now owns.
+            let decoded_bytes = drained.block.retained_heap_bytes();
             let previous = self.received.insert(
                 drained.hash,
                 ReceivedBlock {
@@ -310,22 +357,20 @@ impl BlockStager {
                     serialized: drained.serialized,
                     received_at: drained.received_at,
                     bytes: drained.bytes,
+                    decoded_bytes,
                     source: drained.source,
                     gate_pending,
                 },
             );
             if let Some(previous) = previous {
-                self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
-                if previous.gate_pending {
-                    self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
-                }
+                self.release(&previous);
             } else if !self.received_order_contains(&drained.hash) {
                 self.received_order.push_back(drained.hash);
             }
             if gate_pending {
                 self.gate_pending_count += 1;
             }
-            self.received_bytes = self.received_bytes.saturating_add(drained.bytes);
+            self.count_staged(drained.bytes, decoded_bytes);
             self.track_received_deadline(drained.received_at);
         }
         self.maybe_compact_received_order();
@@ -333,10 +378,7 @@ impl BlockStager {
 
     fn take_entry(&mut self, hash: &Hash256) -> Option<DrainedBlock> {
         let entry = self.received.remove(hash)?;
-        if entry.gate_pending {
-            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
-        }
-        self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
+        self.release(&entry);
         Some(DrainedBlock {
             hash: *hash,
             block: entry.block,
@@ -363,6 +405,7 @@ impl BlockStager {
 
         let mut dropped = Vec::new();
         let mut received_bytes = self.received_bytes;
+        let mut decoded_bytes = self.decoded_bytes;
         let mut gate_pending_dropped = 0_usize;
         let mut next_received_deadline = None;
         let timeout = self.budget.received_timeout;
@@ -376,12 +419,14 @@ impl BlockStager {
                 return true;
             }
             received_bytes = received_bytes.saturating_sub(entry.bytes);
+            decoded_bytes = decoded_bytes.saturating_sub(entry.decoded_bytes);
             gate_pending_dropped += usize::from(entry.gate_pending);
             dropped.push(*hash);
             false
         });
         self.gate_pending_count = self.gate_pending_count.saturating_sub(gate_pending_dropped);
         self.received_bytes = received_bytes;
+        self.decoded_bytes = decoded_bytes;
         self.next_received_deadline = next_received_deadline;
         self.maybe_compact_received_order();
         dropped
@@ -430,10 +475,7 @@ impl BlockStager {
 
     fn remove(&mut self, hash: &Hash256) -> Option<Hash256> {
         let entry = self.received.remove(hash)?;
-        if entry.gate_pending {
-            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
-        }
-        self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
+        self.release(&entry);
         Some(*hash)
     }
 
@@ -517,6 +559,29 @@ impl BlockStager {
         let received = &self.received;
         self.received_order
             .retain(|hash| received.contains_key(hash));
+    }
+
+    /// Counts one entry that just entered `received`: adds its serialized and
+    /// decoded bytes, then advances the retained high-water mark, so a
+    /// restore that refills the set past an earlier peak is observed like an
+    /// insert. The serialized high-water marks stay insert-only, as shipped.
+    fn count_staged(&mut self, bytes: usize, decoded_bytes: usize) {
+        self.received_bytes = self.received_bytes.saturating_add(bytes);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
+        self.retained_bytes_high_water = self
+            .retained_bytes_high_water
+            .max(self.retained_attributed_bytes());
+    }
+
+    /// Reverses [`Self::count_staged`] and the gate-pending count for an
+    /// entry that just left `received`. `prune_expired` batches the same
+    /// subtraction over its retained set.
+    fn release(&mut self, entry: &ReceivedBlock) {
+        if entry.gate_pending {
+            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
+        }
+        self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
+        self.decoded_bytes = self.decoded_bytes.saturating_sub(entry.decoded_bytes);
     }
 
     fn received_order_contains(&self, hash: &Hash256) -> bool {
@@ -1168,5 +1233,261 @@ mod tests {
         assert_eq!(dropped[0], fork_hash);
         assert_eq!(stager.received_len(), 1);
         assert!(stager.contains(&expected_hash));
+    }
+
+    /// Two bodies with identical consensus bytes and different decoded heap
+    /// ownership: `fat` keeps spare `txs` capacity, `lean` is exactly sized.
+    fn lean_and_fat_blocks() -> (Block, Block, bytes::Bytes) {
+        let genesis = Network::Regtest.genesis_block();
+        let serialized = bytes::Bytes::from(consensus_bytes(&genesis));
+        let lean = genesis.clone();
+        let mut fat = genesis;
+        fat.txs.reserve_exact(64);
+        assert!(fat.retained_heap_bytes() > lean.retained_heap_bytes());
+        (lean, fat, serialized)
+    }
+
+    #[test]
+    fn decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_bytes() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let fat_bytes = fat.retained_heap_bytes();
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+        let now = Instant::now();
+        let first = Hash256::from_le_bytes(&[0x81; 32]);
+        let second = Hash256::from_le_bytes(&[0x82; 32]);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), 0);
+
+        stager.insert(first, None, lean, serialized.clone(), None, now);
+        stager.insert(second, None, fat, serialized, None, now);
+
+        let peak = lean_bytes + fat_bytes + 2 * wire;
+        assert_eq!(stager.received_bytes(), 2 * wire);
+        assert_eq!(stager.decoded_bytes(), lean_bytes + fat_bytes);
+        assert_eq!(stager.retained_attributed_bytes(), peak);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+
+        let mut drained = stager.drain_expected_prefix(&[first, second]);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(stager.received_len(), 0);
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+
+        // The committer restores clones, whose vectors are exactly sized: the
+        // stager must attribute the allocation it now owns, not the drained
+        // original's.
+        let fat_tail = drained.split_off(1);
+        let clone = fat_tail[0].clone();
+        let clone_bytes = clone.block.retained_heap_bytes();
+        assert!(clone_bytes < fat_bytes);
+        assert_eq!(fat_tail[0].block.retained_heap_bytes(), fat_bytes);
+        stager.restore_many([clone]);
+        assert_eq!(stager.received_len(), 1);
+        assert_eq!(stager.received_bytes(), wire);
+        assert_eq!(stager.decoded_bytes(), clone_bytes);
+        assert_eq!(stager.retained_attributed_bytes(), clone_bytes + wire);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+
+        stager.restore_many(drained);
+        assert_eq!(stager.received_len(), 2);
+        assert_eq!(stager.received_bytes(), 2 * wire);
+        assert_eq!(stager.decoded_bytes(), clone_bytes + lean_bytes);
+        assert_eq!(
+            stager.retained_attributed_bytes(),
+            clone_bytes + lean_bytes + 2 * wire
+        );
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+
+        let drained = stager.drain_expected_prefix(&[first, second]);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+    }
+
+    #[test]
+    fn restore_refilling_past_the_earlier_peak_advances_only_the_retained_high_water_mark() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let fat_bytes = fat.retained_heap_bytes();
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+        let now = Instant::now();
+        let parked = Hash256::from_le_bytes(&[0x91; 32]);
+        let refill = Hash256::from_le_bytes(&[0x92; 32]);
+
+        stager.insert(parked, None, lean, serialized.clone(), None, now);
+        let drained = stager.drain_expected_prefix(&[parked]);
+        stager.insert(refill, None, fat, serialized, None, now);
+        assert_eq!(stager.received_high_water(), 1);
+        assert_eq!(stager.received_bytes_high_water(), wire);
+        assert_eq!(
+            stager.retained_attributed_bytes_high_water(),
+            fat_bytes + wire
+        );
+
+        stager.restore_many(drained);
+
+        let combined = lean_bytes + fat_bytes + 2 * wire;
+        assert_eq!(stager.retained_attributed_bytes(), combined);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), combined);
+        // The serialized marks are insert-only: restore never moved them.
+        assert_eq!(stager.received_bytes(), 2 * wire);
+        assert_eq!(stager.received_bytes_high_water(), wire);
+        assert_eq!(stager.received_high_water(), 1);
+    }
+
+    #[test]
+    fn restore_replacing_a_staged_entry_swaps_its_attribution() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let fat_bytes = fat.retained_heap_bytes();
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+        let now = Instant::now();
+        let hash = Hash256::from_le_bytes(&[0xa1; 32]);
+
+        stager.insert(hash, None, fat, serialized.clone(), None, now);
+        let drained = stager.drain_expected_prefix(&[hash]);
+        stager.insert(hash, None, lean, serialized, None, now);
+        assert_eq!(stager.decoded_bytes(), lean_bytes);
+
+        stager.restore_many(drained);
+
+        assert_eq!(stager.received_len(), 1);
+        assert_eq!(stager.received_bytes(), wire);
+        assert_eq!(stager.decoded_bytes(), fat_bytes);
+        assert_eq!(stager.retained_attributed_bytes(), fat_bytes + wire);
+        assert_eq!(
+            stager.retained_attributed_bytes_high_water(),
+            fat_bytes + wire
+        );
+
+        let drained = stager.drain_expected_prefix(&[hash]);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+    }
+
+    #[test]
+    fn prune_expired_releases_decoded_and_serialized_attribution() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let fat_bytes = fat.retained_heap_bytes();
+        let mut budget = default_sync_budget(Network::Regtest);
+        budget.received_timeout = Duration::from_secs(10);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let stale_at = now
+            .checked_sub(Duration::from_secs(11))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let stale = Hash256::from_le_bytes(&[0xb1; 32]);
+        let fresh = Hash256::from_le_bytes(&[0xb2; 32]);
+
+        stager.insert(stale, None, fat, serialized.clone(), None, stale_at);
+        stager.insert(fresh, None, lean, serialized, None, now);
+        let peak = fat_bytes + lean_bytes + 2 * wire;
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+
+        assert_eq!(stager.prune_expired(now), [stale]);
+        assert_eq!(stager.received_bytes(), wire);
+        assert_eq!(stager.decoded_bytes(), lean_bytes);
+        assert_eq!(stager.retained_attributed_bytes(), lean_bytes + wire);
+
+        assert_eq!(stager.prune_expired(now + Duration::from_secs(10)), [fresh]);
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
+    }
+
+    #[test]
+    fn eviction_discard_and_retire_release_attribution() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let fat_bytes = fat.retained_heap_bytes();
+        let mut budget = default_sync_budget(Network::Regtest);
+        budget.max_received_blocks = 1;
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let evicted = Hash256::from_le_bytes(&[0xc1; 32]);
+        let kept = Hash256::from_le_bytes(&[0xc2; 32]);
+        let retired = Hash256::from_le_bytes(&[0xc3; 32]);
+
+        stager.insert(evicted, None, fat, serialized.clone(), None, now);
+        let super::StagedBlock::Memory { dropped, .. } =
+            stager.insert(kept, None, lean.clone(), serialized.clone(), None, now)
+        else {
+            panic!("incoming block should stage after evicting the older one");
+        };
+        assert_eq!(dropped, [evicted]);
+        // Both bodies were resident until the count-budget eviction ran.
+        assert_eq!(
+            stager.retained_attributed_bytes_high_water(),
+            fat_bytes + lean_bytes + 2 * wire
+        );
+        assert_eq!(stager.received_bytes(), wire);
+        assert_eq!(stager.decoded_bytes(), lean_bytes);
+        assert_eq!(stager.retained_attributed_bytes(), lean_bytes + wire);
+
+        assert!(stager.discard(&kept));
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+
+        stager.insert(retired, None, lean, serialized, None, now);
+        assert_eq!(stager.decoded_bytes(), lean_bytes);
+        assert!(stager.retire_applied(&retired));
+        assert_eq!(stager.received_bytes(), 0);
+        assert_eq!(stager.decoded_bytes(), 0);
+        assert_eq!(stager.retained_attributed_bytes(), 0);
+    }
+
+    #[test]
+    fn duplicate_and_refused_inserts_leave_attribution_untouched() {
+        let (lean, fat, serialized) = lean_and_fat_blocks();
+        let wire = serialized.len();
+        let lean_bytes = lean.retained_heap_bytes();
+        let mut budget = default_sync_budget(Network::Regtest);
+        budget.max_received_bytes = wire;
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let staged = Hash256::from_le_bytes(&[0xd1; 32]);
+        let refused = Hash256::from_le_bytes(&[0xd2; 32]);
+
+        stager.insert(staged, None, lean, serialized.clone(), None, now);
+        let settled = (
+            stager.decoded_bytes(),
+            stager.retained_attributed_bytes(),
+            stager.retained_attributed_bytes_high_water(),
+        );
+        assert_eq!(settled, (lean_bytes, lean_bytes + wire, lean_bytes + wire));
+
+        assert!(matches!(
+            stager.insert(staged, None, fat.clone(), serialized.clone(), None, now),
+            super::StagedBlock::AlreadyStaged
+        ));
+        assert!(matches!(
+            stager.insert(refused, Some(staged), fat, serialized, None, now),
+            super::StagedBlock::DroppedForRetry { .. }
+        ));
+        assert_eq!(
+            (
+                stager.decoded_bytes(),
+                stager.retained_attributed_bytes(),
+                stager.retained_attributed_bytes_high_water(),
+            ),
+            settled
+        );
+        assert_eq!(stager.received_bytes(), wire);
     }
 }

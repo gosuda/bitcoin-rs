@@ -41,6 +41,40 @@ Benchmark evidence identity (binary/configuration/corpus digests and hardware)
 is recorded with benchmark samples under HPA-12; it is not attached to every
 Prometheus series as global labels.
 
+For staged block bodies, `node.sync.received_bytes` and
+`node.sync.staged_bytes_high_water` stay the serialized wire fact that the
+staging byte budget and request headroom read. Four further signals attribute
+retained residency without changing any admission rule:
+
+| Signal | Meaning |
+| --- | --- |
+| `node.sync.staged_decoded_bytes` | Sum over staged blocks of `Block::retained_heap_bytes()`: the capacity of each block's transaction, input, output, script, and witness allocations. |
+| `node.sync.staged_retained_bytes` | `staged_decoded_bytes` plus the preserved serialized buffers (`received_bytes`). |
+| `node.sync.staged_retained_bytes_high_water` | Highest `staged_retained_bytes` observed this run. |
+| `node.sync.inbound_block_queue_depth` | Length of the bounded inbound channel (`inbound_block_queue_limit`) when the drain pass emitted. A count of unstaged bodies, not bytes. |
+
+The three byte signals are attribution, not measurement of the process. They
+exclude allocator rounding, the inline `Block` value, and the stager's map and
+queue bookkeeping, so they are not an RSS or `VmHWM` figure and need not equal
+one. They cover only bodies the stager owns: a body drained for apply, or
+pulled from the channel into a stage batch, is unattributed until it is
+staged or restored, so `staged_retained_bytes = 0` in the middle of an apply
+does not mean no block memory is held. A block is measured once, when the
+stager takes ownership of its allocation (arrival, or restore after a partial
+apply, which re-measures the restored allocation because the restored copy
+need not have the drained original's capacities), and released at the
+transition that releases its serialized bytes: drain, branch retirement,
+count-budget eviction, discard, expiry, or replacement. The retained high-water
+mark advances on arrival and on restore; an arrival's mark is taken before the
+count-budget eviction it causes. `node.sync.staged_blocks_high_water` and
+`node.sync.staged_bytes_high_water` keep their earlier arrival-only behavior.
+Nothing admits, evicts, or retries on these signals. They are backlog/capacity
+gauges (OBS-01) published with the other staged gauges from one scheduler-lock
+hold by the sync drain pass that saw arrivals, expiry, applies, or failures.
+That pass runs after it has emptied the receiver, so
+`inbound_block_queue_depth` is a post-drain residual, normally near zero, not
+a peak, and it is not refreshed on passes that emit nothing.
+
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 
 Free-form development and debugging detail belongs in `tracing::` events and
