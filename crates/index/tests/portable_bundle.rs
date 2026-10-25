@@ -890,7 +890,7 @@ fn damaged_bundles_are_refused_before_any_write_or_reset() {
             flip_byte(&dir.join(ARTIFACT), len - 1);
         }),
         ("header-bit-flip", |dir, _| {
-            flip_byte(&dir.join(ARTIFACT), 10)
+            flip_byte(&dir.join(ARTIFACT), 10);
         }),
         ("artifact-truncated", |dir, len| {
             fs::OpenOptions::new()
