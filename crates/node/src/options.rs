@@ -35,6 +35,8 @@ use bitcoin_rs_storage::StorageBackend;
 
 /// Canonical subnet type shared by every process-input surface.
 pub use bitcoin_rs_p2p::IpSubnet;
+/// Network label for `--onlynet`.
+pub use bitcoin_rs_primitives::NetworkLabel;
 
 /// Parses a network selection spelling.
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
@@ -126,6 +128,36 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     value
         .split(',')
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
+        .collect()
+}
+
+/// Parses one `--onlynet` network label.
+pub fn parse_network_label(
+    value: &str,
+) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, String> {
+    match value {
+        "ipv4" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv4),
+        "ipv6" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv6),
+        "onion" => Ok(bitcoin_rs_primitives::NetworkLabel::Onion),
+        "i2p" => Ok(bitcoin_rs_primitives::NetworkLabel::I2p),
+        other => Err(format!("unknown network label: {other}")),
+    }
+}
+
+/// Parses a comma-separated `--onlynet` list; empty segments are errors.
+fn parse_onlynet_list(value: &str) -> Result<Vec<bitcoin_rs_primitives::NetworkLabel>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|segment| {
+            if segment.is_empty() {
+                Err(anyhow::anyhow!("onlynet contains an empty segment"))
+            } else {
+                parse_network_label(segment).map_err(|error| anyhow::anyhow!("{error}"))
+            }
+        })
         .collect()
 }
 
@@ -571,6 +603,66 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_V2_TRANSPORT", parse_bool]
                         toml native("v2_transport")
                         conf["v2transport"]
+                    }
+                    /// General SOCKS5 proxy for IP dials (and onion dials
+                    /// without a dedicated `--onion` proxy).
+                    proxy as proxy: Option<SocketAddr> {
+                        cli[#[arg(long = "proxy")]]
+                        env["BITCOIN_RS_PROXY", str::parse]
+                        toml native("proxy")
+                        conf["proxy"]
+                    }
+                    /// Dedicated SOCKS5 proxy for onion dials.
+                    onion as onion: Option<SocketAddr> {
+                        cli[#[arg(long = "onion")]]
+                        env["BITCOIN_RS_ONION", str::parse]
+                        toml native("onion")
+                        conf["onion"]
+                    }
+                    /// Randomize SOCKS credentials per dial on the general
+                    /// proxy (onion dials always isolate).
+                    proxy_randomize_credentials as proxy_randomize_credentials: Option<bool> {
+                        cli[#[arg(long = "proxy-randomize-credentials", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_PROXY_RANDOMIZE_CREDENTIALS", parse_bool]
+                        toml native("proxy_randomize_credentials")
+                        conf["proxyrandomize"]
+                    }
+                    /// Tor control target (`host:port` or unix socket path)
+                    /// used to register the onion hidden service.
+                    torcontrol as torcontrol: Option<String> {
+                        cli[#[arg(long = "torcontrol")]]
+                        env["BITCOIN_RS_TORCONTROL", parse_text]
+                        toml native("torcontrol")
+                        conf["torcontrol"]
+                    }
+                    /// Tor control password; SAFECOOKIE auth when absent.
+                    torpassword as torpassword: Option<String> {
+                        cli[#[arg(long = "torpassword")]]
+                        env["BITCOIN_RS_TORPASSWORD", parse_text]
+                        toml native("torpassword")
+                        conf["torpassword"]
+                    }
+                    /// I2P SAM bridge address for I2P dials and accepts.
+                    i2psam as i2p_sam: Option<SocketAddr> {
+                        cli[#[arg(long = "i2psam")]]
+                        env["BITCOIN_RS_I2PSAM", str::parse]
+                        toml native("i2p_sam")
+                        conf["i2psam"]
+                    }
+                    /// Accept inbound I2P streams through the SAM bridge.
+                    i2pacceptincoming as i2p_accept_incoming: Option<bool> {
+                        cli[#[arg(long = "i2pacceptincoming", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_I2PACCEPTINCOMING", parse_bool]
+                        toml native("i2p_accept_incoming")
+                        conf["i2pacceptincoming"]
+                    }
+                    /// Restrict dials to these networks (`ipv4`, `ipv6`,
+                    /// `onion`, `i2p`); empty means no restriction.
+                    onlynet as onlynet: Option<Vec<$crate::options::NetworkLabel>> {
+                        cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_network_label)]]
+                        env["BITCOIN_RS_ONLYNET", parse_onlynet_list]
+                        toml each("onlynet", parse_network_label)
+                        conf["onlynet"]
                     }
                 }
                 /// User-supplied RPC overrides.

@@ -148,6 +148,263 @@ fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
 }
 
 #[test]
+fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
+    let onlynet_onion = UserConfig {
+        p2p: P2pOverrides {
+            onlynet: Some(vec![bitcoin_rs_primitives::NetworkLabel::Onion]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&onlynet_onion]).is_err());
+
+    let onlynet_i2p = UserConfig {
+        p2p: P2pOverrides {
+            onlynet: Some(vec![bitcoin_rs_primitives::NetworkLabel::I2p]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&onlynet_i2p]).is_err());
+
+    let accept_without_sam = UserConfig {
+        p2p: P2pOverrides {
+            i2pacceptincoming: Some(true),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&accept_without_sam]).is_err());
+
+    // With routes configured, the same selections resolve and the
+    // resolved overlay carries them through.
+    let routed = UserConfig {
+        p2p: P2pOverrides {
+            onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
+            i2pacceptincoming: Some(true),
+            onlynet: Some(vec![
+                bitcoin_rs_primitives::NetworkLabel::Onion,
+                bitcoin_rs_primitives::NetworkLabel::I2p,
+            ]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = super::resolve(&[&routed])?;
+    assert_eq!(
+        config.p2p.overlay.onion,
+        Some(SocketAddr::from(([127, 0, 0, 1], 9050)))
+    );
+    assert!(config.p2p.overlay.i2p_accept_incoming);
+    assert_eq!(config.p2p.overlay.onlynet.len(), 2);
+    assert!(
+        config
+            .p2p
+            .overlay
+            .onion_key_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("onion_v3_private_key"))
+    );
+    assert!(
+        config
+            .p2p
+            .overlay
+            .i2p_key_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("i2p_private_key"))
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
+    let good_tor =
+        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+            key: [3u8; 32],
+            port: 8333,
+        });
+    let (good_onion_host, _) = good_tor
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("formatted Tor endpoint contains port separator"))?;
+
+    let routes_layer = UserConfig {
+        p2p: P2pOverrides {
+            onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+
+    // Prove valid canonical counterpart validates under identical route config.
+    let valid_user_config = UserConfig {
+        p2p: P2pOverrides {
+            connect: Some(vec![good_tor.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let valid_config = super::resolve(&[&routes_layer, &valid_user_config])?;
+    assert_eq!(valid_config.p2p.connect, vec![good_tor.clone()]);
+
+    // 1. Bad Tor v3 checksum (change first character of public key)
+    let mut chars: Vec<char> = good_tor.chars().collect();
+    chars[0] = if chars[0] == 'a' { 'b' } else { 'a' };
+    let bad_checksum_onion: String = chars.into_iter().collect();
+
+    // 2. Missing port
+    let missing_port_onion = good_onion_host.to_owned();
+
+    // 3. Invalid port (non-numeric, overflow)
+    let non_numeric_port = format!("{good_onion_host}:notaport");
+    let overflow_port = format!("{good_onion_host}:99999");
+
+    // 4. Zero port
+    let zero_port_onion = format!("{good_onion_host}:0");
+
+    let rejected_targets = [
+        bad_checksum_onion,
+        missing_port_onion,
+        non_numeric_port,
+        overflow_port,
+        zero_port_onion,
+    ];
+
+    for target in rejected_targets {
+        let invalid_config = UserConfig {
+            p2p: P2pOverrides {
+                connect: Some(vec![target.clone()]),
+                ..P2pOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        // Verify rejection both without routes and with routes configured.
+        assert!(super::resolve(&[&invalid_config]).is_err());
+        assert!(super::resolve(&[&routes_layer, &invalid_config]).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> anyhow::Result<()> {
+    let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+    let routes_layer = UserConfig {
+        p2p: P2pOverrides {
+            i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+
+    // Prove valid canonical counterpart validates under identical route config.
+    let valid_user_config = UserConfig {
+        p2p: P2pOverrides {
+            connect: Some(vec![good_i2p.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let valid_config = super::resolve(&[&routes_layer, &valid_user_config])?;
+    assert_eq!(valid_config.p2p.connect, vec![good_i2p]);
+
+    let malformed_i2p_targets = [
+        format!("{}.b32.i2p:8333", "a".repeat(51)),
+        format!("{}.b32.i2p:8333", "a".repeat(53)),
+        format!("{}.b32.i2p", "a".repeat(52)),
+        format!("{}.b32.i2p:0", "a".repeat(52)),
+        format!("{}.b32.i2p:notaport", "a".repeat(52)),
+        "invalid.b32.i2p:8333".to_owned(),
+    ];
+
+    for target in malformed_i2p_targets {
+        let invalid_config = UserConfig {
+            p2p: P2pOverrides {
+                connect: Some(vec![target.clone()]),
+                ..P2pOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        assert!(super::resolve(&[&invalid_config]).is_err());
+        assert!(super::resolve(&[&routes_layer, &invalid_config]).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> anyhow::Result<()> {
+    for target in [
+        "drynet4.drivechain.dev:8533",
+        "seed.bitcoin.sipa.be:8333",
+        "dnsseed.bluematt.me:8333",
+    ] {
+        let user_config = UserConfig {
+            p2p: P2pOverrides {
+                connect: Some(vec![target.to_owned()]),
+                ..P2pOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        let config = super::resolve(&[&user_config])?;
+        assert_eq!(config.p2p.connect, vec![target.to_owned()]);
+    }
+    Ok(())
+}
+
+#[test]
+fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
+    let good_tor =
+        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+            key: [3u8; 32],
+            port: 8333,
+        });
+    let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+
+    let tor_no_route = UserConfig {
+        p2p: P2pOverrides {
+            connect: Some(vec![good_tor.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&tor_no_route]).is_err());
+
+    let i2p_no_route = UserConfig {
+        p2p: P2pOverrides {
+            connect: Some(vec![good_i2p.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&i2p_no_route]).is_err());
+
+    let routed = UserConfig {
+        p2p: P2pOverrides {
+            onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
+            connect: Some(vec![good_tor.clone(), good_i2p.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = super::resolve(&[&routed])?;
+    assert_eq!(config.p2p.connect, vec![good_tor.clone(), good_i2p]);
+
+    // Tor also routes through a general proxy.
+    let proxy_routed = UserConfig {
+        p2p: P2pOverrides {
+            proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            connect: Some(vec![good_tor.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let proxy_config = super::resolve(&[&proxy_routed])?;
+    assert_eq!(proxy_config.p2p.connect, vec![good_tor]);
+
+    Ok(())
+}
+
+#[test]
 fn rpc_rejects_missing_or_public_credentials() {
     let binding = SocketAddr::from(([0, 0, 0, 0], 8332));
     let exposed = UserConfig {

@@ -113,6 +113,8 @@ struct Entry {
     /// Recency of the last transaction from this connection the mempool
     /// accepted; 0 when there is none.
     useful_tx_sequence: u64,
+    /// Service epoch for anonymous Tor inbound sessions; `None` for IP/I2P.
+    onion_epoch: Option<u64>,
 }
 
 impl Entry {
@@ -125,6 +127,7 @@ impl Entry {
             announcement: PeerAnnouncementState::default(),
             keyed_netgroup: 0,
             useful_tx_sequence: 0,
+            onion_epoch: None,
         }
     }
 
@@ -358,6 +361,7 @@ impl PeerTable {
         max_inbound: usize,
         best_block_depth: u64,
         activity: &crate::NetworkActivity,
+        onion_epoch: Option<u64>,
     ) -> Option<PeerLease> {
         debug_assert!(lease.is_inbound(), "only inbound leases reserve here");
         let mut entries = self.entries.write();
@@ -380,6 +384,7 @@ impl PeerTable {
             keyed_netgroup: self
                 .netgroup_key
                 .hash_one(crate::endpoint::anonymous_netgroup(lease.connection_id())),
+            onion_epoch,
             ..Entry::fresh(lease.clone())
         };
         Self::register_locked(&mut entries, key, entry);
@@ -770,9 +775,31 @@ impl PeerTable {
         })
     }
 
-    /// Removes and cancels whichever connection is live at `addr`.
+    /// Removes and cancels whichever connection is live at `addr`, including
+    /// one still handshaking.
+    ///
+    /// This is address selection, not identity selection: the target is
+    /// whatever connection is live at `addr` at the moment of removal. An
+    /// operator-facing caller that works from `getpeerinfo` must use the
+    /// `disconnect_ready*` family instead.
     pub fn disconnect(&self, addr: PeerEndpoint) -> bool {
         self.remove_if(SessionKey::Endpoint(addr), |_| true)
+    }
+
+    /// Removes and cancels the connection live at `addr` only when it has
+    /// completed its handshake — the sessions `getpeerinfo` lists, which is
+    /// what "connected nodes" means to an operator.
+    ///
+    /// The readiness check and the removal are one table write, so the
+    /// connection that was checked is the connection that is removed: a
+    /// same-address replacement that has not yet published its metadata is
+    /// left alone, exactly as a vacant address is.
+    ///
+    /// PRE: none.
+    /// POST: `false` with no mutation when `addr` is vacant or its session has
+    ///   published no [`PeerInfo`].
+    pub fn disconnect_ready(&self, addr: PeerEndpoint) -> bool {
+        self.remove_entry_if(SessionKey::Endpoint(addr), |entry| entry.info.is_some())
     }
 
     /// Removes and cancels the live connection at `addr` only when its identity is `id`.
@@ -782,19 +809,102 @@ impl PeerTable {
         })
     }
 
-    fn remove_if(&self, addr: SessionKey, matches: impl FnOnce(&PeerLease) -> bool) -> bool {
+    /// Removes and cancels exactly the handshake-complete connection whose
+    /// process-unique node id is `node_id` — [`PeerLease::node_id`], the value
+    /// Core calls `nodeid` and publishes as `getpeerinfo.id`.
+    ///
+    /// Identity resolution and removal are one table write operation, so a
+    /// same-address replacement cannot move the target in between: this can
+    /// never disconnect a connection the caller did not name. Because the
+    /// scan is over session keys rather than addresses, an anonymous inbound
+    /// session — which has no logical endpoint at all — is selectable too.
+    /// Only sessions that published metadata are selectable, the same set
+    /// `getpeerinfo` reports ids for.
+    ///
+    /// PRE: none.
+    /// POST: returns `false` and changes nothing when no handshake-complete
+    ///   entry carries that node id; otherwise removes and cancels exactly
+    ///   that entry and returns `true`.
+    /// INVARIANT: address sessions are not consulted for identity, so the
+    ///   endpoint-keyed replacement rule plays no part here.
+    pub fn disconnect_ready_node_id(&self, node_id: u64) -> bool {
         let mut entries = self.entries.write();
-        if !entries
-            .get(&addr)
-            .is_some_and(|entry| matches(&entry.lease))
-        {
+        let Some(key) = entries
+            .iter()
+            .find(|(_, entry)| entry.info.is_some() && entry.lease.node_id() == node_id)
+            .map(|(key, _)| *key)
+        else {
+            return false;
+        };
+        Self::remove_locked(&mut entries, key);
+        true
+    }
+
+    /// Removes and cancels the handshake-complete connection at `addr` only
+    /// when its process-unique node id is `node_id`.
+    ///
+    /// The conjunction form of [`Self::disconnect_ready_node_id`], for a
+    /// caller that names both an address and an id: the address, readiness
+    /// and identity checks happen under one table write, so a same-address
+    /// replacement fails the identity check instead of being disconnected in
+    /// the stale connection's place.
+    ///
+    /// PRE: none.
+    /// POST: `false` with no mutation when `addr` is vacant, its session has
+    ///   published no [`PeerInfo`], or it holds a connection with a different
+    ///   node id.
+    pub fn disconnect_ready_node_id_at(&self, addr: PeerEndpoint, node_id: u64) -> bool {
+        self.remove_entry_if(SessionKey::Endpoint(addr), |entry| {
+            entry.info.is_some() && entry.lease.node_id() == node_id
+        })
+    }
+
+    fn remove_if(&self, addr: SessionKey, matches: impl FnOnce(&PeerLease) -> bool) -> bool {
+        self.remove_entry_if(addr, |entry| matches(&entry.lease))
+    }
+
+    /// Tests `matches` against the entry at `addr` and, on a match, removes and
+    /// cancels it under the same write lock.
+    fn remove_entry_if(&self, addr: SessionKey, matches: impl FnOnce(&Entry) -> bool) -> bool {
+        let mut entries = self.entries.write();
+        if !entries.get(&addr).is_some_and(matches) {
             return false;
         }
-        if let Some(removed) = entries.remove(&addr) {
-            removed.lease.cancel();
-            Self::retain_traffic(&mut entries, &removed);
-        }
+        Self::remove_locked(&mut entries, addr);
         true
+    }
+
+    /// The one removal body, for callers already holding the write lock:
+    /// removes the entry at `key`, cancels its lease, and retains its traffic
+    /// counters so `traffic_totals` never decreases.
+    fn remove_locked(entries: &mut TableView, key: SessionKey) {
+        if let Some(removed) = entries.remove(&key) {
+            removed.lease.cancel();
+            Self::retain_traffic(entries, &removed);
+        }
+    }
+
+    /// Removes and cancels anonymous Tor inbound connections belonging to `epoch`.
+    ///
+    /// Leaves IP connections, I2P connections, outbound Tor connections, and
+    /// anonymous inbound connections from other epochs completely unaffected.
+    pub(crate) fn disconnect_onion_epoch(&self, epoch: u64) -> Vec<ConnectionId> {
+        let mut entries = self.entries.write();
+        let targets: Vec<(SessionKey, ConnectionId)> = entries
+            .iter()
+            .filter(|(addr, entry)| {
+                matches!(addr, SessionKey::Unidentified(_)) && entry.onion_epoch == Some(epoch)
+            })
+            .map(|(addr, entry)| (*addr, entry.lease.connection_id()))
+            .collect();
+        for (addr, _) in &targets {
+            if let Some(removed) = entries.remove(addr) {
+                removed.lease.cancel();
+                Self::retire(&mut entries, &removed);
+            }
+        }
+        Self::settle_retired(&mut entries);
+        targets.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Removes and cancels every connection accepted by `predicate`, returning
@@ -1191,7 +1301,10 @@ mod tests {
             best_known_height: start_height,
             conn_time: 0,
             inbound: false,
-            addr_bind: crate::TransportRemote::new(addr.as_ip().expect("ip test peer")),
+            addr_bind: crate::TransportRemote::new(match addr.as_ip() {
+                Some(ip) => ip,
+                None => panic!("ip test peer"),
+            }),
             time_offset: 0,
             counters,
             transport: crate::TransportProtocol::V1,
@@ -1250,7 +1363,7 @@ mod tests {
         let refused = inbound_lease();
         assert!(
             table
-                .try_register_inbound_unidentified(refused.clone(), 1, 0, &activity)
+                .try_register_inbound_unidentified(refused, 1, 0, &activity, None)
                 .is_none()
         );
         assert!(!known.is_cancelled());
@@ -1262,12 +1375,12 @@ mod tests {
         let anon2 = inbound_lease();
         assert!(
             table
-                .try_register_inbound_unidentified(anon1.clone(), 3, 0, &activity)
+                .try_register_inbound_unidentified(anon1.clone(), 3, 0, &activity, None)
                 .is_some()
         );
         assert!(
             table
-                .try_register_inbound_unidentified(anon2.clone(), 3, 0, &activity)
+                .try_register_inbound_unidentified(anon2.clone(), 3, 0, &activity, None)
                 .is_some()
         );
         assert_eq!(table.len(), 3);
@@ -1280,19 +1393,125 @@ mod tests {
         let mut keyed = Vec::new();
         for lease in [&anon1, &anon2] {
             let key = SessionKey::Unidentified(lease.connection_id());
-            let candidate = PeerTable::eviction_candidate(key, &entries[&key], 0)
-                .expect("anonymous inbound is an eviction candidate");
+            let Some(candidate) = PeerTable::eviction_candidate(key, &entries[&key], 0) else {
+                panic!("anonymous inbound is an eviction candidate");
+            };
             assert_eq!(candidate.key, lease.connection_id());
             assert_eq!(key.endpoint(), None);
             assert_eq!(
                 candidate.keyed_netgroup,
                 table
                     .netgroup_key
-                    .hash_one(&crate::endpoint::anonymous_netgroup(lease.connection_id()))
+                    .hash_one(crate::endpoint::anonymous_netgroup(lease.connection_id()))
             );
             keyed.push(candidate.keyed_netgroup);
         }
         assert_ne!(keyed[0], keyed[1]);
+    }
+
+    #[test]
+    fn disconnect_onion_epoch_cancels_exact_generation_only_and_preserves_unrelated() {
+        let table = PeerTable::new();
+        let activity = active_network();
+
+        // 1. IP peer
+        let ip_peer = lease();
+        assert!(!table.register(addr(1), ip_peer.clone()));
+
+        // 2. I2P peer
+        let i2p_peer = lease();
+        let i2p_endpoint = PeerEndpoint::I2p {
+            hash: [7; 32],
+            port: 7656,
+        };
+        assert!(!table.register(i2p_endpoint, i2p_peer.clone()));
+
+        // 3. Outbound Tor peer
+        let tor_outbound = lease();
+        let tor_endpoint = PeerEndpoint::TorV3 {
+            key: [8; 32],
+            port: 8333,
+        };
+        assert!(!table.register(tor_endpoint, tor_outbound.clone()));
+
+        // 4. Anonymous inbound Tor peers belonging to epoch 1
+        let anon_epoch1_a = inbound_lease();
+        let anon_epoch1_b = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound_unidentified(
+                    anon_epoch1_a.clone(),
+                    10,
+                    0,
+                    &activity,
+                    Some(1),
+                )
+                .is_some()
+        );
+        assert!(
+            table
+                .try_register_inbound_unidentified(
+                    anon_epoch1_b.clone(),
+                    10,
+                    0,
+                    &activity,
+                    Some(1),
+                )
+                .is_some()
+        );
+
+        // 5. Anonymous inbound Tor peer belonging to epoch 2
+        let anon_epoch2 = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound_unidentified(anon_epoch2.clone(), 10, 0, &activity, Some(2))
+                .is_some()
+        );
+
+        // 6. Generic unidentified inbound peer with no epoch
+        let anon_none = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound_unidentified(anon_none.clone(), 10, 0, &activity, None)
+                .is_some()
+        );
+
+        assert_eq!(table.len(), 7);
+
+        // Disconnecting epoch 1 must remove and cancel only the two epoch 1 peers:
+        let disconnected = table.disconnect_onion_epoch(1);
+        assert_eq!(disconnected.len(), 2);
+        assert!(disconnected.contains(&anon_epoch1_a.connection_id()));
+        assert!(disconnected.contains(&anon_epoch1_b.connection_id()));
+
+        // Epoch 1 leases cancelled:
+        assert!(anon_epoch1_a.is_cancelled());
+        assert!(anon_epoch1_b.is_cancelled());
+
+        // All unrelated peers remain uncancelled and live in the table:
+        assert!(!ip_peer.is_cancelled());
+        assert!(!i2p_peer.is_cancelled());
+        assert!(!tor_outbound.is_cancelled());
+        assert!(!anon_epoch2.is_cancelled());
+        assert!(!anon_none.is_cancelled());
+        assert_eq!(table.len(), 5);
+
+        // Idempotent: repeated disconnect of epoch 1 changes nothing:
+        let disconnected_repeat = table.disconnect_onion_epoch(1);
+        assert_eq!(disconnected_repeat, []);
+        assert_eq!(table.len(), 5);
+
+        // Disconnecting epoch 2 removes only the epoch 2 peer:
+        let disconnected_epoch2 = table.disconnect_onion_epoch(2);
+        assert_eq!(disconnected_epoch2, vec![anon_epoch2.connection_id()]);
+        assert!(anon_epoch2.is_cancelled());
+        assert_eq!(table.len(), 4);
+
+        // The remaining 4 peers (IP, I2P, outbound Tor, generic unidentified) stay live:
+        assert!(!ip_peer.is_cancelled());
+        assert!(!i2p_peer.is_cancelled());
+        assert!(!tor_outbound.is_cancelled());
+        assert!(!anon_none.is_cancelled());
     }
 
     fn active_network() -> crate::NetworkActivity {
@@ -1504,7 +1723,10 @@ mod tests {
     }
 
     fn netgroup(addr: PeerEndpoint) -> Vec<u8> {
-        crate::netgroup::NetGroups::default().group(addr.as_ip().expect("ip test peer").ip())
+        let Some(ip) = addr.as_ip() else {
+            panic!("ip test peer");
+        };
+        crate::netgroup::NetGroups::default().group(ip.ip())
     }
 
     /// Offers an inbound `lease` from `addr` to a table capped at
@@ -1670,6 +1892,162 @@ mod tests {
         assert!(!replacement.is_cancelled());
     }
 
+    /// Registers `lease` at `endpoint` and publishes its handshake metadata,
+    /// so the session is one `getpeerinfo` lists.
+    fn register_ready(table: &PeerTable, endpoint: PeerEndpoint, lease: &PeerLease) {
+        table.register(endpoint, lease.clone());
+        assert!(table.publish_info(endpoint, lease, info(endpoint, 0)));
+    }
+
+    /// The id path removes the connection it names, not the one now at that
+    /// address. This is the race `disconnectnode` must not have: a caller that
+    /// named connection A must never cancel successor B.
+    #[test]
+    fn disconnect_ready_node_id_selects_the_named_connection_across_a_replacement() {
+        let table = PeerTable::new();
+        let selected = lease();
+        let replacement = lease();
+        let selected_id = selected.node_id();
+        let replacement_id = replacement.node_id();
+        register_ready(&table, addr(1), &selected);
+        // The replacement takes over the address while the caller still holds
+        // the id it read from `getpeerinfo`.
+        register_ready(&table, addr(1), &replacement);
+
+        assert!(
+            !table.disconnect_ready_node_id(selected_id),
+            "the selected connection is gone; its identity must not resolve to the successor"
+        );
+        assert!(table.is_connected(addr(1)));
+        assert!(!replacement.is_cancelled());
+        assert_eq!(table.len(), 1);
+
+        assert!(table.disconnect_ready_node_id(replacement_id));
+        assert!(replacement.is_cancelled());
+        assert!(table.is_empty());
+    }
+
+    /// The address-and-id form is a conjunction checked under one lock: the
+    /// stale id fails against the successor, a wrong address fails against the
+    /// right id, and only the matching pair removes anything.
+    #[test]
+    fn disconnect_ready_node_id_at_requires_the_address_and_the_identity() {
+        let table = PeerTable::new();
+        let selected = lease();
+        let replacement = lease();
+        let selected_id = selected.node_id();
+        let replacement_id = replacement.node_id();
+        register_ready(&table, addr(1), &selected);
+        register_ready(&table, addr(1), &replacement);
+
+        assert!(!table.disconnect_ready_node_id_at(addr(1), selected_id));
+        assert!(!table.disconnect_ready_node_id_at(addr(2), replacement_id));
+        assert!(!replacement.is_cancelled());
+        assert_eq!(table.len(), 1);
+
+        assert!(table.disconnect_ready_node_id_at(addr(1), replacement_id));
+        assert!(replacement.is_cancelled());
+        assert!(table.is_empty());
+    }
+
+    /// An address-selected disconnect is *only* address selection: it hits the
+    /// live connection there. Named here so the two modes cannot be confused
+    /// by a later edit.
+    #[test]
+    fn disconnect_by_address_hits_the_live_connection_not_the_named_one() {
+        let table = PeerTable::new();
+        let selected = lease();
+        let replacement = lease();
+        table.register(addr(1), selected);
+        table.register(addr(1), replacement.clone());
+
+        assert!(table.disconnect(addr(1)));
+        assert!(replacement.is_cancelled());
+        assert!(table.is_empty());
+    }
+
+    /// A session still handshaking is not a connected node: `getpeerinfo` does
+    /// not list it, so none of the ready-gated disconnects may reach it. The
+    /// same call succeeds the moment its metadata is published, and the gate
+    /// belongs to the readiness check rather than to a stale snapshot.
+    #[test]
+    fn disconnect_ready_family_refuses_a_session_that_is_still_handshaking() {
+        let table = PeerTable::new();
+        let pending = lease();
+        let node_id = pending.node_id();
+        table.register(addr(1), pending.clone());
+
+        assert!(!table.disconnect_ready(addr(1)));
+        assert!(!table.disconnect_ready_node_id(node_id));
+        assert!(!table.disconnect_ready_node_id_at(addr(1), node_id));
+        assert!(!pending.is_cancelled());
+        assert_eq!(table.len(), 1);
+
+        assert!(table.publish_info(addr(1), &pending, info(addr(1), 0)));
+        assert!(table.disconnect_ready(addr(1)));
+        assert!(pending.is_cancelled());
+        assert!(table.is_empty());
+    }
+
+    /// A replacement that has not published metadata yet is not disconnected
+    /// in place of the ready session it displaced: readiness is read from the
+    /// entry that is removed, not from an earlier one.
+    #[test]
+    fn disconnect_ready_leaves_an_unpublished_replacement_alone() {
+        let table = PeerTable::new();
+        let first = lease();
+        let replacement = lease();
+        register_ready(&table, addr(1), &first);
+        table.register(addr(1), replacement.clone());
+
+        assert!(!table.disconnect_ready(addr(1)));
+        assert!(!replacement.is_cancelled());
+        assert_eq!(table.len(), 1);
+    }
+
+    /// Anonymous inbound overlay sessions have no logical endpoint, so an
+    /// address can never name them. Connection identity is the only handle
+    /// that reaches them, and reaching one must not touch its neighbours.
+    #[test]
+    fn disconnect_ready_node_id_reaches_anonymous_sessions_and_spares_neighbours() {
+        let table = PeerTable::new();
+        let known = lease();
+        register_ready(&table, addr(1), &known);
+        let anon1 = inbound_lease();
+        let anon2 = inbound_lease();
+        assert!(!table.register_unidentified(anon1.clone()));
+        assert!(!table.register_unidentified(anon2.clone()));
+        let anonymous = PeerInfo {
+            endpoint: None,
+            ..info(addr(9), 0)
+        };
+        assert!(table.publish_info_unidentified(&anon1, anonymous.clone()));
+        assert!(table.publish_info_unidentified(&anon2, anonymous));
+
+        assert!(table.disconnect_ready_node_id(anon1.node_id()));
+        assert!(anon1.is_cancelled());
+        assert!(
+            !anon2.is_cancelled(),
+            "an unrelated anonymous session stays"
+        );
+        assert!(!known.is_cancelled(), "an identified session stays");
+        assert_eq!(table.len(), 2);
+    }
+
+    /// An unknown id changes nothing, so a stale id after a disconnect is
+    /// distinguishable from a successful one.
+    #[test]
+    fn disconnect_ready_node_id_reports_absence_without_mutation() {
+        let table = PeerTable::new();
+        let live = lease();
+        register_ready(&table, addr(1), &live);
+        let unknown = live.node_id().wrapping_add(1);
+
+        assert!(!table.disconnect_ready_node_id(unknown));
+        assert!(!live.is_cancelled());
+        assert_eq!(table.len(), 1);
+    }
+
     #[test]
     fn cancel_all_keeps_entries_for_owner_removal() {
         let table = PeerTable::new();
@@ -1696,13 +2074,19 @@ mod tests {
         let ports: Vec<u16> = table
             .infos()
             .iter()
-            .map(|info| info.endpoint.expect("endpoint").port())
+            .map(|info| match info.endpoint.as_ref() {
+                Some(ep) => ep.port(),
+                None => panic!("endpoint"),
+            })
             .collect();
         assert_eq!(ports, vec![14, 13, 12, 11, 10]);
         let session_ports: Vec<u16> = table
             .sessions()
             .iter()
-            .map(|s| s.endpoint.expect("endpoint").port())
+            .map(|s| match s.endpoint.as_ref() {
+                Some(ep) => ep.port(),
+                None => panic!("endpoint"),
+            })
             .collect();
         assert_eq!(session_ports, ports);
     }

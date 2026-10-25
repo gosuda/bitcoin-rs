@@ -151,7 +151,7 @@ impl BlockSync {
                 let mut historical = self.historical.lock();
                 let HistoricalDownload { window, stager, .. } = &mut *historical;
                 // Back off corrupt deliveries even if this is our only peer.
-                if window.peer_in_staller_cooldown(source.endpoint, now) {
+                if window.peer_in_staller_cooldown(*source, now) {
                     continue;
                 }
                 window.next_peer_request(
@@ -204,9 +204,7 @@ impl BlockSync {
             tracing::warn!(%error, "historical body rejected");
             let mut historical = self.historical.lock();
             historical.window.reject_delivery(hash, Some(source), now);
-            historical
-                .window
-                .mark_peer_unresponsive(source.endpoint, now);
+            historical.window.mark_peer_unresponsive(source, now);
             return None;
         }
         let mut historical = self.historical.lock();

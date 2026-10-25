@@ -797,6 +797,42 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
 }
 
+/// Parse optional scientific notation exponent (`e`/`E`), returning the mantissa
+/// text and the parsed exponent.
+fn parse_scientific_exponent<'a>(
+    text: &'a str,
+    message: &'static str,
+) -> Result<(&'a str, i32), RpcError> {
+    if let Some(pos) = text.find(['e', 'E']) {
+        let (m, e) = text.split_at(pos);
+        let e_str = &e[1..];
+        if m.is_empty() || e_str.is_empty() {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let (e_sign, e_digits) = if let Some(stripped) = e_str.strip_prefix('+') {
+            (1_i32, stripped)
+        } else if let Some(stripped) = e_str.strip_prefix('-') {
+            (-1_i32, stripped)
+        } else {
+            (1_i32, e_str)
+        };
+        if e_digits.is_empty() || !e_digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let exp_mag: i32 = e_digits
+            .parse()
+            .map_err(|_| RpcError::InvalidParams(message))?;
+        Ok((
+            m,
+            e_sign
+                .checked_mul(exp_mag)
+                .ok_or(RpcError::InvalidParams(message))?,
+        ))
+    } else {
+        Ok((text, 0_i32))
+    }
+}
+
 /// Converts a BTC-denominated JSON value (number or string) to satoshis using exact
 /// decimal parsing, expanding e/E notation without floating point arithmetic and
 /// rejecting signs other than optional positive, non-digits, more than 8 fractional
@@ -833,34 +869,7 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
     }
 
     // Parse scientific notation: mantissa and optional exponent.
-    let (mantissa, exp) = if let Some(pos) = text.find(['e', 'E']) {
-        let (m, e) = text.split_at(pos);
-        let e_str = &e[1..];
-        if m.is_empty() || e_str.is_empty() {
-            return Err(RpcError::InvalidParams(message));
-        }
-        let (e_sign, e_digits) = if let Some(stripped) = e_str.strip_prefix('+') {
-            (1_i32, stripped)
-        } else if let Some(stripped) = e_str.strip_prefix('-') {
-            (-1_i32, stripped)
-        } else {
-            (1_i32, e_str)
-        };
-        if e_digits.is_empty() || !e_digits.chars().all(|c| c.is_ascii_digit()) {
-            return Err(RpcError::InvalidParams(message));
-        }
-        let exp_mag: i32 = e_digits
-            .parse()
-            .map_err(|_| RpcError::InvalidParams(message))?;
-        (
-            m,
-            e_sign
-                .checked_mul(exp_mag)
-                .ok_or(RpcError::InvalidParams(message))?,
-        )
-    } else {
-        (text, 0_i32)
-    };
+    let (mantissa, exp) = parse_scientific_exponent(text, message)?;
 
     // Split mantissa on decimal point. Like Core's ParseFixedPoint, a
     // decimal point requires at least one digit on each side ("1." and
@@ -900,8 +909,18 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         digits.pop();
     }
 
-    let initial_point =
-        i32::try_from(int_part.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    scale_digits_to_sats(&digits, int_part.len(), exp, message)
+}
+
+/// Scales normalized non-zero digits and decimal exponent to satoshis, checking for
+/// fractional satoshis (more than 8 decimal places), trailing zero bounds, and overflow.
+fn scale_digits_to_sats(
+    digits: &[u8],
+    int_len: usize,
+    exp: i32,
+    message: &'static str,
+) -> Result<u64, RpcError> {
+    let initial_point = i32::try_from(int_len).map_err(|_| RpcError::InvalidParams(message))?;
     let point = initial_point
         .checked_add(exp)
         .ok_or(RpcError::InvalidParams(message))?;
@@ -926,7 +945,7 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
     }
 
     let mut sats: u64 = 0;
-    for &d in &digits {
+    for &d in digits {
         sats = sats
             .checked_mul(10)
             .and_then(|v| v.checked_add(u64::from(d - b'0')))
@@ -3104,43 +3123,31 @@ mod finalizepsbt_tests {
     }
 
     #[test]
-    fn exact_amount_parsing_honors_precision_and_overflow_invariants() {
+    fn exact_amount_parsing_honors_precision_and_overflow_invariants() -> Result<(), RpcError> {
         use super::{optional_max_feerate, parse_btc_amount, sats_from_btc};
 
         // 1e-8 = 1 sat accepted, 1e-9 rejected as Invalid amount
-        assert_eq!(sats_from_btc(&json!(1e-8), "Invalid amount").unwrap(), 1);
-        assert_eq!(sats_from_btc(&json!("1e-8"), "Invalid amount").unwrap(), 1);
-        assert_eq!(sats_from_btc(&json!("1E-8"), "Invalid amount").unwrap(), 1);
+        assert_eq!(sats_from_btc(&json!(1e-8), "Invalid amount")?, 1);
+        assert_eq!(sats_from_btc(&json!("1e-8"), "Invalid amount")?, 1);
+        assert_eq!(sats_from_btc(&json!("1E-8"), "Invalid amount")?, 1);
         assert!(sats_from_btc(&json!(1e-9), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1e-9"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1E-9"), "Invalid amount").is_err());
 
         // Exact 8-decimal satoshi boundary
-        assert_eq!(
-            sats_from_btc(&json!("0.00000001"), "Invalid amount").unwrap(),
-            1
-        );
+        assert_eq!(sats_from_btc(&json!("0.00000001"), "Invalid amount")?, 1);
         // More than 8 fractional decimals rejected when they carry value
         assert!(sats_from_btc(&json!("0.000000001"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1.000000001"), "Invalid amount").is_err());
         // Trailing zeros normalize away: these are whole satoshis, not
         // nine-decimal amounts.
         assert_eq!(
-            sats_from_btc(&json!("1.000000000"), "Invalid amount").unwrap(),
+            sats_from_btc(&json!("1.000000000"), "Invalid amount")?,
             100_000_000
         );
-        assert_eq!(
-            sats_from_btc(&json!("100e-10"), "Invalid amount").unwrap(),
-            1
-        );
-        assert_eq!(
-            sats_from_btc(&json!("0e-100"), "Invalid amount").unwrap(),
-            0
-        );
-        assert_eq!(
-            sats_from_btc(&json!("0.000000000"), "Invalid amount").unwrap(),
-            0
-        );
+        assert_eq!(sats_from_btc(&json!("100e-10"), "Invalid amount")?, 1);
+        assert_eq!(sats_from_btc(&json!("0e-100"), "Invalid amount")?, 0);
+        assert_eq!(sats_from_btc(&json!("0.000000000"), "Invalid amount")?, 0);
         // A decimal point needs a digit on each side (Core ParseFixedPoint).
         assert!(sats_from_btc(&json!("1."), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!(".1"), "Invalid amount").is_err());
@@ -3148,17 +3155,14 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
 
         // Zero handling
-        assert_eq!(sats_from_btc(&json!(0), "Invalid amount").unwrap(), 0);
-        assert_eq!(sats_from_btc(&json!("0"), "Invalid amount").unwrap(), 0);
-        assert_eq!(sats_from_btc(&json!("0.0"), "Invalid amount").unwrap(), 0);
-        assert_eq!(
-            sats_from_btc(&json!("0e2147483647"), "Invalid amount").unwrap(),
-            0
-        );
+        assert_eq!(sats_from_btc(&json!(0), "Invalid amount")?, 0);
+        assert_eq!(sats_from_btc(&json!("0"), "Invalid amount")?, 0);
+        assert_eq!(sats_from_btc(&json!("0.0"), "Invalid amount")?, 0);
+        assert_eq!(sats_from_btc(&json!("0e2147483647"), "Invalid amount")?, 0);
 
         // Optional positive sign accepted, negative sign rejected
         assert_eq!(
-            sats_from_btc(&json!("+1.5"), "Invalid amount").unwrap(),
+            sats_from_btc(&json!("+1.5"), "Invalid amount")?,
             150_000_000
         );
         assert!(sats_from_btc(&json!("-1"), "Invalid amount").is_err());
@@ -3175,7 +3179,7 @@ mod finalizepsbt_tests {
 
         // Overflow safety
         assert_eq!(
-            sats_from_btc(&json!("184467440737.09551615"), "Invalid amount").unwrap(),
+            sats_from_btc(&json!("184467440737.09551615"), "Invalid amount")?,
             u64::MAX
         );
         assert!(sats_from_btc(&json!("184467440737.09551616"), "Invalid amount").is_err());
@@ -3183,16 +3187,18 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("1e25"), "Invalid amount").is_err());
 
         // parse_btc_amount routes through sats_from_btc
-        assert_eq!(parse_btc_amount(&json!("1e-8")).unwrap(), 1);
+        assert_eq!(parse_btc_amount(&json!("1e-8"))?, 1);
         assert!(parse_btc_amount(&json!("1e-9")).is_err());
 
         // optional_max_feerate: 0 is no-cap, 1e-8 accepted, >= 1 BTC/kvB ceiling, negative rejected
-        assert_eq!(optional_max_feerate(&json!([0]), 0).unwrap(), None);
-        assert_eq!(optional_max_feerate(&json!(["0"]), 0).unwrap(), None);
-        assert_eq!(optional_max_feerate(&json!(["1e-8"]), 0).unwrap(), Some(1));
+        assert_eq!(optional_max_feerate(&json!([0]), 0)?, None);
+        assert_eq!(optional_max_feerate(&json!(["0"]), 0)?, None);
+        assert_eq!(optional_max_feerate(&json!(["1e-8"]), 0)?, Some(1));
         assert!(optional_max_feerate(&json!([1.0]), 0).is_err());
         assert!(optional_max_feerate(&json!(["1.0"]), 0).is_err());
         assert!(optional_max_feerate(&json!([-0.1]), 0).is_err());
         assert!(optional_max_feerate(&json!(["-1"]), 0).is_err());
+
+        Ok(())
     }
 }

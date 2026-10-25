@@ -5,8 +5,6 @@
 //! to manage the in-flight window budget. `crate::BlockStager` owns the
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
-#[cfg(test)]
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -382,7 +380,29 @@ pub(crate) struct DownloadWindow {
     /// time. While inside `staller_cooldown` such a peer is not fan-out
     /// eligible and receives no block requests except as the last-resort peer.
     /// This prevents immediate re-acquisition of the same block stripe.
-    recent_stallers: HashMap<crate::PeerEndpoint, Instant>,
+    recent_stallers: HashMap<StallerKey, Instant>,
+}
+
+/// Identity a staller cooldown attaches to: the logical endpoint for
+/// identified peers, or the connection id for unidentified (anonymous,
+/// e.g. inbound Tor) sessions. Anonymous stallers are tracked per
+/// connection rather than silently skipped: a `None` endpoint must never
+/// collapse every anonymous session into one shared key or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum StallerKey {
+    /// Identified peer, keyed by logical endpoint.
+    Endpoint(crate::PeerEndpoint),
+    /// Unidentified session, keyed by its connection id.
+    Unidentified(crate::ConnectionId),
+}
+
+impl From<PeerSource> for StallerKey {
+    fn from(source: PeerSource) -> Self {
+        match source.endpoint() {
+            Some(endpoint) => Self::Endpoint(endpoint),
+            None => Self::Unidentified(source.connection_id()),
+        }
+    }
 }
 
 impl DownloadWindow {
@@ -795,7 +815,7 @@ impl DownloadWindow {
                         now,
                     ))
             {
-                self.mark_peer_unresponsive(observation.owner.endpoint, now);
+                self.mark_peer_unresponsive(observation.owner, now);
                 return Some(observation.owner);
             }
             return None;
@@ -1018,7 +1038,7 @@ impl DownloadWindow {
         self.stall_timeout = effective_timeout
             .saturating_mul(2)
             .min(self.budget.stall_timeout_max);
-        self.mark_peer_unresponsive(owner.endpoint, now);
+        self.mark_peer_unresponsive(owner, now);
         Some(owner)
     }
 
@@ -1343,32 +1363,20 @@ impl DownloadWindow {
     }
 
     /// Starts the re-acquisition cooldown for an unresponsive peer.
-    pub(crate) fn mark_peer_unresponsive(
-        &mut self,
-        peer_addr: Option<crate::PeerEndpoint>,
-        now: Instant,
-    ) {
-        let Some(peer_addr) = peer_addr else {
-            return;
-        };
+    /// Unidentified sessions cool down per connection (see
+    /// [`StallerKey`]); they are never silently skipped.
+    pub(crate) fn mark_peer_unresponsive(&mut self, source: PeerSource, now: Instant) {
         let cooldown = self.budget.staller_cooldown;
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < cooldown);
-        self.recent_stallers.insert(peer_addr, now);
+        self.recent_stallers.insert(StallerKey::from(source), now);
     }
 
-    /// Whether `peer_addr` is in cooldown; such peers are a last resort so a
+    /// Whether `source` is in cooldown; such peers are a last resort so a
     /// reconnecting staller cannot immediately reacquire the window front.
-    pub(crate) fn peer_in_staller_cooldown(
-        &self,
-        peer_addr: Option<crate::PeerEndpoint>,
-        now: Instant,
-    ) -> bool {
-        let Some(peer_addr) = peer_addr else {
-            return false;
-        };
+    pub(crate) fn peer_in_staller_cooldown(&self, source: PeerSource, now: Instant) -> bool {
         self.recent_stallers
-            .get(&peer_addr)
+            .get(&StallerKey::from(source))
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
     }
 
@@ -1517,7 +1525,8 @@ impl DownloadWindow {
     ///   fails `owns` is cancelled regardless of its racers, and a race left
     ///   with fewer than two racers is cancelled.
     /// INVARIANT: no fact here is compared by address alone.
-    ///   `recent_stallers` is the one address-keyed fact and stays exempt;
+    ///   `recent_stallers` is keyed by [`StallerKey`] (endpoint, or
+    ///   connection id for unidentified sessions) and stays exempt;
     ///   `stall` is untouched because the conviction paths own its release.
     pub(crate) fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
         let cold_front_owned = match self.cold_front {
@@ -1631,7 +1640,7 @@ impl DownloadWindow {
         }
         if !allow_expired_retry_from_peer
             && (self.peer_has_expired_pending(source, now)
-                || self.peer_in_staller_cooldown(source.endpoint, now))
+                || self.peer_in_staller_cooldown(source, now))
         {
             return None;
         }
@@ -1930,7 +1939,7 @@ impl DownloadWindow {
         self.pending_timeout_observation = None;
         self.retain_peer_assignments(|peer| *peer == winner || !probe.racers.contains_key(peer));
         if winner != owner {
-            self.mark_peer_unresponsive(owner.endpoint, now);
+            self.mark_peer_unresponsive(owner, now);
         }
         self.preferred_peer = Some(winner);
         tracing::info!(
@@ -1969,7 +1978,7 @@ impl DownloadWindow {
                 }
                 self.prefix_probe = None;
                 self.retain_peer_assignments(|peer| *peer != owner);
-                self.mark_peer_unresponsive(owner.endpoint, now);
+                self.mark_peer_unresponsive(owner, now);
                 self.preferred_peer = Some(alternate);
                 tracing::info!(
                     owner = ?owner.endpoint,

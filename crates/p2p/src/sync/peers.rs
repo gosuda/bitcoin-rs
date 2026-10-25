@@ -591,7 +591,7 @@ impl BlockSync {
         }
         for candidate in &mut *candidates {
             candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.source, now)
-                || window.peer_in_staller_cooldown(candidate.peer.source.endpoint, now);
+                || window.peer_in_staller_cooldown(candidate.peer.source, now);
         }
         let cold_preferred = configure_request_mode(window, candidates, now);
         (

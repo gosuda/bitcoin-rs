@@ -256,7 +256,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
         sync.scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(Some(crate::PeerEndpoint::Ip(owner)), Instant::now())
+            .peer_in_staller_cooldown(crate::PeerSource::for_test(owner), Instant::now())
     );
     assert_eq!(
         witness_block_inventory(next_getdata(&alternate_rx)?)?,
@@ -269,7 +269,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
     sync.scheduler
         .lock()
         .window
-        .mark_peer_unresponsive(Some(crate::PeerEndpoint::Ip(alternate)), Instant::now());
+        .mark_peer_unresponsive(crate::PeerSource::for_test(alternate), Instant::now());
     sync.tick();
     assert_eq!(
         sync.scheduler.lock().window.preferred_peer(),

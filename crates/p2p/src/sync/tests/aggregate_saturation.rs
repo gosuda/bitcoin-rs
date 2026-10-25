@@ -14,15 +14,11 @@ fn connect_on(
 ) -> (PeerLease, crate::test_support::MessageReceiver) {
     let (queue, receiver) = crate::test_support::message_channel();
     let lease = PeerLease::new(queue).with_shared_budget(aggregate);
-    peers.register(
-        info.endpoint.expect("identified peer endpoint"),
-        lease.clone(),
-    );
-    peers.publish_info(
-        info.endpoint.expect("identified peer endpoint"),
-        &lease,
-        info,
-    );
+    let Some(endpoint) = info.endpoint else {
+        panic!("identified peer endpoint");
+    };
+    peers.register(endpoint, lease.clone());
+    peers.publish_info(endpoint, &lease, info);
     (lease, receiver)
 }
 

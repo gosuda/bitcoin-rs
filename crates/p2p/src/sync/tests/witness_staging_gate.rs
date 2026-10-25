@@ -145,7 +145,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash() -> Te
     );
     assert!(!sync.peer_table.is_current(source_a));
     assert!(sync.scheduler.lock().window.peer_in_staller_cooldown(
-        Some(crate::PeerEndpoint::Ip(peer_a)),
+        crate::PeerSource::for_test(peer_a),
         std::time::Instant::now()
     ));
 

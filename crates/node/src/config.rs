@@ -5,6 +5,7 @@ use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
@@ -153,6 +154,9 @@ pub struct P2pConfig {
     /// `NODE_P2P_V2` is advertised. On by default, as Core's `-v2transport` is;
     /// off keeps every connection on v1.
     pub v2_transport: bool,
+    /// Overlay transport configuration (Tor/I2P). Defaults disable every
+    /// overlay and preserve direct IP behavior.
+    pub overlay: bitcoin_rs_p2p::OverlayConfig,
 }
 
 /// Resolved RPC configuration.
@@ -246,6 +250,26 @@ impl NodeConfig {
         Self::materialize(&UserConfig::default(), NetworkSelection::from(network))
     }
 
+    fn materialize_overlay(
+        settings: &UserConfig,
+        selection: NetworkSelection,
+        data_dir: &Path,
+    ) -> bitcoin_rs_p2p::OverlayConfig {
+        bitcoin_rs_p2p::OverlayConfig {
+            proxy: settings.p2p.proxy,
+            onion: settings.p2p.onion,
+            proxy_randomize_credentials: settings.p2p.proxy_randomize_credentials.unwrap_or(true),
+            tor_control: settings.p2p.torcontrol.clone(),
+            tor_password: settings.p2p.torpassword.clone(),
+            tor_virtual_port: selection.consensus_network().default_p2p_port(),
+            onion_key_path: Some(data_dir.join("onion_v3_private_key")),
+            i2p_sam: settings.p2p.i2psam,
+            i2p_accept_incoming: settings.p2p.i2pacceptincoming.unwrap_or(false),
+            i2p_key_path: Some(data_dir.join("i2p_private_key")),
+            onlynet: settings.p2p.onlynet.clone().unwrap_or_default(),
+        }
+    }
+
     /// Materializes the resolved settings from one folded layer.
     ///
     /// PRE: `settings` is the overlay of every source layer and `selection`
@@ -265,15 +289,17 @@ impl NodeConfig {
         let mempool_snapshot_restore_timeout_secs = settings
             .mempool_snapshot_restore_timeout_secs
             .unwrap_or_else(|| std::cmp::max(60, mempool_snapshot_max_bytes / (1024 * 1024)));
+        let data_dir = settings
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".bitcoin-rs"));
+        let overlay = Self::materialize_overlay(settings, selection, &data_dir);
         Self {
             network: selection.consensus_network(),
             persist_mempool: settings.persist_mempool.unwrap_or(true),
             mempool_snapshot_max_bytes,
             mempool_snapshot_restore_timeout_secs,
-            data_dir: settings
-                .data_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".bitcoin-rs")),
+            data_dir,
             storage: StorageConfig {
                 backend: settings.storage.backend.unwrap_or(DEFAULT_STORAGE_BACKEND),
                 dbcache_mb: settings.storage.dbcache_mb.unwrap_or(DEFAULT_DBCACHE_MB),
@@ -288,6 +314,7 @@ impl NodeConfig {
                 connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
                 fast_sync: settings.p2p.fast_sync.unwrap_or(false),
                 v2_transport: settings.p2p.v2_transport.unwrap_or(true),
+                overlay,
             },
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
@@ -388,6 +415,7 @@ impl NodeConfig {
              support is not compiled in (enable the `kernel` feature)",
             self.validation.engine
         );
+        self.validate_overlay()?;
         if self.p2p.magic != self.network.magic() {
             anyhow::ensure!(
                 self.network == Network::Mainnet,
@@ -428,6 +456,59 @@ impl NodeConfig {
             journal.max_lag_seconds > 0,
             "chainstate_journal.max_lag_seconds must be positive"
         );
+        Ok(())
+    }
+
+    /// Validates cross-field overlay transport constraints.
+    ///
+    /// Overlay targets require their routes: an onion target without
+    /// an onion/general proxy, an I2P target without a SAM bridge, or
+    /// an onlynet naming an overlay without its route is refused
+    /// before any worker starts.
+    fn validate_overlay(&self) -> Result<()> {
+        let overlay = &self.p2p.overlay;
+        let onion_route = overlay.onion.is_some() || overlay.proxy.is_some();
+        anyhow::ensure!(
+            !overlay
+                .onlynet
+                .contains(&bitcoin_rs_primitives::NetworkLabel::Onion)
+                || onion_route,
+            "--onlynet=onion requires an onion route (--onion or --proxy)"
+        );
+        anyhow::ensure!(
+            !overlay
+                .onlynet
+                .contains(&bitcoin_rs_primitives::NetworkLabel::I2p)
+                || overlay.i2p_sam.is_some(),
+            "--onlynet=i2p requires an I2P SAM bridge (--i2psam)"
+        );
+        anyhow::ensure!(
+            !overlay.i2p_accept_incoming || overlay.i2p_sam.is_some(),
+            "--i2pacceptincoming requires an I2P SAM bridge (--i2psam)"
+        );
+        for target in &self.p2p.connect {
+            match classify_endpoint(target) {
+                ClassifiedEndpoint::InvalidOverlay => {
+                    anyhow::bail!("--connect target `{target}` is an invalid overlay endpoint");
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+                    ..
+                }) => {
+                    anyhow::ensure!(
+                        onion_route,
+                        "--connect onion target requires an onion route (--onion or --proxy)"
+                    );
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::I2p { .. }) => {
+                    anyhow::ensure!(
+                        overlay.i2p_sam.is_some(),
+                        "--connect I2P target requires an I2P SAM bridge (--i2psam)"
+                    );
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..))
+                | ClassifiedEndpoint::NonOverlay => {}
+            }
+        }
         Ok(())
     }
 }

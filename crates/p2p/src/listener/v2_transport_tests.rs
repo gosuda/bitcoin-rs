@@ -104,7 +104,15 @@ fn handshake_and_ping(addr: SocketAddr, stream: TcpStream, negotiated: Negotiate
     let (client, _) = shared(false);
     let lease = lease();
     let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
-    run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
+    run_outbound_handshake(
+        &mut peer,
+        7,
+        0,
+        &lease,
+        deadline(),
+        crate::PeerEndpoint::Ip(addr),
+        &client,
+    )?;
     peer.send(&Message::Ping(41))?;
     read_until(&mut peer, &Message::Pong(41))
 }
@@ -441,9 +449,25 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
         let (lease, replies) = lease_with_replies();
         let cancel_handle = lease.clone();
         let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
-        run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
-        let loop_handle =
-            std::thread::spawn(move || run_message_loop(&mut peer, addr, &lease, &client, None));
+        run_outbound_handshake(
+            &mut peer,
+            7,
+            0,
+            &lease,
+            deadline(),
+            crate::PeerEndpoint::Ip(addr),
+            &client,
+        )?;
+        let loop_handle = std::thread::spawn(move || {
+            run_message_loop(
+                &mut peer,
+                addr,
+                Some(crate::PeerEndpoint::Ip(addr)),
+                &lease,
+                &client,
+                None,
+            )
+        });
         // Liveness proof: the loop must dispatch the writer's ping through
         // the production path and queue the pong on the peer's reply queue.
         // A decoy drop, a v1 byte-count alias, or a loop that exits early

@@ -50,12 +50,18 @@ pub(crate) mod peer_info;
 pub(crate) mod peer_table;
 /// Buffered reads that survive a peer socket's poll interval.
 pub(crate) mod recv;
+/// I2P SAM v3 client for typed I2P transports.
+pub(crate) mod sam;
 /// Runtime owner for P2P control state and workers.
 pub(crate) mod service;
+/// SOCKS5 client for proxied IP and onion transports.
+pub(crate) mod socks;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// External Tor control-port client for the onion hidden service.
+pub(crate) mod tor_control;
 /// A connection's v1 or BIP324 v2 transport and its negotiation.
 pub(crate) mod transport;
 /// Connection-bound transaction request and relay policy.
@@ -81,8 +87,9 @@ pub use connection::{ConnectionId, OutboundRefusal, PeerLease, PeerSource, Queue
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, FilterRequest, FilterServing, InventoryServing, TxInventory};
 pub use endpoint::{
-    DialRoutes, TransportRemote, accepted_ip_identity, addrv2_gossip_enabled, connect_peer_stream,
-    dialed_ip_identity, endpoint_from_addrv2, endpoint_to_addrv2, format_endpoint, parse_endpoint,
+    DialFailure, DialRoutes, OverlayConfig, TransportRemote, accepted_ip_identity,
+    addrv2_gossip_enabled, connect_peer_stream, dialed_ip_identity, endpoint_from_addrv2,
+    endpoint_to_addrv2, format_endpoint, parse_endpoint,
 };
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
@@ -97,6 +104,7 @@ pub use service::{
     P2pServiceError,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use tor_control::TorControlTarget;
 pub use transport::{TransportFailure, TransportProtocol};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,

@@ -66,7 +66,7 @@ fn version_max_spend(sequence: u32, version: u32) -> Tx {
     }
 }
 
-/// One OP_TRUE spend with the push-only `scriptSig` the mature-coinbase
+/// One `OP_TRUE` spend with the push-only `scriptSig` the mature-coinbase
 /// fixture accepts.
 fn op_true_spend(previous_output: OutPoint, value: u64) -> Tx {
     Tx {
@@ -91,7 +91,6 @@ fn op_true_spend(previous_output: OutPoint, value: u64) -> Tx {
 /// identical either way, for an external spend and a same-block spend.
 #[test]
 fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
-    use crate::UndoStore as _;
     let external = op_true_spend(OutPoint::new(coinbase(1).txid(), 0), 1_000);
     let same_block = op_true_spend(OutPoint::new(external.txid(), 0), 900);
     let final_outpoint = OutPoint::new(same_block.txid(), 0);

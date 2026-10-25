@@ -1737,24 +1737,17 @@ fn block_verbose_typed(
         .flatten()
         .map(BlockHash::from);
     if !include_block_fields {
-        return typed_to_sonic(&v31::GetBlockHeaderVerbose {
-            hash: record.hash.to_string(),
-            confirmations: block_confirmations,
-            height: i64::from(record.height),
-            version: header.version,
-            version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
-            merkle_root: header.merkle_root.to_string_be(),
-            time: i64::from(header.time),
-            median_time: i64_saturated(u64::from(mediantime)),
-            nonce: i64::from(header.nonce),
-            bits: format!("{:08x}", header.bits),
-            target: compact_target_hex(header.bits),
-            difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
-            n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
-            previous_block_hash: Some(header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
-        });
+        return render_block_header_verbose(
+            ctx,
+            record,
+            &header,
+            BlockHeaderRenderFacts {
+                confirmations: block_confirmations,
+                mediantime,
+                chainwork_hex,
+                next_block_hash,
+            },
+        );
     }
     let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
@@ -1827,6 +1820,39 @@ fn block_verbose_typed(
         .ok_or_else(|| RpcError::Internal("typed block coinbase is not an object".to_owned()))?;
     let _ = coinbase.insert("version", json!(coinbase_version));
     Ok(value)
+}
+
+struct BlockHeaderRenderFacts {
+    confirmations: i64,
+    mediantime: u32,
+    chainwork_hex: String,
+    next_block_hash: Option<BlockHash>,
+}
+
+fn render_block_header_verbose(
+    ctx: &Context,
+    record: &BlockRecord,
+    header: &Header,
+    facts: BlockHeaderRenderFacts,
+) -> Result<Value, RpcError> {
+    typed_to_sonic(&v31::GetBlockHeaderVerbose {
+        hash: record.hash.to_string(),
+        confirmations: facts.confirmations,
+        height: i64::from(record.height),
+        version: header.version,
+        version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
+        merkle_root: header.merkle_root.to_string_be(),
+        time: i64::from(header.time),
+        median_time: i64_saturated(u64::from(facts.mediantime)),
+        nonce: i64::from(header.nonce),
+        bits: format!("{:08x}", header.bits),
+        target: compact_target_hex(header.bits),
+        difficulty: ctx.chain.difficulty_for_bits(header.bits),
+        chain_work: facts.chainwork_hex,
+        n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
+        previous_block_hash: Some(header.prev_blockhash.to_string()),
+        next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
+    })
 }
 
 type SpentCoins = Vec<Vec<bitcoin_rs_utxo::UtxoCoin>>;
@@ -6237,7 +6263,9 @@ mod scantxoutset_tests {
         assert_eq!(ranged_result["total_amount"], fixed_result["total_amount"]);
         assert_eq!(ranged_result["unspents"], fixed_result["unspents"]);
 
-        let unspents = ranged_result["unspents"].as_array().unwrap();
+        let Some(unspents) = ranged_result["unspents"].as_array() else {
+            panic!("unspents array missing: {ranged_result:?}");
+        };
         assert_eq!(unspents.len(), 3);
         for entry in unspents {
             assert!(entry.get("txid").is_some());

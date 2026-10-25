@@ -78,6 +78,7 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
         peer_table: state.peer_table(),
         p2p: state.p2p(),
         local_services: state.p2p().local_services().to_u64(),
+        overlay: state.p2p().overlay_config().clone(),
     }
 }
 

@@ -1259,8 +1259,14 @@ mod tests {
         (PeerLease::new(tx).with_shared_budget(shared), rx)
     }
 
-    fn peer_info(addr: crate::PeerEndpoint, conn_time: u64) -> crate::PeerInfo {
-        crate::PeerInfo {
+    fn peer_info(
+        addr: crate::PeerEndpoint,
+        conn_time: u64,
+    ) -> Result<crate::PeerInfo, Box<dyn std::error::Error>> {
+        let ip = addr
+            .as_ip()
+            .ok_or_else(|| std::io::Error::other("ip test peer"))?;
+        Ok(crate::PeerInfo {
             endpoint: Some(addr),
             network: addr.net(),
             version: 70_016,
@@ -1274,11 +1280,11 @@ mod tests {
             best_known_height: 0,
             conn_time,
             inbound: false,
-            addr_bind: crate::TransportRemote::new(addr.as_ip().expect("ip test peer")),
+            addr_bind: crate::TransportRemote::new(ip),
             time_offset: 0,
             counters: std::sync::Arc::new(crate::PeerCounters::default()),
             transport: crate::TransportProtocol::V1,
-        }
+        })
     }
 
     #[test]
@@ -1324,13 +1330,14 @@ mod tests {
     }
 
     #[test]
-    fn stale_connection_cannot_publish_over_replacement() {
+    fn stale_connection_cannot_publish_over_replacement() -> Result<(), Box<dyn std::error::Error>>
+    {
         let table = crate::PeerTable::new();
         let addr: crate::PeerEndpoint = SocketAddr::from(([127, 0, 0, 1], 18_450)).into();
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
         assert!(!table.register(addr, old.clone()));
-        assert!(table.publish_info(addr, &old, peer_info(addr, 1)));
+        assert!(table.publish_info(addr, &old, peer_info(addr, 1)?));
 
         let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
         let replacement = PeerLease::new(replacement_tx);
@@ -1338,11 +1345,11 @@ mod tests {
         assert!(old.is_cancelled());
         assert_eq!(table.infos(), []);
         assert_eq!(table.ready_source(addr), None);
-        assert!(!table.publish_info(addr, &old, peer_info(addr, 2)));
+        assert!(!table.publish_info(addr, &old, peer_info(addr, 2)?));
         assert_eq!(table.infos(), []);
 
-        assert!(table.publish_info(addr, &replacement, peer_info(addr, 3)));
-        assert_eq!(table.infos(), vec![peer_info(addr, 3)]);
+        assert!(table.publish_info(addr, &replacement, peer_info(addr, 3)?));
+        assert_eq!(table.infos(), vec![peer_info(addr, 3)?]);
         assert_eq!(
             table.ready_source(addr),
             Some(replacement.source(Some(addr)))
@@ -1352,10 +1359,11 @@ mod tests {
                 .lease(addr)
                 .is_some_and(|current| current.same_connection(&replacement))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_disconnect_source_preserves_replacement() {
+    fn stale_disconnect_source_preserves_replacement() -> Result<(), Box<dyn std::error::Error>> {
         let table = crate::PeerTable::new();
         let addr: crate::PeerEndpoint = SocketAddr::from(([127, 0, 0, 1], 18_451)).into();
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -1366,31 +1374,32 @@ mod tests {
         let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
         let replacement = PeerLease::new(replacement_tx);
         table.register(addr, replacement.clone());
-        table.publish_info(addr, &replacement, peer_info(addr, 2));
+        table.publish_info(addr, &replacement, peer_info(addr, 2)?);
 
         assert!(!table.disconnect_source(stale_source));
         assert!(!replacement.is_cancelled());
         assert!(table.is_connected(addr));
-        assert_eq!(table.infos(), vec![peer_info(addr, 2)]);
+        assert_eq!(table.infos(), vec![peer_info(addr, 2)?]);
 
         assert!(table.disconnect_source(replacement.source(Some(addr))));
         assert!(replacement.is_cancelled());
         assert!(!table.is_connected(addr));
         assert_eq!(table.infos(), []);
+        Ok(())
     }
 
     #[test]
-    fn ready_snapshot_keeps_identity_across_same_address_replacement() {
+    fn ready_snapshot_keeps_identity_across_same_address_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = crate::PeerTable::new();
         let addr: crate::PeerEndpoint = SocketAddr::from(([127, 0, 0, 1], 18_452)).into();
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
         table.register(addr, old.clone());
-        assert!(table.publish_info(addr, &old, peer_info(addr, 1)));
-        let snapshot = table
-            .ready_peers()
-            .pop()
-            .unwrap_or_else(|| panic!("ready peer snapshot missing"));
+        assert!(table.publish_info(addr, &old, peer_info(addr, 1)?));
+        let Some(snapshot) = table.ready_peers().pop() else {
+            return Err(std::io::Error::other("ready peer snapshot missing").into());
+        };
 
         let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
         let replacement = PeerLease::new(replacement_tx);
@@ -1398,6 +1407,7 @@ mod tests {
 
         assert!(table.lease_source(snapshot).is_none());
         assert!(table.lease_source(replacement.source(Some(addr))).is_some());
+        Ok(())
     }
 
     #[test]

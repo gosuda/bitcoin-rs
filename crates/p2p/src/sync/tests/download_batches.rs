@@ -360,7 +360,7 @@ fn ineligible_peers_receive_no_block_requests_during_fanout() -> TestResult {
     );
     assert!(
         sync.scheduler.lock().window.peer_in_staller_cooldown(
-            Some(crate::PeerEndpoint::Ip(test_addr(9250, 0)?)),
+            crate::PeerSource::for_test(test_addr(9250, 0)?),
             Instant::now()
         ),
         "a timed-out peer must not immediately reacquire the same block stripe"

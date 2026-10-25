@@ -228,7 +228,14 @@ fn the_first_filter_pass_records_an_aggregate_refusal() -> TestResult {
     peer.state = PeerState::Ready;
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_444));
 
-    run_message_loop(&mut peer, addr, &lease, &shared, None)?;
+    run_message_loop(
+        &mut peer,
+        addr,
+        Some(crate::PeerEndpoint::Ip(addr)),
+        &lease,
+        &shared,
+        None,
+    )?;
 
     assert!(lease.is_cancelled(), "the chain closed the lease");
     let parked = peer

@@ -298,7 +298,7 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
             .scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(Some(crate::PeerEndpoint::Ip(peer_addr)), Instant::now()),
+            .peer_in_staller_cooldown(crate::PeerSource::for_test(peer_addr), Instant::now()),
         "local-clock rejection must not blame the peer"
     );
     Ok(())

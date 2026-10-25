@@ -775,35 +775,34 @@ mod tests {
         remote: &str,
         bind: &str,
         inbound: bool,
-    ) -> (PeerSource, MessageReceiver) {
+    ) -> Result<(PeerSource, MessageReceiver), Box<dyn std::error::Error>> {
         let connected = connect_at(
             table,
             remote
                 .parse()
-                .unwrap_or_else(|error| panic!("remote fixture: {error}")),
+                .map_err(|error| std::io::Error::other(format!("remote fixture: {error}")))?,
             bind.parse()
-                .unwrap_or_else(|error| panic!("bind fixture: {error}")),
+                .map_err(|error| std::io::Error::other(format!("bind fixture: {error}")))?,
             inbound,
             false,
             crate::PeerRole::FullRelay,
             true,
         );
         let source = connected.0;
+        let endpoint = source
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("clock fixture endpoint"))?;
         let lease = table
-            .lease(source.endpoint.expect("clock fixture endpoint"))
-            .unwrap_or_else(|| panic!("clock fixture lease"));
+            .lease(endpoint)
+            .ok_or_else(|| std::io::Error::other("clock fixture lease"))?;
         let mut info = table
-            .info_of(source.endpoint.expect("clock fixture endpoint"))
-            .unwrap_or_else(|| panic!("clock fixture info"));
+            .info_of(endpoint)
+            .ok_or_else(|| std::io::Error::other("clock fixture info"))?;
         // A pre-BIP133 peer isolates inventory clock draws from fee-filter
         // refreshes without substituting the scheduler under test.
         info.version = 70_012;
-        table.publish_info(
-            source.endpoint.expect("identified peer endpoint"),
-            &lease,
-            info,
-        );
-        connected
+        table.publish_info(endpoint, &lease, info);
+        Ok(connected)
     }
 
     fn clock(table: &PeerTable, source: PeerSource) -> Instant {
@@ -811,9 +810,10 @@ mod tests {
     }
 
     #[test]
-    fn nontransaction_inventory_does_not_create_relay_state_or_clocks() {
+    fn nontransaction_inventory_does_not_create_relay_state_or_clocks()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
-        let (source, _) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let (source, _) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
         table.note_transaction_inventory(source, &[]);
         table.note_transaction_inventory(
             source,
@@ -824,6 +824,7 @@ mod tests {
         let policy = table.tx_policy.lock();
         assert!(policy.relay.is_empty());
         assert!(policy.inbound_inv.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -857,13 +858,14 @@ mod tests {
     }
 
     #[test]
-    fn inbound_peers_share_cycles_without_suppressing_due_siblings() {
+    fn inbound_peers_share_cycles_without_suppressing_due_siblings()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let gateway = gateway();
         let now = Instant::now();
         let mut rng = CountingRng::new();
-        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
-        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
+        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true)?;
         let request = insert(&gateway, &transaction(1, None), 1_000);
         table.queue_transaction_relay(request, now, &mut rng);
         assert_eq!(rng.draws, 1, "one initial draw for the shared key");
@@ -872,7 +874,7 @@ mod tests {
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         assert!(inventory(&a_rx).is_empty() && inventory(&b_rx).is_empty());
         // Joining an already-due key must not postpone existing siblings.
-        let (c, c_rx) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true);
+        let (c, c_rx) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true)?;
         let draws = rng.draws;
         table.queue_transaction_relay(request, due, &mut rng);
         assert_eq!(rng.draws, draws);
@@ -895,28 +897,30 @@ mod tests {
         for receiver in [&a_rx, &b_rx, &c_rx] {
             assert_eq!(inventory(receiver), Vec::<Inventory>::new());
         }
+        Ok(())
     }
 
     #[test]
-    fn inbound_future_clock_survives_all_creation_paths_and_reconnects() {
+    fn inbound_future_clock_survives_all_creation_paths_and_reconnects()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let gateway = gateway();
         let now = Instant::now();
         let mut rng = CountingRng::new();
-        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
         let request = insert(&gateway, &transaction(1, None), 1_000);
         table.queue_transaction_relay(request, now, &mut rng);
         let due = clock(&table, a);
-        let (b, _) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        let (b, _) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true)?;
         table.receive_fee_filter(b, 1_000);
-        let (c, _) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true);
+        let (c, _) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true)?;
         table.note_transaction_inventory(
             c,
             &[Inventory::Transaction(bitcoin::Txid::from_byte_array(
                 *request.txid.as_bytes(),
             ))],
         );
-        let (d, _) = clock_peer(&table, "8.8.4.4:4000", "10.0.0.1:8333", true);
+        let (d, _) = clock_peer(&table, "8.8.4.4:4000", "10.0.0.1:8333", true)?;
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         for source in [a, b, c, d] {
             assert_eq!(clock(&table, source), due);
@@ -936,7 +940,7 @@ mod tests {
         }
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         assert!(table.tx_policy.lock().relay.is_empty());
-        let (replacement, rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
+        let (replacement, rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
         table.queue_transaction_relay(request, now, &mut rng);
         assert_ne!(a, replacement);
         assert_eq!(clock(&table, replacement), due);
@@ -951,16 +955,18 @@ mod tests {
             inventory(&a_rx).is_empty(),
             "old lease never receives inventory"
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_inbound_ticks_advance_the_shared_clock_without_admissions() {
+    fn empty_inbound_ticks_advance_the_shared_clock_without_admissions()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let gateway = gateway();
         let now = Instant::now();
         let mut rng = CountingRng::new();
-        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true);
-        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true);
+        let (a, a_rx) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
+        let (b, b_rx) = clock_peer(&table, "9.9.9.9:2000", "10.0.0.1:8333", true)?;
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         let due = clock(&table, a);
         let draws = rng.draws;
@@ -977,10 +983,12 @@ mod tests {
         table.poll_transaction_relay(&gateway, next, false, &mut rng);
         assert_eq!(inventory(&a_rx).len(), 1);
         assert_eq!(inventory(&b_rx).len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn different_inbound_keys_and_outbound_peers_sample_independently() {
+    fn different_inbound_keys_and_outbound_peers_sample_independently()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let gateway = gateway();
         let now = Instant::now();
@@ -996,7 +1004,7 @@ mod tests {
             ("8.8.8.8:7000", "10.0.0.1:8333", false),
             ("8.8.8.8:8000", "10.0.0.1:8333", false),
         ] {
-            sources.push(clock_peer(&table, remote, bind, inbound).0);
+            sources.push(clock_peer(&table, remote, bind, inbound)?.0);
         }
         let request = insert(&gateway, &transaction(1, None), 1_000);
         table.queue_transaction_relay(request, now, &mut rng);
@@ -1012,6 +1020,7 @@ mod tests {
             7,
             "distinct controlled draws remain independent"
         );
+        Ok(())
     }
 
     #[test]
@@ -1377,7 +1386,8 @@ mod tests {
         );
     }
     #[test]
-    fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection() {
+    fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let gateway = gateway();
         let now = Instant::now();
@@ -1386,14 +1396,17 @@ mod tests {
             connect(&table, 1, false, false, crate::PeerRole::FullRelay, true);
         let (known, known_rx) = connect(&table, 2, false, true, crate::PeerRole::FullRelay, true);
         let (_, other_rx) = connect(&table, 3, false, true, crate::PeerRole::FullRelay, true);
-        let Some(lease) = table.lease(optout.endpoint.expect("identified fixture")) else {
-            panic!("live fixture lease")
+        let endpoint = optout
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("identified fixture"))?;
+        let Some(lease) = table.lease(endpoint) else {
+            return Err(std::io::Error::other("live fixture lease").into());
         };
-        let Some(mut info) = table.info_of(optout.endpoint.expect("identified fixture")) else {
-            panic!("published fixture info")
+        let Some(mut info) = table.info_of(endpoint) else {
+            return Err(std::io::Error::other("published fixture info").into());
         };
         info.relay_transactions = false;
-        table.publish_info(optout.endpoint.expect("identified fixture"), &lease, info);
+        table.publish_info(endpoint, &lease, info);
         let request = insert(&gateway, &transaction(1, None), 1_000);
         table.note_transaction_inventory(
             known,
@@ -1417,6 +1430,7 @@ mod tests {
         );
         assert_eq!(inventory(&known_rx), []);
         assert_eq!(inventory(&other_rx).len(), 1);
+        Ok(())
     }
     #[test]
     fn fee_filter_uses_core_integer_fee_threshold_at_fractional_boundaries()

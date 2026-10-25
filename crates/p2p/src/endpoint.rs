@@ -5,13 +5,18 @@
 
 use std::io;
 use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message};
-use bitcoin_rs_primitives::endpoint::{base32_decode, tor_v3_key_from_payload};
-use bitcoin_rs_primitives::{EndpointHost, PeerEndpoint};
+use bitcoin_rs_primitives::endpoint::{base32_decode, tor_v3_key_from_payload, tor_v3_payload};
+use bitcoin_rs_primitives::{EndpointHost, NetworkLabel, PeerEndpoint};
 use sha2::{Digest, Sha256};
+
+use crate::sam::SamSession;
+use crate::socks::{SocksTarget, socks_connect};
 
 /// Socket that actually carried a connection. This is socket accounting
 /// (`addrbind`, local/remote socket) only; it is never peer identity and
@@ -52,43 +57,118 @@ pub fn dialed_ip_identity(addr: SocketAddr) -> PeerEndpoint {
     PeerEndpoint::Ip(addr)
 }
 
+/// Result of classifying a textual peer target for dialing and DNS policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassifiedEndpoint {
+    /// Valid typed endpoint (direct IP, Tor v3, or I2P).
+    Valid(PeerEndpoint),
+    /// Reserved overlay target (`.onion` or `.i2p`) that failed validation.
+    ///
+    /// Malformed overlay targets MUST fail locally and MUST NOT fall through
+    /// to system DNS resolution.
+    InvalidOverlay,
+    /// Non-overlay endpoint candidate that requires standard host:port DNS resolution.
+    NonOverlay,
+}
+
+/// Whether a hostname candidate refers to a reserved overlay namespace (`.onion` or `.i2p`),
+/// independently of case, trailing dots, or payload validity.
+///
+/// Preserves ordinary single-label LAN names (`onion`, `i2p`) when they do not have
+/// a trailing dot, while treating absolute root forms (`onion.`, `i2p.`) as reserved overlay.
+#[must_use]
+pub(crate) fn is_reserved_overlay_host(host: &str) -> bool {
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let had_trailing_dot = unbracketed.ends_with('.');
+    let trimmed = unbracketed.trim_end_matches('.');
+    let label = match trimmed.rsplit_once('.') {
+        Some((_, last_label)) => last_label,
+        None if had_trailing_dot => trimmed,
+        None => return false,
+    };
+    label.eq_ignore_ascii_case("onion") || label.eq_ignore_ascii_case("i2p")
+}
+
+/// Classify a textual endpoint: direct IP, valid overlay, invalid overlay, or DNS candidate.
+///
+/// Overlay names (`.onion` and `.i2p`) are validated locally and MUST NEVER fall through
+/// to DNS resolution. All names ending in `.i2p` must fail locally if they are not
+/// supported canonical `<52>.b32.i2p` targets.
+#[must_use]
+pub fn classify_endpoint(text: &str) -> ClassifiedEndpoint {
+    if let Ok(socket) = text.parse::<SocketAddr>() {
+        if socket.port() == 0 {
+            return ClassifiedEndpoint::NonOverlay;
+        }
+        return ClassifiedEndpoint::Valid(PeerEndpoint::Ip(socket));
+    }
+
+    let (host, port_text) = text
+        .rsplit_once(':')
+        .map_or((text, None), |(h, p)| (h, Some(p)));
+
+    let first_host = text.split_once(':').map_or(text, |(h, _)| h);
+    let is_overlay = is_reserved_overlay_host(host)
+        || is_reserved_overlay_host(first_host)
+        || is_reserved_overlay_host(text);
+
+    if !is_overlay {
+        return ClassifiedEndpoint::NonOverlay;
+    }
+
+    let Some(port_str) = port_text else {
+        return ClassifiedEndpoint::InvalidOverlay;
+    };
+    let Ok(port) = port_str.parse::<u16>() else {
+        return ClassifiedEndpoint::InvalidOverlay;
+    };
+    if port == 0 {
+        return ClassifiedEndpoint::InvalidOverlay;
+    }
+
+    if let Some(onion) = host.strip_suffix(".onion") {
+        if onion.len() != 56 {
+            return ClassifiedEndpoint::InvalidOverlay;
+        }
+        let Some(payload) = base32_decode(onion) else {
+            return ClassifiedEndpoint::InvalidOverlay;
+        };
+        let Some(key) = tor_v3_key_from_payload(&payload) else {
+            return ClassifiedEndpoint::InvalidOverlay;
+        };
+        return ClassifiedEndpoint::Valid(PeerEndpoint::TorV3 { key, port });
+    }
+
+    if let Some(b32) = host.strip_suffix(".b32.i2p") {
+        if b32.len() != 52 {
+            return ClassifiedEndpoint::InvalidOverlay;
+        }
+        let Some(payload) = base32_decode(b32) else {
+            return ClassifiedEndpoint::InvalidOverlay;
+        };
+        if payload.len() != 32 {
+            return ClassifiedEndpoint::InvalidOverlay;
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&payload);
+        return ClassifiedEndpoint::Valid(PeerEndpoint::I2p { hash, port });
+    }
+
+    ClassifiedEndpoint::InvalidOverlay
+}
+
 /// Parse a textual endpoint: `host:port` for IP, `<56>.onion:port` for
 /// Tor v3, or `<52>.b32.i2p:port` for I2P. Overlay names are validated
 /// locally and never resolved through system DNS.
 #[must_use]
 pub fn parse_endpoint(text: &str) -> Option<PeerEndpoint> {
-    if let Ok(socket) = text.parse::<SocketAddr>() {
-        if socket.port() == 0 {
-            return None;
-        }
-        return Some(PeerEndpoint::Ip(socket));
+    match classify_endpoint(text) {
+        ClassifiedEndpoint::Valid(endpoint) => Some(endpoint),
+        ClassifiedEndpoint::InvalidOverlay | ClassifiedEndpoint::NonOverlay => None,
     }
-    let (host, port_text) = text.rsplit_once(':')?;
-    let port: u16 = port_text.parse().ok()?;
-    if port == 0 {
-        return None;
-    }
-    if let Some(onion) = host.strip_suffix(".onion") {
-        if onion.len() != 56 {
-            return None;
-        }
-        let payload = base32_decode(onion)?;
-        let key = tor_v3_key_from_payload(&payload)?;
-        return Some(PeerEndpoint::TorV3 { key, port });
-    }
-    if let Some(b32) = host.strip_suffix(".b32.i2p") {
-        if b32.len() != 52 {
-            return None;
-        }
-        let payload = base32_decode(b32)?;
-        if payload.len() != 32 {
-            return None;
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&payload);
-        return Some(PeerEndpoint::I2p { hash, port });
-    }
-    None
 }
 
 /// Log/report form of an optional endpoint: the endpoint or `unknown`.
@@ -143,12 +223,20 @@ pub fn endpoint_to_addrv2(
     }
 }
 
-/// Whether gossip may carry this endpoint on `addrv2` in this slice: no
-/// overlay transport is enabled yet, so only IP endpoints are gossiped
-/// (and legacy `addr` remains IP-only by construction).
+/// Whether gossip may carry this endpoint on `addrv2`: IP always; Tor
+/// only when a Tor route is configured; I2P only when a SAM bridge is
+/// configured (legacy `addr` remains IP-only by construction).
 #[must_use]
-pub const fn addrv2_gossip_enabled(endpoint: PeerEndpoint) -> bool {
-    matches!(endpoint, PeerEndpoint::Ip(_))
+pub const fn addrv2_gossip_enabled(
+    endpoint: PeerEndpoint,
+    tor_enabled: bool,
+    i2p_enabled: bool,
+) -> bool {
+    match endpoint {
+        PeerEndpoint::Ip(_) => true,
+        PeerEndpoint::TorV3 { .. } => tor_enabled,
+        PeerEndpoint::I2p { .. } => i2p_enabled,
+    }
 }
 
 /// Core internal netgroup for an endpoint host (not the BIP155 tag).
@@ -173,31 +261,239 @@ pub fn anonymous_netgroup(connection_id: crate::ConnectionId) -> Vec<u8> {
     vec![3, digest[0], digest[1]]
 }
 
-/// Routing configuration for dials. In this slice no overlay route is
-/// configured, so Tor/I2P dials are typed unavailable; slice B fills the
-/// SOCKS/SAM members without changing call sites.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Resolved overlay configuration (node config → P2P service → dial
+/// routes). Defaults disable every overlay and preserve direct IP.
+#[derive(Clone, Default)]
+pub struct OverlayConfig {
+    /// General SOCKS5 proxy (`--proxy`), also used for IP when set.
+    pub proxy: Option<SocketAddr>,
+    /// SOCKS5 proxy for onion dials (`--onion`); falls back to `proxy`.
+    pub onion: Option<SocketAddr>,
+    /// Randomize SOCKS credentials per dial on the general proxy.
+    pub proxy_randomize_credentials: bool,
+    /// Tor control target (`--torcontrol`): `host:port` or a unix path.
+    pub tor_control: Option<String>,
+    /// Tor control password (`--torpassword`); SAFECOOKIE when absent.
+    pub tor_password: Option<String>,
+    /// Virtual port the onion service is published on.
+    pub tor_virtual_port: u16,
+    /// Persisted onion v3 service key blob path.
+    pub onion_key_path: Option<PathBuf>,
+    /// I2P SAM bridge (`--i2psam`).
+    pub i2p_sam: Option<SocketAddr>,
+    /// Accept inbound I2P streams (`--i2pacceptincoming`).
+    pub i2p_accept_incoming: bool,
+    /// Persisted I2P private destination path.
+    pub i2p_key_path: Option<PathBuf>,
+    /// Networks dials are restricted to (`--onlynet`); empty means all.
+    pub onlynet: Vec<NetworkLabel>,
+}
+
+impl core::fmt::Debug for OverlayConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OverlayConfig")
+            .field("proxy", &self.proxy)
+            .field("onion", &self.onion)
+            .field(
+                "proxy_randomize_credentials",
+                &self.proxy_randomize_credentials,
+            )
+            .field("tor_control", &self.tor_control)
+            .field(
+                "tor_password",
+                &self.tor_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tor_virtual_port", &self.tor_virtual_port)
+            .field("onion_key_path", &self.onion_key_path)
+            .field("i2p_sam", &self.i2p_sam)
+            .field("i2p_accept_incoming", &self.i2p_accept_incoming)
+            .field("i2p_key_path", &self.i2p_key_path)
+            .field("onlynet", &self.onlynet)
+            .finish()
+    }
+}
+
+impl OverlayConfig {
+    /// Whether any Tor route or control surface is configured.
+    #[must_use]
+    pub fn tor_configured(&self) -> bool {
+        self.onion.is_some() || self.proxy.is_some() || self.tor_control.is_some()
+    }
+
+    /// Whether an I2P SAM bridge is configured.
+    #[must_use]
+    pub fn i2p_configured(&self) -> bool {
+        self.i2p_sam.is_some()
+    }
+
+    /// Build dial routes; the SAM session (if any) is attached by the
+    /// service once established.
+    #[must_use]
+    pub fn dial_routes(&self) -> DialRoutes {
+        DialRoutes {
+            proxy: self.proxy,
+            onion: self.onion,
+            proxy_randomize_credentials: self.proxy_randomize_credentials,
+            sam_session: None,
+            onlynet: self.onlynet.clone(),
+        }
+    }
+}
+
+/// Routing configuration for dials: which SOCKS proxy carries IP and
+/// onion traffic and which SAM session carries I2P traffic.
+#[derive(Clone, Debug, Default)]
 pub struct DialRoutes {
-    /// Placeholder kept intentionally empty until slice B; overlays disabled.
-    pub overlays_enabled: bool,
+    /// General SOCKS5 proxy for IP dials (and onion when `onion` unset).
+    pub proxy: Option<SocketAddr>,
+    /// SOCKS5 proxy for onion dials.
+    pub onion: Option<SocketAddr>,
+    /// Per-dial credential randomization on the general proxy.
+    pub proxy_randomize_credentials: bool,
+    /// Established persistent SAM session for I2P dials.
+    pub sam_session: Option<Arc<SamSession>>,
+    /// Dial restriction; empty allows every network.
+    pub onlynet: Vec<NetworkLabel>,
+}
+
+impl DialRoutes {
+    /// Whether Tor dials can be routed.
+    #[must_use]
+    pub fn tor_enabled(&self) -> bool {
+        self.onion.is_some() || self.proxy.is_some()
+    }
+
+    /// Whether I2P dials can be routed.
+    #[must_use]
+    pub fn i2p_enabled(&self) -> bool {
+        self.sam_session.is_some()
+    }
+}
+
+/// Typed dial outcome at the transport seam.
+///
+/// `Transport` covers every local failure: dead or refusing proxy, SOCKS
+/// authentication/protocol failure, dead SAM bridge, SAM negotiation or
+/// naming failure, local policy (`onlynet`), and missing routes. None of
+/// these is evidence about the peer and none may move addrman failure
+/// accounting. `PeerUnreachable` is reserved for outcomes reported past
+/// a working transport (direct TCP refusal, SOCKS peer-unreachable reply
+/// codes, SAM `CANT_REACH_PEER`/`TIMEOUT`).
+#[derive(Debug)]
+pub enum DialFailure {
+    /// Local transport failure; never peer evidence.
+    Transport(io::Error),
+    /// The transport worked and reported the peer unreachable.
+    PeerUnreachable(io::Error),
+}
+
+impl DialFailure {
+    /// Whether this outcome may count as a peer failure in addrman.
+    #[must_use]
+    pub const fn counts_as_peer_failure(&self) -> bool {
+        matches!(self, Self::PeerUnreachable(_))
+    }
+
+    /// The underlying I/O error kind.
+    #[must_use]
+    pub fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Transport(error) | Self::PeerUnreachable(error) => error.kind(),
+        }
+    }
+
+    /// Flatten back to the I/O error callers report.
+    #[must_use]
+    pub fn into_io(self) -> io::Error {
+        match self {
+            Self::Transport(error) | Self::PeerUnreachable(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for DialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(f, "transport failure: {error}"),
+            Self::PeerUnreachable(error) => write!(f, "peer unreachable: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DialFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) | Self::PeerUnreachable(error) => Some(error),
+        }
+    }
+}
+
+impl From<io::Error> for DialFailure {
+    fn from(error: io::Error) -> Self {
+        // Bare I/O failures inside a transport exchange are local.
+        Self::Transport(error)
+    }
 }
 
 /// The single transport-match dial function.
 ///
-/// `Ip` dials exactly as direct TCP did before. `TorV3`/`I2p` return a
-/// typed transport-unavailable error: no SOCKS/SAM dial, no system DNS,
-/// and never a direct-TCP fallback.
+/// `Ip` dials direct TCP exactly as before, or through the configured
+/// general SOCKS proxy. `TorV3` dials through SOCKS with the onion name
+/// as a domain target. `I2p` dials through the SAM session. Overlay
+/// names never reach the system resolver and no failure falls back to
+/// direct TCP; a missing route is a typed transport error.
 pub fn connect_peer_stream(
     endpoint: PeerEndpoint,
-    _routes: &DialRoutes,
+    routes: &DialRoutes,
     timeout: Duration,
-) -> io::Result<TcpStream> {
+) -> Result<TcpStream, DialFailure> {
+    if !routes.onlynet.is_empty() && !routes.onlynet.contains(&endpoint.net()) {
+        return Err(DialFailure::Transport(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "dial refused: endpoint network is not in onlynet",
+        )));
+    }
     match endpoint {
-        PeerEndpoint::Ip(addr) => TcpStream::connect_timeout(&addr, timeout),
-        PeerEndpoint::TorV3 { .. } | PeerEndpoint::I2p { .. } => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "overlay transport unavailable: Tor/I2P transports are not enabled",
-        )),
+        PeerEndpoint::Ip(addr) => match routes.proxy {
+            Some(proxy) => socks_connect(
+                proxy,
+                &SocksTarget::Ip(addr),
+                routes.proxy_randomize_credentials,
+                timeout,
+            ),
+            None => match TcpStream::connect_timeout(&addr, timeout) {
+                Ok(stream) => Ok(stream),
+                Err(error) => Err(match error.kind() {
+                    io::ErrorKind::ConnectionRefused => DialFailure::PeerUnreachable(error),
+                    _ => DialFailure::Transport(error),
+                }),
+            },
+        },
+        PeerEndpoint::TorV3 { key, port } => {
+            let Some(proxy) = routes.onion.or(routes.proxy) else {
+                return Err(DialFailure::Transport(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "overlay transport unavailable: no onion proxy route is configured",
+                )));
+            };
+            // Full `<56-char base32>.onion` name: exactly 62 bytes, the
+            // SOCKS domain-length byte 0x3e asserted by transcript tests.
+            let host = format!(
+                "{}.onion",
+                bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&key))
+            );
+            debug_assert_eq!(host.len(), 62);
+            socks_connect(proxy, &SocksTarget::Domain(host, port), true, timeout)
+        }
+        PeerEndpoint::I2p { hash, port } => {
+            let Some(session) = &routes.sam_session else {
+                return Err(DialFailure::Transport(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "overlay transport unavailable: no I2P SAM session is configured",
+                )));
+            };
+            session.connect(hash, port)
+        }
     }
 }
 
@@ -215,10 +511,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_format_round_trips() {
+    fn parse_format_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         for endpoint in [
             PeerEndpoint::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333)),
-            PeerEndpoint::Ip("[::1]:8333".parse::<SocketAddr>().expect("v6")),
+            PeerEndpoint::Ip("[::1]:8333".parse::<SocketAddr>()?),
             tor_endpoint(),
             PeerEndpoint::I2p {
                 hash: [5u8; 32],
@@ -228,6 +524,7 @@ mod tests {
             let text = format_endpoint(endpoint);
             assert_eq!(parse_endpoint(&text), Some(endpoint), "{text}");
         }
+        Ok(())
     }
 
     #[test]
@@ -261,6 +558,141 @@ mod tests {
                 port: 8333
             })
         );
+    }
+
+    #[test]
+    fn classification_matrix_valid_cases() {
+        let good_tor = format_endpoint(tor_endpoint());
+        let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+
+        assert!(matches!(
+            classify_endpoint(&good_tor),
+            ClassifiedEndpoint::Valid(PeerEndpoint::TorV3 { port: 8333, .. })
+        ));
+        assert_eq!(
+            classify_endpoint(&good_i2p),
+            ClassifiedEndpoint::Valid(PeerEndpoint::I2p {
+                hash: [0u8; 32],
+                port: 8333
+            })
+        );
+        assert_eq!(
+            classify_endpoint("127.0.0.1:8333"),
+            ClassifiedEndpoint::Valid(PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], 8333))))
+        );
+    }
+
+    #[test]
+    fn classification_matrix_invalid_overlay_cases() {
+        let good_tor = format_endpoint(tor_endpoint());
+        let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+
+        let mut bad_payload = tor_v3_payload(&[3u8; 32]);
+        bad_payload[32] ^= 1;
+        let bad_checksum_onion = format!(
+            "{}.onion:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&bad_payload)
+        );
+
+        let wrong_len_i2p_51 = format!("{}.b32.i2p:8333", "a".repeat(51));
+        let wrong_len_i2p_53 = format!("{}.b32.i2p:8333", "a".repeat(53));
+        let missing_port_onion = format!(
+            "{}.onion",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+        let missing_port_i2p = format!("{}.b32.i2p", "a".repeat(52));
+        let malformed_port_onion = format!(
+            "{}.onion:notaport",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+        let zero_port_onion = good_tor.replace("8333", "0");
+        let overflow_port_onion = format!(
+            "{}.onion:99999",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+
+        let uppercase_onion = good_tor.to_uppercase();
+        let mixedcase_onion = format!(
+            "{}.ONION:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+        let uppercase_i2p = good_i2p.to_uppercase();
+        let mixedcase_i2p = format!("{}.B32.I2P:8333", "a".repeat(52));
+        let trailing_dot_onion = format!(
+            "{}.onion.:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+        let trailing_dot_no_port = format!(
+            "{}.onion.",
+            bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        );
+        let trailing_dot_i2p = format!("{}.b32.i2p.:8333", "a".repeat(52));
+        let trailing_dot_i2p_no_port = format!("{}.b32.i2p.", "a".repeat(52));
+
+        let invalid_targets = [
+            bad_checksum_onion.as_str(),
+            "abc.onion:8333",
+            wrong_len_i2p_51.as_str(),
+            wrong_len_i2p_53.as_str(),
+            missing_port_onion.as_str(),
+            missing_port_i2p.as_str(),
+            malformed_port_onion.as_str(),
+            zero_port_onion.as_str(),
+            overflow_port_onion.as_str(),
+            uppercase_onion.as_str(),
+            mixedcase_onion.as_str(),
+            uppercase_i2p.as_str(),
+            mixedcase_i2p.as_str(),
+            trailing_dot_onion.as_str(),
+            trailing_dot_no_port.as_str(),
+            trailing_dot_i2p.as_str(),
+            trailing_dot_i2p_no_port.as_str(),
+            "foo.i2p:8333",
+            "foo.i2p",
+            "FOO.I2P:8333",
+            "foo.i2p.:8333",
+            "foo.i2p.",
+            "b32.i2p:8333",
+            "b32.i2p",
+            "B32.I2P:8333",
+            "b32.i2p.:8333",
+            "onion.:8333",
+            "onion.",
+            "ONION.:8333",
+            "i2p.:8333",
+            "i2p.",
+            "I2P.:8333",
+        ];
+
+        for rejected in invalid_targets {
+            assert_eq!(
+                classify_endpoint(rejected),
+                ClassifiedEndpoint::InvalidOverlay,
+                "invalid overlay target must classify as InvalidOverlay: {rejected}"
+            );
+            assert_eq!(parse_endpoint(rejected), None);
+        }
+    }
+
+    #[test]
+    fn classification_matrix_ordinary_hostnames() {
+        for ordinary in [
+            "seed.bitcoin.sipa.be:8333",
+            "node.example.com:8333",
+            "onion.com:8333",
+            "fakeb32.i2p.org:8333",
+            "onion:8333",
+            "onion",
+            "i2p:8333",
+            "i2p",
+        ] {
+            assert_eq!(
+                classify_endpoint(ordinary),
+                ClassifiedEndpoint::NonOverlay,
+                "ordinary hostname must classify as NonOverlay: {ordinary}"
+            );
+            assert_eq!(parse_endpoint(ordinary), None);
+        }
     }
 
     #[test]
@@ -301,11 +733,100 @@ mod tests {
                 port: 8333,
             },
         ] {
-            let error =
+            let Err(error) =
                 connect_peer_stream(endpoint, &DialRoutes::default(), Duration::from_millis(10))
-                    .expect_err("overlay must not dial");
+            else {
+                panic!("overlay must not dial");
+            };
             assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            assert!(!error.counts_as_peer_failure());
         }
+    }
+
+    #[test]
+    fn dead_onion_proxy_is_transport_not_peer_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let routes = DialRoutes {
+            onion: Some("127.0.0.1:1".parse()?),
+            ..DialRoutes::default()
+        };
+        let Err(error) = connect_peer_stream(tor_endpoint(), &routes, Duration::from_secs(2))
+        else {
+            panic!("dead proxy must fail the dial");
+        };
+        assert!(matches!(error, DialFailure::Transport(_)));
+        assert!(!error.counts_as_peer_failure());
+        Ok(())
+    }
+
+    #[test]
+    fn onlynet_refusal_is_transport_not_peer_failure() {
+        let routes = DialRoutes {
+            onlynet: vec![NetworkLabel::Ipv4],
+            ..DialRoutes::default()
+        };
+        let Err(error) = connect_peer_stream(tor_endpoint(), &routes, Duration::from_millis(10))
+        else {
+            panic!("onlynet must refuse the dial");
+        };
+        assert!(matches!(error, DialFailure::Transport(_)));
+        assert!(!error.counts_as_peer_failure());
+    }
+
+    #[test]
+    fn direct_tcp_classifies_only_refusal_as_peer_unreachable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Unused local port yields ConnectionRefused -> PeerUnreachable
+        let unused_port: SocketAddr = "127.0.0.1:1".parse()?;
+        let Err(error) = connect_peer_stream(
+            PeerEndpoint::Ip(unused_port),
+            &DialRoutes::default(),
+            Duration::from_millis(200),
+        ) else {
+            panic!("refused dial must fail");
+        };
+        match &error {
+            DialFailure::PeerUnreachable(io_err) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::ConnectionRefused);
+                assert!(
+                    error.counts_as_peer_failure(),
+                    "ConnectionRefused must count as peer failure"
+                );
+            }
+            DialFailure::Transport(_) => {
+                assert_ne!(error.kind(), io::ErrorKind::ConnectionRefused);
+                assert!(
+                    !error.counts_as_peer_failure(),
+                    "Non-refusal must not count as peer failure"
+                );
+            }
+        }
+
+        // Non-routable address with tiny timeout yields TimedOut or NetworkUnreachable -> Transport
+        let blackhole: SocketAddr = "192.0.2.1:8333".parse()?;
+        let Err(error) = connect_peer_stream(
+            PeerEndpoint::Ip(blackhole),
+            &DialRoutes::default(),
+            Duration::from_millis(1),
+        ) else {
+            panic!("timed out dial must fail");
+        };
+        match &error {
+            DialFailure::Transport(_) => {
+                assert_ne!(error.kind(), io::ErrorKind::ConnectionRefused);
+                assert!(
+                    !error.counts_as_peer_failure(),
+                    "Timeout or network error must remain Transport failure"
+                );
+            }
+            DialFailure::PeerUnreachable(io_err) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::ConnectionRefused);
+                assert!(
+                    error.counts_as_peer_failure(),
+                    "ConnectionRefused must count as peer failure"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -322,5 +843,48 @@ mod tests {
             overlay_netgroup(EndpointHost::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))),
             None
         );
+    }
+
+    #[test]
+    fn overlay_config_debug_redacts_tor_password_and_preserves_other_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = OverlayConfig {
+            proxy: Some("127.0.0.1:9050".parse()?),
+            onion: Some("127.0.0.1:9051".parse()?),
+            proxy_randomize_credentials: true,
+            tor_control: Some("127.0.0.1:9051".to_owned()),
+            tor_password: Some("super_secret_tor_password_123".to_owned()),
+            tor_virtual_port: 8333,
+            onion_key_path: Some(PathBuf::from("/path/to/onion_v3_private_key")),
+            i2p_sam: Some("127.0.0.1:7656".parse()?),
+            i2p_accept_incoming: true,
+            i2p_key_path: Some(PathBuf::from("/path/to/i2p_private_key")),
+            onlynet: vec![NetworkLabel::Onion, NetworkLabel::I2p],
+        };
+
+        let debug_str = format!("{config:?}");
+        assert!(
+            !debug_str.contains("super_secret_tor_password_123"),
+            "Debug output leaked secret tor_password"
+        );
+        assert!(
+            debug_str.contains("<redacted>"),
+            "Debug output missing <redacted>"
+        );
+        assert!(debug_str.contains("127.0.0.1:9050"));
+        assert!(debug_str.contains("127.0.0.1:7656"));
+
+        // When password is None, verify it formats as None without <redacted>
+        config.tor_password = None;
+        let debug_none = format!("{config:?}");
+        assert!(
+            !debug_none.contains("<redacted>"),
+            "Debug output must not contain <redacted> when password is None"
+        );
+        assert!(
+            debug_none.contains("tor_password: None"),
+            "Debug output missing tor_password: None"
+        );
+        Ok(())
     }
 }

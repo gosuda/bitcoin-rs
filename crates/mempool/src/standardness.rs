@@ -309,8 +309,12 @@ pub(crate) fn evaluate_one(
     // its modified fee negative, which bypassing must not do.
     let modified_fee_res = pool.modified_fee_for(txid, context.fee);
     let modified_fee = modified_fee_res.as_ref().ok().copied();
-    let fee_for_max =
-        u64::try_from(modified_fee.unwrap_or(i128::from(context.fee)).max(0)).unwrap_or(u64::MAX);
+    let fee_for_max = u64::try_from(
+        modified_fee
+            .unwrap_or_else(|| i128::from(context.fee))
+            .max(0),
+    )
+    .unwrap_or(u64::MAX);
 
     let fee_rejection = match mempool_min_fee_sat_per_kvb {
         None => None,
@@ -803,17 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate() {
+    fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut pool = Mempool::new(crate::MempoolLimits::default());
         let tx = standard_tx(2);
         let txid = tx.txid();
 
         // Base fee: 1_000 sats, negative delta of -3_000 sats -> modified fee: -2_000 sats.
-        pool.prioritise(txid, -3_000).expect("prioritise delta");
-        assert_eq!(
-            pool.modified_fee_for(txid, 1_000).expect("modified fee"),
-            -2_000
-        );
+        pool.prioritise(txid, -3_000)?;
+        assert_eq!(pool.modified_fee_for(txid, 1_000)?, -2_000);
 
         let context = PackageTxContext {
             fee: 1_000,
@@ -842,10 +844,11 @@ mod tests {
         assert_eq!(fact.modified_fee, Some(-2_000));
         // 3. Clamped effective fee rate produces Some(0), not None.
         assert_eq!(fact.effective_fee_rate, Some(0));
+        Ok(())
     }
 
     #[test]
-    fn three_vsize_meanings_on_sigop_heavy_tx() {
+    fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), Box<dyn std::error::Error>> {
         use crate::accounting::prepared_context;
         use crate::entry::MempoolEntry;
         use alloc::sync::Arc;
@@ -871,10 +874,10 @@ mod tests {
         assert_eq!(context.sigop_cost, 204);
 
         let unadjusted_weight = tx.weight();
-        let vsize_bip141 = u32::try_from(tx.vsize()).expect("vsize fits u32");
+        let vsize_bip141 = u32::try_from(tx.vsize())?;
         assert_eq!(
             vsize_bip141,
-            u32::try_from(Tx::vsize_from_weight(unadjusted_weight)).expect("fits u32")
+            u32::try_from(Tx::vsize_from_weight(unadjusted_weight))?
         );
 
         // Policy-adjusted virtual size reflects the heavy sigop cost:
@@ -897,11 +900,9 @@ mod tests {
         assert_eq!(entry.vsize, 1_020);
         // 2. entry.bip141_vsize = vsize_bip141 = tx.vsize() unadjusted
         assert_eq!(entry.bip141_vsize, vsize_bip141);
-        assert_eq!(
-            entry.bip141_vsize,
-            u32::try_from(tx.vsize()).expect("fits u32")
-        );
+        assert_eq!(entry.bip141_vsize, u32::try_from(tx.vsize())?);
         // 3. Consensus weight unadjusted
         assert_eq!(entry.weight, unadjusted_weight);
+        Ok(())
     }
 }

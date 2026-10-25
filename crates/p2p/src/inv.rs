@@ -139,15 +139,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
+    fn missing_parents_use_txids_and_deduplicate_repeated_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let (sender, receiver) = crate::test_support::message_channel_bounded(2);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
-        table.register(
-            source.endpoint.expect("identified peer endpoint"),
-            lease.clone(),
-        );
+        let endpoint = source
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("identified peer endpoint"))?;
+        table.register(endpoint, lease.clone());
 
         assert!(request_missing_parents(
             &table,
@@ -162,10 +163,12 @@ mod tests {
         assert!(!request_missing_parents(&table, source, &[]));
         assert!(receiver.try_recv().is_err());
         assert!(!lease.is_cancelled());
+        Ok(())
     }
 
     #[test]
-    fn missing_parents_request_witness_by_service_not_announcement_preference() {
+    fn missing_parents_request_witness_by_service_not_announcement_preference()
+    -> Result<(), Box<dyn std::error::Error>> {
         use bitcoin::p2p::ServiceFlags;
         use std::sync::Arc;
 
@@ -175,10 +178,10 @@ mod tests {
                 let (sender, receiver) = crate::test_support::message_channel_bounded(1);
                 let lease = PeerLease::new(sender);
                 let source = source(&lease);
-                table.register(
-                    source.endpoint.expect("identified peer endpoint"),
-                    lease.clone(),
-                );
+                let endpoint = source
+                    .endpoint
+                    .ok_or_else(|| std::io::Error::other("identified peer endpoint"))?;
+                table.register(endpoint, lease.clone());
                 let mut version = crate::handshake::version_message(
                     1,
                     0,
@@ -199,11 +202,7 @@ mod tests {
                     Arc::new(crate::PeerCounters::default()),
                 );
                 info.wtxid_relay = wtxid_relay;
-                assert!(table.publish_info(
-                    source.endpoint.expect("identified peer endpoint"),
-                    &lease,
-                    info
-                ));
+                assert!(table.publish_info(endpoint, &lease, info));
 
                 assert!(request_missing_parents(
                     &table,
@@ -224,6 +223,7 @@ mod tests {
                 assert!(!lease.is_cancelled());
             }
         }
+        Ok(())
     }
 
     #[test]
@@ -252,21 +252,19 @@ mod tests {
     }
 
     #[test]
-    fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
+    fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let (old_sender, old_receiver) = crate::test_support::message_channel_bounded(1);
         let old = PeerLease::new(old_sender);
         let stale_source = source(&old);
-        table.register(
-            stale_source.endpoint.expect("identified peer endpoint"),
-            old,
-        );
+        let endpoint = stale_source
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("identified peer endpoint"))?;
+        table.register(endpoint, old);
         let (new_sender, new_receiver) = crate::test_support::message_channel_bounded(1);
         let current = PeerLease::new(new_sender);
-        table.register(
-            stale_source.endpoint.expect("identified peer endpoint"),
-            current.clone(),
-        );
+        table.register(endpoint, current.clone());
 
         assert!(current.send(Message::Ping(7)).is_ok());
         assert!(!request_missing_parents(&table, stale_source, &[parent(1)]));
@@ -280,38 +278,43 @@ mod tests {
             &[parent(1)]
         ));
         assert!(matches!(new_receiver.try_recv(), Ok(Message::GetData(_))));
+        Ok(())
     }
 
     #[test]
-    fn missing_parent_request_keeps_outbound_saturation_policy() {
+    fn missing_parent_request_keeps_outbound_saturation_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let (sender, _receiver) = crate::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
-        table.register(
-            source.endpoint.expect("identified peer endpoint"),
-            lease.clone(),
-        );
+        let endpoint = source
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("identified peer endpoint"))?;
+        table.register(endpoint, lease.clone());
         assert!(lease.send(Message::Ping(1)).is_ok());
 
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
         assert!(lease.is_cancelled());
+        Ok(())
     }
 
     #[test]
-    fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
+    fn cancelled_missing_parent_source_does_not_enqueue_a_request()
+    -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
         let (sender, receiver) = crate::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
-        table.register(
-            source.endpoint.expect("identified peer endpoint"),
-            lease.clone(),
-        );
+        let endpoint = source
+            .endpoint
+            .ok_or_else(|| std::io::Error::other("identified peer endpoint"))?;
+        table.register(endpoint, lease.clone());
         lease.cancel();
 
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
         assert!(receiver.try_recv().is_err());
+        Ok(())
     }
 }

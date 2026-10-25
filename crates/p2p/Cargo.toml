@@ -43,6 +43,9 @@ chacha20.workspace = true
 chacha20poly1305.workspace = true
 hkdf.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "net"] }
+
 [dev-dependencies]
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }

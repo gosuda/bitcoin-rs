@@ -124,9 +124,30 @@ impl PeerInfo {
         version_received_time: u64,
         counters: Arc<PeerCounters>,
     ) -> Self {
+        Self::outbound_from_version_endpoint(
+            PeerEndpoint::Ip(addr),
+            addr_bind,
+            version,
+            conn_time,
+            version_received_time,
+            counters,
+        )
+    }
+
+    /// Endpoint-identified form of [`Self::outbound_from_version`]: the
+    /// logical peer is `endpoint`; `addr_bind` is only the local socket.
+    #[must_use]
+    pub(crate) fn outbound_from_version_endpoint(
+        endpoint: PeerEndpoint,
+        addr_bind: SocketAddr,
+        version: &VersionMessage,
+        conn_time: u64,
+        version_received_time: u64,
+        counters: Arc<PeerCounters>,
+    ) -> Self {
         Self {
-            endpoint: Some(PeerEndpoint::Ip(addr)),
-            network: PeerEndpoint::Ip(addr).net(),
+            endpoint: Some(endpoint),
+            network: endpoint.net(),
             version: version.version,
             wtxid_relay: false,
             relay_transactions: version.relay,

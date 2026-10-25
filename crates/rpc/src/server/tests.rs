@@ -1572,48 +1572,52 @@ fn invalid_listener_errors_are_returned() -> io::Result<()> {
     Ok(())
 }
 
-#[test]
-fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
-    let ctx = Arc::new(Context::new());
-    let auth = Arc::new(Auth::basic("alice", "secret"));
+struct TestServerHandle {
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    handle: thread::JoinHandle<io::Result<()>>,
+}
 
-    let public_server = RpcServer::bind_with_role(
-        "127.0.0.1:0",
-        Arc::clone(&auth),
-        Arc::new(Handler::new(Arc::clone(&ctx))),
-        16,
-        Duration::from_secs(5),
-        true,
-        ListenerRole::Public,
-    )?;
-    let public_addr = public_server.local_addr()?;
-    let public_shutdown = Arc::new(AtomicBool::new(false));
-    let pub_sd = Arc::clone(&public_shutdown);
-    let pub_handle = thread::spawn(move || public_server.serve_with_shutdown(pub_sd));
+impl TestServerHandle {
+    fn spawn(
+        auth: &Arc<Auth>,
+        ctx: &Arc<Context>,
+        role: ListenerRole,
+        max_conns: usize,
+        idle_timeout: Duration,
+        rest_enabled: bool,
+    ) -> io::Result<Self> {
+        let server = RpcServer::bind_with_role(
+            "127.0.0.1:0",
+            Arc::clone(auth),
+            Arc::new(Handler::new(Arc::clone(ctx))),
+            max_conns,
+            idle_timeout,
+            rest_enabled,
+            role,
+        )?;
+        let addr = server.local_addr()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sd = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || server.serve_with_shutdown(sd));
+        Ok(Self {
+            addr,
+            shutdown,
+            handle,
+        })
+    }
+}
 
-    let mgmt_server = RpcServer::bind_with_role(
-        "127.0.0.1:0",
-        Arc::clone(&auth),
-        Arc::new(Handler::new(Arc::clone(&ctx))),
-        16,
-        Duration::from_secs(5),
-        true,
-        ListenerRole::Management,
-    )?;
-    let mgmt_addr = mgmt_server.local_addr()?;
-    let mgmt_shutdown = Arc::new(AtomicBool::new(false));
-    let mgmt_sd = Arc::clone(&mgmt_shutdown);
-    let mgmt_handle = thread::spawn(move || mgmt_server.serve_with_shutdown(mgmt_sd));
+fn send_req(addr: SocketAddr, req: &[u8]) -> io::Result<String> {
+    let mut client = TcpStream::connect(addr)?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    client.write_all(req)?;
+    let mut resp = String::new();
+    client.read_to_string(&mut resp)?;
+    Ok(resp)
+}
 
-    let send_req = |addr: SocketAddr, req: &[u8]| -> io::Result<String> {
-        let mut client = TcpStream::connect(addr)?;
-        client.set_read_timeout(Some(Duration::from_secs(5)))?;
-        client.write_all(req)?;
-        let mut resp = String::new();
-        client.read_to_string(&mut resp)?;
-        Ok(resp)
-    };
-
+fn assert_public_role_routes(public_addr: SocketAddr) -> io::Result<()> {
     // Public POST / without credentials -> 404 (never 401)
     let resp = send_req(
         public_addr,
@@ -1663,7 +1667,10 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
         resp.starts_with("HTTP/1.1 204 No Content"),
         "public preflight must be 204: {resp}"
     );
+    Ok(())
+}
 
+fn assert_management_role_routes(mgmt_addr: SocketAddr) -> io::Result<()> {
     // Management Esplora GET -> 404
     let resp = send_req(
         mgmt_addr,
@@ -1716,11 +1723,38 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
         resp.starts_with("HTTP/1.1 200 OK"),
         "management REST must be 200: {resp}"
     );
+    Ok(())
+}
 
-    public_shutdown.store(true, Ordering::Release);
-    mgmt_shutdown.store(true, Ordering::Release);
-    pub_handle.join().expect("public join")?;
-    mgmt_handle.join().expect("mgmt join")?;
+#[test]
+fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
+    let ctx = Arc::new(Context::new());
+    let auth = Arc::new(Auth::basic("alice", "secret"));
+
+    let public_server = TestServerHandle::spawn(
+        &auth,
+        &ctx,
+        ListenerRole::Public,
+        16,
+        Duration::from_secs(5),
+        true,
+    )?;
+    let mgmt_server = TestServerHandle::spawn(
+        &auth,
+        &ctx,
+        ListenerRole::Management,
+        16,
+        Duration::from_secs(5),
+        true,
+    )?;
+
+    assert_public_role_routes(public_server.addr)?;
+    assert_management_role_routes(mgmt_server.addr)?;
+
+    public_server.shutdown.store(true, Ordering::Release);
+    mgmt_server.shutdown.store(true, Ordering::Release);
+    public_server.handle.join().expect("public join")?;
+    mgmt_server.handle.join().expect("mgmt join")?;
     Ok(())
 }
 
@@ -1739,72 +1773,42 @@ fn test_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     handle
 }
 
-#[test]
-fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query()
--> io::Result<()> {
-    let metrics_handle = test_prometheus_handle();
-    let ctx = Arc::new(Context::new());
-    let auth = Arc::new(Auth::basic("alice", "secret"));
-
-    let public_server = RpcServer::bind_with_role(
-        "127.0.0.1:0",
-        Arc::clone(&auth),
-        Arc::new(Handler::new(Arc::clone(&ctx))),
-        4,
-        Duration::from_secs(30),
-        false,
-        ListenerRole::Public,
-    )?;
-    let public_addr = public_server.local_addr()?;
-
-    let mgmt_server = RpcServer::bind_with_role(
-        "127.0.0.1:0",
-        Arc::clone(&auth),
-        Arc::new(Handler::new(Arc::clone(&ctx))),
-        16,
-        Duration::from_secs(30),
-        false,
-        ListenerRole::Management,
-    )?;
-    let mgmt_addr = mgmt_server.local_addr()?;
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let pub_sd = Arc::clone(&shutdown);
-    let pub_handle = thread::spawn(move || public_server.serve_with_shutdown(pub_sd));
-    let mgmt_sd = Arc::clone(&shutdown);
-    let mgmt_handle = thread::spawn(move || mgmt_server.serve_with_shutdown(mgmt_sd));
-
-    fn connect_distinct(server_addr: SocketAddr, index: u8) -> io::Result<TcpStream> {
-        #[cfg(unix)]
-        {
-            use rustix::net::{AddressFamily, SocketAddrV4, SocketType};
-            let fd = rustix::net::socket_with(
-                AddressFamily::INET,
-                SocketType::STREAM,
-                rustix::net::SocketFlags::empty(),
-                None,
-            )?;
-            rustix::net::bind(&fd, &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, index), 0))?;
-            let server_v4 = match server_addr {
-                SocketAddr::V4(v4) => v4,
-                _ => unreachable!(),
-            };
-            rustix::net::connect(&fd, &server_v4)?;
-            Ok(TcpStream::from(fd))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = index;
-            TcpStream::connect(server_addr)
-        }
+fn connect_distinct(server_addr: SocketAddr, index: u8) -> io::Result<TcpStream> {
+    #[cfg(unix)]
+    {
+        use rustix::net::{AddressFamily, SocketAddrV4, SocketType};
+        let fd = rustix::net::socket_with(
+            AddressFamily::INET,
+            SocketType::STREAM,
+            rustix::net::SocketFlags::empty(),
+            None,
+        )?;
+        rustix::net::bind(&fd, &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, index), 0))?;
+        let server_v4 = match server_addr {
+            SocketAddr::V4(v4) => v4,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        rustix::net::connect(&fd, &server_v4)?;
+        Ok(TcpStream::from(fd))
     }
+    #[cfg(not(unix))]
+    {
+        let _ = index;
+        TcpStream::connect(server_addr)
+    }
+}
 
-    // Hold 4 public keep-alive sockets
+fn hold_public_keep_alive_sockets(
+    public_addr: SocketAddr,
+    count: u8,
+) -> io::Result<Vec<TcpStream>> {
     let mut held_sockets = Vec::new();
-    for i in 1..=4 {
+    for i in 1..=count {
         let mut client = connect_distinct(public_addr, i)?;
         client.set_read_timeout(Some(Duration::from_secs(5)))?;
-        client.write_all(b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")?;
+        client.write_all(
+            b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+        )?;
         let mut buf = [0u8; 512];
         let n = client.read(&mut buf)?;
         let resp = String::from_utf8_lossy(&buf[..n]);
@@ -1814,9 +1818,97 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
         );
         held_sockets.push(client);
     }
+    Ok(held_sockets)
+}
+
+fn assert_broadcast_cross_query(
+    public_addr: SocketAddr,
+    mgmt_addr: SocketAddr,
+    ctx: &Arc<Context>,
+) -> io::Result<()> {
+    use core::fmt::Write as _;
+
+    let (tx, _) = crate::esplora::tests::transaction_with_funded_input(ctx, 10_000);
+    let bytes = bitcoin_rs_primitives::consensus_bytes(&tx);
+    let raw_hex = bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+    let txid = tx.txid();
+
+    let mut broadcast_client = TcpStream::connect(public_addr)?;
+    broadcast_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let post_req = format!(
+        "POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        raw_hex.len(),
+        raw_hex
+    );
+    broadcast_client.write_all(post_req.as_bytes())?;
+    let mut broadcast_resp = String::new();
+    broadcast_client.read_to_string(&mut broadcast_resp)?;
+    assert!(
+        broadcast_resp.starts_with("HTTP/1.1 200 OK"),
+        "broadcast must be 200: {broadcast_resp}"
+    );
+    assert!(
+        broadcast_resp.contains(&txid.to_string()),
+        "broadcast response must contain txid"
+    );
+
+    let mut query_client = TcpStream::connect(mgmt_addr)?;
+    query_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let query_body =
+        format!(r#"{{"jsonrpc":"2.0","method":"getrawtransaction","params":["{txid}"],"id":2}}"#);
+    let query_req = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        query_body.len(),
+        query_body
+    );
+    query_client.write_all(query_req.as_bytes())?;
+    let mut query_resp = String::new();
+    query_client.read_to_string(&mut query_resp)?;
+    assert!(
+        query_resp.starts_with("HTTP/1.1 200 OK"),
+        "management getrawtransaction must be 200: {query_resp}"
+    );
+    assert!(
+        query_resp.contains(&raw_hex),
+        "management getrawtransaction must return raw tx hex"
+    );
+    Ok(())
+}
+
+#[test]
+fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_query()
+-> io::Result<()> {
+    let metrics_handle = test_prometheus_handle();
+    let ctx = Arc::new(Context::new());
+    let auth = Arc::new(Auth::basic("alice", "secret"));
+
+    let public_server = TestServerHandle::spawn(
+        &auth,
+        &ctx,
+        ListenerRole::Public,
+        4,
+        Duration::from_secs(30),
+        false,
+    )?;
+    let mgmt_server = TestServerHandle::spawn(
+        &auth,
+        &ctx,
+        ListenerRole::Management,
+        16,
+        Duration::from_secs(30),
+        false,
+    )?;
+
+    // Hold 4 public keep-alive sockets
+    let mut held_sockets = hold_public_keep_alive_sockets(public_server.addr, 4)?;
 
     // 5th public request must return 503 Service Unavailable ("busy")
-    let mut fifth_client = connect_distinct(public_addr, 5)?;
+    let mut fifth_client = connect_distinct(public_server.addr, 5)?;
     fifth_client.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut fifth_resp = String::new();
     fifth_client.read_to_string(&mut fifth_resp)?;
@@ -1842,7 +1934,7 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     );
 
     // Concurrently, management listener serves authenticated JSON-RPC getblockcount as 200 OK
-    let mut mgmt_client = TcpStream::connect(mgmt_addr)?;
+    let mut mgmt_client = TcpStream::connect(mgmt_server.addr)?;
     mgmt_client.set_read_timeout(Some(Duration::from_secs(5)))?;
     let rpc_body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
     let req = format!(
@@ -1863,7 +1955,7 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     thread::sleep(Duration::from_millis(100));
 
     // Public admission is restored!
-    let mut restored_client = connect_distinct(public_addr, 5)?;
+    let mut restored_client = connect_distinct(public_server.addr, 5)?;
     restored_client.set_read_timeout(Some(Duration::from_secs(5)))?;
     restored_client.write_all(
         b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1879,58 +1971,12 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     drop(held_sockets);
 
     // Public /api/tx broadcast is visible via management getrawtransaction
-    let (tx, _) = crate::esplora::tests::transaction_with_funded_input(&ctx, 10_000);
-    let raw_hex = bitcoin_rs_primitives::consensus_bytes(&tx)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let txid = tx.txid();
-
-    let mut broadcast_client = TcpStream::connect(public_addr)?;
-    broadcast_client.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let post_req = format!(
-        "POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        raw_hex.len(),
-        raw_hex
-    );
-    broadcast_client.write_all(post_req.as_bytes())?;
-    let mut broadcast_resp = String::new();
-    broadcast_client.read_to_string(&mut broadcast_resp)?;
-    assert!(
-        broadcast_resp.starts_with("HTTP/1.1 200 OK"),
-        "broadcast must be 200: {broadcast_resp}"
-    );
-    assert!(
-        broadcast_resp.contains(&txid.to_string()),
-        "broadcast response must contain txid"
-    );
-
-    let mut query_client = TcpStream::connect(mgmt_addr)?;
-    query_client.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let query_body = format!(
-        r#"{{"jsonrpc":"2.0","method":"getrawtransaction","params":["{}"],"id":2}}"#,
-        txid
-    );
-    let query_req = format!(
-        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        query_body.len(),
-        query_body
-    );
-    query_client.write_all(query_req.as_bytes())?;
-    let mut query_resp = String::new();
-    query_client.read_to_string(&mut query_resp)?;
-    assert!(
-        query_resp.starts_with("HTTP/1.1 200 OK"),
-        "management getrawtransaction must be 200: {query_resp}"
-    );
-    assert!(
-        query_resp.contains(&raw_hex),
-        "management getrawtransaction must return raw tx hex"
-    );
+    assert_broadcast_cross_query(public_server.addr, mgmt_server.addr, &ctx)?;
 
     // Both listeners join on shutdown
-    shutdown.store(true, Ordering::Release);
-    pub_handle.join().expect("public join")?;
-    mgmt_handle.join().expect("management join")?;
+    public_server.shutdown.store(true, Ordering::Release);
+    mgmt_server.shutdown.store(true, Ordering::Release);
+    public_server.handle.join().expect("public join")?;
+    mgmt_server.handle.join().expect("management join")?;
     Ok(())
 }

@@ -716,7 +716,16 @@ fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     let sink = ProductionSink::new(&lease, Some(credit));
     let shared = shared_with(ScriptedChain { blocks: Vec::new() });
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
-    assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared).is_none());
+    assert!(
+        super::handle_compact_outcome(
+            outcome,
+            &sink,
+            addr,
+            Some(crate::PeerEndpoint::Ip(addr)),
+            &shared
+        )
+        .is_none()
+    );
     assert!(receiver.is_empty());
     assert!(!lease.is_cancelled());
     drop(sink);

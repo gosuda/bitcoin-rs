@@ -545,6 +545,10 @@ fn connected_collision_good_and_new_selection_match_actual_core() {
     let book = AddressBook {
         state: Mutex::new(manager),
         publication: Mutex::new(()),
+        addrv2_gossip: [
+            std::sync::atomic::AtomicBool::new(false),
+            std::sync::atomic::AtomicBool::new(false),
+        ],
     };
     assert_eq!(
         book.feeler(&[target()], &[target()], EPOCH, |_| true),

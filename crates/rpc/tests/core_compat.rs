@@ -191,7 +191,6 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     );
     assert_eq!(network.protocol_version, 70016);
     assert_eq!(network.connections, 0);
-    assert_eq!(network.networks.len(), 3);
     assert_eq!(network.warnings, Vec::<String>::new());
 
     let peers: corepc_types::v31::GetPeerInfo =

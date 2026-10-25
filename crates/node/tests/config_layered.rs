@@ -556,9 +556,8 @@ fn rpc_public_bind_defaults_none_and_resolves_across_layers() -> Result<()> {
     assert_eq!(config.rpc.public_bind, Some(expected_env));
 
     // Equality with rpc.bind is rejected.
-    let conflicting: UserConfig = toml::from_str(&format!(
-        "rpc_bind = \"127.0.0.1:8332\"\nrpc_public_bind = \"127.0.0.1:8332\"\n"
-    ))?;
+    let conflicting: UserConfig =
+        toml::from_str("rpc_bind = \"127.0.0.1:8332\"\nrpc_public_bind = \"127.0.0.1:8332\"\n")?;
     let err = resolve(&[&conflicting]);
     assert!(
         err.is_err_and(|e| e

@@ -136,6 +136,7 @@ impl ServerHarness {
                 derived_index_status: Some(state.derived_index_status()),
             },
             network: NetworkHandles {
+                overlay: bitcoin_rs_p2p::OverlayConfig::default(),
                 peer_table: state.peer_table(),
                 p2p: state.p2p(),
                 local_services: state.p2p().local_services().to_u64(),

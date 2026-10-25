@@ -225,6 +225,9 @@ struct Manager {
 pub(crate) struct AddressBook {
     state: Mutex<Manager>,
     publication: Mutex<()>,
+    /// Which overlay transports `addrv2` gossip may carry, wired from
+    /// resolved config at service start: `[tor_enabled, i2p_enabled]`.
+    addrv2_gossip: [std::sync::atomic::AtomicBool; 2],
 }
 
 pub(crate) fn now() -> u64 {
@@ -927,7 +930,53 @@ impl AddressBook {
         Arc::new(Self {
             state: Mutex::new(manager),
             publication: Mutex::new(()),
+            addrv2_gossip: [
+                std::sync::atomic::AtomicBool::new(false),
+                std::sync::atomic::AtomicBool::new(false),
+            ],
         })
+    }
+
+    /// Wire which overlay transports `addrv2` gossip may carry.
+    pub(crate) fn set_addrv2_gossip(&self, tor_enabled: bool, i2p_enabled: bool) {
+        self.addrv2_gossip[0].store(tor_enabled, std::sync::atomic::Ordering::Release);
+        self.addrv2_gossip[1].store(i2p_enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    /// One `addrv2` gossip round: every non-terrible record whose
+    /// transport is enabled, as BIP155 rows. IP is always carried;
+    /// overlay endpoints only when their transport is configured.
+    pub(crate) fn gossip_addrv2(&self, now: u64) -> Vec<bitcoin::p2p::address::AddrV2Message> {
+        let tor = self.addrv2_gossip[0].load(std::sync::atomic::Ordering::Acquire);
+        let i2p = self.addrv2_gossip[1].load(std::sync::atomic::Ordering::Acquire);
+        let manager = self.state.lock();
+        manager
+            .stored
+            .records
+            .iter()
+            .filter(|entry| !entry.terrible(now))
+            .filter(|entry| crate::endpoint::addrv2_gossip_enabled(entry.endpoint, tor, i2p))
+            .take(MAX_GOSSIP)
+            .map(|entry| {
+                crate::endpoint::endpoint_to_addrv2(
+                    entry.endpoint,
+                    u32::try_from(entry.last_seen).unwrap_or(u32::MAX),
+                    bitcoin::p2p::ServiceFlags::from(entry.services.unwrap_or(0)),
+                )
+            })
+            .collect()
+    }
+
+    /// Failure count recorded for `addr` (test observability for dial
+    /// accounting proofs).
+    #[cfg(test)]
+    pub(crate) fn failure_count(&self, addr: PeerEndpoint) -> Option<u32> {
+        let addr = canonical(addr);
+        let manager = self.state.lock();
+        manager
+            .by_addr
+            .get(&addr)
+            .map(|index| manager.stored.records[*index].failures)
     }
     pub(crate) fn connected(&self, addr: PeerEndpoint, now: u64) {
         let addr = canonical(addr);

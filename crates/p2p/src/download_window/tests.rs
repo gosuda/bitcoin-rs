@@ -214,9 +214,10 @@ fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
     });
     let stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     insert_pending(&mut window, owner, hash(1), 1, now);
     insert_pending(&mut window, owner, hash(2), 2, now);
     window.pending_bytes = 256 * 1024;
@@ -286,7 +287,9 @@ fn pending_timeout_waits_for_second_delivery_drain() {
         observed_at,
     );
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
-    assert!(!window.peer_in_staller_cooldown(Some(peer_addr), observed_at));
+    assert!(
+        !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr), observed_at)
+    );
 }
 
 #[test]
@@ -308,7 +311,9 @@ fn pending_timeout_apply_busy_clears_suspicion_without_blame() {
     assert!(window.pending_timeout_observation.is_some());
     assert_eq!(timeout_owner(&mut window, true, observed_at), None);
     assert!(window.pending_timeout_observation.is_none());
-    assert!(!window.peer_in_staller_cooldown(Some(peer_addr), observed_at));
+    assert!(
+        !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr), observed_at)
+    );
 }
 
 /// A retry delivery releases the observed hash without the owner: the
@@ -345,8 +350,12 @@ fn retry_delivery_resolves_original_peer_timeout_without_blame() {
     window.mark_received_from(block_hash, 80, Some(test_source(retry_peer)), observed_at);
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_none());
-    assert!(!window.peer_in_staller_cooldown(Some(original_peer), observed_at));
-    assert!(!window.peer_in_staller_cooldown(Some(retry_peer), observed_at));
+    assert!(
+        !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(original_peer), observed_at)
+    );
+    assert!(
+        !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(retry_peer), observed_at)
+    );
 }
 
 /// One batched `mark_requested` stamps every entry with one `requested_at`:
@@ -357,9 +366,10 @@ fn batched_non_front_deliveries_do_not_postpone_the_owner_timeout() {
     let mut window = DownloadWindow::new(test_budget());
     let stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     let front = hash(0xe5);
     let first = super::non_empty_request(
         owner,
@@ -416,9 +426,10 @@ fn tied_removal_never_rewinds_the_owner_queue_clock() {
     let mut window = DownloadWindow::new(test_budget());
     let stager = test_stager(&window);
     let t0 = Instant::now();
-    let owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     let batch_a = super::non_empty_request(
         owner,
         vec![
@@ -494,7 +505,9 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
     // The second tick clears the suspicion without blame.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_none());
-    assert!(!window.peer_in_staller_cooldown(Some(peer_addr), observed_at));
+    assert!(
+        !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr), observed_at)
+    );
 }
 
 #[test]
@@ -516,12 +529,14 @@ fn releasing_a_dead_owner_drops_its_queue_start() {
     let mut window =
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let now = Instant::now();
-    let stale_owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
-    let live_owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 2], 8333)).into(),
-    ));
+    let stale_owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
+    let live_owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 2],
+        8333,
+    ))));
     let stale_requested_at = now
         .checked_sub(Duration::from_secs(9))
         .unwrap_or_else(|| panic!("test instant underflow"));
@@ -563,9 +578,10 @@ fn receiving_the_oldest_pending_resets_the_owner_queue_start() {
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let mut stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     let earliest = hash(0x91);
     let later = hash(0x92);
     let earliest_requested_at = now
@@ -622,9 +638,10 @@ fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
         pending_timeout_override: None,
         ..test_budget()
     });
-    let solo = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let solo = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     insert_pending(&mut window, solo, hash(0xb1), 1, requested_at);
     assert_eq!(
         timeout_owner(
@@ -652,9 +669,10 @@ fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
     });
     let owners: Vec<PeerSource> = (1..=3_u8)
         .map(|byte| {
-            let owner = test_source(crate::PeerEndpoint::Ip(
-                std::net::SocketAddr::from(([127, 0, 0, 20 + byte], 8333)).into(),
-            ));
+            let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+                [127, 0, 0, 20 + byte],
+                8333,
+            ))));
             insert_pending(
                 &mut window,
                 owner,
@@ -698,9 +716,10 @@ fn pending_timeout_override_wins_over_spacing_policy() {
         .with_pending_timeout_override(Duration::from_secs(5)),
     );
     let requested_at = Instant::now();
-    let owner = test_source(crate::PeerEndpoint::Ip(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into(),
-    ));
+    let owner = test_source(crate::PeerEndpoint::Ip(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8333,
+    ))));
     insert_pending(&mut window, owner, hash(0xd1), 1, requested_at);
     assert_eq!(
         timeout_owner(&mut window, false, requested_at + Duration::from_secs(5)),
@@ -1009,11 +1028,11 @@ fn window_blocked_on_staller(
 }
 
 fn staller_addr() -> crate::PeerEndpoint {
-    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into())
+    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
 }
 
 fn healthy_addr() -> crate::PeerEndpoint {
-    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)).into())
+    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)))
 }
 
 #[test]
@@ -1314,9 +1333,18 @@ fn stall_fires_after_threshold_and_starts_cooldown() {
 
     assert_eq!(fired, Some(staller_addr()));
     assert!(window.stalling_peer().is_none());
-    assert!(window.peer_in_staller_cooldown(Some(staller_addr()), now + Duration::from_secs(2)));
-    assert!(!window.peer_in_staller_cooldown(Some(healthy_addr()), now + Duration::from_secs(2)));
-    assert!(!window.peer_in_staller_cooldown(Some(staller_addr()), now + Duration::from_secs(33)));
+    assert!(window.peer_in_staller_cooldown(
+        PeerSource::for_test_endpoint(staller_addr()),
+        now + Duration::from_secs(2)
+    ));
+    assert!(!window.peer_in_staller_cooldown(
+        PeerSource::for_test_endpoint(healthy_addr()),
+        now + Duration::from_secs(2)
+    ));
+    assert!(!window.peer_in_staller_cooldown(
+        PeerSource::for_test_endpoint(staller_addr()),
+        now + Duration::from_secs(33)
+    ));
 }
 
 #[test]
@@ -1875,7 +1903,7 @@ fn at_most_one_action_per_tick_blame_outranks_hedge() {
 }
 
 fn peer_addr(idx: u8) -> crate::PeerEndpoint {
-    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([10, 0, 0, idx], 8333)).into())
+    crate::PeerEndpoint::Ip(std::net::SocketAddr::from(([10, 0, 0, idx], 8333)))
 }
 
 #[test]
@@ -1950,7 +1978,7 @@ fn uniform_slow_streaming_saturated_fanout_never_fires() {
     assert_eq!(window.front_interval_ewma_ms(), Some(4500));
     for peer in 0..8u8 {
         assert!(
-            !window.peer_in_staller_cooldown(Some(peer_addr(peer)), end),
+            !window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr(peer)), end),
             "no staller cooldown may exist after uniform-slow streaming"
         );
     }
@@ -2198,8 +2226,8 @@ fn adaptive_floor_still_convicts_true_staller_after_limit_cycle() {
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(8));
     let end = at + Duration::from_millis(6478);
-    assert!(window.peer_in_staller_cooldown(Some(silent), end));
-    assert!(!window.peer_in_staller_cooldown(Some(healthy_addr()), end));
+    assert!(window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(silent), end));
+    assert!(!window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(healthy_addr()), end));
 }
 
 /// Builds the window state reached after the first stall conviction in the
@@ -2367,7 +2395,10 @@ fn cold_start_hedges_front_without_convicting_owner() {
         None
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(2));
-    assert!(!window.peer_in_staller_cooldown(Some(staller_addr()), t0 + Duration::from_secs(30)));
+    assert!(!window.peer_in_staller_cooldown(
+        PeerSource::for_test_endpoint(staller_addr()),
+        t0 + Duration::from_secs(30)
+    ));
 
     let t1 = t0 + Duration::from_secs(30);
     window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
@@ -2377,7 +2408,7 @@ fn cold_start_hedges_front_without_convicting_owner() {
     });
     window.mark_received_from(hash(0x01), 80, Some(alternate), t1);
     assert_eq!(window.preferred_peer(), Some(alternate));
-    assert!(window.peer_in_staller_cooldown(Some(staller_addr()), t1));
+    assert!(window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(staller_addr()), t1));
     assert!(window.pending_timeout_observation.is_none());
     assert_eq!(window.front_interval_ewma_ms(), None);
     for byte in [0x01_u8, 0x02, 0x03, 0x04] {
@@ -2697,7 +2728,7 @@ fn dead_owner_prefix_probe_is_released_even_with_live_alternates()
 
     assert!(window.prefix_probe.is_none());
     assert_eq!(window.preferred_peer(), None);
-    assert!(!window.peer_in_staller_cooldown(owner.endpoint, now));
+    assert!(!window.peer_in_staller_cooldown(owner, now));
     Ok(())
 }
 
@@ -2723,7 +2754,7 @@ fn late_prefix_loser_cannot_replace_winner() -> Result<(), Box<dyn std::error::E
     assert_eq!(window.preferred_peer(), Some(winner));
     window.retain_owned_by(|p| p.endpoint != winner.endpoint);
     assert_eq!(window.preferred_peer(), None);
-    assert!(!window.peer_in_staller_cooldown(loser.endpoint, now));
+    assert!(!window.peer_in_staller_cooldown(loser, now));
     Ok(())
 }
 
@@ -2754,7 +2785,7 @@ fn prefix_owner_win_keeps_unrelated_peer_requests() -> Result<(), Box<dyn std::e
     assert!(window.pending_count_for(unrelated) > 0);
     assert!(!window.contains_pending(&hash(10)));
     assert_eq!(window.pending_count_for(loser), 0);
-    assert!(!window.peer_in_staller_cooldown(owner.endpoint, now));
+    assert!(!window.peer_in_staller_cooldown(owner, now));
     Ok(())
 }
 
@@ -2791,7 +2822,7 @@ fn prefix_alternate_win_releases_only_probe_losers() -> Result<(), Box<dyn std::
     assert!(window.pending_count_for(unrelated) > 0);
     assert_eq!(window.next_request_height, 1);
     assert!(window.owner_downloading_since.contains_key(&unrelated));
-    assert!(window.peer_in_staller_cooldown(owner.endpoint, now));
+    assert!(window.peer_in_staller_cooldown(owner, now));
     Ok(())
 }
 
@@ -2812,7 +2843,7 @@ fn stale_cold_hedge_confirmation_after_release_does_not_blame_replacement() {
     assert!(window.cold_front.is_none());
     assert!(window.cold_hedged_fronts.is_empty());
     assert_eq!(window.preferred_peer(), None);
-    assert!(!window.peer_in_staller_cooldown(owner.endpoint, now));
+    assert!(!window.peer_in_staller_cooldown(owner, now));
 }
 
 #[test]
@@ -2837,6 +2868,21 @@ fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate()
 }
 
 #[test]
+fn anonymous_staller_cools_down_per_connection_not_globally() {
+    // Inbound Tor sessions are unidentified: their stallers must be
+    // tracked (per connection), never silently skipped and never
+    // collapsed into one shared anonymous key.
+    let mut window = DownloadWindow::new(test_budget());
+    let now = Instant::now();
+    let first = PeerSource::for_test_unidentified();
+    let second = PeerSource::for_test_unidentified();
+    window.mark_peer_unresponsive(first, now);
+    assert!(window.peer_in_staller_cooldown(first, now));
+    assert!(!window.peer_in_staller_cooldown(second, now));
+    assert!(!window.peer_in_staller_cooldown(first, now + Duration::from_secs(3600)));
+}
+
+#[test]
 fn release_of_a_dead_connection_clears_state_but_preserves_cooldown() {
     let mut window = DownloadWindow::new(test_budget());
     let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into();
@@ -2844,13 +2890,13 @@ fn release_of_a_dead_connection_clears_state_but_preserves_cooldown() {
     let source = test_source(peer_addr);
     insert_pending(&mut window, source, hash(1), 1, now);
     window.preferred_peer = Some(source);
-    window.mark_peer_unresponsive(Some(peer_addr), now);
+    window.mark_peer_unresponsive(PeerSource::for_test_endpoint(peer_addr), now);
 
     window.retain_owned_by(|p| *p != source);
 
     assert_eq!(window.pending_count_for(source), 0);
     assert!(window.preferred_peer.is_none());
-    assert!(window.peer_in_staller_cooldown(Some(peer_addr), now));
+    assert!(window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr), now));
 }
 
 /// A malformed body releases the pending request only when its deliverer is
@@ -2934,7 +2980,7 @@ fn reject_delivery_from_owner_clears_timeout_observation() {
     );
     assert!(window.pending_timeout_observation.is_none());
     assert_eq!(timeout_owner(&mut window, false, now), None);
-    assert!(!window.peer_in_staller_cooldown(owner.endpoint, now));
+    assert!(!window.peer_in_staller_cooldown(owner, now));
 }
 
 /// Either participant's malformed response terminates a cold-front race
@@ -3342,7 +3388,7 @@ fn fanout_eligibility_requires_block_service_flags() {
     use crate::{PeerCounters, PeerInfo};
 
     fn peer(services: u64, inbound: bool) -> PeerInfo {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333).into();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         PeerInfo {
             endpoint: Some(crate::PeerEndpoint::Ip(addr)),
             network: crate::PeerEndpoint::Ip(addr).net(),

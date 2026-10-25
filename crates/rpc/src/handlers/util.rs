@@ -1546,7 +1546,7 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap_or_else(|| panic!("active_commands missing: {result:?}"));
         assert_eq!(commands.len(), 2, "both held calls are active: {result:?}");
-        for command in commands.iter() {
+        for command in commands {
             assert_eq!(
                 command.get("method").and_then(Value::as_str),
                 Some("getblock")
@@ -1573,7 +1573,7 @@ mod tests {
             "dropping one guard removes exactly its own entry: {result:?}"
         );
         drop(second);
-        assert!(ctx.active_calls.snapshot().is_empty());
+        assert_eq!(ctx.active_calls.snapshot(), Vec::<(String, u64)>::new());
     }
 
     #[test]

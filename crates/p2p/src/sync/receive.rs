@@ -201,16 +201,15 @@ impl BlockSync {
                     false
                 }
             })
-            .map(|source| source.endpoint)
             .collect();
         let mut scheduler = self.scheduler.lock();
         for (hash, _) in invalid {
             scheduler.stager.discard(hash);
         }
-        for peer_addr in &blamed {
+        for source in &blamed {
             scheduler
                 .window
-                .mark_peer_unresponsive(*peer_addr, Instant::now());
+                .mark_peer_unresponsive(*source, Instant::now());
         }
         tracing::debug!(
             discarded = invalid.len(),
@@ -746,7 +745,7 @@ impl BlockSync {
                         self.scheduler
                             .lock()
                             .window
-                            .mark_peer_unresponsive(source.endpoint, now);
+                            .mark_peer_unresponsive(source, now);
                         tracing::warn!(peer_addr = ?source.endpoint, %hash, "block sync: peer served mutated block body; disconnecting");
                     }
                 }

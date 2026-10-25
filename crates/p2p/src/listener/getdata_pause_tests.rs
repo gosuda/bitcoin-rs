@@ -328,7 +328,14 @@ impl Served {
         let session_lease = lease.clone();
         let (outcome_tx, outcome) = crossbeam_channel::bounded(1);
         let session = std::thread::spawn(move || {
-            let result = run_message_loop(&mut peer, addr, &session_lease, &shared, None);
+            let result = run_message_loop(
+                &mut peer,
+                addr,
+                Some(crate::PeerEndpoint::Ip(addr)),
+                &session_lease,
+                &shared,
+                None,
+            );
             let _ = outcome_tx.send(result);
         });
         Ok(Self {

@@ -68,7 +68,7 @@ impl BlockSync {
         self.scheduler
             .lock()
             .window
-            .mark_peer_unresponsive(source.endpoint, Instant::now());
+            .mark_peer_unresponsive(source, Instant::now());
         metrics::counter!("node.sync.invalid_block_disconnects").increment(1);
         tracing::warn!(
             peer_addr = ?source.endpoint,
