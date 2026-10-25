@@ -38,6 +38,7 @@ use super::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use super::receive::unrequested_body_admissible;
+use super::requests::BODY_UNAVAILABLE_RETRY;
 use super::{BlockSync, Inventory};
 use crate::block_stager::StagedBlock;
 use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
@@ -2921,4 +2922,701 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
          has left it, even with headers ahead of the applied tip"
     );
     Ok(())
+}
+
+/// Two peers over a mined three-block header chain. `owner` advertises the
+/// taller chain, so the standard scheduler asks it first; `alternate` is the
+/// peer a released body must move to.
+struct NotFoundFixture {
+    sync: BlockSync,
+    peers: Arc<PeerTable>,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    blocks: Vec<Block>,
+    blocks_tx: InboundBlockSender,
+    owner: SocketAddr,
+    owner_rx: crate::test_support::MessageReceiver,
+    alternate: SocketAddr,
+    alternate_rx: Option<crate::test_support::MessageReceiver>,
+}
+
+impl NotFoundFixture {
+    /// The owner and the alternate both connected.
+    fn two_peers(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect(budget, true)
+    }
+
+    /// Only the owner connected: nobody else can serve a body it lacks.
+    fn owner_only(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect(budget, false)
+    }
+
+    fn connect(
+        budget: super::SyncBudget,
+        with_alternate: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(3)?;
+        install_budget(&sync, budget);
+        let owner = test_addr(9_810, 0)?;
+        let alternate = test_addr(9_810, 1)?;
+        let mut relaying = synthetic_peer(owner, 200);
+        relaying.compact_block_relay = true;
+        let owner_rx = connect_peer(&peers, relaying);
+        let alternate_rx =
+            with_alternate.then(|| connect_peer(&peers, synthetic_peer(alternate, 100)));
+        Ok(Self {
+            sync,
+            peers,
+            applied_tip,
+            blocks,
+            blocks_tx,
+            owner,
+            owner_rx,
+            alternate,
+            alternate_rx,
+        })
+    }
+
+    fn hash(&self, index: usize) -> Hash256 {
+        Hash256::from(self.blocks[index].block_hash())
+    }
+
+    fn inventory(&self, index: usize, compact: bool) -> Inventory {
+        let hash = bitcoin::BlockHash::from_byte_array(*self.hash(index).as_byte_array());
+        if compact {
+            Inventory::CompactBlock(hash)
+        } else {
+            Inventory::WitnessBlock(hash)
+        }
+    }
+
+    fn deliver(&self, source: PeerSource, index: usize) -> TestResult {
+        let mut inbound = crate::InboundBlock::from_decoded(self.blocks[index].clone());
+        inbound.source = Some(source);
+        self.blocks_tx.send(inbound)?;
+        Ok(())
+    }
+
+    fn applied_height(&self) -> Option<u32> {
+        self.applied_tip.load_full().map(|tip| tip.height)
+    }
+
+    fn alternate_getdata(&self) -> Vec<Inventory> {
+        self.alternate_rx
+            .as_ref()
+            .map_or_else(Vec::new, drain_getdata_items)
+    }
+
+    fn owner_getdata(&self) -> Vec<Inventory> {
+        drain_getdata_items(&self.owner_rx)
+    }
+}
+
+/// A window of one block with one request peer: nothing is pending between
+/// requests, so the tick's request scan visits only the highest-ranked peer.
+fn one_request_peer_budget() -> super::SyncBudget {
+    super::SyncBudget {
+        max_pending_blocks: 1,
+        max_peer_inflight: 1,
+        getdata_batch_limit: 1,
+        ..super::default_sync_budget(Network::Regtest)
+    }
+}
+
+/// Every `getdata` inventory vector queued on `rx`, in order; other traffic
+/// is skipped.
+fn drain_getdata_items(rx: &crate::test_support::MessageReceiver) -> Vec<Inventory> {
+    let mut items = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let Message::GetData(inventory) = message {
+            items.extend(inventory);
+        }
+    }
+    items
+}
+
+#[test]
+fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_peer() -> TestResult
+{
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+
+    // The highest-ranked peer is asked for the first body, compact, alone.
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    // It answers `notfound`: the exact owner's request is released.
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+    assert!(!fixture.sync.owns_body_fetch(owner_source, x1));
+
+    // With one request peer per tick, the standard selection now picks the
+    // alternate; the unavailable owner is never polled for the body.
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert!(
+        fixture.owner_getdata().is_empty(),
+        "an owner that answered notfound is not asked again at wake-up pace"
+    );
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)]
+    );
+    assert!(fixture.sync.owns_body_fetch(alternate_source, x1));
+    assert!(
+        fixture
+            .peers
+            .is_connected(crate::PeerEndpoint::Ip(fixture.owner)),
+        "a peer that lacks a body is not punished"
+    );
+
+    // The alternate supplies the body and the rest of the chain completes.
+    fixture.deliver(alternate_source, 0)?;
+    let mut requests: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..16 {
+        fixture.sync.tick();
+        if fixture.applied_height() == Some(3) {
+            break;
+        }
+        for (peer, rx, source) in [
+            (0, Some(&fixture.owner_rx), owner_source),
+            (1, fixture.alternate_rx.as_ref(), alternate_source),
+        ] {
+            let Some(rx) = rx else { continue };
+            for item in drain_getdata_items(rx) {
+                let (Inventory::CompactBlock(hash) | Inventory::WitnessBlock(hash)) = item else {
+                    return Err(std::io::Error::other("unexpected inventory flavor").into());
+                };
+                let hash = Hash256::from_le_bytes(hash.as_byte_array());
+                let index = (0..fixture.blocks.len())
+                    .find(|index| fixture.hash(*index) == hash)
+                    .ok_or("served an unknown body")?;
+                requests.push((peer, index));
+                fixture.deliver(source, index)?;
+            }
+        }
+    }
+    assert_eq!(fixture.applied_height(), Some(3), "sync must complete");
+    assert_eq!(
+        requests,
+        [(0, 1), (0, 2)],
+        "the released body was requested exactly once (from the alternate, above); \
+         the owner serves the later bodies"
+    );
+    Ok(())
+}
+
+#[test]
+fn notfound_owner_with_request_headroom_is_skipped_and_the_alternate_serves_the_released_body()
+-> TestResult {
+    let fixture = NotFoundFixture::two_peers(super::default_sync_budget(Network::Regtest))?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+
+    // The whole chain goes to the highest-ranked peer in one compact batch.
+    fixture.sync.tick();
+    assert_eq!(
+        fixture.owner_getdata(),
+        vec![
+            fixture.inventory(0, true),
+            fixture.inventory(1, true),
+            fixture.inventory(2, true)
+        ]
+    );
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+
+    // It lacks the first body only and keeps the other two in flight, so the
+    // request scan visits both peers and the owner's plan names the refused
+    // body.
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, fixture.hash(1)));
+    for _ in 0..3 {
+        fixture.sync.tick();
+    }
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)],
+        "the alternate is asked for exactly the released body, once"
+    );
+
+    fixture.deliver(alternate_source, 0)?;
+    fixture.deliver(owner_source, 1)?;
+    fixture.deliver(owner_source, 2)?;
+    for _ in 0..4 {
+        fixture.sync.tick();
+        if fixture.applied_height() == Some(3) {
+            break;
+        }
+    }
+    assert_eq!(fixture.applied_height(), Some(3), "sync must complete");
+    Ok(())
+}
+
+#[test]
+fn notfound_only_releases_for_the_exact_current_owner_session() -> TestResult {
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+    let now = Instant::now();
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+
+    // A connection that does not own the request cannot release it, and is
+    // not remembered for it.
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(alternate_source, &[fixture.inventory(0, true)])
+    );
+    // The owner answering for a body nobody asked it for changes nothing.
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(1, true)])
+    );
+    // Vectors that are not block vectors are left to their own lifecycles.
+    let txid = bitcoin::Txid::from_byte_array([7; 32]);
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[Inventory::Transaction(txid)])
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+    {
+        let scheduler = fixture.sync.scheduler.lock();
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(alternate_source, x1, now)
+        );
+        assert!(!scheduler.body_unavailable.refuses(owner_source, x1, now));
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(owner_source, fixture.hash(1), now)
+        );
+    }
+
+    // A same-address replacement is a different connection: neither the
+    // retired session's late notfound nor the replacement's own releases the
+    // predecessor's request.
+    let replacement_rx = connect_peer(&fixture.peers, synthetic_peer(fixture.owner, 200));
+    let replacement_source = current_source(&fixture.peers, fixture.owner);
+    assert_ne!(replacement_source, owner_source);
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)]),
+        "a retired session cannot release"
+    );
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(replacement_source, &[fixture.inventory(0, true)]),
+        "a replacement cannot release its predecessor's request"
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+    {
+        let scheduler = fixture.sync.scheduler.lock();
+        assert!(!scheduler.body_unavailable.refuses(owner_source, x1, now));
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(replacement_source, x1, now)
+        );
+    }
+
+    // Ordinary session reconciliation hands the dead session's request to
+    // the standard scheduler: the replacement carries no inherited refusal.
+    fixture.sync.tick();
+    assert_eq!(
+        drain_getdata_items(&replacement_rx),
+        vec![fixture.inventory(0, false)]
+    );
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+    Ok(())
+}
+
+#[test]
+fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() -> TestResult {
+    let fixture = NotFoundFixture::owner_only(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, true)];
+
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+
+    // Nobody else can serve the body, and the owner is the last resort for
+    // it: nothing is sent and the owner is neither convicted nor starved
+    // forever.
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert!(
+        fixture.owner_getdata().is_empty(),
+        "no wake-up-paced getdata/notfound loop against the only peer"
+    );
+    assert!(
+        fixture
+            .peers
+            .is_connected(crate::PeerEndpoint::Ip(fixture.owner)),
+        "a peer that lacks a body is not disconnected"
+    );
+
+    // The retry interval is measured on the monotonic clock: once it has
+    // passed, the owner is asked exactly once more.
+    let aged = Instant::now()
+        .checked_sub(BODY_UNAVAILABLE_RETRY + Duration::from_secs(1))
+        .ok_or("monotonic clock is younger than the retry interval")?;
+    fixture
+        .sync
+        .scheduler
+        .lock()
+        .body_unavailable
+        .note(owner_source, x1, aged);
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+
+    // A second notfound starts a fresh interval.
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    for _ in 0..3 {
+        fixture.sync.tick();
+    }
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+
+    // The record belongs to the connection: it leaves with it.
+    assert!(fixture.peers.disconnect_source(owner_source));
+    fixture.sync.tick();
+    assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    Ok(())
+}
+
+#[test]
+fn delivering_the_body_ends_the_notfound_demotion() -> TestResult {
+    let fixture = NotFoundFixture::owner_only(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, true)];
+
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+
+    // A peer that answered notfound and then delivers the body anyway shows
+    // it has the body: the delivery ends the record.
+    fixture.deliver(owner_source, 0)?;
+    fixture.sync.tick();
+    assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    Ok(())
+}
+
+#[test]
+fn notfound_releases_a_deferred_owned_fetch_only_for_its_exact_owner() -> TestResult {
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, false)];
+
+    // A compact follow-up the owner was asked for before the header attached:
+    // the deferred ownership mark is the only record of the request.
+    assert!(
+        fixture
+            .sync
+            .enqueue_owned_body_fetch(owner_source, x1, || true)
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    assert!(
+        !fixture.sync.block_not_found(alternate_source, &notfound),
+        "a connection that does not own the fetch cannot release it"
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    assert!(
+        !fixture.sync.owns_body_fetch(owner_source, x1),
+        "the exact owner's notfound drops its deferred mark"
+    );
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    assert!(
+        !fixture.sync.block_not_found(owner_source, &notfound),
+        "a second notfound finds nothing left to release"
+    );
+    Ok(())
+}
+
+/// Chain stub that runs one scripted action the next time the block tree is
+/// read: the deterministic way to land a wire event between a resolve's
+/// snapshot and its install.
+struct TreeReadHook {
+    chain: Arc<TestChain>,
+    on_next_tree_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl SyncChain for TreeReadHook {
+    fn network(&self) -> Network {
+        self.chain.network()
+    }
+
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, BlockTree> {
+        let action = self.on_next_tree_read.lock().take();
+        if let Some(action) = action {
+            action();
+        }
+        self.chain.block_tree()
+    }
+
+    fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.chain.chain_tip()
+    }
+
+    fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.chain.applied_tip()
+    }
+
+    fn bootstrap_genesis(&self) {
+        self.chain.bootstrap_genesis();
+    }
+
+    fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
+        self.chain.admit_headers(headers)
+    }
+
+    fn minimum_chain_work(&self) -> ChainWork {
+        self.chain.minimum_chain_work()
+    }
+
+    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+        self.chain.check_body_binding(block)
+    }
+
+    fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+        self.chain.window_len(serialized_sizes)
+    }
+
+    fn commit_window(
+        &self,
+        blocks: &[&Block],
+        bodies: &[bytes::Bytes],
+    ) -> Result<usize, WindowCommitError> {
+        self.chain.commit_window(blocks, bodies)
+    }
+
+    fn switch_to_branch(
+        &self,
+        target: NodeId,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        connected_body: &mut dyn FnMut(Hash256),
+    ) -> Result<(), ReorgError> {
+        self.chain
+            .switch_to_branch(target, staged_body, connected_body)
+    }
+}
+
+#[test]
+fn notfound_landing_inside_a_deferred_fetch_resolve_still_releases_the_exact_owner_mark()
+-> TestResult {
+    let (mut tree, blocks) = mined_chain(2, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let test_chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::new(ArcSwapOption::empty()),
+        Arc::clone(&block_tree),
+    ));
+    let hooked = Arc::new(TreeReadHook {
+        chain: test_chain,
+        on_next_tree_read: Mutex::new(None),
+    });
+    let peers = Arc::new(PeerTable::new());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
+    let chain: Arc<dyn SyncChain> = hooked.clone();
+    let sync = Arc::new(BlockSync::new(
+        chain,
+        Arc::clone(&peers),
+        headers_rx,
+        blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    ));
+    let declining = test_addr(9_840, 0)?;
+    let bystander = test_addr(9_840, 1)?;
+    let _declining_rx = connect_peer(&peers, synthetic_peer(declining, 100));
+    let _bystander_rx = connect_peer(&peers, synthetic_peer(bystander, 100));
+    let declining_source = current_source(&peers, declining);
+    let bystander_source = current_source(&peers, bystander);
+    let declined = Hash256::from(blocks[0].block_hash());
+    let kept = Hash256::from(blocks[1].block_hash());
+    assert!(sync.enqueue_owned_body_fetch(declining_source, declined, || true));
+    assert!(sync.enqueue_owned_body_fetch(bystander_source, kept, || true));
+
+    // The owner's `notfound` lands after the resolve snapshot and before its
+    // install: the mark is still in the scheduler, so the answer matches it.
+    let matched = Arc::new(Mutex::new(false));
+    let action_sync = Arc::clone(&sync);
+    let action_matched = Arc::clone(&matched);
+    *hooked.on_next_tree_read.lock() = Some(Box::new(move || {
+        let notfound = Inventory::CompactBlock(bitcoin::BlockHash::from_byte_array(
+            *declined.as_byte_array(),
+        ));
+        *action_matched.lock() = action_sync.block_not_found(declining_source, &[notfound]);
+    }));
+    sync.resolve_owned_body_fetches();
+
+    assert!(
+        *matched.lock(),
+        "a notfound during resolution must match the exact owner's mark"
+    );
+    assert!(
+        !sync.owns_body_fetch(declining_source, declined),
+        "the stale snapshot must not re-create a request the owner declined"
+    );
+    assert!(
+        sync.scheduler
+            .lock()
+            .body_unavailable
+            .refuses(declining_source, declined, Instant::now()),
+        "the answer is recorded against the exact owner"
+    );
+    assert!(
+        sync.owns_body_fetch(bystander_source, kept),
+        "a mark nobody released still resolves"
+    );
+
+    // Nothing re-installs the declined request on a later resolve.
+    sync.resolve_owned_body_fetches();
+    assert!(!sync.owns_body_fetch(declining_source, declined));
+    Ok(())
+}
+
+#[test]
+fn retired_generation_cannot_install_a_resolved_deferred_fetch_snapshot() -> TestResult {
+    let fixture = punishment_fixture()?;
+    let hash = Hash256::from_le_bytes(&[0x91; 32]);
+    assert!(
+        fixture
+            .sync
+            .enqueue_owned_body_fetch(fixture.source, hash, || true)
+    );
+    // Resolution has already produced (source, hash, height), but has not
+    // published it. Retire that generation while leaving its deferred mark
+    // present, as happens before the next scheduler session sweep.
+    assert!(fixture.peers.disconnect_source(fixture.source));
+    let addr = test_addr(9770, 0)?;
+    let _replacement_rx = connect_peer(&fixture.peers, synthetic_peer(addr, 2));
+    let replacement = current_source(&fixture.peers, addr);
+    assert_ne!(replacement, fixture.source);
+    assert!(
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .owned_body_fetches
+            .contains(&(fixture.source, hash))
+    );
+
+    fixture
+        .sync
+        .install_resolved_owned_body_fetch(fixture.source, hash, 2);
+
+    let scheduler = fixture.sync.scheduler.lock();
+    assert_eq!(scheduler.window.pending_owner(&hash), None);
+    assert!(
+        !scheduler
+            .owned_body_fetches
+            .contains(&(fixture.source, hash))
+    );
+    assert!(
+        !scheduler
+            .body_unavailable
+            .refuses(replacement, hash, Instant::now()),
+        "session invalidation must not fabricate a notfound for its replacement"
+    );
+    Ok(())
+}
+
+#[test]
+fn unavailable_body_ledger_is_bounded_exact_source_and_expires() {
+    use super::requests::UnavailableBodies;
+
+    let first = PeerSource::for_test(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_820));
+    let second = PeerSource::for_test(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_821));
+    let hash = |byte: u8| Hash256::from_le_bytes(&[byte; 32]);
+    let base = Instant::now();
+    let mut ledger = UnavailableBodies::new(2);
+
+    ledger.note(first, hash(1), base);
+    ledger.note(first, hash(2), base + Duration::from_secs(1));
+    ledger.note(second, hash(3), base + Duration::from_secs(2));
+    let now = base + Duration::from_secs(2);
+    assert!(
+        !ledger.refuses(first, hash(1), now),
+        "the oldest record leaves when the bound is reached"
+    );
+    assert!(ledger.refuses(first, hash(2), now));
+    assert!(ledger.refuses(second, hash(3), now));
+    assert!(
+        !ledger.refuses(second, hash(2), now),
+        "records are keyed by exact connection"
+    );
+
+    ledger.clear(first, hash(2));
+    assert!(!ledger.refuses(first, hash(2), now));
+    ledger.retain_owned_by(|source| *source != second);
+    assert!(!ledger.refuses(second, hash(3), now));
+
+    ledger.note(first, hash(4), now);
+    assert!(ledger.refuses(first, hash(4), now));
+    assert!(
+        ledger.refuses(
+            first,
+            hash(4),
+            now + BODY_UNAVAILABLE_RETRY.saturating_sub(Duration::from_millis(1)),
+        ),
+        "a record refuses until the interval has passed"
+    );
+    assert!(
+        !ledger.refuses(first, hash(4), now + BODY_UNAVAILABLE_RETRY),
+        "a record older than the interval refuses nothing"
+    );
 }

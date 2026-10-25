@@ -170,6 +170,20 @@ impl BlockSync {
             let Some(request) = request else {
                 continue;
             };
+            // A plan that names a body `source` already answered `notfound`
+            // for is dropped whole, exactly as the foreground path does: the
+            // lock is the scheduler's, taken after the historical lock is
+            // released, and nothing was marked, so a later pass plans the
+            // same blocks again for another peer, or for this one once the
+            // retry interval has passed.
+            if self
+                .scheduler
+                .lock()
+                .body_unavailable
+                .refuses_request(&request, now)
+            {
+                continue;
+            }
             let inventory = request
                 .entries()
                 .map(|(_, hash)| {
@@ -207,34 +221,40 @@ impl BlockSync {
             historical.window.mark_peer_unresponsive(source, now);
             return None;
         }
-        let mut historical = self.historical.lock();
-        let HistoricalDownload {
-            window,
-            stager,
-            next_expected,
-            ..
-        } = &mut *historical;
-        match stager.insert(
-            hash,
-            *next_expected,
-            inbound.block,
-            inbound.serialized,
-            Some(source),
-            now,
-        ) {
-            StagedBlock::Memory { bytes, dropped } => {
-                window.mark_received_from(hash, bytes, Some(source), now);
-                for hash in dropped {
+        {
+            let mut historical = self.historical.lock();
+            let HistoricalDownload {
+                window,
+                stager,
+                next_expected,
+                ..
+            } = &mut *historical;
+            match stager.insert(
+                hash,
+                *next_expected,
+                inbound.block,
+                inbound.serialized,
+                Some(source),
+                now,
+            ) {
+                StagedBlock::Memory { bytes, dropped } => {
+                    window.mark_received_from(hash, bytes, Some(source), now);
+                    for hash in dropped {
+                        window.requeue_for_retry(&hash, None, now);
+                    }
+                }
+                StagedBlock::AlreadyStaged => {
+                    window.release_pending(&hash, now);
+                }
+                StagedBlock::DroppedForRetry { hash } => {
                     window.requeue_for_retry(&hash, None, now);
                 }
             }
-            StagedBlock::AlreadyStaged => {
-                window.release_pending(&hash, now);
-            }
-            StagedBlock::DroppedForRetry { hash } => {
-                window.requeue_for_retry(&hash, None, now);
-            }
         }
+        // A delivered body proves the connection has it, so an earlier
+        // `notfound` for the hash no longer applies. The historical lock is
+        // released first: the two locks are never held together.
+        self.scheduler.lock().body_unavailable.clear(source, hash);
         None
     }
 }

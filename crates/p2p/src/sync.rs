@@ -252,6 +252,11 @@ struct SchedulerState {
     /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
     /// `getdata` was issued for a tip hash whose header has not attached yet.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
+    /// Exact connections that answered an outstanding body request with
+    /// `notfound`, so the released body is replanned elsewhere instead of
+    /// being asked of the same connection again. Bounded by the window's
+    /// pending budget and by [`requests::BODY_UNAVAILABLE_RETRY`].
+    body_unavailable: requests::UnavailableBodies,
     /// Chain-sync eviction state for every connection that has not yet shown
     /// it can bring us to the tip. Keyed by exact connection identity, so a
     /// replacement at the same address is judged on its own record.
@@ -294,6 +299,7 @@ impl SchedulerState {
             self.header_request_owner = None;
         }
         self.owned_body_fetches.retain(|(source, _)| owns(source));
+        self.body_unavailable.retain_owned_by(owns);
         self.chain_sync.retain(|source, _| owns(source));
         self.headers_sync.retain(|source, _| owns(source));
     }
@@ -422,6 +428,7 @@ impl BlockSync {
                 stager: BlockStager::new(budget),
                 header_request_owner: None,
                 owned_body_fetches: Vec::new(),
+                body_unavailable: requests::UnavailableBodies::new(budget.max_pending_blocks),
                 chain_sync: hashbrown::HashMap::new(),
                 headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
@@ -444,6 +451,7 @@ impl BlockSync {
             stager: BlockStager::new(budget),
             header_request_owner: None,
             owned_body_fetches: Vec::new(),
+            body_unavailable: requests::UnavailableBodies::new(budget.max_pending_blocks),
             chain_sync: hashbrown::HashMap::new(),
             headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),

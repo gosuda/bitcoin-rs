@@ -10,6 +10,7 @@ use super::telemetry::metric_count;
 use crate::Message;
 use crate::connection::PeerSource;
 use crate::download_window::BlockDownloadPolicy;
+use crate::download_window::PeerRequest;
 use crate::download_window::SyncPeer;
 use crate::download_window::statically_fanout_eligible;
 use crate::download_window::{peer_can_serve_height, servable_floor, serves_requested_height};
@@ -18,6 +19,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -29,7 +31,230 @@ use std::vec::Vec;
 /// request.
 pub(super) const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
 
+/// How long a connection that answered `notfound` for a body is demoted for
+/// that same body: it is the last resort for the hash, and the request path
+/// refuses to ask it again, until the interval passes.
+///
+/// The peer is not at fault for lacking a block, so nothing else changes: its
+/// other requests, its conviction state, and its connection are untouched.
+/// After the interval a peer that has since obtained the body is asked once
+/// more; a fresh `notfound` starts the interval again.
+pub(super) const BODY_UNAVAILABLE_RETRY: Duration = Duration::from_mins(1);
+
+/// Exact connections that answered an outstanding body request with
+/// `notfound`, keyed by connection identity and block hash.
+///
+/// PRE: `capacity` is the window's pending-block budget, the most requests
+///   the scheduler keeps in flight at once.
+/// POST: holds at most `capacity` records; a record older than
+///   [`BODY_UNAVAILABLE_RETRY`] never refuses anything.
+/// INVARIANT: records are keyed by exact [`PeerSource`], so a same-address
+///   replacement never inherits its predecessor's answer, and ages come from
+///   the monotonic clock the caller passes in. A lookup is one hash probe.
+#[derive(Debug)]
+pub(super) struct UnavailableBodies {
+    capacity: usize,
+    answered: hashbrown::HashMap<(PeerSource, Hash256), Instant>,
+}
+
+impl UnavailableBodies {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            answered: hashbrown::HashMap::new(),
+        }
+    }
+
+    /// Records that `source` answered `notfound` for `hash` at `now`.
+    ///
+    /// Expired records leave first; when the table is still full the oldest
+    /// record leaves, so the bound holds without refusing the newest answer.
+    pub(super) fn note(&mut self, source: PeerSource, hash: Hash256, now: Instant) {
+        self.answered
+            .retain(|_, answered_at| Self::live(*answered_at, now));
+        if self.answered.len() >= self.capacity
+            && !self.answered.contains_key(&(source, hash))
+            && let Some(oldest) = self
+                .answered
+                .iter()
+                .min_by_key(|(_, answered_at)| **answered_at)
+                .map(|(key, _)| *key)
+        {
+            self.answered.remove(&oldest);
+        }
+        self.answered.insert((source, hash), now);
+    }
+
+    /// Whether `source` answered `notfound` for `hash` within
+    /// [`BODY_UNAVAILABLE_RETRY`] of `now`.
+    pub(super) fn refuses(&self, source: PeerSource, hash: Hash256, now: Instant) -> bool {
+        self.answered
+            .get(&(source, hash))
+            .is_some_and(|answered_at| Self::live(*answered_at, now))
+    }
+
+    /// Whether any entry of `request` names a body its owner answered
+    /// `notfound` for. One hash probe per entry.
+    pub(super) fn refuses_request(&self, request: &PeerRequest, now: Instant) -> bool {
+        !self.answered.is_empty()
+            && request
+                .entries()
+                .any(|(_, hash)| self.refuses(request.owner(), hash, now))
+    }
+
+    /// Forgets `source`'s answer for `hash`: it delivered the body, so the
+    /// earlier `notfound` no longer describes it.
+    pub(super) fn clear(&mut self, source: PeerSource, hash: Hash256) {
+        self.answered.remove(&(source, hash));
+    }
+
+    /// Drops every record whose connection `owns` rejects.
+    pub(super) fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
+        self.answered.retain(|(source, _), _| owns(source));
+    }
+
+    fn live(answered_at: Instant, now: Instant) -> bool {
+        now.saturating_duration_since(answered_at) < BODY_UNAVAILABLE_RETRY
+    }
+}
+
+/// The body hash a `notfound` vector answers a body request for, in any of
+/// the three flavors this node requests (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`,
+/// `MSG_CMPCT_BLOCK`); `None` for every other vector.
+fn not_found_block_hash(item: &Inventory) -> Option<Hash256> {
+    match item {
+        Inventory::CompactBlock(hash) => Some(Hash256::from_le_bytes(hash.as_byte_array())),
+        other => crate::inv::inventory_block_hash(other),
+    }
+}
+
+/// Releases the body fetch `source` owns for `hash`, if it owns one, and
+/// remembers that `source` cannot serve it.
+///
+/// PRE: the caller holds the scheduler lock inside the peer table's
+///   `with_current(source)` authority, so `source` is the live connection.
+/// POST: `true` when `source` owned a window request for `hash` (released
+///   through the owner-only delivery rejection, which also ends a timeout
+///   observation or cold-front episode naming it and lowers the request
+///   cursor) or a deferred owned-fetch mark for it (dropped); `false` and no
+///   change otherwise.
+/// INVARIANT: only the exact owning connection releases. A different
+///   connection's `notfound`, or one for a hash nobody asked this connection
+///   for, changes nothing. Nothing here blames or disconnects the owner.
+fn release_unavailable_body(
+    scheduler: &mut SchedulerState,
+    source: PeerSource,
+    hash: Hash256,
+    now: Instant,
+) -> bool {
+    let SchedulerState {
+        window,
+        owned_body_fetches,
+        body_unavailable,
+        ..
+    } = scheduler;
+    let owns_window_request = window.pending_owner(&hash) == Some(source);
+    let deferred = owned_body_fetches
+        .iter()
+        .position(|(owner, owned)| *owner == source && *owned == hash);
+    if !owns_window_request && deferred.is_none() {
+        return false;
+    }
+    if owns_window_request {
+        window.reject_delivery(hash, Some(source), now);
+    }
+    if let Some(index) = deferred {
+        owned_body_fetches.remove(index);
+    }
+    body_unavailable.note(source, hash, now);
+    true
+}
+
 impl BlockSync {
+    /// Routes the block vectors of one inbound `notfound` to the body fetch
+    /// each answers.
+    ///
+    /// PRE: `source` is the connection that sent `items`.
+    /// POST: every block vector that `source` is the exact owner of (a
+    ///   foreground window request, a deferred owned fetch, or a historical
+    ///   window request) releases that request without blame, and the next
+    ///   tick replans it through the ordinary scheduler, which no longer
+    ///   offers it to `source` until [`BODY_UNAVAILABLE_RETRY`] passes — the
+    ///   one record in `SchedulerState::body_unavailable` serves all three
+    ///   paths. Returns whether anything was released, so the caller can
+    ///   wake the sync loop.
+    /// INVARIANT: the peer table's `with_current` authority is held across
+    ///   the scheduler mutation, so a stale connection or a same-address
+    ///   replacement can neither release its predecessor's request nor be
+    ///   remembered for it. Vectors that are not block vectors, and block
+    ///   vectors nobody asked `source` for, are left to their own owners.
+    pub(crate) fn block_not_found(&self, source: PeerSource, items: &[Inventory]) -> bool {
+        if !items
+            .iter()
+            .any(|item| not_found_block_hash(item).is_some())
+        {
+            return false;
+        }
+        let now = Instant::now();
+        let mut released = 0_usize;
+        self.peer_table.with_current(source, || {
+            // The historical window is its own request owner. Its lock is
+            // released before the scheduler's is taken: the two are never
+            // held together.
+            let historical_released = self.release_historical_bodies(source, items, now);
+            let mut scheduler = self.scheduler.lock();
+            for hash in historical_released {
+                scheduler.body_unavailable.note(source, hash, now);
+                released += 1;
+            }
+            for hash in items.iter().filter_map(not_found_block_hash) {
+                if release_unavailable_body(&mut scheduler, source, hash, now) {
+                    released += 1;
+                }
+            }
+        });
+        if released > 0 {
+            metrics::counter!("node.sync.body_not_found_releases")
+                .increment(u64::try_from(released).unwrap_or(u64::MAX));
+            tracing::debug!(
+                peer_addr = ?source.endpoint,
+                released,
+                "block sync: peer answered notfound for requested blocks; released for replan"
+            );
+        }
+        released > 0
+    }
+
+    /// Releases the historical-window requests `source` owns among the block
+    /// vectors of `items`, returning the released hashes.
+    ///
+    /// PRE: the caller holds the peer table's `with_current(source)`
+    ///   authority and no scheduler lock.
+    /// POST: each block vector that `source` is the exact pending owner of in
+    ///   the historical window is released through the owner-only delivery
+    ///   rejection, which lowers that window's request cursor so the next
+    ///   `request_historical` pass replans it; every other vector is left
+    ///   alone.
+    /// INVARIANT: only the exact owner releases, nothing is blamed, and the
+    ///   record of the answer lives in the scheduler's one ledger, written by
+    ///   the caller after this lock is released.
+    fn release_historical_bodies(
+        &self,
+        source: PeerSource,
+        items: &[Inventory],
+        now: Instant,
+    ) -> SmallVec<[Hash256; 8]> {
+        let mut released = SmallVec::new();
+        let mut historical = self.historical.lock();
+        for hash in items.iter().filter_map(not_found_block_hash) {
+            if historical.window.pending_owner(&hash) == Some(source) {
+                historical.window.reject_delivery(hash, Some(source), now);
+                released.push(hash);
+            }
+        }
+        released
+    }
+
     /// Sends one estimated-2MiB common-prefix probe to each idle alternate.
     ///
     /// Every alternate receives the same earliest hashes, so the probe cannot
@@ -40,8 +265,23 @@ impl BlockSync {
         else {
             return;
         };
+        // An alternate that already answered `notfound` for one of the probe
+        // hashes is not asked for it again before the retry interval ends.
+        let unavailable: SmallVec<[PeerSource; 8]> = {
+            let scheduler = self.scheduler.lock();
+            probe_peers
+                .iter()
+                .filter(|peer| {
+                    hashes
+                        .iter()
+                        .any(|hash| scheduler.body_unavailable.refuses(peer.source, *hash, now))
+                })
+                .map(|peer| peer.source)
+                .collect()
+        };
         let candidates = probe_peers.iter().filter(|peer| {
             peer.source != owner
+                && !unavailable.contains(&peer.source)
                 && u32::try_from(peer.best_known_height)
                     .is_ok_and(|height| height >= required_height)
         });
@@ -156,20 +396,33 @@ impl BlockSync {
         }
         let servable_floor = servable_floor(&info, &policy);
         let tree = self.chain.block_tree();
+        // A plan that names a body `source` already answered `notfound` for
+        // is dropped whole: nothing was marked, so the ordinary scheduler
+        // plans the same blocks again, for the next peer this tick or for
+        // `source` once the retry interval has passed. Nothing waits on the
+        // refused peer and no message goes out, so a peer that lacks a body
+        // is never polled for it at wake-up pace.
         let request = {
             let mut scheduler = self.scheduler.lock();
-            let SchedulerState { window, stager, .. } = &mut *scheduler;
-            window.next_peer_request(
+            let SchedulerState {
+                window,
                 stager,
-                source,
-                allow_expired_retry_from_peer,
-                chain_tip,
-                required.height,
-                peer_best_height,
-                servable_floor,
-                &tree,
-                now,
-            )
+                body_unavailable,
+                ..
+            } = &mut *scheduler;
+            window
+                .next_peer_request(
+                    stager,
+                    source,
+                    allow_expired_retry_from_peer,
+                    chain_tip,
+                    required.height,
+                    peer_best_height,
+                    servable_floor,
+                    &tree,
+                    now,
+                )
+                .filter(|request| !body_unavailable.refuses_request(request, now))
         };
         drop(tree);
         let Some(request) = request else {
@@ -284,6 +537,7 @@ impl BlockSync {
                 .filter(|source| {
                     !window.peer_has_expired_pending(*source, now)
                         && !window.peer_in_staller_cooldown(*source, now)
+                        && !scheduler.body_unavailable.refuses(*source, front_hash, now)
                 })
                 .collect()
         };

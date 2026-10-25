@@ -707,6 +707,9 @@ impl BlockSync {
             self.peer_table.with_current(source_peer, || {
                 let mut scheduler = self.scheduler.lock();
                 for (hash, _, credit) in batch {
+                    // A delivered body proves the connection has it, so an
+                    // earlier `notfound` for the hash no longer applies.
+                    scheduler.body_unavailable.clear(source_peer, *hash);
                     match *credit {
                         DeliveryCredit::Duplicate => {
                             scheduler

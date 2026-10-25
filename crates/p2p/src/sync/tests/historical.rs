@@ -294,6 +294,224 @@ fn historical_pipeline_bounds_bytes_and_keeps_front_admissible() -> TestResult {
     Ok(())
 }
 
+fn witness_inventory(block: &Block) -> Inventory {
+    Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(
+        block.block_hash().0.to_le_bytes(),
+    ))
+}
+
+fn historical_owner(sync: &BlockSync, block: &Block) -> Option<PeerSource> {
+    sync.historical
+        .lock()
+        .window
+        .pending_owner(&block.block_hash().0)
+}
+
+#[test]
+fn historical_notfound_releases_the_exact_owner_and_the_alternate_serves_it_once() -> TestResult {
+    let (harness, chain, blocks) = fixture(3)?;
+    let addrs = [test_addr(28230, 0)?, test_addr(28230, 1)?];
+    let receivers = [
+        connect_peer(&harness.peers, synthetic_peer(addrs[0], 3)),
+        connect_peer(&harness.peers, synthetic_peer(addrs[1], 3)),
+    ];
+    let sources = [
+        current_source(&harness.peers, addrs[0]),
+        current_source(&harness.peers, addrs[1]),
+    ];
+    let first = witness_inventory(&blocks[0]);
+
+    harness.sync.advance_historical();
+    let owner_source =
+        historical_owner(&harness.sync, &blocks[0]).ok_or("the first body must be requested")?;
+    let owner = usize::from(owner_source != sources[0]);
+    let alternate = 1 - owner;
+    let alternate_source = sources[alternate];
+    let initial: Vec<Vec<Inventory>> = receivers.iter().map(drain_getdata_items).collect();
+    assert_eq!(
+        initial
+            .iter()
+            .flatten()
+            .filter(|item| **item == first)
+            .count(),
+        1,
+        "the first body is requested once, from its owner"
+    );
+    assert!(initial[owner].contains(&first));
+
+    // A connection that does not own the request cannot release it.
+    assert!(
+        !harness
+            .sync
+            .block_not_found(alternate_source, std::slice::from_ref(&first))
+    );
+    assert_eq!(
+        historical_owner(&harness.sync, &blocks[0]),
+        Some(owner_source)
+    );
+
+    // The exact owner answers notfound: the historical request is released
+    // and the standard historical pass hands it to the alternate, once; the
+    // owner is not asked for it again.
+    assert!(
+        harness
+            .sync
+            .block_not_found(owner_source, std::slice::from_ref(&first))
+    );
+    assert_eq!(historical_owner(&harness.sync, &blocks[0]), None);
+    for _ in 0..3 {
+        harness.sync.advance_historical();
+    }
+    assert!(
+        !drain_getdata_items(&receivers[owner]).contains(&first),
+        "an owner that answered notfound is not asked for the body again"
+    );
+    assert_eq!(
+        drain_getdata_items(&receivers[alternate])
+            .iter()
+            .filter(|item| **item == first)
+            .count(),
+        1,
+        "the alternate is asked for the released body exactly once"
+    );
+    assert_eq!(
+        historical_owner(&harness.sync, &blocks[0]),
+        Some(alternate_source)
+    );
+    assert!(
+        harness
+            .peers
+            .is_connected(crate::PeerEndpoint::Ip(addrs[owner])),
+        "a peer that lacks a body is not punished"
+    );
+
+    // Everything is delivered by its current owner and replay completes.
+    for block in &blocks {
+        let source =
+            historical_owner(&harness.sync, block).ok_or("every body must still be pending")?;
+        deliver(&harness.sync, block, source);
+    }
+    for _ in 0..4 {
+        harness.sync.advance_historical();
+    }
+    assert_eq!(
+        *chain.historical_connected.lock(),
+        blocks
+            .iter()
+            .map(|block| block.block_hash().0)
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn historical_notfound_only_peer_is_not_polled_and_is_retried_after_the_interval() -> TestResult {
+    let (harness, _chain, blocks) = fixture(3)?;
+    let addr = test_addr(28231, 0)?;
+    let rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
+    let source = current_source(&harness.peers, addr);
+    let first = witness_inventory(&blocks[0]);
+
+    harness.sync.advance_historical();
+    assert!(drain_getdata_items(&rx).contains(&first));
+    assert!(
+        harness
+            .sync
+            .block_not_found(source, std::slice::from_ref(&first))
+    );
+    assert_eq!(historical_owner(&harness.sync, &blocks[0]), None);
+
+    // Nobody else can serve it: nothing is sent and the peer stays connected.
+    for _ in 0..4 {
+        harness.sync.advance_historical();
+    }
+    assert!(
+        drain_getdata_items(&rx).is_empty(),
+        "no wake-up-paced getdata/notfound loop against the only peer"
+    );
+    assert!(harness.peers.is_connected(crate::PeerEndpoint::Ip(addr)));
+
+    // Once the interval has passed the peer is asked exactly once more.
+    let aged = Instant::now()
+        .checked_sub(BODY_UNAVAILABLE_RETRY + Duration::from_secs(1))
+        .ok_or("monotonic clock is younger than the retry interval")?;
+    harness
+        .sync
+        .scheduler
+        .lock()
+        .body_unavailable
+        .note(source, blocks[0].block_hash().0, aged);
+    harness.sync.advance_historical();
+    assert_eq!(
+        drain_getdata_items(&rx)
+            .iter()
+            .filter(|item| **item == first)
+            .count(),
+        1
+    );
+    harness.sync.advance_historical();
+    assert_eq!(drain_getdata_items(&rx), Vec::<Inventory>::new());
+
+    // The record belongs to the connection: it leaves with it.
+    assert!(
+        harness
+            .sync
+            .block_not_found(source, std::slice::from_ref(&first))
+    );
+    assert!(harness.sync.scheduler.lock().body_unavailable.refuses(
+        source,
+        blocks[0].block_hash().0,
+        Instant::now()
+    ));
+    assert!(harness.peers.disconnect_source(source));
+    harness.sync.reconcile_peer_sessions();
+    assert!(!harness.sync.scheduler.lock().body_unavailable.refuses(
+        source,
+        blocks[0].block_hash().0,
+        Instant::now()
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_delivery_ends_the_notfound_record() -> TestResult {
+    let (harness, _chain, blocks) = fixture(3)?;
+    let addr = test_addr(28232, 0)?;
+    let _rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
+    let source = current_source(&harness.peers, addr);
+    let hash = blocks[0].block_hash().0;
+
+    harness.sync.advance_historical();
+    assert_eq!(historical_owner(&harness.sync, &blocks[0]), Some(source));
+    harness
+        .sync
+        .scheduler
+        .lock()
+        .body_unavailable
+        .note(source, hash, Instant::now());
+    assert!(
+        harness
+            .sync
+            .scheduler
+            .lock()
+            .body_unavailable
+            .refuses(source, hash, Instant::now())
+    );
+
+    // The peer delivers the body it was answered notfound for.
+    deliver(&harness.sync, &blocks[0], source);
+    assert!(
+        !harness
+            .sync
+            .scheduler
+            .lock()
+            .body_unavailable
+            .refuses(source, hash, Instant::now()),
+        "a delivered historical body ends the record"
+    );
+    Ok(())
+}
+
 #[test]
 fn historical_pipeline_follows_snapshot_branch_instead_of_best_header() -> TestResult {
     let (harness, chain, _) = fixture(5)?;

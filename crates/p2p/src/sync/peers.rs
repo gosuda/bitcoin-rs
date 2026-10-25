@@ -572,7 +572,12 @@ impl BlockSync {
             && frontier.chain.next_required.is_some())
         .then(|| self.chain.block_tree());
         let mut scheduler = self.scheduler.lock();
-        let SchedulerState { window, stager, .. } = &mut *scheduler;
+        let SchedulerState {
+            window,
+            stager,
+            body_unavailable,
+            ..
+        } = &mut *scheduler;
         // Purge state the old request branch left behind before the peer
         // budget is measured: `next_peer_request` is the only other place
         // a retarget runs, and a stale pending/staged set that fills the
@@ -589,9 +594,17 @@ impl BlockSync {
         {
             window.retarget_request_branch(stager, chain_tip, required.height, tree, now);
         }
+        // A connection that answered `notfound` for the required body is
+        // demoted to last resort for it, like an owner past its request
+        // timeout: the standard selection prefers a peer that can serve the
+        // body, and the request path still refuses to re-ask the demoted one
+        // before its retry interval ends. Conviction state is untouched.
+        let required_hash = frontier.chain.next_required.map(|body| body.hash);
         for candidate in &mut *candidates {
             candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.source, now)
-                || window.peer_in_staller_cooldown(candidate.peer.source, now);
+                || window.peer_in_staller_cooldown(candidate.peer.source, now)
+                || required_hash
+                    .is_some_and(|hash| body_unavailable.refuses(candidate.peer.source, hash, now));
         }
         let cold_preferred = configure_request_mode(window, candidates, now);
         (
