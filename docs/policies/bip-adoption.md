@@ -166,7 +166,13 @@ in each issue:
   index sidecars never masquerade as Core format.
 - **#1488 Lightning backends.** Class: external interop evidence. Stage:
   Research. Each Lightning backend is one row of external evidence, not a
-  bitcoin-rs feature.
+  bitcoin-rs feature. See [../lightning-interop-matrix.md](../lightning-interop-matrix.md)
+  for the maintained per-target behavior qualification matrix (covering startup,
+  chain sync, new-block/tx detection, broadcast, and restart/reorg across LDK
+  Server, Lampo, LND, CLN, Alby Hub, Fedimint, LDK Node, Lexe, lightning-kmp, and Eclair) and
+  `scripts/verify-lightning-interop.sh` for the isolated regtest test runner.
+  External verification requires unmodified upstream binaries speaking the public
+  JSON-RPC, REST, and ZMQ surfaces without wallet simulation or version spoofing.
 
 ## 7. Relationship to existing contracts
 
