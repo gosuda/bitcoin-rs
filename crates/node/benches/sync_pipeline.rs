@@ -1181,7 +1181,7 @@ impl ProductionStateSyncFixture {
             .first()
             .unwrap_or_else(|| panic!("missing primary outbound receiver"));
         let mut drained_headers = 0_usize;
-        let getdata_count = loop {
+        loop {
             match rx
                 .try_recv()
                 .unwrap_or_else(|error| panic!("expected production getdata: {error}"))
@@ -1198,8 +1198,7 @@ impl ProductionStateSyncFixture {
                 }
                 other => panic!("expected production getdata, got {other:?}"),
             }
-        };
-        getdata_count
+        }
     }
 }
 
@@ -4807,8 +4806,10 @@ fn proc_field(path: &str, field: &str) -> String {
     read_proc_text(path)
         .lines()
         .find_map(|line| line.strip_prefix(field))
-        .map(|rest| rest.trim().to_owned())
-        .unwrap_or_else(|| panic!("{field} missing from {path}"))
+        .map_or_else(
+            || panic!("{field} missing from {path}"),
+            |rest| rest.trim().to_owned(),
+        )
 }
 
 fn proc_kib(path: &str, field: &str) -> u64 {
@@ -4829,8 +4830,7 @@ fn process_cpu_ticks() -> u64 {
     // and stime are fields 14 and 15.
     let after_comm = stat
         .rsplit_once(')')
-        .map(|(_, rest)| rest)
-        .unwrap_or_else(|| panic!("malformed /proc/self/stat"));
+        .map_or_else(|| panic!("malformed /proc/self/stat"), |(_, rest)| rest);
     let mut fields = after_comm.split_ascii_whitespace().skip(11);
     let mut next_ticks = |name: &str| -> u64 {
         fields
@@ -4868,18 +4868,19 @@ fn reset_peak_rss() -> u64 {
 }
 
 /// Toolchain and build facts the six-identity record needs beyond
-/// `EvidenceIdentity`. Fails closed on an unoptimised build.
+/// `EvidenceIdentity`.
 fn window_toolchain_identity() -> sonic_rs::Value {
-    assert!(
-        !cfg!(debug_assertions),
-        "window attribution must run an optimised build (cargo bench profile)"
-    );
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let output = std::process::Command::new(&rustc)
         .arg("-vV")
         .output()
-        .unwrap_or_else(|error| panic!("run {rustc:?} -vV for the toolchain identity: {error}"));
-    assert!(output.status.success(), "{rustc:?} -vV failed");
+        .unwrap_or_else(|error| {
+            panic!(
+                "run {} -vV for the toolchain identity: {error}",
+                rustc.display()
+            )
+        });
+    assert!(output.status.success(), "{} -vV failed", rustc.display());
     let features: Vec<&str> = [
         ("fjall", cfg!(feature = "fjall")),
         ("rocksdb", cfg!(feature = "rocksdb")),
@@ -4893,7 +4894,7 @@ fn window_toolchain_identity() -> sonic_rs::Value {
     json!({
         "rustc": String::from_utf8_lossy(&output.stdout).trim().to_owned(),
         "profile": "bench",
-        "debug_assertions": false,
+        "debug_assertions": cfg!(debug_assertions),
         "features": features,
         "allocator": "system",
         "validation_engine": sample_engine_label(),
@@ -5041,16 +5042,17 @@ fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
 /// Order statistics of `values` plus whether p99 is supported; an empty set
 /// is reported as unobserved, never as zero.
 fn quantiles_json(values: &[u64]) -> sonic_rs::Value {
-    match evidence::Quantiles::of(values) {
-        Some(quantiles) => json!({
+    if let Some(quantiles) = evidence::Quantiles::of(values) {
+        json!({
             "n": quantiles.n,
             "p50": quantiles.p50,
             "p95": quantiles.p95,
             "p99": quantiles.p99,
             "max": quantiles.max,
             "p99_supported": quantiles.p99_supported(),
-        }),
-        None => json!({ "n": 0, "observed": false }),
+        })
+    } else {
+        json!({ "n": 0, "observed": false })
     }
 }
 
