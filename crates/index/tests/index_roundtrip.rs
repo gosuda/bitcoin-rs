@@ -27,8 +27,8 @@ use bitcoin_rs_index::{
     IndexWatermark, IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits,
 };
 use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScanLimit,
-    StorageError, WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScan,
+    PrefixScanLimit, StorageError, WriteCondition,
 };
 
 /// Reserved capability-reset marker slot mirrored from the index crate.
@@ -196,6 +196,17 @@ impl KvStore for CallTrackingStore {
         self.inner.iter_prefix(cf, prefix)
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        self.inner
+            .scan_prefix_from_bounded(cf, prefix, start, limit)
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         self.inner.new_batch()
     }
@@ -318,6 +329,17 @@ impl KvSnapshot for CallTrackingSnapshot<'_> {
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
         self.captured.iter_prefix(cf, prefix)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        self.captured
+            .scan_prefix_from_bounded(cf, prefix, start, limit)
     }
 }
 
@@ -1499,6 +1521,17 @@ impl KvStore for ForeignFenceStore {
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
         self.inner.iter_prefix(cf, prefix)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        self.inner
+            .scan_prefix_from_bounded(cf, prefix, start, limit)
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {

@@ -212,6 +212,24 @@ impl KvStore for RocksDbStore {
         ))
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .db
+            .iterator_cf_opt(
+                self.cf_handle(cf)?,
+                ReadOptions::default(),
+                IteratorMode::From(core::cmp::max(start, prefix), Direction::Forward),
+            )
+            .map(|item| item.map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -366,5 +384,23 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
                     Err(_) => true,
                 }),
         ))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .snapshot
+            .iterator_cf_opt(
+                self.db.cf_handle(cf)?,
+                ReadOptions::default(),
+                IteratorMode::From(core::cmp::max(start, prefix), Direction::Forward),
+            )
+            .map(|item| item.map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
     }
 }

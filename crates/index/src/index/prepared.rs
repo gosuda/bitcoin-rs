@@ -2,6 +2,8 @@
 
 use super::{capability::IndexCapabilities, capability::IndexWatermark, rows::PendingRows};
 
+pub(crate) use super::rows::IndexRowBytes;
+
 /// Hard limits for one prepared forward write.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PreparedBatchLimits {
@@ -23,6 +25,8 @@ pub struct PreparedBlock {
     pub row_count: usize,
     /// Actual encoded key/value bytes retained by the row mutations.
     pub encoded_bytes: usize,
+    /// Encoded key/value bytes retained by individual row families.
+    pub(crate) family_bytes: IndexRowBytes,
     pub(super) capabilities: IndexCapabilities,
     /// Row mutations retained from the serialized body.
     pub(super) rows: PendingRows,
@@ -44,6 +48,7 @@ pub struct PreparedBatch {
     blocks: Vec<PreparedBlock>,
     row_count: usize,
     encoded_bytes: usize,
+    family_bytes: IndexRowBytes,
     capabilities: Option<IndexCapabilities>,
 }
 
@@ -55,6 +60,7 @@ impl PreparedBatch {
             blocks: Vec::new(),
             row_count: 0,
             encoded_bytes: 0,
+            family_bytes: IndexRowBytes::ZERO,
             capabilities: None,
         }
     }
@@ -74,13 +80,18 @@ impl PreparedBatch {
         {
             return Err(block);
         }
+        let Some(new_family) = self.family_bytes.checked_add(&block.family_bytes).ok() else {
+            return Err(block);
+        };
         let new_rows = self.row_count.checked_add(block.row_count);
         let new_bytes = self.encoded_bytes.checked_add(block.encoded_bytes);
+
         let fits = new_rows.is_some_and(|rows| rows <= self.limits.max_rows)
             && new_bytes.is_some_and(|bytes| bytes <= self.limits.max_bytes);
         if !self.blocks.is_empty() && !fits {
             return Err(block);
         }
+        self.family_bytes = new_family;
         self.row_count = new_rows.unwrap_or(usize::MAX);
         self.encoded_bytes = new_bytes.unwrap_or(usize::MAX);
         self.blocks.push(block);
@@ -106,6 +117,11 @@ impl PreparedBatch {
     /// Actual encoded key/value bytes retained by row mutations.
     pub const fn encoded_bytes(&self) -> usize {
         self.encoded_bytes
+    }
+
+    /// Actual encoded key/value bytes retained by row mutations by family.
+    pub(crate) const fn family_bytes(&self) -> IndexRowBytes {
+        self.family_bytes
     }
     /// Returns whether either normal admission limit has been reached.
     ///

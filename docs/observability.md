@@ -29,51 +29,126 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`,
+`node.sync.no_progress_ticks{reason}` in `crates/p2p/src/sync.rs`,
 and `node.rpc.connection_rejections_total{surface,reason}` where `surface` in
-`{json_rpc, rest, esplora_public, esplora_backend}` and `reason` in
+`{json_rpc, esplora_public}` and `reason` in
 `{pool_full, per_source_limit}` for the pattern), the closed surface labels of
-`node.rpc.connections{surface}` and `node.rpc.request_seconds{surface}`, and
-the enum capability states of `node.capability.txindex_readiness`.
+`node.rpc.connections{surface}` (`surface` in `{json_rpc, esplora_public}`) and
+`node.rpc.request_seconds{surface}` (`surface` in
+`{json_rpc, rest, esplora_public, esplora_backend}`),
+the enum capability states of `node.capability.txindex_readiness`, and
+the closed family labels of `index.family_planned_write_bytes{family}` where
+`family` in `{tx_lookup, script_history, script_live, headers, filters}`.
 No speculative instrumentation: a signal earns its place by an operator
 decision (alert, dashboard, SLO) or a named contract hook (below).
 Benchmark evidence identity (binary/configuration/corpus digests and hardware)
 is recorded with benchmark samples under HPA-12; it is not attached to every
 Prometheus series as global labels.
 
-For staged block bodies, `node.sync.received_bytes` and
-`node.sync.staged_bytes_high_water` stay the serialized wire fact that the
-staging byte budget and request headroom read. Four further signals attribute
-retained residency without changing any admission rule:
+The call-site audit table below is a snapshot of its audited base. It has no
+row for `index.family_planned_write_bytes`, `node.package_charge_overrun`, or
+the four staged-body gauges in the second table below. This clause describes
+each of them.
 
-| Signal | Meaning |
+`index.family_planned_write_bytes{family}` is a histogram in bytes with one
+label, `family`, in `{tx_lookup, script_history, script_live, headers,
+filters}`. The families are the transaction-id lookup rows, the script funding
+and spending rows, the live-view mutations, the block header identity rows, and
+the basic compact-filter rows. A forward batch commit records one observation
+for each family whose planned bytes are non-zero, after the store commit
+succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
+`commit_forward` and `commit_block` use it). A failed commit records nothing,
+and no other commit path records this metric. The value is the sum, over the
+blocks of the batch, of the bytes each block planned for that family under the
+rule in the next table (`PendingRows::encoded_bytes_by_family` in
+`crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,
+before the commit merges, sorts, and de-duplicates the batch rows. The value is
+row-size arithmetic over the prepared rows. It does not read the store, so it
+does not include write-ahead-log, storage-engine, or device write volume, and
+it is not a count of bytes written.
+
+| `family` | Planned bytes per block |
 | --- | --- |
-| `node.sync.staged_decoded_bytes` | Sum over staged blocks of `Block::retained_heap_bytes()`: the capacity of each block's transaction, input, output, script, and witness allocations. |
-| `node.sync.staged_retained_bytes` | `staged_decoded_bytes` plus the preserved serialized buffers (`received_bytes`). |
-| `node.sync.staged_retained_bytes_high_water` | Highest `staged_retained_bytes` observed this run. |
-| `node.sync.inbound_block_queue_depth` | Length of the bounded inbound channel (`inbound_block_queue_limit`) when the drain pass emitted. A count of unstaged bodies, not bytes. |
+| `tx_lookup` | Distinct transaction-id rows times `HASH_PREFIX_ROW_SIZE` (12), plus every transaction-id position times `TX_POSITION_SIZE` (6). |
+| `script_history` | The same rule over the funding rows and the spending rows together. |
+| `script_live` | `SCRIPT_LIVE_ROW_SIZE` (43, the width of the row key) times the number of live-view operations. Inserts and deletes each count once. |
+| `headers` | `HEADER_ROW_SIZE` (80) times the number of header rows. |
+| `filters` | For each filter row, 98 plus the filter length. |
 
-The three byte signals are attribution, not measurement of the process. They
-exclude allocator rounding, the inline `Block` value, and the stager's map and
-queue bookkeeping, so they are not an RSS or `VmHWM` figure and need not equal
-one. They cover only bodies the stager owns: a body drained for apply, or
-pulled from the channel into a stage batch, is unattributed until it is
-staged or restored, so `staged_retained_bytes = 0` in the middle of an apply
-does not mean no block memory is held. A block is measured once, when the
-stager takes ownership of its allocation (arrival, or restore after a partial
-apply, which re-measures the restored allocation because the restored copy
-need not have the drained original's capacities), and released at the
-transition that releases its serialized bytes: drain, branch retirement,
-count-budget eviction, discard, expiry, or replacement. The retained high-water
-mark advances on arrival and on restore; an arrival's mark is taken before the
-count-budget eviction it causes. `node.sync.staged_blocks_high_water` and
-`node.sync.staged_bytes_high_water` keep their earlier arrival-only behavior.
-Nothing admits, evicts, or retries on these signals. They are backlog/capacity
-gauges (OBS-01) published with the other staged gauges from one scheduler-lock
-hold by the sync drain pass that saw arrivals, expiry, applies, or failures.
-That pass runs after it has emptied the receiver, so
-`inbound_block_queue_depth` is a post-drain residual, normally near zero, not
-a peak, and it is not refreshed on passes that emit nothing.
+`node.package_charge_overrun` is a counter in bytes with no label. The
+transaction ingress consumer (`crates/node/src/tx_ingress.rs`) adds the excess
+for each opened peer `pkgtxns` package whose measured decoded heap is larger
+than its plan. The plan (`PackagePlan::decoded_bytes`) is a lower bound of the
+heap the decoded members own. The measure (`package_heap_usage` in
+`crates/mempool/src/pool.rs`) sums each member's heap usage and the spare outer
+slots of the member vector, and never counts the wire frame. The package
+charge is topped up by the excess before the counter moves. The counter does
+not move for a package whose measure does not exceed its plan. If the capacity
+budget refuses the top-up, the package is refused with `PackageRefusal::Budget`
+and the counter does not move (`InboundPackage::open` in
+`crates/p2p/src/tx_policy/ingress.rs`).
+
+For staged block bodies, `node.sync.received_bytes` is the serialized byte
+total that the staging byte budget and request headroom read, and
+`node.sync.staged_bytes_high_water` is its high-water mark. Four further
+gauges attribute retained residency. No admission, eviction, or retry decision
+reads them.
+
+| Signal | Unit | Meaning |
+| --- | --- | --- |
+| `node.sync.staged_decoded_bytes` | bytes | Sum over staged blocks of `Block::retained_heap_bytes()`. |
+| `node.sync.staged_retained_bytes` | bytes | `staged_decoded_bytes` plus the serialized length of each staged body's preserved wire payload, the total that `node.sync.received_bytes` reports. |
+| `node.sync.staged_retained_bytes_high_water` | bytes | Highest `staged_retained_bytes` observed this run. |
+| `node.sync.inbound_block_queue_depth` | blocks | Length of the inbound block channel (bounded by `P2pServiceConfig::inbound_block_queue_limit`) when the drain pass emitted. A count of queued bodies, not bytes. |
+
+`Block::retained_heap_bytes()` (`crates/primitives/src/block.rs`) sums
+allocation capacities, spare capacity included. It adds the `txs` capacity
+times `size_of::<Tx>()`. For each transaction it adds the `inputs` capacity
+times `size_of::<TxIn>()`, the `outputs` capacity times `size_of::<TxOut>()`,
+every `script_sig` and `script_pubkey` buffer capacity, and every witness stack
+(its outer capacity times `size_of::<Vec<u8>>()` plus the capacity of each
+item). The staged byte gauges add only these capacities and the serialized
+lengths, so they count nothing for the inline `Block` value, allocator
+size-class rounding or metadata, or the stager's map and queue storage. They
+are attribution, not an RSS or `VmHWM` figure, and need not equal one. The
+three byte gauges in the table are not clamped at `u32::MAX`.
+`node.sync.received_bytes` and `node.sync.staged_bytes_high_water` saturate at
+`u32::MAX`.
+
+The totals cover the bodies the foreground stager holds. A body is outside
+them while it waits in the inbound channel (only
+`node.sync.inbound_block_queue_depth` counts it), while the drain pass holds it
+in a stage chunk before insertion, and from its drain for apply until a partial
+apply restores it. The gauges are not refreshed during a pass, so a published
+value never shows the mid-apply interval, and a published zero does not mean
+that no block memory is held. The separate stager of the historical download
+(`crates/p2p/src/sync/historical.rs`) is not published by these gauges.
+
+The stager measures a block's decoded bytes once, when it takes ownership of
+the block's allocation: at arrival (`insert`), or at restore after a partial
+apply (`restore_many`). A restore measures again, because the restored copy
+need not have the capacities of the drained original. The stager releases the
+measurement in the transition that releases the body's serialized bytes: drain
+for apply, branch retirement (`retire_applied`), count-budget eviction,
+`discard`, expiry (`prune_expired`), or replacement of a staged hash by a
+restore. The retained high-water mark advances on arrival and on restore. An
+arrival's mark is taken after the new body is counted and before the
+count-budget eviction that arrival causes, so it can include both the new body
+and the body about to be evicted. `node.sync.staged_blocks_high_water` and
+`node.sync.staged_bytes_high_water` advance on arrival only, also before that
+eviction.
+
+The four gauges in the second table belong to the backlog/capacity class defined
+in the call-site audit. The sync drain pass (`drain_inbound_blocks`) publishes
+them with the other staged gauges from one scheduler-lock hold
+(`record_sync_metrics` in `crates/p2p/src/sync/telemetry.rs`). It publishes only
+when the pass received bodies, pruned expired bodies, applied blocks, or failed
+an apply. The pass
+empties the inbound channel first and applies buffered blocks before it
+publishes, so `node.sync.inbound_block_queue_depth` is the length of the
+channel at that point: a residual, not a peak. Each gauge holds its last
+published value until the next pass that publishes.
 
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 
@@ -354,6 +429,25 @@ fields stay in tracing, where they can change with the implementation.
   vout index exceeding `u32`, which is not a practical valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
+- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
+  `record_family_byte_histograms` against a local recorder. It checks the five
+  `family` label values with their byte values, and that a family with zero
+  planned bytes records nothing. It does not drive a commit.
+- The stager attribution tests in `crates/p2p/src/block_stager.rs` check the
+  decoded, serialized, and retained totals and the retained high-water mark
+  through insert, drain, restore, replacement, expiry, count-budget eviction,
+  discard, and branch retirement:
+  `decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_bytes`,
+  `restore_refilling_past_the_earlier_peak_advances_only_the_retained_high_water_mark`,
+  `restore_replacing_a_staged_entry_swaps_its_attribution`,
+  `prune_expired_releases_decoded_and_serialized_attribution`,
+  `eviction_discard_and_retire_release_attribution`, and
+  `duplicate_and_refused_inserts_leave_attribution_untouched`. The eviction test
+  also checks that an arrival's retained mark includes the body evicted by that
+  arrival.
+- `metric_bytes_is_exact_across_the_u32_boundary`
+  (`crates/p2p/src/sync/telemetry.rs`) checks the unclamped conversion of the
+  retained-byte gauges.
 - Review enforcement: a new `metrics::` call site must cite an OBS clause in
   the PR. A series not in the ledger and not an operator signal is a
   review-failing diagnostic leak into the metrics API.

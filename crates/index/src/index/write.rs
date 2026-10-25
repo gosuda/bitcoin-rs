@@ -5,11 +5,11 @@ use super::{
     capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
     capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
-    prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::PendingRows,
-    rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate,
-    state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE, state::IndexWriteFence,
-    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
-    state::resume_capability_reset,
+    prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
+    rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
+    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
+    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
+    state::ensure_fence_live, state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
@@ -317,13 +317,15 @@ impl<S: KvStore> IndexWriter<S> {
         parent_hash.copy_from_slice(&header[4..36]);
         rows.sort();
         let row_count = rows.total();
-        let encoded_bytes = rows.encoded_bytes()?;
+        let family_bytes = rows.encoded_bytes_by_family()?;
+        let encoded_bytes = family_bytes.total()?;
         Ok(PreparedBlock {
             height,
             hash,
             parent_hash,
             row_count,
             encoded_bytes,
+            family_bytes,
             capabilities,
             rows,
         })
@@ -413,6 +415,7 @@ impl<S: KvStore> IndexWriter<S> {
         } else {
             [0; 32]
         };
+        let batch_family_bytes = batch.family_bytes();
         let mut merged = PendingRows::default();
         let mut last = None;
         let block_count = batch.len();
@@ -467,6 +470,7 @@ impl<S: KvStore> IndexWriter<S> {
             &fence,
             store_batch,
         )?;
+        record_family_byte_histograms(&batch_family_bytes);
         Ok(final_watermark)
     }
 
@@ -650,4 +654,50 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
         }
     }
     Ok(false)
+}
+
+/// Metric name for per-family planned write bytes histogram.
+///
+/// Records logical pre-coalescing planned bytes for row families present in a
+/// prepared batch. Excludes engine-internal overhead, write-ahead logs, and
+/// device-level physical storage writes.
+pub(crate) const FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM: &str = "index.family_planned_write_bytes";
+/// Label key distinguishing row families in [`FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM`].
+pub(crate) const FAMILY_LABEL: &str = "family";
+
+pub(crate) const FAMILY_TX_LOOKUP: &str = "tx_lookup";
+pub(crate) const FAMILY_SCRIPT_HISTORY: &str = "script_history";
+pub(crate) const FAMILY_SCRIPT_LIVE: &str = "script_live";
+pub(crate) const FAMILY_HEADERS: &str = "headers";
+pub(crate) const FAMILY_FILTERS: &str = "filters";
+
+fn metric_f64_from_usize(val: usize) -> f64 {
+    bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).unwrap_or(u64::MAX))
+}
+
+/// Emits one histogram observation per index family present with non-zero planned bytes in a committed batch.
+///
+/// Observations reflect the sum of prepared rows before multi-block coalescing (logical planned bytes),
+/// and do not measure actual emitted batch writes or physical storage I/O.
+pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
+    if family_bytes.tx_lookup > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_TX_LOOKUP)
+            .record(metric_f64_from_usize(family_bytes.tx_lookup));
+    }
+    if family_bytes.script_history > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_HISTORY)
+            .record(metric_f64_from_usize(family_bytes.script_history));
+    }
+    if family_bytes.script_live > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_LIVE)
+            .record(metric_f64_from_usize(family_bytes.script_live));
+    }
+    if family_bytes.headers > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_HEADERS)
+            .record(metric_f64_from_usize(family_bytes.headers));
+    }
+    if family_bytes.filters > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_FILTERS)
+            .record(metric_f64_from_usize(family_bytes.filters));
+    }
 }

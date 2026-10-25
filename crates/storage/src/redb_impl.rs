@@ -1,6 +1,7 @@
 #[cfg(any(test, feature = "test-seam"))]
 use crate::batch::prefix_ops;
 use crate::batch::{BatchOp, BufferedWriteBatch};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use redb::{
@@ -13,6 +14,7 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
 type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u8]>;
+type FixedWindow<const N: usize> = (Bound<[u8; N]>, [u8; N]);
 /// `ScriptLive` key width: `prefix(8) || txid(32) || vout_le_u24(3)`.
 const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
@@ -271,7 +273,7 @@ impl KvStore for RedbStore {
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        let rows = scan_prefix(&read_txn, table_for(cf), prefix, UNBOUNDED)?.rows;
+        let rows = scan_prefix(&read_txn, table_for(cf), prefix, &[], UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -282,7 +284,18 @@ impl KvStore for RedbStore {
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        scan_prefix(&read_txn, table_for(cf), prefix, limit)
+        scan_prefix(&read_txn, table_for(cf), prefix, &[], limit)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        scan_prefix(&read_txn, table_for(cf), prefix, start, limit)
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -497,7 +510,7 @@ impl KvStore for RedbTxIndexStore {
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        let rows = scan_txindex_prefix(&read_txn, cf, prefix, UNBOUNDED)?.rows;
+        let rows = scan_txindex_prefix(&read_txn, cf, prefix, &[], UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -508,7 +521,18 @@ impl KvStore for RedbTxIndexStore {
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        scan_txindex_prefix(&read_txn, cf, prefix, limit)
+        scan_txindex_prefix(&read_txn, cf, prefix, &[], limit)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        scan_txindex_prefix(&read_txn, cf, prefix, start, limit)
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -712,7 +736,7 @@ impl KvSnapshot for RedbSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let rows = scan_prefix(&self.read_txn, table_for(cf), prefix, UNBOUNDED)?.rows;
+        let rows = scan_prefix(&self.read_txn, table_for(cf), prefix, &[], UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -722,7 +746,17 @@ impl KvSnapshot for RedbSnapshot {
         prefix: &[u8],
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
-        scan_prefix(&self.read_txn, table_for(cf), prefix, limit)
+        scan_prefix(&self.read_txn, table_for(cf), prefix, &[], limit)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        scan_prefix(&self.read_txn, table_for(cf), prefix, start, limit)
     }
 }
 
@@ -760,7 +794,7 @@ impl KvSnapshot for RedbTxIndexSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let rows = scan_txindex_prefix(&self.read_txn, cf, prefix, UNBOUNDED)?.rows;
+        let rows = scan_txindex_prefix(&self.read_txn, cf, prefix, &[], UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -770,14 +804,27 @@ impl KvSnapshot for RedbTxIndexSnapshot {
         prefix: &[u8],
         limit: crate::PrefixScanLimit,
     ) -> Result<crate::PrefixScan, StorageError> {
-        scan_txindex_prefix(&self.read_txn, cf, prefix, limit)
+        scan_txindex_prefix(&self.read_txn, cf, prefix, &[], limit)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        scan_txindex_prefix(&self.read_txn, cf, prefix, start, limit)
     }
 }
 
+/// Scans rows under `prefix` from the inclusive seek point `start`, clamped to
+/// the prefix. An empty `start` begins at the prefix itself.
 fn scan_prefix(
     read_txn: &redb::ReadTransaction,
     table_def: ByteTable,
     prefix: &[u8],
+    start: &[u8],
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
     let table = read_txn
@@ -785,10 +832,17 @@ fn scan_prefix(
         .map_err(StorageError::backend)?;
     let mut rows = Vec::new();
     let mut bytes = 0;
+    let lower = core::cmp::max(start, prefix);
     match prefix_end(prefix) {
         Some(end) => {
+            if lower >= end.as_slice() {
+                return Ok(crate::PrefixScan {
+                    rows,
+                    complete: true,
+                });
+            }
             for item in table
-                .range(prefix..end.as_slice())
+                .range(lower..end.as_slice())
                 .map_err(StorageError::backend)?
             {
                 let (key, value) = item.map_err(StorageError::backend)?;
@@ -807,7 +861,7 @@ fn scan_prefix(
             }
         }
         None => {
-            for item in table.range(prefix..).map_err(StorageError::backend)? {
+            for item in table.range(lower..).map_err(StorageError::backend)? {
                 let (key, value) = item.map_err(StorageError::backend)?;
                 if !key.value().starts_with(prefix) {
                     break;
@@ -932,6 +986,38 @@ fn fixed_prefix_bounds<const N: usize>(prefix: &[u8]) -> Result<([u8; N], [u8; N
     Ok((start, end))
 }
 
+/// Key range of the fixed-width keys that begin with `prefix` and sort at or
+/// after the seek point `start`, as a lower bound and an inclusive upper key.
+///
+/// `None` means no key of the prefix can sort at or after `start`. An empty
+/// `start`, or one before the prefix, begins at the prefix itself.
+fn fixed_prefix_window<const N: usize>(
+    prefix: &[u8],
+    start: &[u8],
+) -> Result<Option<FixedWindow<N>>, StorageError> {
+    let (first, last) = fixed_prefix_bounds::<N>(prefix)?;
+    if start <= prefix {
+        return Ok(Some((Bound::Included(first), last)));
+    }
+    if !start.starts_with(prefix) {
+        return Ok(None);
+    }
+    let mut seek = [0u8; N];
+    let lower = if start.len() <= N {
+        seek[..start.len()].copy_from_slice(start);
+        Bound::Included(seek)
+    } else {
+        // A key equal to `start[..N]` is a proper prefix of `start` and sorts
+        // before it, so the seek excludes that key.
+        seek.copy_from_slice(&start[..N]);
+        if seek == last {
+            return Ok(None);
+        }
+        Bound::Excluded(seek)
+    };
+    Ok(Some((lower, last)))
+}
+
 fn fixed_get<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
@@ -988,16 +1074,22 @@ fn fixed_prefix_scan<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
     prefix: &[u8],
+    start: &[u8],
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<N>(prefix)?;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    let Some((lower, end)) = fixed_prefix_window::<N>(prefix, start)? else {
+        return Ok(crate::PrefixScan {
+            rows,
+            complete: true,
+        });
+    };
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
-    let mut bytes = 0;
     for item in table
-        .range::<&[u8; N]>(&start..=&end)
+        .range::<&[u8; N]>((lower.as_ref(), Bound::Included(&end)))
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
@@ -1019,19 +1111,25 @@ fn fixed_value_prefix_scan(
     main_def: FixedTable<12>,
     value_def: TxIndexValueTable,
     prefix: &[u8],
+    start: &[u8],
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<12>(prefix)?;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    let Some((lower, end)) = fixed_prefix_window::<12>(prefix, start)? else {
+        return Ok(crate::PrefixScan {
+            rows,
+            complete: true,
+        });
+    };
     let main = read_txn
         .open_table(main_def)
         .map_err(StorageError::backend)?;
     let values = read_txn
         .open_table(value_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
-    let mut bytes = 0;
     for item in main
-        .range::<&[u8; 12]>(&start..=&end)
+        .range::<&[u8; 12]>((lower.as_ref(), Bound::Included(&end)))
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
@@ -1057,6 +1155,7 @@ fn scan_txindex_prefix(
     read_txn: &ReadTransaction,
     cf: ColumnFamily,
     prefix: &[u8],
+    start: &[u8],
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
     match cf {
@@ -1065,6 +1164,7 @@ fn scan_txindex_prefix(
             TXINDEX_TX_CONFIRMED,
             TXINDEX_TX_CONFIRMED_VALUES,
             prefix,
+            start,
             limit,
         ),
         ColumnFamily::Funding => fixed_value_prefix_scan(
@@ -1072,6 +1172,7 @@ fn scan_txindex_prefix(
             TXINDEX_FUNDING,
             TXINDEX_FUNDING_VALUES,
             prefix,
+            start,
             limit,
         ),
         ColumnFamily::Spending => fixed_value_prefix_scan(
@@ -1079,15 +1180,20 @@ fn scan_txindex_prefix(
             TXINDEX_SPENDING,
             TXINDEX_SPENDING_VALUES,
             prefix,
+            start,
             limit,
         ),
         ColumnFamily::BlockHeaders => {
-            fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
+            fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, start, limit)
         }
-        ColumnFamily::ScriptLive => {
-            fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, limit)
-        }
-        ColumnFamily::UtxoMeta => scan_prefix(read_txn, TXINDEX_META, prefix, limit),
+        ColumnFamily::ScriptLive => fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(
+            read_txn,
+            TXINDEX_SCRIPT_LIVE,
+            prefix,
+            start,
+            limit,
+        ),
+        ColumnFamily::UtxoMeta => scan_prefix(read_txn, TXINDEX_META, prefix, start, limit),
         _ => Err(invalid_txindex_cf()),
     }
 }

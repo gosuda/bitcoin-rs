@@ -238,6 +238,20 @@ impl KvStore for FjallStore {
         Ok(Box::new(iterator))
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .keyspace(cf)?
+            .range::<&[u8], _>(core::cmp::max(start, prefix)..)
+            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -344,5 +358,19 @@ impl KvSnapshot for FjallSnapshot<'_> {
                     .map_err(StorageError::backend)
             });
         Ok(Box::new(iterator))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .snapshot
+            .range::<&[u8], _>(self.store.keyspace(cf)?, core::cmp::max(start, prefix)..)
+            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
     }
 }

@@ -250,6 +250,10 @@ fn describe_node_metrics() {
         TXINDEX_READINESS_GAUGE,
         "txindex capability readiness from the live getcapabilities source; 1 for the active state label, 0 for the others"
     );
+    metrics::describe_histogram!(
+        "index.family_planned_write_bytes",
+        "pre-coalescing planned logical write bytes by index row family"
+    );
     metrics::describe_gauge!(
         "node.rpc.connections",
         "concurrent RPC connections by surface"

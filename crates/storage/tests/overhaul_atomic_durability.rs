@@ -20,7 +20,7 @@
 
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PersistFault,
-    StorageError, WriteCondition,
+    PrefixScan, PrefixScanLimit, StorageError, WriteCondition,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -664,6 +664,38 @@ fn apply_one_family_ops(rows: &mut OneFamilyShared, ops: Vec<BatchOp>) {
     }
 }
 
+/// Ordered continuation scan over one family: seeks the map to the clamped
+/// start key and stops at the prefix end or the first row `limit` refuses.
+fn scan_one_family_from(
+    rows: &OneFamilyRows,
+    cf: ColumnFamily,
+    prefix: &[u8],
+    start: &[u8],
+    limit: PrefixScanLimit,
+) -> PrefixScan {
+    let family = family_index(cf);
+    let mut taken = Vec::new();
+    let mut bytes = 0usize;
+    for ((row_cf, key), value) in rows.range((family, std::cmp::max(start, prefix).to_vec())..) {
+        if *row_cf != family || !key.starts_with(prefix) {
+            break;
+        }
+        let next_bytes = bytes.saturating_add(key.len()).saturating_add(value.len());
+        if taken.len() >= limit.max_rows || (!taken.is_empty() && next_bytes > limit.max_bytes) {
+            return PrefixScan {
+                rows: taken,
+                complete: false,
+            };
+        }
+        bytes = next_bytes;
+        taken.push((key.clone(), value.clone()));
+    }
+    PrefixScan {
+        rows: taken,
+        complete: true,
+    }
+}
+
 impl KvStore for OneFamilyStore {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self
@@ -692,6 +724,22 @@ impl KvStore for OneFamilyStore {
             .map(|((_, key), value)| (key.clone(), value.clone()))
             .collect();
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        Ok(scan_one_family_from(
+            &self.rows.lock().rows,
+            cf,
+            prefix,
+            start,
+            limit,
+        ))
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -744,6 +792,16 @@ struct OneFamilySnapshot {
 impl KvSnapshot for OneFamilySnapshot {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.rows.get(&(family_index(cf), key.to_vec())).cloned())
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        Ok(scan_one_family_from(&self.rows, cf, prefix, start, limit))
     }
 
     #[expect(

@@ -199,6 +199,29 @@ pub trait KvStore: Send + Sync + 'static {
         collect_bounded(self.iter_prefix(cf, prefix)?, limit)
     }
 
+    /// Collects matching rows from the inclusive full-key seek point `start`.
+    ///
+    /// PRE: none. A caller resuming after returned row `k` passes `k` followed
+    /// by one zero byte, the least key above `k`.
+    /// POST: rows are in key order, begin at the first key `>= max(start,
+    /// prefix)`, and end where keys stop beginning with `prefix`. A `start`
+    /// before the prefix begins at its first row; a `start` beyond every key
+    /// of the prefix yields an empty, complete scan. `complete` is true only
+    /// when the scan reached the end of the prefix with no row withheld by
+    /// `limit`; a row that does not fit `limit` makes it false.
+    ///
+    /// Implementations seek the engine to the start key and read at most one
+    /// row past the limit. They never collect the prefix and discard its head,
+    /// and a store that cannot serve the scan returns an error rather than an
+    /// empty or falsely complete one.
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError>;
+
     /// Returns an empty buffered batch for this or any other store.
     ///
     /// PRE: none. POST: the batch records operations but touches no engine
@@ -329,6 +352,16 @@ pub trait KvSnapshot: Send + Sync {
     ) -> Result<PrefixScan, StorageError> {
         collect_bounded(self.iter_prefix(cf, prefix)?, limit)
     }
+
+    /// Collects matching snapshot rows from the inclusive full-key seek point
+    /// `start`, with the contract of [`KvStore::scan_prefix_from_bounded`].
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError>;
 }
 
 pub(crate) fn push_bounded_row(
@@ -353,19 +386,41 @@ pub(crate) fn push_bounded_row(
 }
 
 fn collect_bounded(iter: KvIter<'_>, limit: PrefixScanLimit) -> Result<PrefixScan, StorageError> {
-    let mut rows = Vec::new();
+    collect_bounded_prefix(iter, &[], limit)
+}
+
+/// Collects ordered pairs under `limit`, ending at the first key outside
+/// `prefix`.
+///
+/// Rows are copied only once accepted, so the first row `limit` refuses and
+/// the first key past the prefix are read but never copied. `complete` is true
+/// only when the stream ended or left the prefix without a refused row.
+pub(crate) fn collect_bounded_prefix<K, V>(
+    rows: impl Iterator<Item = Result<(K, V), StorageError>>,
+    prefix: &[u8],
+    limit: PrefixScanLimit,
+) -> Result<PrefixScan, StorageError>
+where
+    K: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
+    let mut out = Vec::new();
     let mut bytes = 0;
-    for item in iter {
+    for item in rows {
         let (key, value) = item?;
-        if !push_bounded_row(&mut rows, &mut bytes, &key, &value, limit) {
+        let key = key.as_ref();
+        if !key.starts_with(prefix) {
+            break;
+        }
+        if !push_bounded_row(&mut out, &mut bytes, key, value.as_ref(), limit) {
             return Ok(PrefixScan {
-                rows,
+                rows: out,
                 complete: false,
             });
         }
     }
     Ok(PrefixScan {
-        rows,
+        rows: out,
         complete: true,
     })
 }

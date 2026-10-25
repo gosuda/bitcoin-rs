@@ -12,6 +12,8 @@ dependency boundaries.
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
 - Workspace dependency gate in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`
+- `KvStore`, `KvSnapshot`, `PrefixScanLimit`, and `PrefixScan` in
+  `crates/storage/src/trait_.rs` (bounded prefix scans, `ARCH-02`)
 
 ## Layer model
 
@@ -86,6 +88,89 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   and storage abstractions exported by `bitcoin-rs-storage`.
 - Storage owns generic journal/checkpoint formats, filesystem operations and
   durability primitives. Its bounded `HistoryAccess` supplies optional consumers.
+- Bounded prefix scans: `scan_prefix_bounded` and `scan_prefix_from_bounded` on
+  `KvStore` and on `KvSnapshot` return a bounded part of one column family's
+  rows under a prefix.
+  - **Limit**: `PrefixScanLimit { max_rows: usize, max_bytes: usize }` bounds
+    one scan. `max_rows` caps the returned rows; zero returns no rows.
+    `max_bytes` caps the running total of returned key-plus-value bytes. The
+    first row is exempt from the cap: it is returned even when it alone exceeds
+    `max_bytes`, and its bytes count in the total. A later row is returned only
+    when the total including that row stays at or below `max_bytes`. With
+    `max_bytes` 10 and rows of 6 and 5 bytes, the first row is returned and the
+    second is refused. A row whose byte count overflows `usize` is refused.
+  - **Result**: `PrefixScan { rows: Vec<(Vec<u8>, Vec<u8>)>, complete: bool }`
+    holds the rows in key order.
+    `complete` is true only when the scan reached the end of the prefix with
+    no row refused by the limit. An implementation MUST NOT report
+    `complete = true` after it refused a row, so an incomplete result is never
+    presented as complete. A limit that exactly fits the matching rows is
+    complete. A zero-row limit is complete only when no row matches. A store
+    that cannot serve a scan MUST return an error, never an empty or falsely
+    complete scan.
+  - **Seek point**: `scan_prefix_from_bounded(cf, prefix, start, limit)` takes
+    an inclusive full-key `start`. Rows begin at the first key at or above the
+    greater of `start` and `prefix` in byte order and end where keys stop
+    beginning with `prefix`. A `start` before the prefix, including the empty
+    slice, begins at the first row of the prefix. A `start` past every key of
+    the prefix, including one that sorts after the prefix without beginning
+    with it, yields an empty, complete scan. A caller that resumes after
+    returned row `k` passes `k` followed by one zero byte, the least key above
+    `k`.
+  - **Required and defaulted methods**: `iter_prefix` and
+    `scan_prefix_from_bounded` are required on both traits. Neither has a
+    default body, so every `KvStore` and `KvSnapshot` implementation MUST
+    provide both. `scan_prefix_bounded` has a default body on both traits that
+    collects from `iter_prefix` under the same limit. Implementations MAY
+    override it. The four redb types (`RedbStore`,
+    `RedbSnapshot`, `RedbTxIndexStore`, `RedbTxIndexSnapshot`) override it and
+    apply the limit inside the scan; their `iter_prefix` materializes every
+    matching row. The fjall and RocksDB stores and snapshots use the default.
+  - **Backends**: fjall (`range`), RocksDB (`IteratorMode::From`), and redb
+    (`Table::range`) seek natively to the greater of `start` and `prefix`.
+    None collects the prefix and discards its head. A scan stops at the first
+    row the limit refuses, so it reads at most one row past the limit and
+    drops it.
+  - **Fixed-width txindex store**: `RedbTxIndexStore` and
+    `RedbTxIndexSnapshot` serve `TxConfirmed`, `Funding`, `Spending`,
+    `BlockHeaders`, `ScriptLive`, and `UtxoMeta`. For any other column family,
+    and for a prefix wider than a fixed-width family's key, they return
+    `StorageError::InvalidOperation` instead of an empty scan.
+  - **Snapshot reads**: a `KvSnapshot` scan reads the view captured by
+    `KvStore::snapshot`; rows committed after the snapshot are not visible to
+    it. Pages read through one snapshot read one view.
+  - **Bound**: a scan returns at most `max_rows` rows and at most the greater
+    of `max_bytes` and the first row's key-plus-value size in bytes. A single
+    oversized first row is returned whole. The limit applies to the returned
+    rows. It does not bound engine-internal reads or caches, or a transient
+    copy of the row it refuses: the fixed-width txindex value scan copies a
+    row's value before the limit can refuse that row.
+  - **Consumers**: `bitcoin-rs-index` calls `KvSnapshot::scan_prefix_bounded`
+    for its txid, scripthash, spending-outpoint, and live-output lookups
+    (`StoreTxIndexSnapshot::scan` and `live_rows`,
+    `crates/index/src/index/snapshot.rs`). `QueryBudget::next_scan_limit`
+    (`crates/index/src/runtime/query.rs`) derives each `PrefixScanLimit` from
+    the query's remaining row and byte budget. `accept_scan` and
+    `accept_live_scan` turn `complete = false` into
+    `TxUnavailableCause::PrefixScanTruncated` or `LivePrefixScanTruncated`
+    instead of returning a partial answer. The index capability reset
+    (`crates/index/src/index/state.rs`) calls `KvStore::scan_prefix_bounded`
+    under `RESET_SCAN_LIMIT` and deletes one page at a time. No production
+    code calls `scan_prefix_from_bounded`; storage tests do.
+  - Proof: `crates/storage/tests/bounded_prefix_scan.rs` tests
+    `fjall_bounded_prefix_scan`, `rocksdb_bounded_prefix_scan`, and
+    `redb_bounded_prefix_scan` (feature-gated; limit semantics, prefix
+    boundaries, seek positions, pages resumed without gaps, snapshot isolation,
+    oversized first row); `crates/storage/tests/redb_txindex.rs` tests
+    `txindex_fixed_prefix_boundaries_12`, `txindex_fixed_prefix_boundaries_80`,
+    `txindex_bounded_scan_empty_values`,
+    `txindex_continuation_seeks_every_fixed_width_family`,
+    `txindex_continuation_snapshot_is_point_in_time`, and
+    `txindex_unsupported_column_families_rejected`. These tests assert returned
+    rows, `complete`, and errors. The statement that a scan reads at most one
+    row past the limit rests on the code: `collect_bounded_prefix` and the
+    redb scan loops return at the first refused row. The `usize`-overflow
+    refusal rests on `push_bounded_row` (`checked_add`); no test covers it.
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
@@ -621,6 +706,9 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
     including the P2P `SyncChain` adapter's, go through `BlockTreeReader`.
     The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
     production reader cannot reach the set `utxo::contract` mutates.
+- `crates/storage/tests/bounded_prefix_scan.rs` and
+  `crates/storage/tests/redb_txindex.rs`: bounded prefix scan limits, seek
+  points, completeness, and snapshot isolation (`ARCH-02`).
 - `crates/chainstate/tests/unit/apply/admission_tests.rs` and
   `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
   shutdown and coherent chain transaction-count publication. Checkpoint and
