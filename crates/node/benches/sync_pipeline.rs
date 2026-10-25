@@ -284,16 +284,8 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
         id: cell.to_owned(),
         manifest_sha256: Sha256Hex::digest(&corpus_bytes),
     });
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmarks/sync_pipeline.toml");
-    let mut ledger = match std::fs::read_to_string(&path) {
-        Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
-        Err(_) => Ledger {
-            schema: LEDGER_SCHEMA.into(),
-            cells: Vec::new(),
-            contract: std::collections::BTreeMap::new(),
-        },
-    };
+    let path = bench_ledger_path("sync_pipeline.toml");
+    let mut ledger = load_bench_ledger(&path);
     if !ledger.cells.iter().any(|candidate| candidate.id == cell) {
         ledger.cells.push(Cell {
             id: cell.to_owned(),
@@ -321,12 +313,36 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
             .record(cell, sample)
             .unwrap_or_else(|error| panic!("record bench sample: {error}"));
     }
+    store_bench_ledger(&path, &ledger);
+}
+
+/// Path of one bench evidence file under the workspace `target/benchmarks/`.
+fn bench_ledger_path(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/benchmarks")
+        .join(name)
+}
+
+/// Loads an append-only bench ledger; a missing file is an empty ledger.
+fn load_bench_ledger(path: &Path) -> Ledger {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
+        Err(_) => Ledger {
+            schema: LEDGER_SCHEMA.into(),
+            cells: Vec::new(),
+            contract: std::collections::BTreeMap::new(),
+        },
+    }
+}
+
+/// Writes `ledger` back to `path`, creating the evidence directory.
+fn store_bench_ledger(path: &Path, ledger: &Ledger) {
     std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
         .unwrap_or_else(|error| panic!("bench evidence dir: {error}"));
     let rendered = ledger
         .render()
         .unwrap_or_else(|error| panic!("render bench ledger: {error}"));
-    std::fs::write(&path, rendered).unwrap_or_else(|error| panic!("write bench ledger: {error}"));
+    std::fs::write(path, rendered).unwrap_or_else(|error| panic!("write bench ledger: {error}"));
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
@@ -905,6 +921,23 @@ impl SyncFixture {
     }
 }
 
+/// A boundary of the production replay that a caller may time.
+#[derive(Clone, Copy)]
+enum ReplayPhase {
+    /// The contiguous head is delivered; the next tick applies the window.
+    ApplyStart,
+    /// The applying tick returned.
+    ApplyDone,
+}
+
+/// What one production replay observed.
+struct ReplayReport {
+    /// Items in the first getdata the replay issued.
+    requested: usize,
+    /// Height of the applied tip once the replay finished.
+    applied_height: u32,
+}
+
 struct ProductionStateSyncFixture {
     _dir: TempDir,
     state: NodeState,
@@ -940,6 +973,21 @@ impl ProductionStateSyncFixture {
                 blocks
             },
             SYNC_PROXY_BLOCKS_USIZE,
+        )
+    }
+
+    /// Production replay of `body_blocks` coinbase-only blocks under the
+    /// same deep header chain and single synthetic peer as the 128-block arm.
+    /// Window attribution varies only the body count, so the header tree,
+    /// storage backend and request shape stay identical across scenarios.
+    fn window_replay(body_blocks: u32) -> Self {
+        let expected_getdata_count = usize::try_from(body_blocks)
+            .unwrap_or_else(|error| panic!("invalid window body count: {error}"));
+        Self::with_config_and_header_blocks(
+            1,
+            production_state_config(),
+            |tree| populate_sync_header_chain(tree, body_blocks).0,
+            expected_getdata_count,
         )
     }
 
@@ -1006,9 +1054,19 @@ impl ProductionStateSyncFixture {
     }
 
     fn run(mut self) -> u32 {
+        let replay = self.run_phased(|_| {});
+        assert_eq!(replay.requested, self.expected_getdata_count);
+        replay.applied_height
+    }
+
+    /// The production replay of `run`, reporting the boundaries of the tick
+    /// that applies the window so a caller can time that tick on its own.
+    /// The fixture stays alive afterwards: its teardown is not part of any
+    /// interval the caller times.
+    fn run_phased(&mut self, mut phase: impl FnMut(ReplayPhase)) -> ReplayReport {
         let sync = self.state.sync();
         sync.tick();
-        self.assert_getdata_batch();
+        let requested = self.first_getdata_len();
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
         // Send the out-of-order tail, tick, then deliver the contiguous head and
@@ -1027,12 +1085,26 @@ impl ProductionStateSyncFixture {
         inbound_blocks_tx
             .send(contiguous)
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
+        phase(ReplayPhase::ApplyStart);
         sync.tick();
-        self.state
+        phase(ReplayPhase::ApplyDone);
+        let applied_height = self
+            .state
             .chainstate()
             .applied_tip_snapshot()
             .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
-            .height
+            .height;
+        ReplayReport {
+            requested,
+            applied_height,
+        }
+    }
+
+    /// One more sync tick. After the applying tick it closes the window's
+    /// measurement-only intervals (apply-idle, download-blocked-by-apply),
+    /// which record only when they close.
+    fn settle_tick(&self) {
+        self.state.sync().tick();
     }
 
     fn stage_for_contiguous_apply(self) -> Self {
@@ -1098,6 +1170,12 @@ impl ProductionStateSyncFixture {
     }
 
     fn assert_getdata_batch(&self) {
+        assert_eq!(self.first_getdata_len(), self.expected_getdata_count);
+    }
+
+    /// Drains header requests up to the first getdata and returns its item
+    /// count.
+    fn first_getdata_len(&self) -> usize {
         let rx = self
             .outbound_rxs
             .first()
@@ -1121,7 +1199,7 @@ impl ProductionStateSyncFixture {
                 other => panic!("expected production getdata, got {other:?}"),
             }
         };
-        assert_eq!(getdata_count, self.expected_getdata_count);
+        getdata_count
     }
 }
 
@@ -4385,8 +4463,892 @@ fn require_bare_counted_flag(args: &[String], flag: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step-24 window attribution: the production replay of one windowed apply,
+// control against candidate, single-group against multi-group.
+// ---------------------------------------------------------------------------
+
+/// Blocks per durable group commit: `DURABLE_HEAD_GROUP_BLOCKS` in
+/// `bitcoin-rs-chainstate`, private there. Drift trips the per-unit group
+/// flush assertion instead of being absorbed.
+const WINDOW_GROUP_BLOCKS: u32 = 64;
+/// Units that bring the allocator, page cache and fjall to steady state.
+/// Retained raw, excluded from every summary and from the ledger.
+const WINDOW_WARMUP_UNITS: usize = 5;
+/// Measured units per run. Equals `evidence::MIN_SAMPLES_FOR_P99`, so every
+/// per-unit series supports its own p99.
+const WINDOW_MEASURED_UNITS: usize = 100;
+/// `/proc/<pid>/stat` reports CPU time in `USER_HZ` ticks, fixed at 100.
+const WINDOW_CPU_TICK_NS: u64 = 10_000_000;
+const WINDOW_ATTRIBUTION_SCHEMA: &str = "bitcoin-rs-window-attribution-v1";
+
+/// Which tree built this binary. The label names the arm; the artifact digest
+/// in the identity is what proves the two arms are different programs.
+#[derive(Clone, Copy)]
+enum WindowArm {
+    Control,
+    Candidate,
+}
+
+impl WindowArm {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Candidate => "candidate",
+        }
+    }
+
+    fn parse(label: &str) -> Option<Self> {
+        [Self::Control, Self::Candidate]
+            .into_iter()
+            .find(|arm| arm.label() == label)
+    }
+}
+
+/// One window shape: the number of coinbase-only body blocks the replay
+/// delivers as a single contiguous window.
+#[derive(Clone, Copy)]
+struct WindowScenario {
+    id: &'static str,
+    body_blocks: u32,
+}
+
+impl WindowScenario {
+    /// Group commits the window must issue: one per started group.
+    fn groups(self) -> usize {
+        usize::try_from(self.body_blocks.div_ceil(WINDOW_GROUP_BLOCKS))
+            .unwrap_or_else(|error| panic!("invalid window group count: {error}"))
+    }
+}
+
+/// Single-group: exactly one full group, the largest window that flushes
+/// once. Multi-group: two full groups, so a mid-window flush separates
+/// them. The byte bound (`8 MiB`) is not reached by coinbase-only blocks;
+/// only the block-count bound is exercised.
+const WINDOW_SCENARIOS: [WindowScenario; 2] = [
+    WindowScenario {
+        id: "single_group",
+        body_blocks: WINDOW_GROUP_BLOCKS,
+    },
+    WindowScenario {
+        id: "multi_group",
+        body_blocks: 2 * WINDOW_GROUP_BLOCKS,
+    },
+];
+
+/// What a captured interval measures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowSpanKind {
+    /// `transition_held_us`: the chain transition lock, acquire to release.
+    TransitionHeld,
+    /// `flush_wait_us`: the caller's wait on one durable group commit.
+    FlushWait,
+    /// A group commit that failed; a replay that sees one is invalid.
+    FlushFailed,
+    /// `node.sync.apply_idle_seconds`: apply starved while downloads were owed.
+    ApplyIdle,
+    /// `node.sync.download_blocked_by_apply_seconds`: front in flight while
+    /// apply held the frontier.
+    DownloadBlocked,
+}
+
+impl WindowSpanKind {
+    /// Ledger path the interval measures.
+    const fn ledger_path(self) -> &'static str {
+        match self {
+            Self::TransitionHeld => "apply.window.transition_held",
+            Self::FlushWait => "apply.window.flush_wait",
+            Self::FlushFailed => "apply.window.flush_failed",
+            Self::ApplyIdle => "p2p.window.apply_idle",
+            Self::DownloadBlocked => "p2p.window.download_blocked_by_apply",
+        }
+    }
+}
+
+/// One interval captured from the production diagnostics: it ended when the
+/// event or histogram record arrived and lasted `duration_ns`.
+struct WindowSpan {
+    kind: WindowSpanKind,
+    end: quanta::Instant,
+    duration_ns: u64,
+    /// Blocks the group commit covered; set for `FlushWait` only.
+    blocks: Option<u64>,
+}
+
+/// Spans of the unit in flight. The replay runs on the bench thread, and the
+/// harness drains this per unit, so no span crosses a unit boundary.
+static WINDOW_SPANS: ParkingMutex<Vec<WindowSpan>> = ParkingMutex::new(Vec::new());
+
+/// Bench-side tracing subscriber. It enables only the two production events
+/// that carry `transition_held_us` and `flush_wait_us`; every other callsite
+/// is disabled at registration, so the replay pays no tracing cost beyond
+/// these events.
+struct WindowSpanSubscriber;
+
+impl WindowSpanSubscriber {
+    fn watches(metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_event()
+            && (metadata.fields().field("transition_held_us").is_some()
+                || metadata.fields().field("flush_wait_us").is_some())
+    }
+}
+
+#[derive(Default)]
+struct WindowSpanVisitor {
+    transition_held_us: Option<u128>,
+    flush_wait_us: Option<u128>,
+    blocks: Option<u64>,
+    failed: bool,
+}
+
+impl tracing::field::Visit for WindowSpanVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+        if field.name() == "flush_error" {
+            self.failed = true;
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "blocks" => self.blocks = Some(value),
+            "transition_held_us" => self.transition_held_us = Some(u128::from(value)),
+            "flush_wait_us" => self.flush_wait_us = Some(u128::from(value)),
+            _ => {}
+        }
+    }
+
+    fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+        match field.name() {
+            "transition_held_us" => self.transition_held_us = Some(value),
+            "flush_wait_us" => self.flush_wait_us = Some(value),
+            _ => {}
+        }
+    }
+}
+
+impl tracing::Subscriber for WindowSpanSubscriber {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if Self::watches(metadata) {
+            tracing::subscriber::Interest::always()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    }
+
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        Self::watches(metadata)
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let end = quanta::Instant::now();
+        let mut visitor = WindowSpanVisitor::default();
+        event.record(&mut visitor);
+        let micros_to_nanos =
+            |micros: u128| u64::try_from(micros.saturating_mul(1_000)).unwrap_or(u64::MAX);
+        let span = match (visitor.transition_held_us, visitor.flush_wait_us) {
+            (Some(micros), None) => WindowSpan {
+                kind: WindowSpanKind::TransitionHeld,
+                end,
+                duration_ns: micros_to_nanos(micros),
+                blocks: None,
+            },
+            (None, Some(micros)) => WindowSpan {
+                kind: if visitor.failed {
+                    WindowSpanKind::FlushFailed
+                } else {
+                    WindowSpanKind::FlushWait
+                },
+                end,
+                duration_ns: micros_to_nanos(micros),
+                blocks: visitor.blocks,
+            },
+            _ => return,
+        };
+        WINDOW_SPANS.lock().push(span);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Scoped recorder for the unit's replay: it keeps only the two existing
+/// window-gate histograms and drops every other metric.
+struct WindowSeriesRecorder;
+
+impl metrics::Recorder for WindowSeriesRecorder {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn register_counter(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        metrics::Counter::noop()
+    }
+
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+
+    fn register_histogram(
+        &self,
+        key: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        let kind = match key.name() {
+            "node.sync.apply_idle_seconds" => WindowSpanKind::ApplyIdle,
+            "node.sync.download_blocked_by_apply_seconds" => WindowSpanKind::DownloadBlocked,
+            _ => return metrics::Histogram::noop(),
+        };
+        metrics::Histogram::from_arc(Arc::new(WindowSeriesHistogram { kind }))
+    }
+}
+
+struct WindowSeriesHistogram {
+    kind: WindowSpanKind,
+}
+
+impl metrics::HistogramFn for WindowSeriesHistogram {
+    fn record(&self, seconds: f64) {
+        let end = quanta::Instant::now();
+        WINDOW_SPANS.lock().push(WindowSpan {
+            kind: self.kind,
+            end,
+            duration_ns: (seconds * 1e9).round() as u64,
+            blocks: None,
+        });
+    }
+}
+
+/// Everything one replay of one window measured.
+struct WindowUnit {
+    started: quanta::Instant,
+    apply_started: quanta::Instant,
+    /// Ticks 1..=4: request, stage, apply, and the closing tick.
+    wall: Duration,
+    /// Tick 3 alone, the one that applies the window.
+    apply_wall: Duration,
+    /// Tick 4, which closes the measurement-only intervals.
+    settle_wall: Duration,
+    /// Process CPU in `/proc` ticks across `wall`, dead threads included.
+    cpu_ticks: u64,
+    rss_start_bytes: u64,
+    /// Process peak resident set across `wall`; the peak was reset first.
+    rss_peak_bytes: u64,
+    requested: usize,
+    applied_height: u32,
+    corpus_sha256: Sha256Hex,
+    spans: Vec<WindowSpan>,
+}
+
+impl WindowUnit {
+    fn spans_of(&self, kind: WindowSpanKind) -> impl Iterator<Item = &WindowSpan> {
+        self.spans.iter().filter(move |span| span.kind == kind)
+    }
+
+    fn durations_ns(&self, kind: WindowSpanKind) -> Vec<u64> {
+        self.spans_of(kind).map(|span| span.duration_ns).collect()
+    }
+
+    fn cpu_ns(&self) -> u64 {
+        self.cpu_ticks.saturating_mul(WINDOW_CPU_TICK_NS)
+    }
+
+    /// The window's commit transition is the longest hold in the unit; any
+    /// other hold (genesis bootstrap) stays in the raw record only.
+    fn window_transition_held_us(&self) -> u64 {
+        self.spans_of(WindowSpanKind::TransitionHeld)
+            .map(|span| span.duration_ns / 1_000)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn read_proc_text(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
+}
+
+/// The text after `field` on its line of a `/proc` file, trimmed.
+fn proc_field(path: &str, field: &str) -> String {
+    read_proc_text(path)
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .map(|rest| rest.trim().to_owned())
+        .unwrap_or_else(|| panic!("{field} missing from {path}"))
+}
+
+fn proc_kib(path: &str, field: &str) -> u64 {
+    proc_field(path, field)
+        .split_ascii_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("{field} in {path} is not a KiB count"))
+}
+
+/// Process CPU time, user plus system, in `/proc` clock ticks. Counts every
+/// thread including exited ones, so scoped worker threads are not lost; the
+/// price is `WINDOW_CPU_TICK_NS` resolution, which is why runs summarise it
+/// as a total beside the per-unit values.
+fn process_cpu_ticks() -> u64 {
+    let stat = read_proc_text("/proc/self/stat");
+    // Fields after the parenthesised command name start at field 3; utime
+    // and stime are fields 14 and 15.
+    let after_comm = stat
+        .rsplit_once(')')
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("malformed /proc/self/stat"));
+    let mut fields = after_comm.split_ascii_whitespace().skip(11);
+    let mut next_ticks = |name: &str| -> u64 {
+        fields
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{name} missing from /proc/self/stat"))
+    };
+    let user = next_ticks("utime");
+    let system = next_ticks("stime");
+    user.saturating_add(system)
+}
+
+/// Resets the process peak resident set to the current one (`proc(5)`:
+/// writing `5` to `clear_refs`, Linux 4.0 and later), so the next `VmHWM`
+/// read is the peak of the interval that follows. Returns the resident set
+/// that interval starts from.
+///
+/// Verifies the reset took effect: after it the peak must sit within 1 MiB of
+/// the resident set, otherwise a stale lifetime peak would be reported as
+/// this unit's peak.
+fn reset_peak_rss() -> u64 {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/proc/self/clear_refs")
+        .and_then(|mut file| file.write_all(b"5"))
+        .unwrap_or_else(|error| panic!("reset peak RSS through /proc/self/clear_refs: {error}"));
+    let resident_kib = proc_kib("/proc/self/status", "VmRSS:");
+    let peak_kib = proc_kib("/proc/self/status", "VmHWM:");
+    assert!(
+        peak_kib.saturating_sub(resident_kib) <= 1024,
+        "VmHWM is {peak_kib} KiB after the reset but VmRSS is {resident_kib} KiB: \
+         this kernel did not reset the peak resident set"
+    );
+    resident_kib.saturating_mul(1024)
+}
+
+/// Toolchain and build facts the six-identity record needs beyond
+/// `EvidenceIdentity`. Fails closed on an unoptimised build.
+fn window_toolchain_identity() -> sonic_rs::Value {
+    assert!(
+        !cfg!(debug_assertions),
+        "window attribution must run an optimised build (cargo bench profile)"
+    );
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = std::process::Command::new(&rustc)
+        .arg("-vV")
+        .output()
+        .unwrap_or_else(|error| panic!("run {rustc:?} -vV for the toolchain identity: {error}"));
+    assert!(output.status.success(), "{rustc:?} -vV failed");
+    let features: Vec<&str> = [
+        ("fjall", cfg!(feature = "fjall")),
+        ("rocksdb", cfg!(feature = "rocksdb")),
+        ("redb", cfg!(feature = "redb")),
+        ("kernel", cfg!(feature = "kernel")),
+        ("zmq", cfg!(feature = "zmq")),
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled)| enabled.then_some(name))
+    .collect();
+    json!({
+        "rustc": String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        "profile": "bench",
+        "debug_assertions": false,
+        "features": features,
+        "allocator": "system",
+        "validation_engine": sample_engine_label(),
+    })
+}
+
+/// Host facts beyond `EvidenceIdentity.hardware`: kernel, pinned core set,
+/// memory, and the filesystem holding the durable state.
+///
+/// Fails closed on a RAM-backed temporary directory: a group flush there is
+/// not a durable write, so `flush_wait_us` would measure nothing.
+fn window_host_identity() -> sonic_rs::Value {
+    let tmpdir = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("resolve the temporary directory: {error}"));
+    let mounts = read_proc_text("/proc/self/mounts");
+    let (device, mount_point, fstype) = mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            let device = fields.next()?;
+            let mount_point = fields.next()?;
+            let fstype = fields.next()?;
+            tmpdir
+                .starts_with(mount_point)
+                .then_some((device, mount_point, fstype))
+        })
+        .max_by_key(|(_, mount_point, _)| mount_point.len())
+        .unwrap_or_else(|| panic!("no mount holds {}", tmpdir.display()));
+    assert!(
+        !matches!(fstype, "tmpfs" | "ramfs"),
+        "{} is on {fstype}: set TMPDIR to a disk-backed directory so group flushes are durable",
+        tmpdir.display()
+    );
+    json!({
+        "kernel": read_proc_text("/proc/sys/kernel/osrelease").trim(),
+        "cpus_allowed_list": proc_field("/proc/self/status", "Cpus_allowed_list:"),
+        "mem_total_kib": proc_kib("/proc/meminfo", "MemTotal:"),
+        "storage": {
+            "tmpdir": tmpdir.display().to_string(),
+            "mount_point": mount_point,
+            "fstype": fstype,
+            "device": device,
+        },
+    })
+}
+
+/// Replays one window on fresh durable state and measures it.
+///
+/// Setup (state, headers, pre-serialized payloads) is outside every timer
+/// and every counter. The measured interval is the whole replay: the request
+/// tick, the out-of-order staging tick, the applying tick, and one closing
+/// tick that lets the window close its measurement-only intervals.
+fn run_window_unit(scenario: WindowScenario) -> WindowUnit {
+    let mut fixture =
+        ProductionStateSyncFixture::window_replay(scenario.body_blocks).prebuild_run();
+    let corpus_bytes: Vec<u8> = fixture.blocks.iter().flat_map(consensus_bytes).collect();
+    let corpus_sha256 = Sha256Hex::digest(&corpus_bytes);
+    let recorder = WindowSeriesRecorder;
+    WINDOW_SPANS.lock().clear();
+    let rss_start_bytes = reset_peak_rss();
+    let cpu_before = process_cpu_ticks();
+    let started = quanta::Instant::now();
+    let mut apply_started = started;
+    let mut apply_done = started;
+    let mut settled = started;
+    let mut report = None;
+    metrics::with_local_recorder(&recorder, || {
+        report = Some(fixture.run_phased(|phase| match phase {
+            ReplayPhase::ApplyStart => apply_started = quanta::Instant::now(),
+            ReplayPhase::ApplyDone => apply_done = quanta::Instant::now(),
+        }));
+        fixture.settle_tick();
+        settled = quanta::Instant::now();
+    });
+    let cpu_after = process_cpu_ticks();
+    let rss_peak_bytes = proc_kib("/proc/self/status", "VmHWM:").saturating_mul(1024);
+    let spans = std::mem::take(&mut *WINDOW_SPANS.lock());
+    let report = report.unwrap_or_else(|| panic!("window replay produced no report"));
+    drop(fixture);
+    WindowUnit {
+        started,
+        apply_started,
+        wall: settled.duration_since(started),
+        apply_wall: apply_done.duration_since(apply_started),
+        settle_wall: settled.duration_since(apply_done),
+        cpu_ticks: cpu_after.saturating_sub(cpu_before),
+        rss_start_bytes,
+        rss_peak_bytes,
+        requested: report.requested,
+        applied_height: report.applied_height,
+        corpus_sha256,
+        spans,
+    }
+}
+
+/// Fails closed unless the replay did what the scenario names: every body
+/// block applied, one group flush per started group covering every block,
+/// no failed flush, and the transition hold present.
+fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
+    let body_blocks = usize::try_from(scenario.body_blocks)
+        .unwrap_or_else(|error| panic!("invalid window body count: {error}"));
+    assert_eq!(
+        unit.applied_height, scenario.body_blocks,
+        "{}: the replay must apply every body block",
+        scenario.id
+    );
+    assert!(
+        unit.requested >= body_blocks,
+        "{}: the first getdata asked for {} blocks, fewer than the {body_blocks} replayed",
+        scenario.id,
+        unit.requested
+    );
+    assert_eq!(
+        unit.spans_of(WindowSpanKind::FlushFailed).count(),
+        0,
+        "{}: a group flush failed during the replay",
+        scenario.id
+    );
+    assert_eq!(
+        unit.spans_of(WindowSpanKind::FlushWait).count(),
+        scenario.groups(),
+        "{}: expected one group flush per started group of {WINDOW_GROUP_BLOCKS} blocks",
+        scenario.id
+    );
+    let flushed: u64 = unit
+        .spans_of(WindowSpanKind::FlushWait)
+        .filter_map(|span| span.blocks)
+        .sum();
+    assert_eq!(
+        flushed,
+        u64::from(scenario.body_blocks),
+        "{}: group flushes must cover every body block",
+        scenario.id
+    );
+    assert!(
+        unit.spans_of(WindowSpanKind::TransitionHeld)
+            .next()
+            .is_some(),
+        "{}: no transition_held_us event; this binary lacks the chainstate timing spans",
+        scenario.id
+    );
+}
+
+/// Order statistics of `values` plus whether p99 is supported; an empty set
+/// is reported as unobserved, never as zero.
+fn quantiles_json(values: &[u64]) -> sonic_rs::Value {
+    match evidence::Quantiles::of(values) {
+        Some(quantiles) => json!({
+            "n": quantiles.n,
+            "p50": quantiles.p50,
+            "p95": quantiles.p95,
+            "p99": quantiles.p99,
+            "max": quantiles.max,
+            "p99_supported": quantiles.p99_supported(),
+        }),
+        None => json!({ "n": 0, "observed": false }),
+    }
+}
+
+fn window_unit_json(index: usize, origin: quanta::Instant, unit: &WindowUnit) -> sonic_rs::Value {
+    let micros = |kind: WindowSpanKind| -> Vec<u64> {
+        unit.spans_of(kind)
+            .map(|span| span.duration_ns / 1_000)
+            .collect()
+    };
+    json!({
+        "unit": index,
+        "warmup": index < WINDOW_WARMUP_UNITS,
+        "started_offset_ns": duration_nanos(unit.started.duration_since(origin)),
+        "wall_ns": duration_nanos(unit.wall),
+        "apply_wall_ns": duration_nanos(unit.apply_wall),
+        "settle_wall_ns": duration_nanos(unit.settle_wall),
+        "cpu_ticks": unit.cpu_ticks,
+        "cpu_ns": unit.cpu_ns(),
+        "rss_start_bytes": unit.rss_start_bytes,
+        "rss_peak_bytes": unit.rss_peak_bytes,
+        "requested_blocks": unit.requested,
+        "applied_height": unit.applied_height,
+        "transition_held_us": micros(WindowSpanKind::TransitionHeld),
+        "flush_wait_us": micros(WindowSpanKind::FlushWait),
+        "flush_blocks": unit
+            .spans_of(WindowSpanKind::FlushWait)
+            .filter_map(|span| span.blocks)
+            .collect::<Vec<u64>>(),
+        "apply_idle_ns": unit.durations_ns(WindowSpanKind::ApplyIdle),
+        "download_blocked_by_apply_ns": unit.durations_ns(WindowSpanKind::DownloadBlocked),
+    })
+}
+
+/// Summaries over the measured units. Each is read beside the raw units in
+/// the same file, never instead of them. Production spans are nested inside
+/// the wall and inside each other, so none is summed with another.
+fn window_summary_json(measured: &[WindowUnit]) -> sonic_rs::Value {
+    let walls: Vec<u64> = measured
+        .iter()
+        .map(|unit| duration_nanos(unit.wall))
+        .collect();
+    let apply_walls: Vec<u64> = measured
+        .iter()
+        .map(|unit| duration_nanos(unit.apply_wall))
+        .collect();
+    let settle_walls: Vec<u64> = measured
+        .iter()
+        .map(|unit| duration_nanos(unit.settle_wall))
+        .collect();
+    let cpu: Vec<u64> = measured.iter().map(WindowUnit::cpu_ns).collect();
+    let rss_peak: Vec<u64> = measured.iter().map(|unit| unit.rss_peak_bytes).collect();
+    let rss_over_start: Vec<u64> = measured
+        .iter()
+        .map(|unit| unit.rss_peak_bytes.saturating_sub(unit.rss_start_bytes))
+        .collect();
+    let transition_held_us: Vec<u64> = measured
+        .iter()
+        .map(WindowUnit::window_transition_held_us)
+        .collect();
+    let pooled = |kind: WindowSpanKind| -> Vec<u64> {
+        measured
+            .iter()
+            .flat_map(|unit| unit.durations_ns(kind))
+            .collect()
+    };
+    let flush_wait_us: Vec<u64> = pooled(WindowSpanKind::FlushWait)
+        .into_iter()
+        .map(|nanos| nanos / 1_000)
+        .collect();
+    let cpu_total_ns = cpu
+        .iter()
+        .fold(0_u64, |total, nanos| total.saturating_add(*nanos));
+    let observed_units = |kind: WindowSpanKind| {
+        measured
+            .iter()
+            .filter(|unit| unit.spans_of(kind).next().is_some())
+            .count()
+    };
+    json!({
+        "units": measured.len(),
+        "wall_ns": quantiles_json(&walls),
+        "apply_wall_ns": quantiles_json(&apply_walls),
+        "settle_wall_ns": quantiles_json(&settle_walls),
+        "cpu_ns": quantiles_json(&cpu),
+        "cpu_total_ns": cpu_total_ns,
+        "cpu_resolution_ns": WINDOW_CPU_TICK_NS,
+        "rss_peak_bytes": quantiles_json(&rss_peak),
+        "rss_peak_over_start_bytes": quantiles_json(&rss_over_start),
+        "transition_held_us": quantiles_json(&transition_held_us),
+        "flush_wait_us": quantiles_json(&flush_wait_us),
+        "apply_idle_ns": quantiles_json(&pooled(WindowSpanKind::ApplyIdle)),
+        "apply_idle_observed_units": observed_units(WindowSpanKind::ApplyIdle),
+        "download_blocked_by_apply_ns": quantiles_json(&pooled(WindowSpanKind::DownloadBlocked)),
+        "download_blocked_by_apply_observed_units": observed_units(WindowSpanKind::DownloadBlocked),
+    })
+}
+
+fn window_sample(identity: &EvidenceIdentity, path: &str, start_ns: u64, end_ns: u64) -> Sample {
+    Sample {
+        path: path.into(),
+        owner: "node".into(),
+        identity: identity.clone(),
+        interval: Interval {
+            kind: IntervalKind::Inside,
+            start_ns,
+            end_ns: end_ns.max(start_ns),
+        },
+        cpu_ns: None,
+        elapsed_ns: end_ns.saturating_sub(start_ns),
+        rss_peak_bytes: None,
+        io_bytes: None,
+        storage_bytes: None,
+    }
+}
+
+/// One wall sample, one apply-tick sample and one sample per captured span.
+/// Offsets are on the run clock, so the nested spans overlap the wall and
+/// the ledger refuses to add them.
+fn window_evidence_samples(
+    identity: &EvidenceIdentity,
+    origin: quanta::Instant,
+    unit: &WindowUnit,
+) -> Vec<Sample> {
+    let offset = |at: quanta::Instant| duration_nanos(at.duration_since(origin));
+    let mut samples = Vec::with_capacity(unit.spans.len().saturating_add(2));
+    let started = offset(unit.started);
+    samples.push(Sample {
+        cpu_ns: Some(unit.cpu_ns()),
+        rss_peak_bytes: Some(unit.rss_peak_bytes),
+        ..window_sample(
+            identity,
+            "apply.window.replay_wall",
+            started,
+            started.saturating_add(duration_nanos(unit.wall)),
+        )
+    });
+    let apply_started = offset(unit.apply_started);
+    samples.push(window_sample(
+        identity,
+        "apply.window.apply_tick",
+        apply_started,
+        apply_started.saturating_add(duration_nanos(unit.apply_wall)),
+    ));
+    for span in &unit.spans {
+        let end = offset(span.end);
+        samples.push(window_sample(
+            identity,
+            span.kind.ledger_path(),
+            end.saturating_sub(span.duration_ns),
+            end,
+        ));
+    }
+    samples
+}
+
+/// Runs one arm of one scenario in this process and writes its evidence:
+/// every measured unit as identity-bearing ledger samples
+/// (`target/benchmarks/window_attribution.toml`, append-only across runs) and
+/// one self-contained JSON record with raw units, summaries and the six
+/// identities (`target/benchmarks/window_attribution/`).
+///
+/// The deterministic regtest workload proves the mechanism and the
+/// measurement surface; its walls are not mainnet speed and fill no product
+/// cell (`HPA-09`, `HPA-12`).
+fn run_window_attribution(arm: WindowArm, scenario: WindowScenario) {
+    let host = window_host_identity();
+    let toolchain = window_toolchain_identity();
+    tracing::subscriber::set_global_default(WindowSpanSubscriber)
+        .unwrap_or_else(|error| panic!("window span subscriber install failed: {error}"));
+    let run_started_unix_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("system clock before the epoch: {error}"))
+        .as_nanos();
+    let origin = quanta::Instant::now();
+    let total_units = WINDOW_WARMUP_UNITS.saturating_add(WINDOW_MEASURED_UNITS);
+    let mut units = Vec::with_capacity(total_units);
+    for _ in 0..total_units {
+        let unit = run_window_unit(scenario);
+        assert_window_unit(scenario, &unit);
+        units.push(unit);
+    }
+    let corpus_sha256 = units[0].corpus_sha256;
+    assert!(
+        units.iter().all(|unit| unit.corpus_sha256 == corpus_sha256),
+        "{}: replay blocks differ between units",
+        scenario.id
+    );
+    let mut identity = EvidenceIdentity::of_process(&production_state_config())
+        .unwrap_or_else(|error| panic!("evidence identity: {error}"));
+    identity.corpus = Some(CorpusIdentity {
+        id: format!("sync_pipeline.window_replay.{}", scenario.id),
+        manifest_sha256: corpus_sha256,
+    });
+    let measured = &units[WINDOW_WARMUP_UNITS..];
+
+    let cell = format!("window_attribution.{}.{}", scenario.id, arm.label());
+    let ledger_path = bench_ledger_path("window_attribution.toml");
+    let mut ledger = load_bench_ledger(&ledger_path);
+    if !ledger.cells.iter().any(|candidate| candidate.id == cell) {
+        ledger.cells.push(Cell {
+            id: cell.clone(),
+            samples: Vec::new(),
+        });
+    }
+    for unit in measured {
+        for sample in window_evidence_samples(&identity, origin, unit) {
+            ledger
+                .record(&cell, sample)
+                .unwrap_or_else(|error| panic!("record window sample: {error}"));
+        }
+    }
+    store_bench_ledger(&ledger_path, &ledger);
+
+    let record = json!({
+        "schema": WINDOW_ATTRIBUTION_SCHEMA,
+        "claim_scope": "diagnostic: deterministic regtest replay; mechanism and measurement surface only, not mainnet speed, fills no product cell",
+        "arm": arm.label(),
+        "scenario": scenario.id,
+        "body_blocks": scenario.body_blocks,
+        "group_blocks": WINDOW_GROUP_BLOCKS,
+        "groups": scenario.groups(),
+        "run_started_unix_ns": run_started_unix_ns.to_string(),
+        "warmup_units": WINDOW_WARMUP_UNITS,
+        "measured_units": WINDOW_MEASURED_UNITS,
+        "identity": identity,
+        "toolchain": toolchain,
+        "host": host,
+        "ledger": { "path": ledger_path.display().to_string(), "cell": cell },
+        "summary": window_summary_json(measured),
+        "units": units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| window_unit_json(index, origin, unit))
+            .collect::<Vec<_>>(),
+    });
+    let record_dir = bench_ledger_path("window_attribution");
+    std::fs::create_dir_all(&record_dir)
+        .unwrap_or_else(|error| panic!("window attribution record dir: {error}"));
+    let record_path = record_dir.join(format!(
+        "{}.{}.{run_started_unix_ns}.json",
+        arm.label(),
+        scenario.id
+    ));
+    let rendered = sonic_rs::to_vec_pretty(&record)
+        .unwrap_or_else(|error| panic!("render window attribution record: {error}"));
+    std::fs::write(&record_path, rendered)
+        .unwrap_or_else(|error| panic!("write window attribution record: {error}"));
+
+    println!(
+        "window_attribution arm={} scenario={} measured_units={} record={}",
+        arm.label(),
+        scenario.id,
+        measured.len(),
+        record_path.display()
+    );
+    let walls: Vec<Duration> = measured.iter().map(|unit| unit.wall).collect();
+    let apply_walls: Vec<Duration> = measured.iter().map(|unit| unit.apply_wall).collect();
+    print_percentiles("window_attribution_wall", &walls);
+    print_percentiles("window_attribution_apply_tick", &apply_walls);
+}
+
+/// Validates the `--window-attribution` invocation shape before any fixture
+/// work: the flag, one arm, one scenario, and nothing else. Cargo appends
+/// `--bench`, which carries no meaning here and is ignored.
+fn window_attribution_cli(args: &[String]) -> (WindowArm, WindowScenario) {
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| *arg != "--bench")
+        .collect();
+    let fail = |message: &str| -> ! {
+        eprintln!("window-attribution: {message}");
+        eprintln!(
+            "usage: sync_pipeline --window-attribution <control|candidate> <{}>",
+            WINDOW_SCENARIOS.map(|scenario| scenario.id).join("|")
+        );
+        std::process::exit(2);
+    };
+    if args.len() != 3 || args[0] != "--window-attribution" {
+        fail("expected exactly --window-attribution <arm> <scenario>");
+    }
+    let Some(arm) = WindowArm::parse(args[1]) else {
+        fail("unknown arm");
+    };
+    let Some(scenario) = WINDOW_SCENARIOS
+        .iter()
+        .copied()
+        .find(|scenario| scenario.id == args[2])
+    else {
+        fail("unknown scenario");
+    };
+    (arm, scenario)
+}
+
 /// Binary entrypoint: `--mrp-verify` runs the untimed real-fixture
 /// verification path with no Criterion involvement and no timing output;
+/// `--window-attribution ARM SCENARIO` replays one windowed apply on fresh
+/// durable state, measures it, and writes ledger and JSON evidence;
 /// `--mrp-list-counted` lists the counted row IDs without fixture
 /// construction or sampling; `--mrp-counted ROW_ID` runs one counted row
 /// through the shared measured-work sampler; `--mrp-verify-counted` runs
@@ -4406,6 +5368,11 @@ fn main() {
     if args.iter().any(|arg| arg == "--mrp-counted") {
         let row = counted_cli_row(&args);
         run_counted_row(row);
+        return;
+    }
+    if args.iter().any(|arg| arg == "--window-attribution") {
+        let (arm, scenario) = window_attribution_cli(&args);
+        run_window_attribution(arm, scenario);
         return;
     }
     if args.iter().any(|arg| arg == "--mrp-verify-counted") {

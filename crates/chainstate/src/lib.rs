@@ -183,6 +183,14 @@ impl ApplyAdmission {
 struct TransitionGuard<'a> {
     _transition: TransitionAuthorityGuard<'a>,
     _admission: RwLockReadGuard<'a, ()>,
+    started: quanta::Instant,
+}
+
+impl Drop for TransitionGuard<'_> {
+    fn drop(&mut self) {
+        let transition_held_us = self.started.elapsed().as_micros();
+        tracing::debug!(transition_held_us, "chainstate: transition held");
+    }
 }
 
 fn begin_chain_transition<'a>(
@@ -191,10 +199,16 @@ fn begin_chain_transition<'a>(
 ) -> core::result::Result<TransitionGuard<'a>, ApplyError> {
     let admission_guard = admission.enter()?;
     let transition = chain_transition.lock();
-    admission.ensure_open()?;
+    let started = quanta::Instant::now();
+    if let Err(err) = admission.ensure_open() {
+        let transition_held_us = started.elapsed().as_micros();
+        tracing::debug!(transition_held_us, "chainstate: transition held");
+        return Err(err);
+    }
     Ok(TransitionGuard {
         _transition: transition,
         _admission: admission_guard,
+        started,
     })
 }
 

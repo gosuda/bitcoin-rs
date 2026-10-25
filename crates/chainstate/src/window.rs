@@ -337,24 +337,34 @@ fn flush_group(
     committed: &mut Vec<ConnectOutcome>,
     blocks: &[&Block],
 ) -> core::result::Result<(), WindowApplyError> {
+    if group.pending.is_empty() {
+        return Ok(());
+    }
     // The staged prefix is a contiguous suffix starting at `committed.len()`,
     // so the newest staged block is borrowed straight from the caller's apply
     // batch — no clone in chainstate. Empty group: nothing staged, no hook.
     // Failure-prefix flush: the failing block was never staged, so the same
     // index still names the newest successfully staged block.
-    let staged_block = if group.pending.is_empty() {
-        None
-    } else {
-        blocks
-            .get(committed.len() + group.pending.len() - 1)
-            .copied()
-    };
+    let staged_block = blocks
+        .get(committed.len() + group.pending.len() - 1)
+        .copied();
+    let flush_started = quanta::Instant::now();
+    let pending_blocks = group.pending.len();
     match group.flush(handles, staged_block) {
         Ok(flushed) => {
+            let flush_wait_us = flush_started.elapsed().as_micros();
+            tracing::debug!(blocks = flushed.len(), flush_wait_us, "window: group flush");
             committed.extend(flushed);
             Ok(())
         }
         Err(flush_error) => {
+            let flush_wait_us = flush_started.elapsed().as_micros();
+            tracing::debug!(
+                blocks = pending_blocks,
+                flush_wait_us,
+                %flush_error,
+                "window: group flush failed"
+            );
             group.abandon();
             Err(WindowApplyError {
                 applied: committed.len(),
