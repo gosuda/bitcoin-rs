@@ -79,11 +79,12 @@ their content:
 - [recovery.md](recovery.md) `RCV-01`–`RCV-15`: durable commit, restart,
   crash, reorg, schema-refusal guarantees; `RCV-07` owns missing-body
   recovery; `RCV-05` owns deep rollback and selective rebuild.
-- [indexing.md](indexing.md) `IDX-01`–`IDX-10`: capability gating, watermark
-  identity, query consistency, backfill/reorg worker behavior.
-- [chain-events.md](chain-events.md) `EVT-01`–`EVT-05`: ordered post-commit
-  publication and consumer cursors; `EVT-02` owns the post-durable-commit
-  applied-tip publication step.
+- [indexing.md](indexing.md) `IDX-01`–`IDX-12`: capability gating, watermark
+  identity, query consistency, backfill/reorg worker behavior, portable bundle,
+  historical prefix queries.
+- [chain-events.md](chain-events.md) `EVT-01`–`EVT-06`: ordered post-commit
+  publication, consumer cursors, and public settled polling with positional
+  replay; `EVT-02` owns the post-durable-commit applied-tip publication step.
 - [mempool-mutations.md](mempool-mutations.md) `MPL-01`–`MPL-04`:
   chain-change generation fencing around admission.
 - [embedding.md](embedding.md) `EMB-*`: startup/shutdown/worker lifecycle and
