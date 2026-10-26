@@ -18,17 +18,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mining::{
-    Candidate, CoinbaseBudget, FakeMiningControl, MiningControl, MiningControlError, TemplateId,
+    BlockValidationResult, Candidate, CoinbaseBudget, FakeMiningControl, MiningControl,
+    MiningControlError, STALE_PARENT_REASON, TemplateId,
 };
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
 use bitcoin_rs_stratum::{
-    AcceptedShare, ConnectionLimiter, DifficultyPolicy, ExtranonceLayout, FoundBlock, FrameError,
-    JobBookConfig, LineBuffer, Observer, PoolCore, RecordOutcome, RefusalReason, Server,
-    ServerConfig, ServerDeps, ServerEvent, ShareLedger, StaticAccountResolver, prevhash_from_wire,
-    prevhash_to_wire, swap_words,
+    AcceptedShare, ConnectionLimiter, DifficultyPolicy, Extranonce, ExtranonceLayout, FoundBlock,
+    FrameError, Job, JobBookConfig, LineBuffer, Observer, PoolCore, RecordOutcome, RefusalReason,
+    Server, ServerConfig, ServerDeps, ServerEvent, ShareLedger, StaticAccountResolver,
+    prevhash_from_wire, prevhash_to_wire, swap_words,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -782,4 +784,249 @@ fn connection_caps_refuse_excess_peers_and_shutdown_joins_served_sessions() {
         assert_eq!(report.sessions_panicked, 0);
         drop(first);
     }
+}
+
+/// Extranonce2 every share of the retirement tests submits (`"00000001"`).
+const ROLLED: [u8; 4] = [0, 0, 0, 1];
+
+/// One authorized SV1 miner on a pool holding a single regtest job, plus the
+/// fields every share of the retirement tests submits.
+struct MinerFixture {
+    server: Server,
+    client: TestClient,
+    pool: Arc<PoolCore>,
+    control: Arc<FakeMiningControl>,
+    ledger: Arc<TestLedger>,
+    job: Arc<Job>,
+    prefix: [u8; 4],
+    version: u32,
+}
+
+impl MinerFixture {
+    /// Boots the pool on a regtest candidate whose parent hash is `parent`
+    /// repeated, then walks one miner through configure, subscribe, authorize
+    /// and the first `mining.notify`.
+    fn start(parent: u8) -> Self {
+        let candidate = Arc::new(sample_candidate(
+            Hash256::from_le_bytes(&[parent; 32]),
+            CompactTarget::from_consensus(0x207f_ffff),
+            1,
+        ));
+        let control = Arc::new(FakeMiningControl::default());
+        let ledger = Arc::new(TestLedger::default());
+        let pool = build_pool(control.clone(), ledger.clone());
+        let installed = pool
+            .install(candidate, Vec::new())
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        let accounts = Arc::new(
+            StaticAccountResolver::new()
+                .with_account("alice", "secret123")
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+        );
+        let policy = DifficultyPolicy::new("0.0000000001", "0.00000000001", "1000")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let server = Server::bind(
+            "127.0.0.1:0",
+            ServerConfig::new(policy),
+            ServerDeps {
+                pool: pool.clone(),
+                accounts,
+                observer: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        let mut client = TestClient::connect(server.local_addr());
+
+        client.send("{\"id\":1,\"method\":\"mining.configure\",\"params\":[[\"version-rolling\"],{\"version-rolling.mask\":\"1fffe000\",\"version-rolling.min-bit-count\":2}]}\n");
+        assert!(client.read_line().contains("\"id\":1"));
+        client.send("{\"id\":2,\"method\":\"mining.subscribe\",\"params\":[\"miner/1.0.0\"]}\n");
+        let subscribed = client.read_line();
+        assert!(subscribed.contains("\"id\":2"));
+        // The session prefix the server assigned: headers are rebuilt locally.
+        let ext1_hex = subscribed
+            .split("]],\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .unwrap_or_else(|| panic!("subscribe carries extranonce1: {subscribed}"));
+        assert_eq!(ext1_hex.len(), 8, "4-byte session prefix");
+        let prefix = u32::from_str_radix(ext1_hex, 16)
+            .unwrap_or_else(|error| panic!("hex session prefix: {error:?}"))
+            .to_be_bytes();
+        // Exactly what the server derives from `version_bits` "00002000".
+        let version = installed
+            .job
+            .version_from_rolled_bits(0x2000)
+            .unwrap_or_else(|error| panic!("mask-clean version bits: {error:?}"));
+        client.send(
+            "{\"id\":3,\"method\":\"mining.authorize\",\"params\":[\"alice.worker1\",\"secret123\"]}\n",
+        );
+        assert_eq!(
+            client.read_line(),
+            "{\"id\":3,\"result\":true,\"error\":null}\n"
+        );
+        // Drain the server-pushed difficulty and job notification.
+        let mut seen_notify = false;
+        for _ in 0..4 {
+            if client.read_line().contains("\"method\":\"mining.notify\"") {
+                seen_notify = true;
+                break;
+            }
+        }
+        assert!(seen_notify, "installed job is announced");
+
+        Self {
+            server,
+            client,
+            pool,
+            control,
+            ledger,
+            job: installed.job,
+            prefix,
+            version,
+        }
+    }
+
+    /// First nonce at or after `start` whose header meets the network target:
+    /// the same scan as the SV2 tests' `block_nonce`, so winning nonces are
+    /// known before anything is submitted.
+    fn winning_nonce(&self, start: u32) -> u32 {
+        (start..=u32::MAX)
+            .find(|nonce| {
+                let header = self
+                    .job
+                    .header(
+                        Extranonce {
+                            session: &self.prefix,
+                            rolled: &ROLLED,
+                        },
+                        self.job.ntime(),
+                        self.version,
+                        *nonce,
+                    )
+                    .unwrap_or_else(|error| panic!("header builds: {error:?}"));
+                compact_is_met_by(self.job.bits(), Hash256::from(header.compute_hash()))
+            })
+            .unwrap_or_else(|| panic!("a winning nonce exists"))
+    }
+
+    /// Sends `mining.submit` for `nonce` on `job` and returns the response
+    /// line that carries `id`.
+    fn submit(&mut self, id: u32, job: &Job, nonce: u32) -> String {
+        let (job_id, ntime) = (job.id().get(), job.ntime());
+        self.client.send(&format!(
+            "{{\"id\":{id},\"method\":\"mining.submit\",\"params\":[\"alice.worker1\",\"{job_id:08x}\",\"00000001\",\"{ntime:08x}\",\"{nonce:08x}\",\"00002000\"]}}\n",
+        ));
+        for _ in 0..8 {
+            let line = self.client.read_line();
+            if line.contains(&format!("\"id\":{id}")) {
+                return line;
+            }
+        }
+        panic!("no response to submit {id}");
+    }
+}
+
+#[test]
+fn applied_block_retires_job_and_second_submit_is_stale() {
+    let mut miner = MinerFixture::start(0x22);
+    let job = Arc::clone(&miner.job);
+    // Two distinct winning nonces, known before anything is submitted.
+    let first = miner.winning_nonce(0);
+    let second = miner.winning_nonce(first + 1);
+    assert_ne!(first, second);
+
+    // The first winning nonce is accepted, and the applied block retires the
+    // job synchronously.
+    let accepted = miner.submit(100, &job, first);
+    assert!(
+        accepted.contains("\"error\":null"),
+        "first winning nonce accepted: {accepted}"
+    );
+    assert!(
+        miner.pool.current_installed().is_none(),
+        "applied block retired the job"
+    );
+    assert_eq!(
+        miner.control.submit_calls.load(Ordering::SeqCst),
+        1,
+        "exactly one block reached the node"
+    );
+
+    // The second winning nonce on the same retired job is stale, not
+    // resubmitted, and the connection stays usable.
+    let stale = miner.submit(200, &job, second);
+    assert!(
+        stale.contains("\"error\":[21,\"Stale share\""),
+        "retired job submit is a stale protocol error: {stale}"
+    );
+    assert_eq!(
+        miner.control.submit_calls.load(Ordering::SeqCst),
+        1,
+        "stale share never resubmitted to the node"
+    );
+
+    // A new parent job is accepted on the same connection.
+    let next = miner
+        .pool
+        .install(
+            Arc::new(sample_candidate(
+                Hash256::from_le_bytes(&[0x33; 32]),
+                CompactTarget::from_consensus(0x207f_ffff),
+                2,
+            )),
+            Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let fresh = miner.submit(300, &next.job, 0);
+    assert!(
+        fresh.contains("\"error\":null"),
+        "new parent job accepted: {fresh}"
+    );
+
+    miner.server.shutdown();
+}
+
+/// An already-validated share whose block the node rejects as a stale parent
+/// is a `STALE_SHARE` protocol error, not success: the ledger record stays
+/// durable, nothing else is submitted, and the connection remains usable.
+#[test]
+fn stale_parent_backend_verdict_is_stale_error() {
+    let mut miner = MinerFixture::start(0x44);
+    let job = Arc::clone(&miner.job);
+
+    // The backend answers with the node's stale-parent verdict.
+    *miner.control.submit.lock() = BlockValidationResult::Rejected(STALE_PARENT_REASON.into());
+    let winner = miner.winning_nonce(0);
+    let stale = miner.submit(100, &job, winner);
+    assert!(
+        stale.contains("\"error\":[21,\"Stale share\""),
+        "stale-parent receipt is a stale protocol error: {stale}"
+    );
+    assert_eq!(
+        miner.control.submit_calls.load(Ordering::SeqCst),
+        1,
+        "exactly one block reached the node"
+    );
+    {
+        let blocks = miner
+            .ledger
+            .blocks
+            .lock()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        assert_eq!(blocks.len(), 1, "rejected block stays durably recorded");
+    }
+    assert!(
+        miner.pool.current_installed().is_some(),
+        "no retire without an applied block"
+    );
+
+    // The connection remains usable: a later share is accepted.
+    *miner.control.submit.lock() = BlockValidationResult::Accepted;
+    let later = miner.submit(200, &job, winner + 1);
+    assert!(
+        later.contains("\"error\":null"),
+        "connection usable after stale error: {later}"
+    );
+
+    miner.server.shutdown();
 }

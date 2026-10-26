@@ -646,7 +646,9 @@ fn test_block_validity_error(error: &ApplyError) -> MiningControlError {
 fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningControlError> {
     let reason = match error {
         ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),
-        ApplyError::PrevHashMismatch { .. } => CompactString::from("inconclusive-not-best-prevblk"),
+        ApplyError::PrevHashMismatch { .. } => {
+            CompactString::from(bitcoin_rs_mining::STALE_PARENT_REASON)
+        }
         ApplyError::TargetAboveLimit => CompactString::from("bad-diffbits"),
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             CompactString::from("bad-cb-amount")

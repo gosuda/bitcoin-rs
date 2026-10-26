@@ -1804,6 +1804,51 @@ impl ProtocolSession {
         Ok(true)
     }
 
+    /// The node rejected a found block as a stale sibling: tell the miner it
+    /// did not count without closing the connection.
+    ///
+    /// Only the token produced by [`PendingBlock::submit`] passes the ticket
+    /// and channel checks. Returns `false` when the ticket is unknown or its
+    /// channel closed meanwhile (nothing is sent).
+    pub fn reject_block(
+        &mut self,
+        submission: &BlockSubmission,
+        code: &'static str,
+    ) -> Result<bool, SessionError> {
+        let Some(pending) = self.pending.get(&submission.ticket.0) else {
+            return Ok(false);
+        };
+        if !matches!(pending.kind, PendingKind::Block) {
+            return Ok(false);
+        }
+        if pending.channel_id != submission.channel_id {
+            return Ok(false);
+        }
+        if pending.sequence_number != submission.sequence_number {
+            return Ok(false);
+        }
+        if pending.block_hash != Some(submission.block_hash) {
+            return Ok(false);
+        }
+        let Some(pending) = self.pending.remove(&submission.ticket.0) else {
+            return Ok(false);
+        };
+        if !self.channels.contains_key(&pending.channel_id) {
+            return Ok(false);
+        }
+        let msg = SubmitSharesError {
+            channel_id: pending.channel_id,
+            sequence_number: pending.sequence_number,
+            error_code: code_str(code)?,
+        };
+        self.queue(
+            MESSAGE_TYPE_SUBMIT_SHARES_ERROR,
+            CHANNEL_BIT_SUBMIT_SHARES_ERROR,
+            msg,
+        )?;
+        Ok(true)
+    }
+
     /// The host could not record the share: tell the miner it did not count.
     ///
     /// `code` must be printable ASCII (for example [`ERROR_CODE_SHARE_NOT_RECORDED`]).

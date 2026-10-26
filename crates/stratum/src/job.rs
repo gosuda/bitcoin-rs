@@ -24,7 +24,7 @@ use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, Candidate, CoinbaseBudget, MiningControl, MiningControlError,
-    MiningError,
+    MiningError, STALE_PARENT_REASON,
 };
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, Script, Tx, TxOut, Txid, Witness,
@@ -675,6 +675,17 @@ pub struct BlockReceipt {
 }
 
 impl BlockReceipt {
+    /// Whether the node refused the block only because its parent is no longer
+    /// the applied tip: a stale sibling, not a defective block. This is the one
+    /// reading of [`STALE_PARENT_REASON`] every pool adapter shares.
+    #[must_use]
+    pub fn is_stale_parent(&self) -> bool {
+        matches!(
+            &self.result,
+            BlockValidationResult::Rejected(reason) if reason.as_str() == STALE_PARENT_REASON
+        )
+    }
+
     /// Maps the node verdict onto the three outcomes a ledger can act on.
     #[must_use]
     pub fn status(&self) -> BlockStatus {
@@ -1026,6 +1037,41 @@ impl Job {
             });
         }
         Ok(())
+    }
+
+    /// The header `share` hashes to under `extranonce`, after the field rules
+    /// every share obeys: extranonce lengths, version mask and `ntime` window.
+    /// The one home of those rules, shared by live validation and the
+    /// stale-job replay probe so the two cannot disagree.
+    fn checked_header(
+        &self,
+        extranonce: Extranonce<'_>,
+        share: &ShareSubmission<'_>,
+        scratch: &mut Vec<u8>,
+    ) -> Result<Header, ShareError> {
+        self.check_extranonce(extranonce)?;
+        if (share.version ^ self.version) & !self.version_mask != 0 {
+            return Err(ShareError::VersionOutsideMask {
+                version: share.version,
+                job_version: self.version,
+                mask: self.version_mask,
+            });
+        }
+        let min_ntime = self.min_ntime();
+        if share.ntime < min_ntime {
+            return Err(ShareError::TimeTooEarly {
+                ntime: share.ntime,
+                min_ntime,
+            });
+        }
+        if share.ntime > self.max_ntime {
+            return Err(ShareError::TimeTooLate {
+                ntime: share.ntime,
+                max_ntime: self.max_ntime,
+            });
+        }
+        let root = self.merkle_root_with(extranonce, scratch)?;
+        Ok(self.header_from(root, share.ntime, share.version, share.nonce))
     }
 
     fn coinbase_hash_with(
@@ -1417,9 +1463,12 @@ impl JobBook {
     ///
     /// Checks, in order: session, job existence, job staleness, extranonce
     /// lengths, version mask, `ntime` window, duplicate, network target, share
-    /// target, per-job capacity. A header that meets the network target is a
-    /// block candidate even when it misses `target`, and is never refused for
-    /// capacity. Only accepted shares are remembered, so rejected input
+    /// target, per-job capacity. A stale job refuses with
+    /// [`ShareError::Duplicate`] when the share is an exact replay of one
+    /// already accepted (same header under the same field rules) and with
+    /// [`ShareError::Stale`] otherwise. A header that meets the network target
+    /// is a block candidate even when it misses `target`, and is never refused
+    /// for capacity. Only accepted shares are remembered, so rejected input
     /// cannot consume duplicate-set capacity.
     pub fn validate(
         &mut self,
@@ -1435,41 +1484,30 @@ impl JobBook {
             .jobs
             .get(index)
             .ok_or(ShareError::UnknownJob(share.job))?;
-        if let JobState::Stale(reason) = entry.state {
-            return Err(ShareError::Stale {
-                job: share.job,
-                reason,
-            });
-        }
         let job = &entry.job;
         let extranonce = Extranonce {
             session: session.extranonce_prefix(),
             rolled: share.rolled_extranonce,
         };
-        job.check_extranonce(extranonce)?;
-        if (share.version ^ job.version) & !job.version_mask != 0 {
-            return Err(ShareError::VersionOutsideMask {
-                version: share.version,
-                job_version: job.version,
-                mask: job.version_mask,
+        if let JobState::Stale(reason) = entry.state {
+            // An exact retransmit keeps its duplicate identity: the identical
+            // header was already judged, so the miner learns `Duplicate`
+            // rather than `Stale`. Any other share on a retired job is stale.
+            let replayed = job
+                .checked_header(extranonce, share, &mut self.scratch)
+                .ok()
+                .map(|header| header.compute_hash());
+            if let Some(hash) = replayed
+                && let Some(&first_job) = self.seen.get(&Hash256::from(hash))
+            {
+                return Err(ShareError::Duplicate { hash, first_job });
+            }
+            return Err(ShareError::Stale {
+                job: share.job,
+                reason,
             });
         }
-        let min_ntime = job.min_ntime();
-        if share.ntime < min_ntime {
-            return Err(ShareError::TimeTooEarly {
-                ntime: share.ntime,
-                min_ntime,
-            });
-        }
-        if share.ntime > job.max_ntime {
-            return Err(ShareError::TimeTooLate {
-                ntime: share.ntime,
-                max_ntime: job.max_ntime,
-            });
-        }
-
-        let root = job.merkle_root_with(extranonce, &mut self.scratch)?;
-        let header = job.header_from(root, share.ntime, share.version, share.nonce);
+        let header = job.checked_header(extranonce, share, &mut self.scratch)?;
         let hash = header.compute_hash();
         let raw_hash = Hash256::from(hash);
         if let Some(&first_job) = self.seen.get(&raw_hash) {

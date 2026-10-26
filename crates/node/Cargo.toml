@@ -122,6 +122,13 @@ rustix.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
+# Miner side of the SV2 host-path regression in `pool/sv2.rs`: the same pinned
+# SRI release family the pool adapter links, never a second wire version.
+binary_sv2.workspace = true
+codec_sv2 = { workspace = true, features = ["noise_sv2"] }
+common_messages_sv2.workspace = true
+mining_sv2.workspace = true
+noise_sv2.workspace = true
 
 [[bench]]
 name = "sync_pipeline"

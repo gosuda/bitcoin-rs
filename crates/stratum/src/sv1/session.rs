@@ -786,7 +786,12 @@ impl PoolCore {
         let mut attempt = 0;
         loop {
             match found.submit(&*self.control) {
-                Ok(receipt) => return Ok(receipt),
+                Ok(receipt) => {
+                    if receipt.status() == BlockStatus::Applied {
+                        self.invalidate_active();
+                    }
+                    return Ok(receipt);
+                }
                 Err(
                     MiningControlError::Unavailable(message) | MiningControlError::Failed(message),
                 ) => {
@@ -993,6 +998,8 @@ impl PoolCore {
                     Err(_) => BlockOutcome::NodeError,
                 };
                 let hash = found.share.hash;
+                let job = found.share.job;
+                let stale_parent = submission.as_ref().is_ok_and(BlockReceipt::is_stale_parent);
                 let completion = Arc::new(Completion::new(2));
                 let share_item = Pending::Share {
                     worker: worker.clone(),
@@ -1017,6 +1024,13 @@ impl PoolCore {
                     reservation.commit(block_item);
                 } else {
                     completion.record();
+                }
+
+                if stale_parent {
+                    return Err(SubmitFailure::Share(ShareError::Stale {
+                        job,
+                        reason: StaleReason::Invalidated,
+                    }));
                 }
 
                 Ok(Credited {

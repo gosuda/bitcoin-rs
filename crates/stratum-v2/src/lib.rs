@@ -77,6 +77,7 @@
 
 mod session;
 
+pub use mining_sv2::ERROR_CODE_SUBMIT_SHARES_STALE_SHARE;
 pub use session::{
     AdmitError, AdmitUser, BlockSubmission, ChannelInfo, ChannelKind, CloseReason,
     ERROR_CODE_INVALID_SEQUENCE_NUMBER, ERROR_CODE_JOB_SHARE_CAPACITY, ERROR_CODE_POOL_BUSY,
@@ -767,6 +768,22 @@ impl Connection {
     pub fn reject_share(&mut self, ticket: ShareTicket, code: &'static str) -> Result<bool, Error> {
         self.guard(|conn| {
             let sent = conn.session.reject_share(ticket, code)?;
+            conn.flush()?;
+            Ok(sent)
+        })
+    }
+
+    /// The node rejected a found block as stale: send `SubmitShares.Error`.
+    ///
+    /// The token must come from [`PendingBlock::submit`]. Retires the block
+    /// ticket without closing the connection.
+    pub fn reject_block(
+        &mut self,
+        submission: &BlockSubmission,
+        code: &'static str,
+    ) -> Result<bool, Error> {
+        self.guard(|conn| {
+            let sent = conn.session.reject_block(submission, code)?;
             conn.flush()?;
             Ok(sent)
         })

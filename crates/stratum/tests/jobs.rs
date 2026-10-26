@@ -1249,3 +1249,52 @@ fn templates_are_requested_with_the_declared_budget() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn accepted_block_retirement_makes_second_same_job_nonce_stale() -> TestResult {
+    let mut fx = fixture(config(), 100, 2)?;
+    let target = ShareTarget::from_pool_difficulty(1)?;
+    let winning = nonces(&fx.session, &fx.job, true, 2)?;
+    let outcome = fx
+        .book
+        .validate(&submit_for(&fx.session, &fx.job, winning[0]), &target)?;
+    assert!(
+        matches!(outcome, ShareOutcome::Block(_)),
+        "first known winning nonce is accepted"
+    );
+    // Mirrors the synchronous retire on `Applied` in both submit paths.
+    fx.book.invalidate_active();
+    assert!(fx.book.current().is_none());
+    let err = fx
+        .book
+        .validate(&submit_for(&fx.session, &fx.job, winning[1]), &target)
+        .err();
+    assert_eq!(
+        err,
+        Some(ShareError::Stale {
+            job: fx.job.id(),
+            reason: StaleReason::Invalidated
+        }),
+        "second winning nonce on the same job is stale and never resubmitted"
+    );
+    let replay = fx
+        .book
+        .validate(&submit_for(&fx.session, &fx.job, winning[0]), &target)
+        .err();
+    assert!(
+        matches!(replay, Some(ShareError::Duplicate { .. })),
+        "exact replay of an accepted share keeps duplicate identity, not stale"
+    );
+    let next = fx
+        .book
+        .install(build_candidate(101, 0xcd, 0)?, Vec::new())?;
+    assert!(next.clean_jobs, "new parent job is fresh");
+    let share = nonces(&fx.session, &next.job, false, 1)?[0];
+    assert!(
+        fx.book
+            .validate(&submit_for(&fx.session, &next.job, share), &easy()?)
+            .is_ok(),
+        "new parent job accepts shares"
+    );
+    Ok(())
+}

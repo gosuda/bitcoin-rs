@@ -8,6 +8,11 @@ use crate::{MiningControlError, MiningError};
 
 const SIGOPS_LIMIT_REASON: &str = "bad-blk-sigops";
 
+/// BIP22 reason for a block whose parent is no longer the best tip. The node
+/// answers it for `ApplyError::PrevHashMismatch`; pool adapters read it as a
+/// stale sibling instead of a defective block.
+pub const STALE_PARENT_REASON: &str = "inconclusive-not-best-prevblk";
+
 /// Core `GetRejectReason` strings for consensus failures (API-19).
 pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
     CompactString::from(match error {
