@@ -335,6 +335,15 @@ fn launch_command(
                 .arg(format!("-datadir={}", datadir.display()))
                 .arg(format!("-bind={p2p_addr}"))
                 .arg(format!("-rpcport={}", rpc_addr.port()))
+                // Pin the RPC listener to the exact probed endpoint. Core
+                // ignores -rpcbind unless -rpcallowip is also set, and
+                // without the pin a stolen IPv4 port leaves a half-alive
+                // node bound only on ::1: readiness probes 127.0.0.1 and
+                // hangs to the deadline instead of failing fast. Pinned, a
+                // stolen port is a fatal "Unable to start HTTP server"
+                // child exit, which the bounded spawn retry already owns.
+                .arg(format!("-rpcbind={rpc_addr}"))
+                .arg(format!("-rpcallowip={}", rpc_addr.ip()))
                 .arg(format!("-mocktime={mock}"));
             ClockControl::Mock(mock)
         }
@@ -401,6 +410,62 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 10048")
         || stderr.contains("An attempt was made to access a socket")
         || stderr.contains("os error 10013")
+        // Pinned Core RPC bind loss: the fatal "Unable to start HTTP
+        // server" reaches stderr while the per-endpoint "Binding RPC on
+        // address ... failed" cause stays in stdout. The pair keeps the
+        // retry scoped to the port race: a lookup failure ("Address lookup
+        // failed") or an allow-list error never prints that warning line,
+        // so non-port startup failures still surface untouched.
+        || (stderr.contains("Unable to start HTTP server")
+            && fs::read_to_string(evidence.join("stdout.log")).is_ok_and(|stdout| {
+                stdout
+                    .lines()
+                    .any(|line| line.contains("Binding RPC on address") && line.contains("failed"))
+            }))
+}
+
+/// Whether the child's own logs prove it bound the probed RPC endpoint: a
+/// readiness probe may have been answered by whoever stole the port in the
+/// reserve-release window (every harness node shares credentials), so a
+/// reply alone never identifies our child. Core requires its attempt line
+/// for our endpoint plus the post-bind `Starting HTTP server` record with
+/// no `failed` line (the attempt alone also exists just before a fatal
+/// exit); bitcoin-rs logs `rpc listener bound` with the address on
+/// stderr. No bind proof yet means keep polling, never adopt.
+fn rpc_bind_evidence_ready(kind: Kind, rpc_addr: SocketAddr, evidence: &Path) -> bool {
+    match kind {
+        Kind::Core => {
+            // Positive proof only: the attempt line alone also exists while
+            // the child is still alive just before its fatal exit, so its
+            // absence of `failed` proves nothing. `Starting HTTP server`
+            // runs strictly after the bind phase succeeds (31.1 order:
+            // attempts, then start), and the pin leaves exactly one
+            // endpoint, so this line means our address bound.
+            let attempt = format!(
+                "Binding RPC on address {} port {}",
+                rpc_addr.ip(),
+                rpc_addr.port()
+            );
+            let Ok(stdout) = fs::read_to_string(evidence.join("stdout.log")) else {
+                return false;
+            };
+            stdout.lines().any(|line| line.contains(&attempt))
+                && stdout
+                    .lines()
+                    .any(|line| line.contains("Starting HTTP server"))
+                && !stdout
+                    .lines()
+                    .any(|line| line.contains("Binding RPC on address") && line.contains("failed"))
+        }
+        Kind::BitcoinRs => {
+            let Ok(stderr) = fs::read_to_string(evidence.join("stderr.log")) else {
+                return false;
+            };
+            stderr.lines().any(|line| {
+                line.contains("rpc listener bound") && line.contains(&rpc_addr.to_string())
+            })
+        }
+    }
 }
 
 impl ProcessNode {
@@ -556,7 +621,31 @@ impl ProcessNode {
                 &json!([]),
                 deadline.min(Instant::now() + REQUEST_TIMEOUT),
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    // A successful probe is not proof our child answered:
+                    // whoever stole the port in the reserve-release window
+                    // may have, and every harness node shares the same
+                    // credentials. Trust the probe only while our child is
+                    // still alive; a dead child means the reply came from
+                    // elsewhere, so surface the exit for the bounded retry
+                    // instead of adopting a foreign node.
+                    if let Some(status) = self.child.try_wait()? {
+                        return Err(Error::ChildExit {
+                            pid: self.pid(),
+                            status,
+                            evidence: self.evidence.clone(),
+                        });
+                    }
+                    // Liveness is not identity: our child may still be alive
+                    // but not yet bound while the thief answers. Adopt the
+                    // probe only once our child's own logs prove it bound
+                    // the probed endpoint; until then keep polling.
+                    if !rpc_bind_evidence_ready(self.kind, self.rpc_addr, &self.evidence) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    return Ok(());
+                }
                 Err(error) if Instant::now() >= deadline => {
                     return Err(Error::Timeout {
                         pid: self.pid(),
@@ -977,6 +1066,106 @@ mod tests {
             invalid_flag_runs() - before,
             1,
             "a non-bind startup failure must consume exactly one spawn attempt"
+        );
+        Ok(())
+    }
+
+    /// The pinned Core RPC-steal pair must match the port-race evidence and
+    /// nothing else: the fatal stderr line plus the per-endpoint stdout
+    /// warning retries, while a lookup failure or an unrelated exit never
+    /// does, so the bounded retry cannot fire on the wrong cause.
+    #[test]
+    fn busy_port_detector_matches_only_the_core_rpc_steal_pair() -> Result<()> {
+        fn evidence_with(stdout: &str, stderr: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+            let dir = tempfile::tempdir()?;
+            fs::write(dir.path().join("stdout.log"), stdout)?;
+            fs::write(dir.path().join("stderr.log"), stderr)?;
+            let path = dir.path().to_path_buf();
+            Ok((dir, path))
+        }
+
+        let (_keep, fatal) = evidence_with(
+            "2026-10-26T01:19:20Z [warning] Binding RPC on address 127.0.0.1 port 36079 failed.\n",
+            "Error: Unable to start HTTP server. See debug log for details.\n",
+        )?;
+        assert!(exited_on_busy_port(&fatal));
+
+        let (_keep, lookup) = evidence_with(
+            "2026-10-26T01:19:20Z Binding RPC on address 127.0.0.1 port 36079\n2026-10-26T01:19:20Z Could not bind RPC on address 127.0.0.1 port 36079: Address lookup failed.\n",
+            "Error: Unable to start HTTP server. See debug log for details.\n",
+        )?;
+        assert!(
+            !exited_on_busy_port(&lookup),
+            "a lookup failure is not the port race"
+        );
+
+        let (_keep, other) = evidence_with(
+            "error: unexpected argument '--bogus'\n",
+            "error: unexpected argument '--bogus'\n",
+        )?;
+        assert!(
+            !exited_on_busy_port(&other),
+            "an unrelated startup failure must surface untouched"
+        );
+        Ok(())
+    }
+
+    /// Readiness adopts a probe only with the child's own bind proof: a
+    /// same-credential thief can answer while our child is still alive but
+    /// unbound, so the reply alone never identifies our node.
+    #[test]
+    fn readiness_requires_the_child_own_bind_evidence() -> Result<()> {
+        fn evidence_with(stdout: &str, stderr: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+            let dir = tempfile::tempdir()?;
+            fs::write(dir.path().join("stdout.log"), stdout)?;
+            fs::write(dir.path().join("stderr.log"), stderr)?;
+            let path = dir.path().to_path_buf();
+            Ok((dir, path))
+        }
+
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 36079));
+        let (_keep, core_bound) = evidence_with(
+            "2026-10-26T01:19:20Z Binding RPC on address 127.0.0.1 port 36079\n2026-10-26T01:19:20Z Starting HTTP server with 16 worker threads\n",
+            "",
+        )?;
+        assert!(rpc_bind_evidence_ready(Kind::Core, addr, &core_bound));
+
+        let (_keep, core_attempt_only) = evidence_with(
+            "2026-10-26T01:19:20Z Binding RPC on address 127.0.0.1 port 36079\n",
+            "",
+        )?;
+        assert!(
+            !rpc_bind_evidence_ready(Kind::Core, addr, &core_attempt_only),
+            "an attempt without the started record must not adopt: the child may die next"
+        );
+
+        let (_keep, core_pending) =
+            evidence_with("2026-10-26T01:19:20Z Bound to 127.0.0.1:37681\n", "")?;
+        assert!(
+            !rpc_bind_evidence_ready(Kind::Core, addr, &core_pending),
+            "a pre-bind probe must keep polling, never adopt"
+        );
+
+        let (_keep, core_lost) = evidence_with(
+            "2026-10-26T01:19:20Z Binding RPC on address 127.0.0.1 port 36079\n2026-10-26T01:19:20Z [warning] Binding RPC on address 127.0.0.1 port 36079 failed.\n",
+            "",
+        )?;
+        assert!(
+            !rpc_bind_evidence_ready(Kind::Core, addr, &core_lost),
+            "a lost bind must never read as ready"
+        );
+
+        let (_keep, node_bound) = evidence_with(
+            "",
+            "2026-10-26T01:19:20Z INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:36079\n",
+        )?;
+        assert!(rpc_bind_evidence_ready(Kind::BitcoinRs, addr, &node_bound));
+
+        let (_keep, node_pending) =
+            evidence_with("", "2026-10-26T01:19:20Z INFO startup: loading\n")?;
+        assert!(
+            !rpc_bind_evidence_ready(Kind::BitcoinRs, addr, &node_pending),
+            "a pre-bind probe must keep polling, never adopt"
         );
         Ok(())
     }
