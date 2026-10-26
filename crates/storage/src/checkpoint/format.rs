@@ -7,26 +7,25 @@ pub(crate) fn generation_name(generation: u64) -> String {
     format!("gen-{generation:020}")
 }
 
+fn is_twenty_ascii_digits(digits: &str) -> bool {
+    digits.len() == 20 && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 pub(crate) fn valid_generation_name(name: &str) -> bool {
-    name.len() == 24
-        && name.starts_with("gen-")
-        && name[4..].bytes().all(|byte| byte.is_ascii_digit())
+    name.strip_prefix("gen-")
+        .is_some_and(is_twenty_ascii_digits)
 }
 
 pub(crate) fn valid_staging_name(name: &str) -> bool {
     name.strip_prefix(".gen-")
         .and_then(|value| value.strip_suffix(".tmp"))
-        .is_some_and(|digits| {
-            digits.len() == 20 && digits.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        .is_some_and(is_twenty_ascii_digits)
 }
 
 pub(crate) fn valid_current_temp_name(name: &str) -> bool {
     name.strip_prefix(".CURRENT-")
         .and_then(|value| value.strip_suffix(".tmp"))
-        .is_some_and(|digits| {
-            digits.len() == 20 && digits.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        .is_some_and(is_twenty_ascii_digits)
 }
 
 /// Checkpoint-file network spelling. Core's `testnet` alias names
