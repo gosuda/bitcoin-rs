@@ -2763,6 +2763,117 @@ mod tests {
     }
 
     #[test]
+    fn prefers_blocks_peer_gets_same_retained_tip_once_body_available() {
+        use crate::staletip::{CompressedHeader, StaleTipAnnouncement};
+        use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+        let table = Arc::new(PeerTable::new());
+        let chain = Arc::new(MockAnnounceChain::new(5));
+        let addr = test_addr(1403);
+
+        let mut tree = BlockTree::new();
+        let genesis = Network::Regtest.genesis_block().header;
+        let g_id = tree
+            .insert_node(None, genesis, NodeStatus::HeaderValid)
+            .expect("genesis");
+        let h1 = mined_regtest_header(genesis.compute_hash(), 1).expect("h1");
+        let fork_node = tree
+            .insert_node(Some(g_id), h1, NodeStatus::HeaderValid)
+            .expect("fork");
+        let fork_hash = Hash256::from(h1.compute_hash());
+
+        let h2 = mined_regtest_header(BlockHash::from(fork_hash), 2).expect("h2");
+        let old_active_id = tree
+            .insert_node(Some(fork_node), h2, NodeStatus::HeaderValid)
+            .expect("demoted");
+        let demoted_hash = Hash256::from(h2.compute_hash());
+
+        let b1 = mined_regtest_header(BlockHash::from(fork_hash), 101).expect("b1");
+        let b1_id = tree
+            .insert_node(Some(fork_node), b1, NodeStatus::HeaderValid)
+            .expect("b1 node");
+        let b2 = mined_regtest_header(b1.compute_hash(), 102).expect("b2");
+        let _b2_id = tree
+            .insert_node(Some(b1_id), b2, NodeStatus::HeaderValid)
+            .expect("b2 node");
+        assert_eq!(
+            tree.node(old_active_id).expect("demoted node").status,
+            NodeStatus::Stale,
+            "h2 must be demoted to Stale"
+        );
+
+        let reader = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let retainer = Arc::new(crate::sync::StaleTipRetainer::default());
+        let announcer = BlockAnnouncer::new(
+            Arc::clone(&table),
+            Arc::clone(&chain) as Arc<dyn ChainQuery>,
+            BlockAnnounceConfig::default(),
+        )
+        .with_stale_tips(Arc::clone(&retainer), reader.clone());
+
+        let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
+        let src = source(&table, addr);
+        table.note_stale_tip_relay(src, true);
+        table.note_announced_tip(src, fork_hash, Some(1));
+
+        // The peer demonstrated and opened relay before the target was
+        // retained (campaign o2 demonstrates the main tip while the retainer
+        // is still empty, so its opening floor predates the later tip).
+        let opened = announcer.process_stale_tips();
+        assert!(opened.is_empty(), "empty retainer opens relay with no send");
+
+        assert!(
+            retainer.learn(&reader.read(), demoted_hash, None),
+            "demoted tip must be learned"
+        );
+
+        // Same peer, same retained hash, body absent: prefers-blocks gets nothing.
+        *chain.stale_announcement.lock() = Some(StaleTipAnnouncement {
+            fork_point: fork_hash,
+            headers: vec![CompressedHeader {
+                version: 1,
+                merkle_root: Hash256::default(),
+                time: 12345,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
+                nonce: 42,
+            }],
+            have_block: false,
+        });
+        let absent = announcer.process_stale_tips();
+        assert!(
+            absent.is_empty(),
+            "prefers-blocks peer must not get body-absent tip"
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(
+            !retainer.knows(src, demoted_hash),
+            "refused tip must stay unoffered, not marked known"
+        );
+
+        // Same peer, same retained hash, body now available: sent exactly once.
+        *chain.stale_announcement.lock() = Some(StaleTipAnnouncement {
+            fork_point: fork_hash,
+            headers: vec![CompressedHeader {
+                version: 1,
+                merkle_root: Hash256::default(),
+                time: 12345,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
+                nonce: 42,
+            }],
+            have_block: true,
+        });
+        let sent = announcer.process_stale_tips();
+        assert_eq!(sent.len(), 1, "same hash must relay once body is available");
+        assert!(matches!(sent[0].1, Message::StaleTip(_)));
+        assert_eq!(sent[0].0, Some(addr));
+        let msg = rx.try_recv().expect("staletip delivered");
+        assert!(matches!(msg, Message::StaleTip(_)));
+
+        let again = announcer.process_stale_tips();
+        assert!(again.is_empty(), "repeat same-hash tip must be suppressed");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn origin_peer_receives_inv_fallback_even_when_known_position_meets_tip() {
         let table = Arc::new(PeerTable::new());
         let chain = Arc::new(MockAnnounceChain::new(5));

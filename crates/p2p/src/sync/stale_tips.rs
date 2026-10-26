@@ -27,7 +27,8 @@
 //!   (never echo it back) and we announced it to the peer (never repeat it).
 //! - Relay with a peer opens once ([`StaleTipRetainer::pending_for`]): the
 //!   first call offers at most [`MAX_ADVERTISED_STALETIPS`] of the tips already
-//!   held, every later call only tips learned after it. A peer therefore
+//!   held, every later call only tips learned after it plus the selected
+//!   earlier tips the peer has not acknowledged. A peer therefore
 //!   receives at most ten earlier tips however many are held, plus each tip
 //!   learned while it is connected, once.
 //!
@@ -86,13 +87,27 @@ impl Retained {
     }
 }
 
+/// Relay with one peer, opened by the first [`StaleTipRetainer::pending_for`]
+/// call for it.
+#[derive(Debug, Default)]
+struct Opening {
+    /// Learn sequence when relay opened: only tips learned at or after it
+    /// are offered again, plus [`Self::pending`].
+    floor: u64,
+    /// Initial tips selected on opening that the peer has not acknowledged,
+    /// best first: the offered eligible plus the refused within the
+    /// remaining slots, at most [`MAX_ADVERTISED_STALETIPS`] in total.
+    /// Offering is not delivery — a saturated send marks nothing — so
+    /// entries leave only when marked known, retired, or forgotten.
+    pending: Vec<Hash256>,
+}
+
 #[derive(Debug, Default)]
 struct State {
     tips: Vec<Retained>,
     next_sequence: u64,
-    /// Peers relay has been opened with, and the learn sequence at that
-    /// moment: only tips learned at or after it are offered again.
-    opened: HashMap<PeerSource, u64>,
+    /// Peers relay has been opened with.
+    opened: HashMap<PeerSource, Opening>,
     /// Announcements peers sent whose branch the sync loop has not yet
     /// admitted, oldest first; at most [`MAX_RETAINED_STALE_TIPS`].
     heard: VecDeque<(Hash256, PeerSource)>,
@@ -342,8 +357,9 @@ impl StaleTipRetainer {
     ///
     /// The first call for a peer opens relay with it: it offers at most
     /// [`MAX_ADVERTISED_STALETIPS`] of the tips already held, greatest
-    /// chainwork first. Every later call offers only tips learned since, so a
-    /// peer is never sent the backlog twice nor the part of it beyond the cap.
+    /// chainwork first. Every later call offers only tips learned since plus
+    /// the selected earlier tips the peer has not acknowledged, so a peer is
+    /// never sent the backlog twice nor the part of it beyond the cap.
     ///
     /// PRE: call first for a peer once it has demonstrated a tip, so
     ///   `relayable` can choose a fork point it knows; opening is one-shot.
@@ -352,36 +368,113 @@ impl StaleTipRetainer {
     ///   the mutex, and on opening only until the cap is met, so the work is
     ///   bounded by the cap plus the tips it rejects. A tip `relayable`
     ///   refuses stays offerable (a body still being fetched for a
-    ///   `prefers_blocks` peer, say) until it is marked known or retired.
-    ///   Nothing is marked known here: the caller marks each tip with
-    ///   [`Self::mark_known`] after its send returned `Ok`.
+    ///   `prefers_blocks` peer, say) until it is marked known or retired,
+    ///   and so does a tip that was offered but never marked: the caller
+    ///   marks each tip with [`Self::mark_known`] after its send returned
+    ///   `Ok`, and a saturated send that breaks the batch marks nothing, so
+    ///   the next call offers the unacked tips again. Nothing is marked
+    ///   known here.
     pub(crate) fn pending_for(
         &self,
         peer: PeerSource,
         mut relayable: impl FnMut(Hash256) -> bool,
     ) -> Vec<Hash256> {
-        let (opening, offered) = {
+        // Rank-ordered candidates snapshotted under the mutex: every unknown
+        // tip on opening, otherwise unknown tips learned since plus the
+        // selected initial tips still awaiting acknowledgement.
+        let (opening, candidates) = {
             let mut state = self.state.lock();
             let opening = !state.opened.contains_key(&peer);
-            let floor = state.opened.get(&peer).copied().unwrap_or(0);
-            let offered: Vec<Hash256> = state
-                .ranked()
-                .into_iter()
-                .filter(|held| held.sequence >= floor && !held.known_by.contains(&peer))
-                .map(|held| held.hash)
-                .collect();
             if opening {
-                let opened_at = state.next_sequence;
-                state.opened.insert(peer, opened_at);
+                let floor = state.next_sequence;
+                state.opened.insert(
+                    peer,
+                    Opening {
+                        floor,
+                        pending: Vec::new(),
+                    },
+                );
             }
-            (opening, offered)
+            let (floor, pending) = state
+                .opened
+                .get(&peer)
+                .map(|slot| (slot.floor, slot.pending.clone()))
+                .unwrap_or_default();
+            let mut candidates = Vec::new();
+            for held in state.ranked() {
+                if held.known_by.contains(&peer) {
+                    continue;
+                }
+                if opening || held.sequence >= floor || pending.contains(&held.hash) {
+                    candidates.push(held.hash);
+                }
+            }
+            (opening, candidates)
         };
-        let mut accepted = offered.into_iter().filter(|hash| relayable(*hash));
-        if opening {
-            accepted.by_ref().take(MAX_ADVERTISED_STALETIPS).collect()
-        } else {
-            accepted.collect()
+        // `relayable` runs outside the mutex. On opening the scan stops once
+        // the cap is met; refused tips met before that stay selected, so a
+        // tip refused for a still-fetching body is offered again once it
+        // arrives. Later refusals of new tips stay offerable through the
+        // unchanged floor, and unacked retries stay selected: offering is
+        // not delivery, so a merely offered tip is never dropped before its
+        // `mark_known`.
+        let mut accepted: Vec<Hash256> = Vec::new();
+        let mut seen: Vec<Hash256> = Vec::new();
+        for hash in candidates {
+            if opening && accepted.len() == MAX_ADVERTISED_STALETIPS {
+                break;
+            }
+            if opening {
+                seen.push(hash);
+            }
+            if relayable(hash) {
+                accepted.push(hash);
+            }
         }
+        {
+            let mut state = self.state.lock();
+            // A tip is offerable here when it is still retained and not
+            // known: a concurrent `mark_known` (a send that landed while
+            // `relayable` ran) drops it from the window instead. Takes the
+            // tips slice so the retain below can hold its `opened` entry
+            // (a disjoint field) while filtering.
+            let offerable = |tips: &[Retained], hash: Hash256| {
+                tips.iter()
+                    .any(|held| held.hash == hash && !held.known_by.contains(&peer))
+            };
+            if opening {
+                // The selected initial window, best first: every offered
+                // eligible tip plus the refused within the remaining slots,
+                // at most the cap in total, so no eleventh initial tip is
+                // ever offered even when some go unsent.
+                let budget = MAX_ADVERTISED_STALETIPS.saturating_sub(accepted.len());
+                let mut selected = Vec::new();
+                let mut refused_kept = 0;
+                for hash in &seen {
+                    if accepted.contains(hash) {
+                        if offerable(&state.tips, *hash) {
+                            selected.push(*hash);
+                        }
+                    } else if refused_kept < budget && offerable(&state.tips, *hash) {
+                        selected.push(*hash);
+                        refused_kept += 1;
+                    }
+                }
+                if let Some(slot) = state.opened.get_mut(&peer) {
+                    slot.pending = selected;
+                }
+            } else {
+                // Only acknowledgement and retirement shrink the window: an
+                // offered-but-unsent tip (a saturated send that marked
+                // nothing) is offered again next call. Disjoint field
+                // borrows keep the retain in place with no extra allocation.
+                let State { tips, opened, .. } = &mut *state;
+                if let Some(slot) = opened.get_mut(&peer) {
+                    slot.pending.retain(|hash| offerable(tips, *hash));
+                }
+            }
+        }
+        accepted
     }
 
     /// Whether `peer` is recorded as knowing the retained tip `hash`.
@@ -876,9 +969,18 @@ mod tests {
         );
         assert!(!retainer.knows(peer, expected[0]), "offering marks nothing");
 
-        // The backlog is never offered again, nor the part beyond the cap.
-        let again = retainer.pending_for(peer, |_| panic!("no tip is pending"));
-        assert_eq!(again, []);
+        // Offering is not delivery: the selected backlog is offered again
+        // until the sends are acknowledged (a saturated send marks nothing).
+        let retry = retainer.pending_for(peer, |_| true);
+        assert_eq!(retry, expected, "unacked selected tips are offered again");
+        for hash in &expected {
+            retainer.mark_known(peer, *hash);
+        }
+        assert_eq!(
+            retainer.pending_for(peer, |_| true),
+            Vec::<Hash256>::new(),
+            "acked selected tips leave no extra old beyond the cap"
+        );
 
         // A tip learned afterwards is offered, exactly once it is marked.
         let fresh = fixture.child(main[49].id)?;
