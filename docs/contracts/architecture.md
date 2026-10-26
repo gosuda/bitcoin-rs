@@ -660,6 +660,108 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
     (`TipReader`, `BlockTreeReader`), while worker orchestration belongs to
     `BlockSync`.
 
+## Current boundary and target design
+
+This section states what runs and what remains target. In the graph,
+solid arrows are implemented and dotted arrows are targets. Ownership
+for the implemented behaviors lives in `ARCH-07` / `ARCH-07a`,
+`ARCH-05`, `ARCH-02`, `IDX-12` in [indexing](indexing.md) with the
+historical-prefix reads in [embedding](embedding.md), and the retained
+rows below; ownership for the targets lives in the `T1` / `T3` clauses
+below.
+
+```mermaid
+flowchart TD
+    BODY["raw block bodies + undo records"] -->|"apply input"| CS["chainstate: transition, durable write, publication (ARCH-07)"]
+    PAIR["independent decoded + raw input pair"] -->|"supplied to apply callers today"| CS
+    CS -->|"mutates through one narrow contract (ARCH-07a)"| UTXO["canonical UTXO: authoritative spendability"]
+    CS -->|"commits"| HB["durable head batch: receipt"]
+    HB -->|"durable receipt precedes"| TIP["applied tip publication"]
+    TIP -->|"wakes on published tip (EVT-01)"| WORKER["existing async index worker (ARCH-05)"]
+    WORKER -->|"writes index rows incl. prefix coverage"| ROWS["index rows: ScriptLive + prefix coverage"]
+    ROWS -->|"rows join"| SL["ScriptLive strict live join"]
+    UTXO -->|"join consults via UtxoReader"| SL
+    SL -->|"serves"| LIVE["live outputs"]
+    CS -->|"writes early undo and body-locator metadata"| ER["active-store early rows (P4 retained; consolidation gated)"]
+    ROWS -->|"serves coverage rows"| HIST["typed historical-prefix query (P2 implemented)"]
+
+    WORKER -.->|"T1 reads seed artifact when usable"| SNAP["verified immutable snapshot artifact (T1 target)"]
+    BODY -.->|"T1 alternate source: replay complete retained history"| WORKER
+    WORKER -.->|"T1 seeds rows outside live UTXO lock (else reports unavailable); never from live set or fresh checkpoint"| ROWS
+    PAIR -.->|"T3 replaced by"| BP["BlockPayload: one immutable input (T3 target)"]
+    CS -.->|"T3 apply consumes"| BP
+```
+
+### T1: snapshot-seeded ScriptLive outside the live UTXO lock (target)
+
+The seeder MUST run under the existing worker, retention, and
+reconciliation owners named in `ARCH-05` and `ARCH-07` / `ARCH-07b`,
+and MUST NOT hold the live UTXO lock while seeding. The seed source
+MUST be a verified immutable artifact when one is usable; otherwise the
+existing worker MUST replay complete retained history when that complete
+source is available under existing retention limits; when neither source
+suffices, the seed MUST report unavailability explicitly. The
+seed MUST NOT fall back to the live UTXO set and MUST NOT create a
+fresh checkpoint on demand. Ownership stays where it is today:
+activation roles and retention authority in `ARCH-07` / `ARCH-07b`,
+ScriptLive as a fixed-width family under `ARCH-02`. Comparison
+(reference only): Core keeps live reads on the coin cache independent
+of any index prefix
+([coins.cpp](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/coins.cpp#L68-L80));
+no snapshot-seeded index path was found in the inspected Core code.
+
+### P2: typed historical-prefix query with scoped absence (implemented)
+
+Consistency and embedding usage are owned by `IDX-12` in
+[indexing](indexing.md) and the historical-prefix reads in
+[embedding](embedding.md); this clause states only the architecture
+boundary. Each call takes one immutable snapshot, derives the bounded
+common covered ancestor of its required capability watermarks and the
+published tip, reads only heights from the maximum required floor
+through that anchor on that chain, then rechecks the anchor against the
+active tip after the read. Each call takes its own DB snapshot and
+chooses its prefix independently; callers MUST NOT assume equal anchors
+across calls, even when coincident calls return the same prefix. Absence is scoped to that
+prefix, never a global negative. Full script history on a positive
+floor stays unproven because funding below the floor can hide in-range
+spends; the exact-outpoint spend lookup and the transaction lookup MAY
+report scoped absence after verifying the in-range rows. Strict
+ScriptLive reads and Core-compatible endpoints keep their current
+semantics: bounded scans under `ARCH-02` and `BlockUndoSource` reads
+with receipt, applied-hash, and lease revalidation under `ARCH-07`. The
+ancestry guard is a btcrs rule derived from the captured prefix. The
+pinned Core persistence guard is reference only: an index skips its
+persist unless its tip is an ancestor of the last flushed block
+([base.cpp](https://github.com/bitcoin/bitcoin/blob/a773e1e33b349dc819b5a0edc1c7a4839dc73b48/src/index/base.cpp#L277-L305));
+it describes no Core per-query behavior. An old-branch persisted cursor
+stays possible: strict reads refuse the stale watermark, while
+historical reads may serve the proved common prefix while the worker
+rewinds asynchronously.
+
+### T3: one private immutable BlockPayload in place of independent pairs (target)
+
+Callers that today take an independent decoded input and a raw input
+MUST instead take one immutable `BlockPayload` bound to the exact wire
+serialization. The fields are private. Ownership stays where it is
+today: the apply path in `ARCH-07` / `ARCH-07a` is where the paired
+call shape lives; the payload narrows that call shape and adds no new
+crate, layer, runtime, or parser.
+
+### P4: retain current early rows until staged readers and recovery proof permit consolidation (implemented retention; consolidation gated)
+
+The current early undo and body-locator rows MUST stay until every
+staged serving reader, historical undo consumer, and recovery dependency
+has a replacement and the audit gate passes. Body bytes are appended
+once; only metadata is repeated. The UTXO cache stays deferred until a
+supported memory requirement is demonstrated. Explicit non-goals are no
+wholesale archive replacement, no second runtime, and no generic MVCC
+or copy-on-write. Comparison (reference only): the relational archive
+rebuilds historical wire bytes from a join instead of keeping raw
+blocks
+([architecture](https://github.com/reardencode/rbitcoin/blob/572e72c1ce0b1c16dcd7182872a1e9c0089afd6a/docs/architecture.md),
+[reconstruct](https://github.com/reardencode/rbitcoin/blob/572e72c1ce0b1c16dcd7182872a1e9c0089afd6a/crates/rbitcoin-query/src/reconstruct.rs));
+the raw-body choice kept here is the opposite.
+
 ## Test and evidence isolation
 
 Default production builds contain no storage persistence fault slots,
