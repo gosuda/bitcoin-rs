@@ -772,7 +772,7 @@ fn decode_feature(payload: &[u8]) -> Result<Message, PeerError> {
     validate_feature_lengths(id_len, 0)?;
     let id = reader
         .get(..id_len)
-        .ok_or(PeerError::Protocol("truncated feature identifier"))?;
+        .ok_or(PeerError::Misbehavior("truncated feature identifier"))?;
     reader = &reader[id_len..];
     let data_len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let data_len = usize::try_from(data_len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;

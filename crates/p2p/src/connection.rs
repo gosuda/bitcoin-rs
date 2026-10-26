@@ -1050,6 +1050,12 @@ impl PeerLease {
         if self.is_cancelled() {
             return Err(OutboundRefusal::Closed(message));
         }
+        // BIP434 advertisements belong to Peer::send's version/verack
+        // window; refuse before charging the budget.
+        if matches!(message, crate::Message::Feature { .. }) {
+            self.cancel();
+            return Err(OutboundRefusal::Closed(message));
+        }
         let Ok(wire_len) = crate::wire::wire_len(&message) else {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));
@@ -1089,6 +1095,12 @@ impl PeerLease {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));
         };
+        // BIP434 advertisements belong to Peer::send's version/verack
+        // window; refuse before charging the budget.
+        if matches!(message, crate::Message::Feature { .. }) {
+            self.cancel();
+            return Err(OutboundRefusal::Closed(message));
+        }
         if wire_len > credit.bytes() {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));

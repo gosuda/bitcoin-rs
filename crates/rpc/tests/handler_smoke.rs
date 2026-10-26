@@ -263,7 +263,7 @@ fn network_and_wallet_expectations(
         (
             "getnetworkinfo",
             json!([]),
-            json!({"protocolversion": 70016, "connections": 0, "networkactive": true}),
+            json!({"protocolversion": 70017, "connections": 0, "networkactive": true}),
         ),
         ("getpeerinfo", json!([]), json!([])),
         ("getconnectioncount", json!([]), json!(0)),

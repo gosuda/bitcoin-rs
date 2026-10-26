@@ -189,7 +189,7 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
         network.version,
         usize::try_from(client_version()).unwrap_or(usize::MAX)
     );
-    assert_eq!(network.protocol_version, 70016);
+    assert_eq!(network.protocol_version, 70017);
     assert_eq!(network.connections, 0);
     assert_eq!(network.networks.len(), 3);
     assert_eq!(network.warnings, Vec::<String>::new());

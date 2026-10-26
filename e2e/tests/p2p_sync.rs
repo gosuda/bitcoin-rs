@@ -130,7 +130,7 @@ fn peer_and_network_introspection() -> Result<()> {
         info.str_field("subversion")?,
         concat!("/bitcoin-rs:", env!("CARGO_PKG_VERSION"), "/")
     );
-    assert_eq!(info.u64_field("protocolversion")?, 70016);
+    assert_eq!(info.u64_field("protocolversion")?, 70017);
     let services = info["localservicesnames"]
         .as_array()
         .ok_or_else(|| Error::Assertion("localservicesnames".into()))?;
