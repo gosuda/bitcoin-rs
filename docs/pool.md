@@ -57,7 +57,7 @@ The input buffer, decoded secret, and stored authority secret use `Zeroizing`; t
 
 ## Register miners and inspect accounting
 
-Use the authenticated management JSON-RPC listener. Pool methods are unavailable without the compiled feature; with the feature compiled but the runtime off, they report `MethodDisabled`. Parameters are positional arrays.
+Use the authenticated management JSON-RPC listener. The dispatcher and its shipped-method inventory include pool methods only when the `pool` feature is compiled. The `pool-sv2` feature also enables `pool`. With the feature compiled but the runtime off, these methods report `MethodDisabled`. Parameters are positional arrays.
 
 | Method | Parameters | Result or effect |
 | --- | --- | --- |
