@@ -451,33 +451,51 @@ impl ChainQuery for ActiveChainQuery {
         stop_hash: BlockHash,
         limit: usize,
     ) -> Vec<Header> {
-        let tree = self.block_tree.read();
-        let Some(tip) = tree.tip() else {
-            return Vec::new();
-        };
-        if tip.chainwork < ChainWork::from_be_bytes(self.network.minimum_chain_work()) {
-            return Vec::new();
-        }
+        // Locator-based replies follow the applied chain, not the header-best
+        // chain: Core only serves validated headers, and during a reorg the
+        // applied tip may sit off best while bodies catch up. The snapshot is
+        // validated under the tree lock; on mismatch return empty, never fall
+        // back to header-best traversal. The empty-locator single-header
+        // direct lookup stays on the header-best chain, unchanged.
         if limit == 0 {
             return Vec::new();
         }
+        let tree = self.block_tree.read();
         if locator_hashes.is_empty() {
+            let Some(tip) = tree.tip() else {
+                return Vec::new();
+            };
+            if tip.chainwork < ChainWork::from_be_bytes(self.network.minimum_chain_work()) {
+                return Vec::new();
+            }
             return header_for_active_stop(&tree, tip.tip_id, stop_hash)
                 .into_iter()
                 .take(limit)
                 .collect();
         }
+        let Some(applied) = self.applied_tip.load_full() else {
+            return Vec::new();
+        };
+        let Ok(applied_node) = tree.node(applied.tip_id) else {
+            return Vec::new();
+        };
+        if applied_node.hash != applied.hash || applied_node.height != applied.height {
+            return Vec::new();
+        }
+        if applied_node.chainwork < ChainWork::from_be_bytes(self.network.minimum_chain_work()) {
+            return Vec::new();
+        }
 
         let mut height = locator_hashes
             .iter()
-            .find_map(|hash| tree.active_height_of(tip.tip_id, (*hash).into()))
+            .find_map(|hash| tree.active_height_of(applied.tip_id, (*hash).into()))
             .and_then(|height| height.checked_add(1))
             .unwrap_or(1);
         let has_stop = stop_hash != BlockHash::default();
         let mut headers = Vec::new();
 
-        while height <= tip.height && headers.len() < limit {
-            let Some(node_id) = tree.node_at_height_from(tip.tip_id, height) else {
+        while height <= applied.height && headers.len() < limit {
+            let Some(node_id) = tree.node_at_height_from(applied.tip_id, height) else {
                 break;
             };
             let Ok(node) = tree.node(node_id) else {
@@ -1715,6 +1733,160 @@ mod tests {
             vec![active1.compute_hash(), active2.compute_hash()]
         );
         assert_eq!(query.headers_after(&[], fork1.compute_hash(), 10), []);
+        Ok(())
+    }
+
+    #[test]
+    fn applied_prefix_when_headers_lead() -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(4);
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
+        let applied_id = tree.insert_node(Some(genesis), headers[1], NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("applied")?;
+        let second = tree.insert_node(Some(applied_id), headers[2], NodeStatus::Active)?;
+        tree.insert_node(Some(second), headers[3], NodeStatus::Active)?;
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[headers[0].compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![headers[1].compute_hash()],
+            "only the servable applied prefix replies while headers lead"
+        );
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[headers[2].compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![headers[1].compute_hash()],
+            "a header-best-only locator is not an applied ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn applied_fork_off_best_serves_own_ancestry() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = test_header(BlockHash::default(), 0);
+        let shared = test_header(genesis.compute_hash(), 1);
+        let fork_tip = test_header(shared.compute_hash(), 42);
+        let main_second = test_header(shared.compute_hash(), 2);
+        let main_tip = test_header(main_second.compute_hash(), 3);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let shared_id = tree.insert_node(Some(genesis_id), shared, NodeStatus::Active)?;
+        let fork_id = tree.insert_node(Some(shared_id), fork_tip, NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("applied fork")?;
+        let main_second_id = tree.insert_node(Some(shared_id), main_second, NodeStatus::Active)?;
+        tree.insert_node(Some(main_second_id), main_tip, NodeStatus::Active)?;
+        assert_ne!(tree.node(fork_id)?.hash, tree.node(main_second_id)?.hash);
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[genesis.compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![shared.compute_hash(), fork_tip.compute_hash()],
+            "an off-best applied tip serves its own ancestry"
+        );
+        assert_eq!(
+            header_hashes(&query.headers_after(&[shared.compute_hash()], BlockHash::default(), 10)),
+            vec![fork_tip.compute_hash()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn best_only_locator_does_not_skip_applied_fork() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = test_header(BlockHash::default(), 0);
+        let shared = test_header(genesis.compute_hash(), 1);
+        let fork_tip = test_header(shared.compute_hash(), 42);
+        let main_second = test_header(shared.compute_hash(), 2);
+        let main_tip = test_header(main_second.compute_hash(), 3);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let shared_id = tree.insert_node(Some(genesis_id), shared, NodeStatus::Active)?;
+        tree.insert_node(Some(shared_id), fork_tip, NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("applied fork")?;
+        let main_second_id = tree.insert_node(Some(shared_id), main_second, NodeStatus::Active)?;
+        tree.insert_node(Some(main_second_id), main_tip, NodeStatus::Active)?;
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[main_second.compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![shared.compute_hash(), fork_tip.compute_hash()],
+            "a best-only locator falls back instead of skipping the applied fork"
+        );
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[main_second.compute_hash(), shared.compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![fork_tip.compute_hash()],
+            "locator order keeps the first servable applied ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stop_hash_bounds_applied_response() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = test_header(BlockHash::default(), 0);
+        let shared = test_header(genesis.compute_hash(), 1);
+        let fork_tip = test_header(shared.compute_hash(), 42);
+        let main_second = test_header(shared.compute_hash(), 2);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let shared_id = tree.insert_node(Some(genesis_id), shared, NodeStatus::Active)?;
+        tree.insert_node(Some(shared_id), fork_tip, NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("applied fork")?;
+        tree.insert_node(Some(shared_id), main_second, NodeStatus::Active)?;
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[genesis.compute_hash()],
+                shared.compute_hash(),
+                10
+            )),
+            vec![shared.compute_hash()],
+            "an applied stop ends the range"
+        );
+        assert_eq!(
+            header_hashes(&query.headers_after(
+                &[genesis.compute_hash()],
+                main_second.compute_hash(),
+                10
+            )),
+            vec![shared.compute_hash(), fork_tip.compute_hash()],
+            "a stop off the applied chain does not truncate it"
+        );
+        assert_eq!(
+            header_hashes(&query.headers_after(&[genesis.compute_hash()], BlockHash::default(), 1)),
+            vec![shared.compute_hash()],
+            "the caller limit still bounds the applied range"
+        );
         Ok(())
     }
 

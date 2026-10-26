@@ -126,7 +126,9 @@ pub trait ChainQuery: Send + Sync {
     ) -> Result<FilterServing, PeerError> {
         Ok(FilterServing::Done)
     }
-    /// Returns a bounded contiguous active-chain header response.
+    /// Returns a bounded contiguous header response: locator-based ranges
+    /// walk the applied chain, while the empty-locator single-header direct
+    /// lookup stays on the header-best chain.
     fn headers_after(
         &self,
         locator_hashes: &[BlockHash],
