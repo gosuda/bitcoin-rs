@@ -12,7 +12,7 @@ use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain
 use bitcoin_rs_e2e::helpers::{
     coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
 };
-use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy)]
@@ -303,21 +303,41 @@ fn transaction_cases(
     Ok(valid)
 }
 
-#[test]
-fn curated_live_acceptance() -> Result<()> {
+/// Isolated RPC-only pair for the curated lane: the candidate never binds
+/// P2P, so unrelated loopback probes under the full-gate scheduler cannot
+/// enter the shared-state observation. Core keeps its harness `-bind`
+/// (node.rs owns it), so its networking is disabled via the public
+/// `setnetworkactive` RPC instead of `-listen=0` (rejected with `-bind`).
+fn spawn_isolated_acceptance_pair() -> Result<(ProcessNode, ProcessNode)> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let funds = common_active_chain(&mut core, &mut node)?;
-    let valid = transaction_cases(&mut core, &mut node, &funds)?;
-    let valid_block = core_candidate(&mut core, &[])?;
-    compare_case(
-        &mut core,
-        &mut node,
-        "core-coinbase-block",
-        Input::Block(&valid_block),
-        true,
+    core.rpc("setnetworkactive", &json!([false]))?;
+    core.wait_for(
+        "acceptance network inactive",
+        std::time::Duration::from_secs(20),
+        |node| {
+            let count = node.rpc("getconnectioncount", &json!([]))?;
+            Ok((count == json!(0)).then_some(()))
+        },
     )?;
-    let template = core_candidate(&mut core, &[])?;
+    let node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            toml_override: Some(
+                "network = \"regtest\"\np2p_listen = []\ndns_seeds_enabled = false",
+            ),
+            ..SpawnOptions::default()
+        },
+    )?;
+    Ok((core, node))
+}
+
+/// Malformed header/coinbase block cases: each must be rejected by both
+/// nodes without moving the shared tip (checked inside `compare_case`).
+fn malformed_coinbase_block_cases(
+    core: &mut ProcessNode,
+    node: &mut ProcessNode,
+    template: Block,
+) -> Result<()> {
     let mut bad_merkle = template.clone();
     bad_merkle.header.merkle_root = TxMerkleNode::all_zeros();
     grind_pow(&mut bad_merkle.header)?;
@@ -348,8 +368,26 @@ fn curated_live_acceptance() -> Result<()> {
         ("wrong-coinbase-height", wrong_height),
         ("time-at-median", old_time),
     ] {
-        compare_case(&mut core, &mut node, name, Input::Block(&block), false)?;
+        compare_case(core, node, name, Input::Block(&block), false)?;
     }
+    Ok(())
+}
+
+#[test]
+fn curated_live_acceptance() -> Result<()> {
+    let (mut core, mut node) = spawn_isolated_acceptance_pair()?;
+    let funds = common_active_chain(&mut core, &mut node)?;
+    let valid = transaction_cases(&mut core, &mut node, &funds)?;
+    let valid_block = core_candidate(&mut core, &[])?;
+    compare_case(
+        &mut core,
+        &mut node,
+        "core-coinbase-block",
+        Input::Block(&valid_block),
+        true,
+    )?;
+    let template = core_candidate(&mut core, &[])?;
+    malformed_coinbase_block_cases(&mut core, &mut node, template)?;
     // A max-version (0xFFFFFFFF) BIP68 spend: the version is read unsigned,
     // so the relative lock applies and both nodes must reject the block.
     let (_, funding_prevout) = funds.confirmed_output(0)?;
