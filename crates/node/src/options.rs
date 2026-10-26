@@ -108,6 +108,9 @@ pub fn parse_peer_network(value: &str) -> std::result::Result<bitcoin_rs_p2p::Pe
     value.parse().map_err(str::to_owned)
 }
 fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     value
         .split(',')
         .map(|network| parse_peer_network(network.trim()).map_err(anyhow::Error::msg))
@@ -568,43 +571,43 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_CONNECT", parse_connect_list]
                         toml each("connect", parse_connect_endpoint)
                     }
-                    /// Opt-in overlay routing: proxy.
+                    /// SOCKS5 route for IP destinations; onion routing is configured separately.
                     proxy as proxy: Option<SocketAddr> {
                         cli[#[arg(long = "proxy")]]
                         env["BITCOIN_RS_PROXY", str::parse]
                         toml native("proxy")
                     }
-                    /// Opt-in overlay routing: onion-proxy.
+                    /// SOCKS5 route for Tor v3 destinations, passed to the proxy without local DNS.
                     onion_proxy as onion_proxy: Option<SocketAddr> {
                         cli[#[arg(long = "onion-proxy")]]
                         env["BITCOIN_RS_ONION_PROXY", str::parse]
                         toml native("onion_proxy")
                     }
-                    /// Opt-in overlay routing: i2p-sam.
+                    /// Loopback SAM bridge of an operator-managed IVNP router.
                     i2p_sam as i2p_sam: Option<SocketAddr> {
                         cli[#[arg(long = "i2p-sam")]]
                         env["BITCOIN_RS_I2P_SAM", str::parse]
                         toml native("i2p_sam")
                     }
-                    /// Opt-in overlay routing: tor-control.
+                    /// Loopback Tor control endpoint enabling a persistent inbound onion service.
                     tor_control as tor_control: Option<SocketAddr> {
                         cli[#[arg(long = "tor-control")]]
                         env["BITCOIN_RS_TOR_CONTROL", str::parse]
                         toml native("tor_control")
                     }
-                    /// Opt-in overlay routing: tor-cookie.
+                    /// Tor control authentication cookie file; otherwise use NULL authentication.
                     tor_cookie as tor_cookie: Option<PathBuf> {
                         cli[#[arg(long = "tor-cookie")]]
                         env["BITCOIN_RS_TOR_COOKIE", parse_path]
                         toml native("tor_cookie")
                     }
-                    /// Opt-in overlay setting: i2p-accept.
+                    /// Accept inbound I2P streams using a persistent application destination.
                     i2p_accept as i2p_accept: Option<bool> {
                         cli[#[arg(long = "i2p-accept", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_I2P_ACCEPT", parse_bool]
                         toml native("i2p_accept")
                     }
-                    /// Opt-in overlay setting: proxy-randomize-credentials.
+                    /// Require SOCKS username/password authentication with fresh credentials per connection.
                     proxy_randomize_credentials as proxy_randomize_credentials: Option<bool> {
                         cli[#[arg(long = "proxy-randomize-credentials", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_PROXY_RANDOMIZE_CREDENTIALS", parse_bool]

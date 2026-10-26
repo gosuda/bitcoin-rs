@@ -107,8 +107,9 @@ fn compare_block_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering 
 
 /// Core's `ProtectEvictionCandidatesByRatio`: protects the half connected
 /// longest, reserving up to a quarter of the candidates for localhost peers
-/// even when they are newer. Core's other reserved networks (onion, I2P,
-/// CJDNS) are not transports here, so localhost is the only one.
+/// even when they are newer. Overlay peers use the existing eviction policy
+/// without Core's onion/I2P quotas; transport support does not add those
+/// policy preferences. This deviation is recorded in the compatibility policy.
 fn protect_by_ratio(candidates: &mut Vec<EvictionCandidate>) {
     let initial = candidates.len();
     let protect_total = initial / 2;

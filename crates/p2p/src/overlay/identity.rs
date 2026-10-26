@@ -77,7 +77,10 @@ pub(super) fn validate(text: &str, kind: Kind) -> io::Result<()> {
                 .decode(text)
                 .map_err(|_| invalid("invalid I2P private destination encoding"))?;
             let public_length = destination_length(&bytes)?;
-            if bytes.len() < public_length + 32 || bytes.len() > 12_288 {
+            // SAM PrivateKeyFile contains a 256-byte encryption-private-key
+            // field (also when unused), followed by a signing private key.
+            // DSA's 20 bytes are the smallest supported signing-key encoding.
+            if bytes.len() < public_length + 256 + 20 || bytes.len() > 12_288 {
                 return Err(invalid("invalid I2P private destination length"));
             }
         }
@@ -165,6 +168,19 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
         .parent()
         .ok_or_else(|| invalid("identity path has no parent"))?;
     ensure_directory(parent)?;
+    // A previous publication may have linked the key but failed directory
+    // sync. Retry durability for that exact identity, never replace a key.
+    if let Some(existing) = read(path, kind)? {
+        if existing != text {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "overlay identity already exists with a different key",
+            ));
+        }
+        return bitcoin_rs_storage::checkpoint::fs::sync_dir(
+            &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,
+        );
+    }
     let temporary = path.with_extension(format!(
         "tmp-{}-{:016x}",
         std::process::id(),

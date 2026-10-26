@@ -152,12 +152,14 @@ impl OverlayTransport {
                     }
                     let private = field(&line, "PRIV")
                         .ok_or_else(|| invalid("SAM destination lacks private key"))?;
+                    key = Some(private.to_owned());
+                }
+                if let Some(private) = &key {
                     identity::create(
                         &self.config.identity_dir.join("i2p.key"),
                         private,
                         identity::Kind::I2p,
                     )?;
-                    key = Some(private.to_owned());
                 }
                 let id = format!(
                     "bitcoin-rs-{:016x}",
@@ -191,7 +193,7 @@ impl OverlayTransport {
                 if self.config.i2p_accept {
                     *self.local_i2p.write() = Some(local);
                 }
-                backoff = Duration::from_secs(1);
+                let healthy_since = Instant::now();
 
                 std::thread::scope(|scope| {
                     let accept = self
@@ -204,6 +206,9 @@ impl OverlayTransport {
                             control.write(b"PING bitcoin-rs\n")?;
                             if control.line()? != "PONG bitcoin-rs" {
                                 return Err(invalid("SAM control heartbeat failed"));
+                            }
+                            if healthy_since.elapsed() >= Duration::from_secs(60) {
+                                backoff = Duration::from_secs(1);
                             }
                             pause(&cancelled, Duration::from_secs(1));
                         }

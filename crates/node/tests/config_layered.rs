@@ -62,6 +62,26 @@ fn overlay_routing_is_opt_in_and_layered_without_implicit_fallback() -> Result<(
 }
 
 #[test]
+fn blank_onlynet_environment_clears_an_inherited_network_list() -> Result<()> {
+    let file: UserConfig = toml::from_str("onlynet = ['ipv4']")?;
+    let mut environment = UserConfig::default();
+    environment.apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("  "))?;
+    assert!(
+        resolve(&[&file, &environment])?
+            .p2p
+            .overlay
+            .onlynet
+            .is_empty()
+    );
+    assert!(
+        environment
+            .apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("ipv4,"))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn silent_payments_toml_overlay_preserves_explicit_disable() -> Result<()> {
     assert!(
         !NodeConfig::default_for_network(Network::Regtest)

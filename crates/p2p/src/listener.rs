@@ -891,7 +891,9 @@ fn dial(
         .try_register_outbound(addr, lease, &shared.activity)
     else {
         let _ = stream.shutdown(std::net::Shutdown::Both);
-        return Err(crate::wire::PeerError::Protocol("network inactive"));
+        return Err(crate::wire::PeerError::Protocol(
+            "transport or network unavailable",
+        ));
     };
     if let Err(error) = shared.check_destination(addr, manual) {
         shared.peer_table.remove_current(addr, &lease);

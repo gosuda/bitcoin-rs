@@ -78,22 +78,27 @@ impl OverlayTransport {
                         .iter()
                         .find_map(|line| line.strip_prefix("PrivateKey="))
                         .ok_or_else(|| invalid("Tor control missing private key"))?;
+                    key = Some(private.to_owned());
+                }
+                if let Some(private) = &key {
                     identity::create(
                         &self.config.identity_dir.join("onion.key"),
                         private,
                         identity::Kind::Tor,
                     )?;
-                    key = Some(private.to_owned());
                 }
                 *self.local_onion.write() = Some(endpoint);
                 tracing::info!(service = %endpoint, %forwarding, "Tor inbound service active");
-                backoff = Duration::from_secs(1);
+                let healthy_since = Instant::now();
                 let mut next_heartbeat = Instant::now();
                 while !cancelled() {
                     if Instant::now() >= next_heartbeat {
                         control.deadline = Instant::now() + SETUP_TIMEOUT;
                         control.write(b"GETINFO version\r\n")?;
                         reply(&mut control)?;
+                        if healthy_since.elapsed() >= Duration::from_secs(60) {
+                            backoff = Duration::from_secs(1);
+                        }
                         next_heartbeat = Instant::now() + Duration::from_secs(1);
                     }
                     match listener.accept() {

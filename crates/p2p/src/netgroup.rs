@@ -169,11 +169,9 @@ impl NetGroups {
             PeerAddress::Ip(ip) => ip,
             PeerAddress::Onion(key) => return vec![4, key[0] | 15],
             PeerAddress::I2p(key) => return vec![5, key[0] | 15],
-            PeerAddress::AnonymousTor(id) => {
-                let mut group = vec![4];
-                group.extend_from_slice(&id.to_le_bytes());
-                return group;
-            }
+            // The remote identity is unknown: fresh circuit handles cannot
+            // establish independent network diversity.
+            PeerAddress::AnonymousTor(_) => return vec![4],
         };
         // Core applies ASMap only to IPv4/IPv6 network classes; local and
         // unroutable IPs keep the prefix owner's unclassified group.
@@ -347,6 +345,32 @@ pub(crate) const LINKED_ASMAP: &[u8] =
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_groups_use_address_prefixes_and_share_unknown_tor_origins() {
+        let groups = NetGroups::default();
+        for (address, class, group) in [
+            (
+                PeerAddress::Onion([0x12; 32]),
+                NetworkClass::Onion,
+                vec![4, 0x1f],
+            ),
+            (
+                PeerAddress::I2p([0x23; 32]),
+                NetworkClass::I2p,
+                vec![5, 0x2f],
+            ),
+            (PeerAddress::AnonymousTor(1), NetworkClass::Onion, vec![4]),
+            (
+                PeerAddress::AnonymousTor(u64::MAX),
+                NetworkClass::Onion,
+                vec![4],
+            ),
+        ] {
+            assert_eq!(network_class(address), class);
+            assert_eq!(groups.group(address), group);
+        }
+    }
 
     // The bytes and expected addresses/ASNs are copied unchanged from Bitcoin
     // Core v31.1 src/test/netbase_tests.cpp::asmap_test_vectors (MIT).

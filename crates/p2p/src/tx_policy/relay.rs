@@ -26,6 +26,8 @@ const INVENTORY_TARGET: usize = 70;
 /// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus
 /// bound address bytes and port. Socket scope/flow and the remote address/port
 /// are not part of this identity.
+/// Accepted I2P SAM streams use their ephemeral local bind endpoint, so their
+/// clocks are per stream; they do not share a destination-wide inbound clock.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct InboundClockKey {
     network: NetworkClass,

@@ -563,12 +563,12 @@ impl Manager {
         {
             return false;
         }
-        let time_penalty = if matches!(&source, Source::Ip(ip) if Some(crate::netgroup::canonical_ip(*ip)) == addr.address().ip())
-        {
-            0
-        } else {
-            time_penalty
+        let self_source = match &source {
+            Source::Ip(ip) => Some(crate::netgroup::canonical_ip(*ip)) == addr.address().ip(),
+            Source::Overlay(address) => *address == addr.address(),
+            _ => false,
         };
+        let time_penalty = if self_source { 0 } else { time_penalty };
         let existing = self.by_addr.get(&addr).copied();
         let mut refs = 0;
         if let Some(index) = existing {

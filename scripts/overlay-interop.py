@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Own external overlay backend processes and run the real process-harness tests."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import tempfile
 import time
@@ -13,10 +15,14 @@ import time
 IVNP_REVISION = "d5274b4752bd5a37bb35e6bb47796916c21e514c"
 
 
-def port():
-    with socket.socket() as listener:
+def reserve_port(kind=socket.SOCK_STREAM):
+    listener = socket.socket(type=kind)
+    try:
         listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+        return listener
+    except BaseException:
+        listener.close()
+        raise
 
 
 def wait_port(address, process):
@@ -45,6 +51,8 @@ def main():
         return 0
     if not args.ivnpd or not args.tor:
         parser.error("--ivnpd and --tor are required")
+    if os.name != "posix":
+        parser.error("external overlay campaigns require POSIX process-group cleanup")
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     binaries = {"tor": args.tor.resolve(), "ivnpd": args.ivnpd.resolve()}
@@ -56,9 +64,11 @@ def main():
     }, indent=2) + "\n")
     children = []
     logs = []
-    with tempfile.TemporaryDirectory(prefix="bitcoin-rs-overlay-") as directory:
+    with tempfile.TemporaryDirectory(prefix="bitcoin-rs-overlay-") as directory, ExitStack() as reservations:
         state = Path(directory)
-        socks, control, sam, sam_udp = port(), port(), port(), port()
+        held = [reservations.enter_context(reserve_port(kind)) for kind in
+                (socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_DGRAM)]
+        socks, control, sam, sam_udp = [listener.getsockname()[1] for listener in held]
         cookie = state / "tor.cookie"
         config = state / "ivnp.conf"
         config.write_text(f"[sam]\nlisten_host = 127.0.0.1\nlisten_port = {sam}\nudp_host = 127.0.0.1\nudp_port = {sam_udp}\n")
@@ -70,9 +80,14 @@ def main():
                        "-webui=false", "-http-proxy=false", "-log-level", "warn"]),
         ]
         try:
-            for name, command in commands:
+            for (name, command), ports in zip(commands, (held[:2], held[2:])):
                 log = (evidence / f"{name}.log").open("wb")
                 logs.append(log)
+                # Keep each reservation until immediately before its backend starts.
+                # The backend does not accept inherited sockets, so a short handoff
+                # race remains; a bind failure is reported by wait_port.
+                for listener in ports:
+                    listener.close()
                 children.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT))
             wait_port(("127.0.0.1", control), children[0])
             wait_port(("127.0.0.1", sam), children[1])
@@ -82,9 +97,20 @@ def main():
             command = [args.cargo, "test", "--locked", "-p", "bitcoin-rs-e2e", "--test", "overlay_connectivity",
                        "--", "--ignored", "--nocapture", "--test-threads=1"]
             with (evidence / "results.log").open("wb") as log:
-                result = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=1500)
+                with subprocess.Popen(command, env=environment, stdout=log,
+                                      stderr=subprocess.STDOUT, start_new_session=True) as campaign:
+                    try:
+                        returncode = campaign.wait(timeout=1500)
+                    finally:
+                        # Cargo, its test binary and the nodes inherit this group.
+                        # Also reap surviving descendants after a failed test run.
+                        try:
+                            os.killpg(campaign.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        campaign.wait()
             print((evidence / "results.log").read_text(errors="replace"))
-            return result.returncode
+            return returncode
         finally:
             for child in children:
                 child.terminate()

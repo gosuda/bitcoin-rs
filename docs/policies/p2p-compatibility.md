@@ -355,7 +355,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    timestamps before Add. Existing native port/routability admission is retained
    (`addrman.rs::routable`), including its narrower accepted IPv6 ranges and
    reserved IPv4 exclusions; exact group/hash vectors do not claim that every
-   Core-routable address is admitted. Only existing IP transports are supported.
+   Core-routable address is admitted. IP, Tor v3 and I2P destinations are supported.
    DNS remains
    bounded bootstrap input (64 results per seed pass), not a second address
    owner. Books with at least 64 records get 60 seconds to connect before a
@@ -398,10 +398,11 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
    original source with no prior Good. Missing or invalid fields fail closed.
    Same-map restart restores every reference; same-classifier v5/v6/v7/v8-to-v9
-   upgrades preserve all references and anchors exactly. Known v1–v7 formats,
+   upgrades preserve all references and anchors exactly. Known v1–v8 formats,
    including genuine v3 files carrying anchors, are strict migration sources.
-   Their service fields must be numeric u64; old null or missing fields remain
-   invalid. Historical DNS zero/no-Good records cannot reveal whether zero was
+   In v1–v7, service fields must be numeric u64; old null or missing fields remain
+   invalid. V8 retains its explicit nullable DNS-service representation.
+   Historical DNS zero/no-Good records cannot reveal whether zero was
    actually observed. Decoding infers only that ambiguous case as unknown in
    memory, where it may retry; its next accepted VERSION records the observation
    precisely. Exact-byte backup gates publication of the upgraded file, not
@@ -426,7 +427,8 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    Actual Core group/placement evidence includes 224 ASMap rows and official
    Tried236/New795 anchors. Migration fixtures were emitted by the original
-   v1/v2/v3/v4/v5/v6/v7 writers; v5/v6/v7 fixtures pin all eight retained references. These
+   v1/v2/v3/v4/v5/v6/v7/v8 writers; v5/v6/v7 fixtures pin all eight retained references.
+   The v8 endpoint fixture pins exact IP membership and anchor preservation. These
    are specific algorithm/persistence checks, not full peer-lifecycle parity.
 
    Filenames remain scoped to actual P2P magic: `peers.dat` becomes
@@ -685,7 +687,10 @@ Tor control and IVNP SAM workers participate in `P2pService` startup/shutdown.
 Allowed-network policy is checked both during selection and final admission.
 The [configuration reference](../getting-started.md#tor-and-ivnp-i2p-networking)
 owns option spellings and defaults. Setup uses absolute deadlines and bounded
-cancellation polls. SAM session preparation has a 120-second bound; onion
+cancellation polls for local overlay-service I/O. Direct IP dialing retains
+the existing single 10-second TCP connect timeout and does not poll cancellation
+during that call; the 100ms local-service reconnect helper is unsuitable for
+high-latency remote TCP establishment. SAM session preparation has a 120-second bound; onion
 circuit and I2P stream connection have a 60-second bound. Local service errors do not enter
 remote protocol discouragement or count as failed overlay peer attempts.
 Control-session loss revokes I2P stream epochs, including late registrations,
@@ -698,6 +703,12 @@ advertised as destinations. Inbound I2P uses `STREAM ACCEPT` Destination and
 port metadata. Both paths use ordinary inbound capacity/eviction policy and
 have no localhost exemptions. Core's special onion/I2P uptime protection in
 eviction remains a deviation, as recorded above.
+
+Inbound transaction-inventory clocks use the remote network class and local
+bind endpoint. Tor circuits forwarded to one service share its bind clock.
+Accepted I2P SAM streams have ephemeral local bind ports, so their clocks are
+per stream rather than shared by application destination. This remains a
+deviation from Core's shared inbound clock policy.
 
 Schema v9 adds overlay endpoints and source identities using the existing
 backup-before-migration path. Upgrading v8 IP records preserves the secret,

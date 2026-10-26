@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn overlay_self_announcements_keep_the_advertised_time() {
+    for address in [
+        crate::PeerAddress::Onion([3; 32]),
+        crate::PeerAddress::I2p([4; 32]),
+    ] {
+        let book = AddressBook::open(None, [1; 4], false, None);
+        let own = PeerEndpoint::new(address, 8333);
+        let other = PeerEndpoint::new(crate::PeerAddress::Onion([5; 32]), 8333);
+        book.learn_peer(address, &[(own, 9, EPOCH), (other, 9, EPOCH)], EPOCH);
+        let state = book.state.lock();
+        let seen = |endpoint| {
+            state
+                .stored
+                .records
+                .iter()
+                .find(|entry| entry.addr == endpoint)
+                .expect("learned endpoint")
+                .last_seen
+        };
+        assert_eq!(seen(own), EPOCH);
+        assert_eq!(seen(other), EPOCH - 2 * 60 * 60);
+    }
+}
+
+#[test]
 fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");

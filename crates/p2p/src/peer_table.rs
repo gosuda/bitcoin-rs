@@ -192,6 +192,8 @@ impl PeerTable {
 
     /// Register an outbound socket only while the service activity flag is enabled.
     /// Activity admission and connection replacement share the table write lock.
+    /// Inactive admission or a cancelled lease (including a revoked transport
+    /// epoch) returns `None` without changing the table.
     pub(crate) fn try_register_outbound(
         &self,
         addr: PeerEndpoint,
@@ -236,7 +238,8 @@ impl PeerTable {
     ///   [`crate::netgroup::NetGroups::group`], `max_inbound` is the resolved
     ///   automatic-connection remainder, and `best_block_depth` is
     ///   [`crate::listener::approximate_best_block_depth`].
-    /// POST: inactive admission returns `None` without mutation, even for an
+    /// POST: inactive admission or a cancelled lease (including a revoked
+    /// transport epoch) returns `None` without mutation, even for an
     ///   already registered lease. A lease at an address already holding a
     ///   LIVE inbound connection replaces and cancels it exactly as
     ///   [`Self::register`] does, which never grows the count. Any other

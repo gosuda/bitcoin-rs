@@ -170,10 +170,27 @@ fn application_identity_is_create_once_and_corruption_is_explicit() {
         identity::read(&path, identity::Kind::Tor).expect("reuse"),
         Some(key.clone())
     );
-    assert!(identity::create(&path, &key, identity::Kind::Tor).is_err());
+    identity::create(&path, &key, identity::Kind::Tor).expect("retry same identity durability");
+    let other = format!(
+        "ED25519-V3:{}",
+        base64::engine::general_purpose::STANDARD.encode([8; 64])
+    );
+    assert!(identity::create(&path, &other, identity::Kind::Tor).is_err());
     std::fs::write(&path, "damaged").expect("damage");
     assert!(identity::read(&path, identity::Kind::Tor).is_err());
     assert_eq!(std::fs::read_to_string(path).expect("preserved"), "damaged");
+}
+
+#[test]
+fn sam_private_destination_requires_the_encryption_and_signing_fields() {
+    use base64::Engine as _;
+    let mut bytes = vec![0; 387 + 256 + 20];
+    let encoded = identity::i2p_base64().encode(&bytes);
+    identity::validate(&encoded, identity::Kind::I2p).expect("complete legacy private key");
+    bytes.pop();
+    assert!(
+        identity::validate(&identity::i2p_base64().encode(bytes), identity::Kind::I2p).is_err()
+    );
 }
 
 #[test]
