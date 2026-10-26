@@ -136,6 +136,9 @@ pub struct TxAcceptanceFact {
     pub base_fee: Option<u64>,
     /// Modified fee rate in sat/kvB from the captured policy state.
     pub effective_fee_rate: Option<u64>,
+    /// Modified fee in sats from the captured policy state; the caller's
+    /// fee cap compares against it unrounded, like Core's `GetFeeRate`.
+    pub modified_fee: Option<u64>,
     /// Rejection reason when `allowed` is false.
     pub reject_reason: Option<AcceptanceRejectReason>,
 }
@@ -357,6 +360,10 @@ pub(crate) fn evaluate_one(
             .ok()
             .and_then(|fee| (vsize != 0).then(|| fee * 1_000 / i128::from(vsize)))
             .and_then(|rate| u64::try_from(rate).ok()),
+        modified_fee: pool
+            .modified_fee_for(txid, context.fee)
+            .ok()
+            .and_then(|fee| u64::try_from(fee).ok()),
         reject_reason: reject,
     }
 }

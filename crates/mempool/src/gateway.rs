@@ -219,8 +219,9 @@ enum ReplacementStage {
 impl PreparedAdmission {
     pub(crate) fn check_package_max_feerate(&mut self, maximum: Option<u64>) {
         if self.rejection.is_none()
-            && maximum
-                .is_some_and(|max| self.fact.effective_fee_rate.is_some_and(|rate| rate > max))
+            && self.fact.modified_fee.is_some_and(|fee| {
+                crate::standardness::exceeds_max_feerate(fee, self.fact.vsize, maximum)
+            })
         {
             self.reject(
                 AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MaxFeeExceeded),

@@ -55,6 +55,7 @@ pub(crate) fn unfinished(tx: &Tx) -> TxAcceptanceFact {
         sigop_cost: 0,
         base_fee: None,
         effective_fee_rate: None,
+        modified_fee: None,
         reject_reason: None,
     }
 }
@@ -202,6 +203,12 @@ pub(crate) fn finish_package(
         facts.package_error = Some(error.into());
         return facts;
     }
+    // Core runs the combined package fee check before package RBF, cluster
+    // limits, and ephemeral-spend checks (validation.cpp `PreChecks` order).
+    if let Some(error) = aggregate_error {
+        facts.package_error = Some(error);
+        return facts;
+    }
     match checks
         .graph
         .and_then(|graph| graph.check_limits(checks.limits))
@@ -233,10 +240,6 @@ pub(crate) fn finish_package(
     if let Some(index) = checks.dust_child {
         facts.results[index].allowed = Some(false);
         facts.results[index].reject_reason = Some(AcceptanceRejectReason::MissingEphemeralSpends);
-        return facts;
-    }
-    if let Some(error) = aggregate_error {
-        facts.package_error = Some(error);
         return facts;
     }
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
