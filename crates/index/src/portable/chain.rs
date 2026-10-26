@@ -59,12 +59,22 @@ impl ChainBase {
     /// base below the tip is usually uncounted in the tree. Capture then
     /// remembers the blocks up to the nearest counted node;
     /// [`Self::base_count`] derives the base's count from them.
+    ///
+    /// Polls `cancelled` before work and every [`CANCEL_POLL_RECORDS`]
+    /// heights during the ancestry walk and the nearest-counted scan, like
+    /// every other bundle loop. The callback only loads lock-free shutdown,
+    /// generation, and runtime latches, so invoking it under the shared
+    /// tree guard cannot form a lock-order cycle with a tree writer.
     pub(super) fn capture(
         tree: &BlockTreeReader,
         tip: &TipSnapshot,
         base_height: u32,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, IndexBundleError> {
         let identity = |reason: &str| IndexBundleError::Identity(reason.to_owned());
+        if cancelled() {
+            return Err(IndexBundleError::Cancelled);
+        }
         if base_height > tip.height {
             return Err(identity("bundle base is above the applied tip"));
         }
@@ -72,7 +82,12 @@ impl ChainBase {
         let mut nodes = Vec::new();
         let mut cursor = tip.tip_id;
         let mut expected = tip.height;
+        let mut walked = 0_u64;
         loop {
+            if walked.is_multiple_of(CANCEL_POLL_RECORDS) && cancelled() {
+                return Err(IndexBundleError::Cancelled);
+            }
+            walked = walked.saturating_add(1);
             let node = guard
                 .node(cursor)
                 .map_err(|_| identity("applied-tip ancestry is missing from the block tree"))?;
@@ -120,7 +135,12 @@ impl ChainBase {
             count
         } else {
             let mut found = None;
+            let mut scanned = 0_u64;
             for (index, &id) in above.iter().enumerate() {
+                if scanned.is_multiple_of(CANCEL_POLL_RECORDS) && cancelled() {
+                    return Err(IndexBundleError::Cancelled);
+                }
+                scanned = scanned.saturating_add(1);
                 let node = guard
                     .node(id)
                     .map_err(|_| identity("applied-tip ancestry is missing from the block tree"))?;
@@ -333,4 +353,79 @@ fn decode(bytes: &[u8], expected_len: u32) -> Located {
         return Located::Mismatch;
     }
     deserialize::<Tx>(bytes).map_or(Located::Mismatch, Located::Found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::error::Error;
+    use std::sync::Arc;
+
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_primitives::CompactTarget;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    fn fixture_header(prev: BlockHash, height: u32) -> Header {
+        let mut merkle = [0_u8; 32];
+        merkle[..4].copy_from_slice(&height.to_le_bytes());
+        Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::from_le_bytes(&merkle),
+            time: height,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: height,
+        }
+    }
+
+    #[test]
+    fn capture_polls_cancellation_during_chain_walks() -> TestResult {
+        const HEIGHT: u32 = 5_000;
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(
+            None,
+            fixture_header(BlockHash::default(), 0),
+            NodeStatus::HeaderValid,
+        )?;
+        let mut tip_id = genesis;
+        let mut prev = BlockHash::from(tree.node(genesis)?.hash);
+        for height in 1..=HEIGHT {
+            let id = tree.insert_node(
+                Some(tip_id),
+                fixture_header(prev, height),
+                NodeStatus::HeaderValid,
+            )?;
+            prev = BlockHash::from(tree.node(id)?.hash);
+            tip_id = id;
+        }
+        let node = tree.node(tip_id)?;
+        let count = u64::from(HEIGHT) + 1;
+        let tip = TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: ChainTxCount::established(count),
+        };
+        let reader = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(tree)));
+
+        let chain = ChainBase::capture(&reader, &tip, HEIGHT, &|| false)?;
+        assert_eq!(chain.counted_base(), Some(count));
+
+        for (base, quiet) in [(HEIGHT, 2_u32), (0, 4)] {
+            let calls = Cell::new(0_u32);
+            let cancelled = || {
+                let n = calls.get();
+                calls.set(n.saturating_add(1));
+                n >= quiet
+            };
+            assert!(matches!(
+                ChainBase::capture(&reader, &tip, base, &cancelled),
+                Err(IndexBundleError::Cancelled)
+            ));
+        }
+        Ok(())
+    }
 }

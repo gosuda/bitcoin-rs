@@ -222,7 +222,7 @@ impl<'a> Captured<'a> {
                 "the txindex watermark is not at the applied tip",
             ));
         }
-        let chain = ChainBase::capture(host.block_tree, &tip, tip.height)?;
+        let chain = ChainBase::capture(host.block_tree, &tip, tip.height, host.cancelled)?;
         if !chain.validated {
             return Err(IndexBundleError::NotReady(
                 "the base block is not on the active chain",

@@ -170,7 +170,7 @@ fn check_identity(
         .applied_tip
         .load_full()
         .ok_or_else(|| refuse("the receiver has no applied tip"))?;
-    let chain = ChainBase::capture(host.block_tree, &tip, identity.base_height)?;
+    let chain = ChainBase::capture(host.block_tree, &tip, identity.base_height, host.cancelled)?;
     if chain.genesis != identity.genesis {
         return Err(refuse("the bundle has a different genesis block"));
     }
