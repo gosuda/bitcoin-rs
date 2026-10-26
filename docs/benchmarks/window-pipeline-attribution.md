@@ -101,8 +101,9 @@ summary and from the ledger, followed by 100 measured units.
 The harness stops with a panic, and records nothing, when a unit applies fewer
 blocks than the scenario names, issues a flush count other than one per started
 group, covers fewer blocks than the window, hits a failed flush, lacks a
-`transition_held_us` event, runs a build with debug assertions, or finds a
-non-disk `TMPDIR`.
+`transition_held_us` event, or finds a non-disk `TMPDIR`. The actual debug-assertion
+setting is recorded in `toolchain.debug_assertions`; it is not a refusal by
+itself.
 
 ### 3.4 Evidence artifacts
 
