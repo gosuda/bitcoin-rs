@@ -222,7 +222,10 @@ scanning and wallet interoperability remain unverified.
   compares level-one witness-nonce mutation outcomes through both live daemons.
 
 - Level 2 additionally reads each undo record and decodes it against its
-  block; levels 3 and 4 run the level-2 checks and do not replay disconnect
+  block. The copy bound includes serialized block size, that block's input/output counts, the
+  interpreter's spendable-script limit, and the persisted codec's overhead;
+  the separate 64 MiB consumer-query budget does not limit startup or
+  verification of valid undo. Levels 3 and 4 run the level-2 checks and do not replay disconnect
   or reconnect. A history lease pins the window for the whole walk so a
   concurrent prune pass cannot delete rows about to be read; the lease is
   released when the walk ends. Data this node never kept or intentionally no
@@ -232,7 +235,9 @@ scanning and wallet interoperability remain unverified.
   block the node still holds has passed. Shutdown likewise skips instead of
   failing.
 
-  Proof: `chainstate::verify_tests::undo_records_are_read_and_decoded_only_at_the_undo_level`,
+  Proof: `undo_codec::tests::read_bound_covers_spent_scripts_and_bip30_overwrite_bytes`
+  in `crates/utxo/src/undo_codec.rs` exercises the dynamic read bound;
+  `chainstate::verify_tests::undo_records_are_read_and_decoded_only_at_the_undo_level`,
   `an_executed_prune_line_ends_the_window_without_hiding_damage_above_it`,
   `a_window_reaching_a_prune_in_flight_is_skipped_until_the_claim_ends`,
   `an_assumed_valid_base_is_never_checked`, `a_historical_role_keeps_its_whole_window`,

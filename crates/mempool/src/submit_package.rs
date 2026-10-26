@@ -233,12 +233,7 @@ impl MempoolGateway {
                     // of `pending` above were never admitted here, and expiry
                     // must not fail the package over them.
                     let admitted: Vec<_> = pending.iter().map(Tx::txid).collect();
-                    self.expire_after_admission(
-                        origin,
-                        AdmissionFence::Stable,
-                        &admitted,
-                        pending.iter().map(&time).max().unwrap_or(0),
-                    )?;
+                    self.check_admitted_residency(origin, AdmissionFence::Stable, &admitted)?;
                     return Ok(result);
                 }
                 Err(crate::AdmitError::GenerationChanged | crate::AdmitError::MempoolChanged) => {

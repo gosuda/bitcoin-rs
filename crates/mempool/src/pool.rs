@@ -854,7 +854,8 @@ impl Mempool {
         }
         let required = crate::rbf::required_fee(min_rate, entry.vsize)
             .map_err(|_| PolicyError::FeeArithmetic)?;
-        if enforcement == crate::rbf::LimitEnforcement::Full && entry.modified_fee() < required {
+        if enforcement != crate::rbf::LimitEnforcement::Deferred && entry.modified_fee() < required
+        {
             let modified_rate = entry.modified_fee() * 1_000 / i128::from(entry.vsize);
             return Err(PolicyError::BelowMinRelayFee {
                 tx_rate: u64::try_from(modified_rate).unwrap_or(0),
@@ -2016,6 +2017,17 @@ impl Mempool {
     /// Nothing expired commits nothing and moves no sequence, so a repeated
     /// call at the same `now` is a no-op.
     pub fn expire(&mut self, now: u64) -> MutationResult {
+        let removals: Vec<_> = self
+            .expired_entry_ids(now)
+            .into_iter()
+            .map(|id| (id, RemovalReason::Expiry))
+            .collect();
+        let mut changes = Vec::with_capacity(removals.len());
+        self.remove_entries_with_reasons(&removals, &mut changes);
+        self.finish_mutation(changes)
+    }
+
+    pub(crate) fn expired_entry_ids(&self, now: u64) -> Vec<EntryId> {
         let cutoff = now.saturating_sub(MEMPOOL_EXPIRY_SECS);
         // Sparse marks: expiry usually visits a thin tail, and an
         // arena-sized bitset would zero-fill to the highest slot on a pool
@@ -2026,13 +2038,7 @@ impl Mempool {
             self.stage_with_descendants(root, &mut visited, &mut stage);
         }
         stage.sort_unstable();
-        let removals: Vec<_> = stage
-            .into_iter()
-            .map(|id| (id, RemovalReason::Expiry))
-            .collect();
-        let mut changes = Vec::with_capacity(removals.len());
-        self.remove_entries_with_reasons(&removals, &mut changes);
-        self.finish_mutation(changes)
+        stage
     }
 
     /// Appends `root` and every descendant not yet in `visited` to `stage`.

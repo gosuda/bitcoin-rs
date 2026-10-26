@@ -86,8 +86,12 @@ state (`crates/mempool/src/orphan.rs`).
   `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
 - `RemovalReason::Expiry` records transactions whose insertion timestamp is
   strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`),
-  removed along with their descendants. Expiry runs after each committed
-  transaction or package admission and during reorg trim; preview operations
+  removed along with their descendants. Normal submission plans capacity
+  against the post-expiry pool, then commits acceptance before expiry and
+  remaining capacity removals in the same writer interval and ordered batch.
+  Package insertion remains all-or-nothing, runs expiry after member inserts
+  using the max member entry time cutoff rather than wall-clock `now`, and
+  never capacity-evicts residents. Expiry also runs during reorg trim; preview operations
   never expire entries. If expiry removes an admitted member, admission
   returns a mempool-full error.
 - `Mempool::sequence_number` advances exactly once per emitted change while
@@ -104,6 +108,12 @@ state (`crates/mempool/src/orphan.rs`).
   per-change assignment;
   `gateway::tests::failed_insert_and_noop_remove_publish_nothing` checks a
   failed insert and a no-op removal assign nothing and publish nothing.
+  The expiry/capacity ordering is covered by
+  `admission::tests::committed_admission_publishes_acceptance_before_expiry_atomically`,
+  `admission::tests::child_of_a_stale_parent_expires_with_it_and_is_refused_as_full`
+  in `crates/mempool/src/admission.rs`, and
+  `package::tests::native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope`
+  in `crates/mempool/src/package/tests.rs`.
 
 ### `MPL-03`: ZeroMQ sequence event payload mapping
 

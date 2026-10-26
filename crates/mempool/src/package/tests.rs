@@ -775,9 +775,9 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
 }
 
 // Core expires stale entries after each accepted transaction: a committed
-// package does too, and only after its own envelope published.
+// package does too, inside the same atomic envelope as its acceptance.
 #[test]
-fn native_package_commit_expires_an_unrelated_stale_entry_after_its_own_envelope() -> TestResult {
+fn native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope() -> TestResult {
     let seen = Arc::new(Seen::default());
     let gateway = gateway_observed(Some(seen.clone()));
     let stale = spend(&[coin(820)], &[100_000], false);
@@ -800,16 +800,23 @@ fn native_package_commit_expires_an_unrelated_stale_entry_after_its_own_envelope
         &chain,
     )?;
 
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.len(), 3);
     let pool = gateway.read();
     assert!(!pool.contains_txid(&stale.txid()));
     assert!(pool.contains_txid(&parent.txid()));
     assert!(pool.contains_txid(&child.txid()));
     let envelopes = seen.0.lock();
-    assert_eq!(envelopes.len(), 3, "stale insert, package commit, expiry");
+    assert_eq!(
+        envelopes.len(),
+        2,
+        "stale insert, atomic package and expiry commit"
+    );
     assert_eq!(envelopes[1].result, result);
-    assert_eq!(envelopes[2].origin, AdmissionOrigin::Rpc);
-    assert_eq!(envelopes[2].result.changes, vec![expired(stale.txid())]);
+    assert_eq!(envelopes[1].origin, AdmissionOrigin::Rpc);
+    assert_eq!(
+        envelopes[1].result.changes.last(),
+        Some(&expired(stale.txid()))
+    );
     Ok(())
 }
 
@@ -839,16 +846,20 @@ fn native_package_member_expires_with_its_stale_parent_and_is_refused_as_full() 
     );
     assert!(gateway.read().is_empty());
     let envelopes = seen.0.lock();
-    assert_eq!(envelopes.len(), 3, "stale insert, package commit, expiry");
     assert_eq!(
-        envelopes[1].result.changes,
-        vec![crate::mutation::change(
+        envelopes.len(),
+        2,
+        "stale insert, atomic package and expiry commit"
+    );
+    assert_eq!(
+        envelopes[1].result.changes.first(),
+        Some(&crate::mutation::change(
             &child.txid(),
             crate::MutationOutcome::Accepted
-        )],
+        )),
         "the refused member's commit stays published"
     );
-    let removed = &envelopes[2].result.changes;
+    let removed = &envelopes[1].result.changes[1..];
     assert_eq!(removed.len(), 2);
     assert!(removed.contains(&expired(parent.txid())));
     assert!(removed.contains(&expired(child.txid())));
@@ -902,13 +913,24 @@ fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
         &chain,
     )?;
 
-    assert_eq!(result.len(), 2, "only the two new parents are admitted");
+    assert_eq!(
+        result.len(),
+        3,
+        "two new parents precede the resident's expiry"
+    );
     let pool = gateway.read();
     assert!(!pool.contains_txid(&resident_txid));
     assert!(pool.contains_txid(&parent_a_txid));
     assert!(pool.contains_txid(&parent_b_txid));
     let envelopes = seen.0.lock();
-    assert_eq!(envelopes.len(), 3, "stale insert, package commit, expiry");
-    assert_eq!(envelopes[2].result.changes, vec![expired(resident_txid)]);
+    assert_eq!(
+        envelopes.len(),
+        2,
+        "stale insert, atomic package and expiry commit"
+    );
+    assert_eq!(
+        envelopes[1].result.changes.last(),
+        Some(&expired(resident_txid))
+    );
     Ok(())
 }

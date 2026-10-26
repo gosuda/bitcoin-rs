@@ -14,9 +14,9 @@ use std::thread::JoinHandle;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// Sigop cost of the heavy transaction: five below the 80,000 block limit, so
-/// the ordinary candidate leaves exactly five cost units of room.
-const HEAVY_SIGOPS: u32 = 79_995;
+/// Leaves room for the 98-byte input extension (80 cost units per byte),
+/// plus exactly five additional output cost units.
+const HEAVY_SIGOPS: u32 = 72_155;
 
 const FITS: CoinbaseBudget = CoinbaseBudget {
     additional_size: 100,

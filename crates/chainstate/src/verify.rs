@@ -33,9 +33,11 @@ use bitcoin_rs_storage::{
     block_body::BlockBodyStore,
     pruning::{HistoryLease, HistoryUnavailable},
 };
-use bitcoin_rs_utxo::contract::{UndoCodecError, decode_undo_record_for_block};
+use bitcoin_rs_utxo::contract::{
+    UndoCodecError, decode_undo_record_for_block, undo_record_size_limit,
+};
 
-use crate::block_spends::{MAX_BLOCK_QUERY_BYTES, MAX_UNDO_QUERY_BYTES};
+use crate::block_spends::MAX_BLOCK_QUERY_BYTES;
 use crate::{Chainstate, ChainstateRole};
 
 /// How many of the newest applied blocks startup verifies.
@@ -505,7 +507,7 @@ impl Walk<'_> {
     }
 
     fn check_undo(&self, block: &Block, height: u32, hash: Hash256) -> Result<(), Stop> {
-        let record = self.load_undo(height, hash)?;
+        let record = self.load_undo(block, height, hash)?;
         decode_undo_record_for_block(&record, block)
             .map(drop)
             .map_err(|source| {
@@ -517,12 +519,12 @@ impl Walk<'_> {
             })
     }
 
-    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Vec<u8>, Stop> {
-        match self
-            .chainstate
-            .undo_store
-            .load_undo_bounded(height, hash, MAX_UNDO_QUERY_BYTES)
-        {
+    fn load_undo(&self, block: &Block, height: u32, hash: Hash256) -> Result<Vec<u8>, Stop> {
+        match self.chainstate.undo_store.load_undo_bounded(
+            height,
+            hash,
+            undo_record_size_limit(block, bitcoin_rs_script::MAX_SCRIPT_SIZE),
+        ) {
             Ok(Some(record)) => Ok(record),
             Ok(None) => Err(self.absent(height, VerifyError::UndoMissing { height, hash })),
             Err(source) => Err(Stop::Failed(VerifyError::UndoRead {

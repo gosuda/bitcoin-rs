@@ -75,6 +75,156 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Headers and a rejected body must not publish applied progress. Delivering
+/// the correct frontier body later must also apply its already-staged child.
+///
+/// This is the smallest proof that spans inbound delivery -> authoritative
+/// apply/commit -> consumer publication on the success arm: `SYNC-02`,
+/// `SYNC-01` (admitted headers and applied state are separate authorities),
+/// and `SYNC-05` (consumers observe only committed outcomes). The rejection
+/// arm is narrower: the malformed body keeps `block_one`'s header, so the
+/// body/header binding check refuses it at pre-staging delivery — the test
+/// exercises no failed authoritative apply. It is a channel-fed, in-memory
+/// composition; it does **not** exercise live peer sockets, durable crash
+/// recovery, or eventual progress under real index contention.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the rejection, unchanged consumer state and recovery in one scenario"
+)]
+fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = regtest_genesis_block()?;
+    let block_one = child_coinbase_block(&genesis, 1)?;
+    let block_two = child_coinbase_block(&block_one, 2)?;
+    let mut malformed = block_one.clone();
+    malformed.txs[0].outputs[0].value = Amount::from_sat(1);
+    assert_eq!(malformed.block_hash(), block_one.block_hash());
+
+    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+    let chain_tip = block_tree.write().tip_handle();
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
+    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+        Network::Regtest,
+        chain_tip,
+        applied_tip,
+        Arc::clone(&block_tree),
+    );
+    let handles = Arc::new(handles);
+    // This follower set still publishes the real RPC block log; only its
+    // optional ZMQ, index and mempool consumers are absent.
+    let followers = bitcoin_rs_node::ChainFollowers::noop();
+    let block_log = followers.block_log_reader();
+    let sync = bitcoin_rs_node::sync::block_sync(
+        Arc::clone(&handles),
+        followers,
+        Arc::new(bitcoin_rs_p2p::PeerTable::new()),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+        handles.ibd_latch(),
+        None,
+    );
+    sync.tick();
+    let before = handles.chain_snapshot();
+    assert_eq!(
+        (before.tip_height, before.tip_hash),
+        (0, genesis.block_hash().0)
+    );
+    let genesis_stats = expected_coin_stats(&[&genesis])?;
+
+    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
+        headers: vec![block_one.header, block_two.header],
+        source: None,
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    // Check the header-only tick, then the rejected frontier with a valid
+    // successor. Neither may advance authoritative or consumer state.
+    for bodies in [vec![], vec![malformed, block_two.clone()]] {
+        for block in bodies {
+            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))?;
+        }
+        sync.tick();
+        let header = handles.header_tip().ok_or("missing header tip")?;
+        assert_eq!((header.height, header.hash), (2, block_two.block_hash().0));
+        let applied = handles
+            .applied_tip_snapshot()
+            .ok_or("missing applied tip")?;
+        assert_eq!((applied.height, applied.hash), (0, genesis.block_hash().0));
+        assert_eq!(handles.chain_snapshot(), before);
+        assert_eq!(coin_stats.snapshot(), genesis_stats);
+        assert!(utxo.is_empty(), "unapplied bodies must not create coins");
+        let log = block_log.read();
+        assert_eq!(log.len(), 1, "unapplied blocks must not reach the RPC log");
+        assert_eq!(log[0].hash, genesis.block_hash());
+        drop(log);
+        let tree = block_tree.read();
+        for block in [&block_one, &block_two] {
+            let id = tree
+                .lookup(block.block_hash().0)
+                .ok_or("missing admitted header")?;
+            assert_ne!(tree.node(id)?.status, bitcoin_rs_chain::NodeStatus::Invalid);
+        }
+    }
+
+    // Only resend the correct parent: success at height 2 also proves that
+    // the earlier successor survived while its frontier was unavailable.
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+        block_one.clone(),
+    ))?;
+    // Give this finite fixture bounded scheduling opportunities without
+    // requiring the parent and child to share one application batch or tick.
+    for _ in 0..16 {
+        sync.tick();
+        if handles
+            .applied_tip_snapshot()
+            .is_some_and(|tip| tip.hash == block_two.block_hash().0)
+        {
+            break;
+        }
+    }
+
+    let applied = handles
+        .applied_tip_snapshot()
+        .ok_or("missing applied tip")?;
+    assert_eq!(
+        (applied.height, applied.hash),
+        (2, block_two.block_hash().0)
+    );
+    let after = handles.chain_snapshot();
+    assert_eq!(
+        (after.tip_height, after.tip_hash),
+        (applied.height, applied.hash)
+    );
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.sequence, before.sequence + 2);
+    assert_eq!(
+        coin_stats.snapshot(),
+        expected_coin_stats(&[&genesis, &block_one, &block_two])?
+    );
+    assert_eq!(utxo.len(), 2);
+    for block in [&block_one, &block_two] {
+        assert_eq!(
+            utxo.get(&OutPoint::new(block.txs[0].txid(), 0)),
+            Some(block.txs[0].outputs[0].clone())
+        );
+    }
+    let log = block_log.read();
+    assert_eq!(
+        log.iter()
+            .map(|record| (record.height, record.hash))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, genesis.block_hash()),
+            (1, block_one.block_hash()),
+            (2, block_two.block_hash())
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
 -> Result<(), Box<dyn std::error::Error>> {
