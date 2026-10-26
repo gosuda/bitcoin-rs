@@ -46,10 +46,14 @@ fn status(setup: &mut Setup<'_>, prefix: &str) -> io::Result<String> {
             Some("KEY_NOT_FOUND") => "KEY_NOT_FOUND",
             _ => "malformed reply",
         };
-        return Err(io::Error::new(
-            io::ErrorKind::ConnectionRefused,
-            format!("SAM {prefix}{result}"),
-        ));
+        let message = format!("SAM {prefix}{result}");
+        if prefix == "STREAM STATUS "
+            && line.starts_with(prefix)
+            && matches!(result, "CANT_REACH_PEER" | "TIMEOUT")
+        {
+            return Err(super::remote_failure(message));
+        }
+        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, message));
     }
     Ok(line)
 }
@@ -291,6 +295,29 @@ mod tests {
     use super::*;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::TcpListener;
+
+    #[test]
+    fn only_explicit_stream_destination_failures_are_remote_attempts() {
+        for (reply, remote) in [
+            ("STREAM STATUS RESULT=CANT_REACH_PEER\n", true),
+            ("STREAM STATUS RESULT=TIMEOUT\n", true),
+            ("STREAM STATUS RESULT=I2P_ERROR\n", false),
+            ("STREAM STATUS RESULT=INVALID_ID\n", false),
+            ("SESSION STATUS RESULT=TIMEOUT\n", false),
+            ("STREAM STATUS RESULT=TIMEOUT RESULT=TIMEOUT\n", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("SAM");
+            let address = listener.local_addr().expect("address");
+            let fixture = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                stream.write_all(reply.as_bytes()).expect("status");
+            });
+            let mut setup = Setup::new(address, &|| false).expect("setup");
+            let error = status(&mut setup, "STREAM STATUS ").expect_err("refused stream");
+            assert_eq!(super::super::remote_connect_failed(&error), remote);
+            fixture.join().expect("fixture");
+        }
+    }
 
     #[test]
     fn negotiation_refuses_unsupported_duplicate_and_malformed_replies() {

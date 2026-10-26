@@ -850,10 +850,13 @@ fn dial(
         shared.is_session_cancelled() || !shared.activity.is_active()
     });
     if let Some(book) = &shared.address_book {
-        // Like Core ConnectNode, record actual TCP attempts on success/failure,
-        // after local admission guards. Spawn failures/cancellation are not peer evidence.
+        // Record direct attempts, routed success and explicit remote refusals.
+        // Local proxy/router setup failures are not evidence against the peer.
         if addr.address().ip().is_some() && shared.overlay.config.proxy.is_none()
             || connection.is_ok()
+            || connection
+                .as_ref()
+                .is_err_and(crate::overlay::remote_connect_failed)
         {
             book.attempted(addr, count_failure && !manual, crate::addrman::now());
         }

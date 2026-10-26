@@ -87,6 +87,48 @@ fn socks_requires_the_selected_auth_policy_and_refuses_bad_replies() {
 }
 
 #[test]
+fn socks_destination_refusals_are_distinct_from_local_and_malformed_failures() {
+    for reply in [
+        [5, 1, 0, 1],
+        [5, 2, 0, 1],
+        [5, 3, 0, 1],
+        [5, 4, 0, 1],
+        [5, 5, 0, 1],
+        [5, 6, 0, 1],
+        [5, 7, 0, 1],
+        [5, 8, 0, 1],
+        [4, 5, 0, 1],
+        [5, 5, 1, 1],
+        [5, 5, 0, 9],
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("proxy");
+        let address = listener.local_addr().expect("address");
+        let fixture = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream.read_exact(&mut [0; 3]).expect("hello");
+            stream.write_all(&[5, 0]).expect("method");
+            stream.read_exact(&mut [0; 10]).expect("IP request");
+            stream.write_all(&reply).expect("refusal");
+        });
+        let error = socks(
+            address,
+            PeerEndpoint::from(([8, 8, 8, 8], 8333)),
+            false,
+            &|| false,
+        )
+        .expect_err("refused connection");
+        assert_eq!(
+            remote_connect_failed(&error),
+            matches!(reply, [5, 3..=6, 0, 1])
+        );
+        fixture.join().expect("fixture");
+    }
+    assert!(!remote_connect_failed(&io::Error::from(
+        io::ErrorKind::ConnectionRefused
+    )));
+}
+
+#[test]
 fn setup_retains_partial_reads_and_obeys_deadline_and_cancellation() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("proxy");
     let address = listener.local_addr().expect("address");

@@ -351,6 +351,25 @@ impl OverlayTransport {
 pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+
+// Only explicit destination failures reported by a live proxy/router carry
+// this attribution. I/O, authentication and control-session errors stay local.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RemoteConnectFailure(String);
+
+fn remote_failure(message: impl Into<String>) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionRefused,
+        RemoteConnectFailure(message.into()),
+    )
+}
+
+pub(crate) fn remote_connect_failed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RemoteConnectFailure>())
+}
 fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "overlay operation cancelled")
 }
@@ -524,6 +543,13 @@ fn socks(
     let mut reply = [0; 4];
     setup.read(&mut reply)?;
     if reply[..3] != [5, 0, 0] {
+        if reply[0] == 5
+            && reply[2] == 0
+            && matches!(reply[3], 1 | 3 | 4)
+            && matches!(reply[1], 3..=6)
+        {
+            return Err(remote_failure("SOCKS destination unreachable or refused"));
+        }
         return Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "SOCKS connect refused",

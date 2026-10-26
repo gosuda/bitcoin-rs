@@ -693,6 +693,10 @@ during that call; the 100ms local-service reconnect helper is unsuitable for
 high-latency remote TCP establishment. SAM session preparation has a 120-second bound; onion
 circuit and I2P stream connection have a 60-second bound. Local service errors do not enter
 remote protocol discouragement or count as failed overlay peer attempts.
+Explicit SOCKS destination-unreachable/refused replies and SAM stream
+`CANT_REACH_PEER`/`TIMEOUT` replies do update the existing address-book attempt
+and retry policy. Authentication, malformed replies, local I/O and control
+session failures remain local errors.
 Control-session loss revokes I2P stream epochs, including late registrations,
 and the worker restores the selected stable destination with bounded backoff.
 
