@@ -38,6 +38,84 @@ A later layer overrides only fields it supplies. Network-dependent validation, i
 
 Common network names are `mainnet`, `signet`, `testnet4`, and `regtest`; retained aliases are documented by the compatibility contracts.
 
+### Tor and IVNP I2P networking
+
+Overlay networking is opt-in. With no overlay settings, ordinary IPv4/IPv6
+connections and DNS seeding retain their defaults. The node does not launch
+Tor or an I2P router. The [P2P compatibility policy](policies/p2p-compatibility.md#overlay-transports)
+describes routing, persistence, and the evidence boundary.
+
+| CLI option | TOML key | Default and behavior |
+| --- | --- | --- |
+| `--proxy IP:port` | `proxy` | Unset. SOCKS5 for IP destinations; does not enable onion routing. |
+| `--onion-proxy IP:port` | `onion_proxy` | Unset. SOCKS5 for Tor v3 destinations, sent as domain names. |
+| `--proxy-randomize-credentials=false` | `proxy_randomize_credentials` | `true`. Require RFC1929 with fresh credentials per connection; `false` selects no-auth SOCKS5. |
+| `--onlynet onion,i2p` | `onlynet = ["onion", "i2p"]` | Unset permits IP and configured overlays. Explicit lists restrict manual/automatic outbound paths, listeners, and reconnects. Values: `ipv4`, `ipv6`, `onion`, `i2p`. |
+| `--i2p-sam IP:port` | `i2p_sam` | Unset. SAM v3.1–3.3 on an operator-managed `ivnpd`; its usual bridge is `127.0.0.1:7656`. |
+| `--i2p-accept` | `i2p_accept` | `false`. Persistent I2P application destination and `STREAM ACCEPT`; requires `i2p_sam`. |
+| `--tor-control IP:port` | `tor_control` | Unset. Enables a persistent v3 onion service; requires `onion_proxy`. |
+| `--tor-cookie PATH` | `tor_cookie` | Unset selects Tor control NULL authentication; set this to external Tor's 32-byte authentication cookie file. |
+| `--overlay-port PORT` | `overlay_port` | The selected Bitcoin network's default P2P port. Public service port, independent of local forwarding sockets. |
+
+Each option also has a `BITCOIN_RS_` environment spelling using the uppercase
+TOML key (for example `BITCOIN_RS_I2P_SAM`). `BITCOIN_RS_ONLYNET` uses a comma
+list. These new options are available through CLI, environment and TOML;
+they do not add `bitcoin.conf` aliases.
+
+All proxy, SAM and control endpoints must be numeric loopback sockets with
+nonzero ports. Proxy/router failure never selects a direct connection.
+DNS seeds are suppressed when `proxy` is configured or both IP families are
+excluded. Ordinary hostname peers are rejected with a general proxy; use
+numeric IP endpoints there. Onion destinations never use local DNS.
+Human-readable `.i2p` names from `--connect` or `addnode` use IVNP's SAM naming
+resolver when available; Bitcoin peer identity is the resulting Destination
+hash. Use canonical `*.b32.i2p:port` addresses for deterministic removal.
+
+For Tor-only outbound operation, start external Tor with a SOCKS port and run:
+
+```sh
+bitcoin-rs --onion-proxy 127.0.0.1:9050 --onlynet onion \
+  --connect VALID_V3_SERVICE.onion:8333
+```
+
+Use a real v3 service address in place of the placeholder. To add an inbound
+onion service, enable external Tor's cookie-authenticated control port and
+add `--tor-control 127.0.0.1:9051 --tor-cookie /path/to/control_auth_cookie`.
+Tor forwards to a dedicated, unprivileged local listener. Accepted circuits
+have opaque `tor-inbound-N:0` connection handles because Tor does not reveal
+the remote peer's onion address; they receive no localhost policy exemptions.
+
+Build IVNP using the revision owned by
+[`scripts/overlay-interop.py`](../scripts/overlay-interop.py), then run its daemon:
+
+```sh
+git clone https://github.com/gosuda/IVNP.git
+git -C IVNP checkout "$(python3 scripts/overlay-interop.py --ivnp-revision)"
+(cd IVNP && go build -o ivnpd ./cmd/ivnpd)
+./IVNP/ivnpd -config /path/to/ivnp.conf
+bitcoin-rs --i2p-sam 127.0.0.1:7656 --i2p-accept --onlynet i2p \
+  --connect PEER.b32.i2p:8333
+```
+
+The pinned IVNP revision requires Go 1.27 or newer. IVNP owns its router
+keys, tunnels and router data directory. bitcoin-rs owns application keys in
+`<data-dir>/overlay-<P2P-magic>/i2p.key` and `onion.key`, with create-once
+publication, checksums and private Unix permissions. Back up those files to
+retain inbound addresses. An existing unreadable/damaged key fails startup;
+it is never silently regenerated. SAM control loss invalidates its stream
+epoch and reconnects with backoff capped at 60 seconds, reusing a stable key
+when inbound I2P is enabled. Persistently added overlay peers use the existing
+outbound drain for bounded retries.
+
+`getpeerinfo` reports logical network identities and separate local socket
+bindings. `getnetworkinfo` reports configured routes, effective restrictions,
+live reachability observations and active inbound service addresses. A live
+control service is not evidence of end-to-end Bitcoin interoperability, and
+fresh SOCKS credentials alone do not establish anonymity. The manually run
+[overlay interoperability workflow](../.github/workflows/overlay-interop.yml)
+records external-backend Bitcoin exchange and restart evidence separately
+from deterministic local protocol fixtures.
+
 ## Storage
 
 `fjall` is the default backend; `redb` is also compiled into the default binary.

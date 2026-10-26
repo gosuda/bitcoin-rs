@@ -588,7 +588,7 @@ mod tests {
     };
     fn source(id: u64) -> PeerToken {
         PeerToken {
-            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            addr: bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
             connection_id: id,
         }
     }

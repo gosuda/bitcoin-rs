@@ -464,7 +464,8 @@ fn registered_inbound(
         &lease,
         crate::PeerInfo::inbound_from_version(
             addr,
-            addr,
+            addr.socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             0,
             0,

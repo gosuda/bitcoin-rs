@@ -11,6 +11,57 @@ use bitcoin_rs_primitives::Network;
 use bitcoin_rs_rpc::zmq::ZmqTopic;
 
 #[test]
+fn overlay_routing_is_opt_in_and_layered_without_implicit_fallback() -> Result<()> {
+    let default = NodeConfig::default_for_network(Network::Regtest);
+    assert!(default.p2p.overlay.proxy.is_none());
+    assert!(default.p2p.overlay.onion_proxy.is_none());
+    assert!(default.p2p.overlay.i2p_sam.is_none());
+    let file: UserConfig = toml::from_str(
+        r#"
+        network = "regtest"
+        onion_proxy = "127.0.0.1:9050"
+        onlynet = ["onion"]
+        proxy_randomize_credentials = false
+        overlay_port = 18445
+    "#,
+    )?;
+    let mut environment = UserConfig::default();
+    environment.apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("onion,i2p"))?;
+    environment.apply_env("BITCOIN_RS_I2P_SAM", std::ffi::OsStr::new("127.0.0.1:7656"))?;
+    let config = resolve(&[&file, &environment])?;
+    assert!(
+        config
+            .p2p
+            .overlay
+            .allows(bitcoin_rs_primitives::PeerNetwork::Onion)
+    );
+    assert!(
+        config
+            .p2p
+            .overlay
+            .allows(bitcoin_rs_primitives::PeerNetwork::I2p)
+    );
+    assert!(
+        !config
+            .p2p
+            .overlay
+            .allows(bitcoin_rs_primitives::PeerNetwork::Ipv4)
+    );
+    assert!(!config.p2p.overlay.randomize_credentials);
+    assert_eq!(config.p2p.overlay.port, 18445);
+    for text in [
+        "onlynet = ['onion']",
+        "i2p_accept = true",
+        "onion_proxy = '8.8.8.8:9050'",
+        "tor_control = '127.0.0.1:9051'",
+    ] {
+        let layer: UserConfig = toml::from_str(text)?;
+        assert!(resolve(&[&layer]).is_err(), "{text}");
+    }
+    Ok(())
+}
+
+#[test]
 fn silent_payments_toml_overlay_preserves_explicit_disable() -> Result<()> {
     assert!(
         !NodeConfig::default_for_network(Network::Regtest)

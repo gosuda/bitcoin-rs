@@ -1,0 +1,39 @@
+name: overlay-interoperability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-backends:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/native-deps
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install external backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y tor golang-go
+          git clone https://github.com/gosuda/IVNP.git "$RUNNER_TEMP/ivnp"
+          git -C "$RUNNER_TEMP/ivnp" checkout "$(python3 scripts/overlay-interop.py --ivnp-revision)"
+          cd "$RUNNER_TEMP/ivnp"
+          # Go's versioned toolchain mechanism fetches the module's required toolchain.
+          GOTOOLCHAIN=go1.27.0+auto go build -o "$RUNNER_TEMP/ivnpd" ./cmd/ivnpd
+      - run: cargo build --locked --bin bitcoin-rs
+      - name: Bitcoin handshake, block exchange, inbound admission, and identity restart
+        run: python3 scripts/overlay-interop.py --ivnpd "$RUNNER_TEMP/ivnpd" --tor /usr/bin/tor
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: overlay-interoperability
+          path: |
+            target/overlay-interop
+            target/process-harness/e2e

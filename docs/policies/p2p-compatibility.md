@@ -77,8 +77,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. The shared inbound channel is bounded once for the node, and each connection's unsolicited share of it is bounded separately; a body the download window asked that connection for is always admitted (`docs/contracts/p2p-wire.md` `P2P-07`). |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel, except while the node is in initial block download: unsolicited transaction bodies are then dropped before ingress, without a misbehavior score or disconnect (Core 31.1 `net_processing.cpp:4713-4716`). Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | served | At most 32 retained IPv4/IPv6 addresses, once per full-relay connection; a peer that sent `sendaddrv2` gets `addrv2` rows from the same book, any other peer gets legacy `addr`. Book-disabled test/embedding connections remain silent. Core sends `addrv2` once negotiated (`net_processing.cpp:5803-5807`); non-IP networks are not relayed. |
-| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. The same learned IPv4/IPv6 rows feed both `addr` and `addrv2` `getaddr` replies. |
+| `getaddr` | served | At most 32 retained IPv4/IPv6/Tor-v3/I2P addresses, once per full-relay connection; a peer that sent `sendaddrv2` gets `addrv2` rows from the same book, any other peer gets legacy `addr`. Book-disabled test/embedding connections remain silent. Core sends `addrv2` once negotiated (`net_processing.cpp:5803-5807`); legacy `addr` replies omit overlay endpoints. |
+| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; Tor v3 and I2P identities are retained and relayed as `addrv2`; Tor v2, CJDNS and unknown families are ignored. Legacy `addr` replies contain only the IP subset. Anonymous inbound Tor circuits do not supply a durable address-learning source. |
 | `feefilter` | applied | BIP133. Valid nonnegative thresholds through `MAX_MONEY` filter queued outbound transaction inventory for that connection; invalid values are ignored. The threshold never changes admission. Full-relay connections at protocol 70013+ receive rounded effective local floors on randomized refreshes. |
 | `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. A high-bandwidth `cmpctblock` may precede connect for a PoW-valid tip child (rules passed, commit intent, segwit active); a later connect failure is not retracted and sends nothing further. Inbound announcements also publish compact-fetch eligibility. |
 | `cmpctblock` / `blocktxn` | sink | BIP152 receive path. Like Core, a `cmpctblock` enters reconstruction only when its header earns the mempool scan. The header needs valid proof of work for the network, the block must not be marked invalid, and its parent must be a known block not marked invalid. The header must also pass the contextual checks header admission applies against that parent, including the required nBits, so a header mined at an easier target never earns the scan; as in admission, a header already in the tree is not rechecked. Finally it must either carry more work than the applied chain or answer a body fetch the same connection owns. Any other `cmpctblock` routes only its header to admission. A hash already attempted on that connection within the reconstruction deadline is not scanned again. Admitted, `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool and the bounded reconstruction extra pool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — the extra pool holds at most 100 wtxid-keyed bodies (transactions removed as replaced, peer orphan-held bodies, and peer policy-only rejects below 100 000 serialized bytes; never a coinbase; hint-only, never admitted or relayed by retention; Core `DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; version 1 matches by txid and version 2 by wtxid; two witness variants of one txid stay distinct while a pool-resident identity duplicated in the extra pool is one claim, not a collision; missing transactions are requested with `getblocktxn` on the same connection; two distinct hint identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision) and a body without a coinbase that holds a 64-byte transaction (CVE-2017-12842), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
@@ -366,7 +366,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    Its shared at-most-32-entry sample stays byte-stable for 24 hours across
    reconnects and discoveries, then rotates and applies IsTerrible filtering.
    This differs from Core's randomized 21–27-hour cache and response sizing.
-   Non-IP addrv2 families are ignored; block-relay-only peers neither learn nor
+   Tor v3 and I2P addrv2 families are retained; other non-IP families are ignored; block-relay-only peers neither learn nor
    serve addresses. These boundaries are not a claim of complete Core peer
    lifecycle equivalence.
 
@@ -392,12 +392,12 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    and migration backup creation; restoring the map recovers the untouched
    book. Intentionally omitting the map permits backed-up prefix migration.
 
-   Schema v8 persists the secret, original source, health, map identity,
+   Schema v9 persists the secret, original source, health, map identity,
    New membership and at most two anchors in one checksummed snapshot. Services
    is a required field: JSON null means unknown DNS metadata, while numeric zero
    means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
    original source with no prior Good. Missing or invalid fields fail closed.
-   Same-map restart restores every reference; same-classifier v5/v6/v7-to-v8
+   Same-map restart restores every reference; same-classifier v5/v6/v7/v8-to-v9
    upgrades preserve all references and anchors exactly. Known v1–v7 formats,
    including genuine v3 files carrying anchors, are strict migration sources.
    Their service fields must be numeric u64; old null or missing fields remain
@@ -467,7 +467,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
     - A block counts once applied. Core credits a peer whose block is newly stored (`net_processing.cpp:3429-3432`), side-branch blocks included. bitcoin-rs credits a block when it is applied to the active chain.
     - Wanted services are judged at eviction. Core fixes `fRelevantServices` when the peer's `version` arrives (`net_processing.cpp:3672`). bitcoin-rs evaluates `has_all_desirable_service_flags` against the tip depth at the newcomer's arrival, which differs only for a `NODE_NETWORK_LIMITED` peer whose standing crossed the 144-block threshold in between.
     - A newcomer at an address holding a live outbound connection is refused instead of evicting. The table keys one connection per address, so admitting it would replace the outbound connection too. Core keeps both.
-    - Core reserves part of the uptime protection for onion, I2P, CJDNS and localhost peers; only localhost exists as a transport here.
+    - Core reserves part of the uptime protection for onion, I2P, CJDNS and localhost peers; this implementation still reserves uptime protection only for localhost, even when overlay transports are enabled.
 
     Two Core steps never apply. BIP37 filters are ignored, so no peer has the bloom filter Core's transaction-time tie-break looks at. A discouraged address is refused at accept, where Core admits it while the inbound slots are not almost full and then evicts it first (`net.cpp:1811-1817`), so no candidate is discouraged.
 13. **Outbound service gate**: an outbound peer that does not advertise the desirable set is disconnected right after its `version`, before it is published as usable, exactly as Core's `HasAllDesirableServiceFlags` check does (`net_processing.cpp:1857-1872`, applied to an outbound connection at `:3864-3871`). The desirable set is `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks (`NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`). Inbound peers are not service-checked, as in Core.
@@ -671,3 +671,49 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 - Node-level reorg effects are coordinated in `crates/node/src/reorg.rs` (`switch_to_branch`, `invalidate_block`), which moves the applied tip off a losing branch; the node's P2P-chain adapter calls `switch_to_branch` when a higher-work header branch wins. The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
 
 See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the contracts index and precedence rule.
+
+## Overlay transports
+
+`primitives::endpoint` owns logical IP, Tor v3 and I2P destination identities.
+Those identities key the existing peer table, connection sources, mempool
+attribution, address book, netgroups and relay. A loopback SOCKS/SAM hop is
+never the remote peer's identity. The existing listener owns Bitcoin framing,
+handshake, leases, counters, admission and message processing for all streams.
+
+`p2p::overlay` owns opt-in route selection and SOCKS5/SAM setup; its private
+Tor control and IVNP SAM workers participate in `P2pService` startup/shutdown.
+Allowed-network policy is checked both during selection and final admission.
+The [configuration reference](../getting-started.md#tor-and-ivnp-i2p-networking)
+owns option spellings and defaults. Setup uses absolute deadlines and bounded
+cancellation polls. SAM session preparation has a 120-second bound; onion
+circuit and I2P stream connection have a 60-second bound. Local service errors do not enter
+remote protocol discouragement or count as failed overlay peer attempts.
+Control-session loss revokes I2P stream epochs, including late registrations,
+and the worker restores the selected stable destination with bounded backoff.
+
+Inbound Tor service identity is persistent but remote circuit identity is
+unknown. Opaque per-connection handles are usable for disconnecting a live
+connection; they are never persisted, learned as address-book sources, or
+advertised as destinations. Inbound I2P uses `STREAM ACCEPT` Destination and
+port metadata. Both paths use ordinary inbound capacity/eviction policy and
+have no localhost exemptions. Core's special onion/I2P uptime protection in
+eviction remains a deviation, as recorded above.
+
+Schema v9 adds overlay endpoints and source identities using the existing
+backup-before-migration path. Upgrading v8 IP records preserves the secret,
+all membership references, services and restart anchors; IP hash bytes and
+grouping remain unchanged. Application keys have a separate versioned,
+checksummed create-once format. A bad existing identity fails startup and is
+never replaced. IVNP router data and application identities have separate
+owners and directories.
+
+Local fixtures in `p2p::overlay` prove protocol transitions, refusal,
+malformed input, timeout/cancellation, service loss and key preservation.
+They do not prove privacy or external router interoperability. The manual
+[`overlay-interoperability`](../../.github/workflows/overlay-interop.yml)
+workflow runs `e2e/tests/overlay_connectivity.rs` through the existing process
+harness against external Tor and the IVNP revision owned by
+[`scripts/overlay-interop.py`](../../scripts/overlay-interop.py). Its artifacts
+record executable hashes, Bitcoin peer identity/counters, headers/block
+exchange and stable service-address restart observations. A failing or absent
+campaign is unavailable interoperability evidence, not an advertised pass.

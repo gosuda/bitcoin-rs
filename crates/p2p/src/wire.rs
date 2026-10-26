@@ -287,10 +287,10 @@ pub enum PeerError {
     Incoming(#[source] Box<Self>),
     /// Automatic dialing is temporarily avoided after a prior remote violation.
     #[error("discouraged destination {0}")]
-    DiscouragedDestination(std::net::IpAddr),
+    DiscouragedDestination(bitcoin_rs_primitives::PeerAddress),
     /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
-    BannedDestination(std::net::IpAddr),
+    BannedDestination(bitcoin_rs_primitives::PeerAddress),
     /// The BIP324 transport failed: a malformed handshake, or a packet that
     /// is oversized or fails authentication. BIP324 does not authenticate
     /// peers, so this ends the connection without implicating the peer.

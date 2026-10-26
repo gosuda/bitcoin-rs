@@ -1,5 +1,6 @@
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -150,7 +151,7 @@ fn chain_over(blocks: &[Block], recent: RecentBlockSlot) -> Fallible<ActiveChain
 }
 
 struct Node {
-    addr: SocketAddr,
+    addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
     shutdown: Arc<AtomicBool>,
@@ -167,13 +168,17 @@ impl Node {
         );
         shared.chain_query = Some(Arc::new(chain));
         let aggregate = Arc::clone(&shared.shared_outbound);
-        let listener = bind_listener(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = bind_listener(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let addr = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let thread = std::thread::spawn(move || serve(listener, flag, shared));
         Ok(Self {
-            addr,
+            addr: addr.into(),
             table,
             aggregate,
             shutdown,
@@ -221,13 +226,17 @@ impl Drop for Node {
 
 struct Client {
     peer: Peer<TcpStream>,
-    local: SocketAddr,
+    local: PeerEndpoint,
     nonce: u64,
 }
 
 impl Client {
     fn connect(node: &Node) -> Fallible<Self> {
-        let stream = TcpStream::connect(node.addr)?;
+        let stream = TcpStream::connect(
+            node.addr
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         configure_peer_stream(&stream)?;
         let local = stream.local_addr()?;
         let mut peer = Peer::new(stream, MAGIC);
@@ -248,7 +257,7 @@ impl Client {
         )?;
         let mut client = Self {
             peer,
-            local,
+            local: local.into(),
             nonce: 0,
         };
         let barrier = client.ping()?;

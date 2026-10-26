@@ -1,7 +1,8 @@
 //! BIP324 negotiation over real loopback sockets: inbound v1/v2 detection,
 //! outbound v2 with Core's single v1 retry, and the handshake deadline.
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use bitcoin_rs_primitives::PeerEndpoint;
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -56,22 +57,29 @@ fn deadline() -> Instant {
 }
 
 /// A serving listener: its address, the flag that stops it, and its thread.
-type Listening = (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>);
+type Listening = (PeerEndpoint, Arc<AtomicBool>, std::thread::JoinHandle<()>);
 
 /// A listener serving `shared` until the returned flag is raised.
 fn listen(shared: ConnectionShared) -> Result<Listening, Box<dyn std::error::Error>> {
-    let listener = bind_listener(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
     let handle = std::thread::spawn(move || {
         let _ = serve(listener, flag, shared);
     });
-    Ok((addr, shutdown, handle))
+    Ok((addr.into(), shutdown, handle))
 }
 
-fn connect(addr: SocketAddr) -> Result<TcpStream, Box<dyn std::error::Error>> {
-    let stream = TcpStream::connect(addr)?;
+fn connect(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    let stream = TcpStream::connect(
+        addr.socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     configure_peer_stream(&stream)?;
     Ok(stream)
 }
@@ -100,7 +108,7 @@ fn read_until(
 
 /// Completes the version handshake as an outbound peer of `addr` over
 /// `negotiated`, then proves the remote message loop answers over it.
-fn handshake_and_ping(addr: SocketAddr, stream: TcpStream, negotiated: Negotiated) -> TestResult {
+fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotiated) -> TestResult {
     let (client, _) = shared(false);
     let lease = lease();
     let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
@@ -140,7 +148,11 @@ fn a_v2_listener_still_serves_a_v1_peer() -> TestResult {
 
 #[test]
 fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
-    let server = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let server = TcpListener::bind(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = server.local_addr()?;
     let responder = std::thread::spawn(move || -> Result<TransportProtocol, String> {
         let (stream, _) = server.accept().map_err(|error| error.to_string())?;
@@ -168,7 +180,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
     });
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+    let dial = spawn_pinned_outbound_connection(addr.into(), dialer, PeerRole::FullRelay);
     let protocol = responder.join().map_err(|_| "responder panicked")??;
     assert!(matches!(protocol, TransportProtocol::V2 { .. }));
 
@@ -255,9 +267,13 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
 
 #[test]
 fn a_silent_responder_ends_at_the_handshake_deadline() -> TestResult {
-    let server = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let server = TcpListener::bind(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = server.local_addr()?;
-    let mut stream = connect(addr)?;
+    let mut stream = connect(addr.into())?;
     let (_held, _) = server.accept()?;
     let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(3));
     let started = Instant::now();
@@ -393,7 +409,11 @@ fn spawn_decoy_then_ping_writer(
 /// successful exit.
 #[test]
 fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
-    let server = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let server = TcpListener::bind(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = server.local_addr()?;
     // A nonblocking accept keeps a failed test from pinning the writer in
     // `accept` past cleanup.
@@ -412,7 +432,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
     // The fallible body runs first so the writer is always stopped and joined,
     // even when the handshake or the loop fails.
     let result = (|| -> Result<(Result<(), PeerError>, Duration), Box<dyn std::error::Error>> {
-        let mut stream = connect(addr)?;
+        let mut stream = connect(addr.into())?;
         let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(5));
         let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
         if !matches!(negotiated.protocol, TransportProtocol::V2 { .. }) {
@@ -429,9 +449,10 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
         let (lease, replies) = lease_with_replies();
         let cancel_handle = lease.clone();
         let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
-        run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
-        let loop_handle =
-            std::thread::spawn(move || run_message_loop(&mut peer, addr, &lease, &client, None));
+        run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr.into(), &client)?;
+        let loop_handle = std::thread::spawn(move || {
+            run_message_loop(&mut peer, addr.into(), &lease, &client, None)
+        });
         // Liveness proof: the loop must dispatch the writer's ping through
         // the production path and queue the pong on the peer's reply queue.
         // A decoy drop, a v1 byte-count alias, or a loop that exits early

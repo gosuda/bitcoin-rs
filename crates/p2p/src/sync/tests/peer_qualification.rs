@@ -54,7 +54,7 @@ fn received_only_state_uses_scan_path_without_duplicate_request() -> TestResult 
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let (_, blocks) = mined_chain(3, 0)?;
     stage_body(&sync, &blocks[1]);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 3));
 
     sync.tick();

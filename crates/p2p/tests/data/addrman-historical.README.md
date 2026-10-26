@@ -77,3 +77,20 @@ SHA-256 values are `b91d1cfd3add210e4cf2e20307894088e99206916d1bda9f1e525c65bb36
 The two ambiguous old DNS rows deliberately migrate to unknown: their bytes
 cannot recover whether zero was observed. Schema8 tests then observe known zero
 without Good and verify that future DNS refresh and restart retain it.
+
+Overlay endpoint migration adds an original v8 writer file:
+
+| File | Original writer commit | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| addrman-historical-v8-endpoints.dat | 653c150836ce3d7de684609c9bc72b3d432d24de | 1245 | 434f6b21032e4da8d3d6b28856fdfcd5d7e5e2a75fffa7cb0e533cca63aa3c17 |
+
+The immutable AddrMan module (blob `7e76785854e78d4eeea7a1a8269e61364cf8170a`) and its original
+netgroup module were compiled unchanged in a scratch producer; only a local
+fixture entry point was appended. The exact original desirable-services
+predicate supplied its listener linkage. The producer uses secret `[7;32]`,
+StdRng seed17, magic `[1;4]` and time1700000000. It retains unknown DNS
+8.8.8.8, observed-zero DNS8.8.4.4, Good IPv4 9.9.9.9 and Good IPv6
+2001:4860:4860::8888, with both Good records as anchors. A New record for
+11.12.13.14 has eight references and one attempt. No schema was relabelled.
+The v9 test compares every persisted field except the version and validates
+exact backup bytes before publication and preservation when backup fails.

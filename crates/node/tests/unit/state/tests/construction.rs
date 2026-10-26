@@ -104,7 +104,7 @@ fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
     let sender = state.inbound_tx_sender();
     let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
     let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
-    let source = lease.source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let source = lease.source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)).into());
     let tx = bitcoin_rs_primitives::Tx {
         version: 1,
         inputs: Vec::new(),

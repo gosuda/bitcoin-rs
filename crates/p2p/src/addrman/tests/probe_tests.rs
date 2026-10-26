@@ -1,6 +1,6 @@
 use super::*;
 
-fn challenger() -> SocketAddr {
+fn challenger() -> PeerEndpoint {
     "8.8.8.8:412".parse().expect("actual Core collision")
 }
 fn collision_book() -> Arc<AddressBook> {
@@ -20,7 +20,7 @@ fn collision_book() -> Arc<AddressBook> {
     }
     book
 }
-fn state(book: &AddressBook, addr: SocketAddr) -> Candidate {
+fn state(book: &AddressBook, addr: PeerEndpoint) -> Candidate {
     let manager = book.state.lock();
     manager.stored.records[manager.by_addr[&addr]].clone()
 }
@@ -60,7 +60,7 @@ fn collision_pending_active_policy_and_callback_bounds_recheck_current_state() {
 fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference() {
     for victim_refs in [1, 2] {
         let book = collision_book();
-        let victim: SocketAddr = "8.8.9.89:8333".parse().expect("actual Core New collider");
+        let victim: PeerEndpoint = "8.8.9.89:8333".parse().expect("actual Core New collider");
         {
             let mut manager = book.state.lock();
             for n in 2..=8 {
@@ -95,7 +95,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
 #[test]
 fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
     let book = collision_book();
-    let victim: SocketAddr = "8.8.9.89:8333".parse().expect("collider");
+    let victim: PeerEndpoint = "8.8.9.89:8333".parse().expect("collider");
     {
         let mut manager = book.state.lock();
         manager.learn(victim, Some(9), source(1), EPOCH - 1000, EPOCH, 0);
@@ -121,14 +121,14 @@ fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
 #[test]
 fn feeler_connected_incumbent_gets_good_but_pending_attempt_does_not() {
     let book = collision_book();
-    let mapped: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
+    let mapped: PeerEndpoint = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
     assert_eq!(
         book.feeler(&[mapped], &[mapped], EPOCH, |_| true),
         Some(challenger())
     );
     assert_eq!(state(&book, target()).last_success, EPOCH);
     book.resolve_collisions(&[], EPOCH + 1, |_| true);
-    assert_eq!(book.state.lock().collisions, Vec::<SocketAddr>::new());
+    assert_eq!(book.state.lock().collisions, Vec::<PeerEndpoint>::new());
     let book = collision_book();
     book.queued(mapped);
     let before = state(&book, target()).last_success;
@@ -150,11 +150,11 @@ fn feeler_connected_incumbent_gets_good_but_pending_attempt_does_not() {
 #[test]
 fn connected_collision_good_uses_ip_not_port_but_not_linked_ipv6_group() {
     let book = collision_book();
-    let other_port: SocketAddr = "[::ffff:8.8.8.8]:18444".parse().expect("TCP alias");
+    let other_port: PeerEndpoint = "[::ffff:8.8.8.8]:18444".parse().expect("TCP alias");
     book.feeler(&[other_port], &[other_port], EPOCH, |_| true);
     assert_eq!(state(&book, target()).last_success, EPOCH);
     let book = collision_book();
-    let linked: SocketAddr = "[2002:808:808::1]:8333".parse().expect("linked IPv6");
+    let linked: PeerEndpoint = "[2002:808:808::1]:8333".parse().expect("linked IPv6");
     assert_eq!(
         book.feeler(&[linked], &[linked], EPOCH, |_| true),
         Some(target())
@@ -181,7 +181,7 @@ fn actual_historical_anchor_and_v6_files_migrate_with_exact_backup() {
             let manager = book.state.lock();
             assert!(manager.writable);
             assert_eq!(manager.stored.version, VERSION);
-            assert_eq!(manager.collisions, Vec::<SocketAddr>::new());
+            assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
             if schema == 6 {
                 assert_eq!(refs(&manager, target()), 8);
             } else {
@@ -263,7 +263,7 @@ fn failed_anchor_consumption_exposes_no_claims_and_newer_confirmation_wins_retur
     fs::create_dir(&path).expect("failed replace");
     assert_eq!(
         book.take_restart_anchors(EPOCH + 1),
-        Vec::<SocketAddr>::new()
+        Vec::<PeerEndpoint>::new()
     );
     assert!(book.state.lock().pending.is_empty());
     assert_eq!(
@@ -384,7 +384,7 @@ fn assert_collision_snapshot(manager: &Manager, row: &serde_json::Value) {
         if entry.is_null() {
             continue;
         }
-        let addr: SocketAddr = entry["endpoint"]
+        let addr: PeerEndpoint = entry["endpoint"]
             .as_str()
             .expect("endpoint")
             .parse()
@@ -492,7 +492,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
         .take(11)
         .enumerate()
     {
-        let addr: SocketAddr = endpoint
+        let addr: PeerEndpoint = endpoint
             .as_str()
             .expect("endpoint")
             .parse()
@@ -583,7 +583,7 @@ fn historical_anchor_migration_obeys_configured_map_and_unknown_shape_barriers()
         assert!(!invalid.state.lock().writable);
         assert_eq!(
             invalid.take_restart_anchors(EPOCH + 10),
-            Vec::<SocketAddr>::new()
+            Vec::<PeerEndpoint>::new()
         );
         assert_eq!(invalid.state.lock().stored.anchors.len(), 2);
         invalid.save();
@@ -657,7 +657,7 @@ fn anchor_reservation_precedes_publication_and_failed_commit_rolls_it_back() {
     book.queued(target());
     assert_eq!(
         book.take_restart_anchors(EPOCH + 3),
-        Vec::<SocketAddr>::new()
+        Vec::<PeerEndpoint>::new()
     );
     assert_eq!(
         book.state.lock().stored.anchors,
@@ -672,7 +672,7 @@ fn anchor_reservation_precedes_publication_and_failed_commit_rolls_it_back() {
 #[test]
 fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     let book = oracle_book();
-    let second: SocketAddr = "8.8.8.8:1343".parse().expect("second actual Core collider");
+    let second: PeerEndpoint = "8.8.8.8:1343".parse().expect("second actual Core collider");
     let mut manager = book.state.lock();
     manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     manager.good(target(), true, EPOCH - 20_000);
@@ -692,7 +692,7 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     manager.resolve_collisions(&HashSet::new(), &allowed, EPOCH);
     assert!(manager.stored.records[manager.by_addr[&challenger()]].tried);
     assert!(!manager.stored.records[manager.by_addr[&second]].tried);
-    assert_eq!(manager.collisions, Vec::<SocketAddr>::new());
+    assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
     assert_indexes(&manager);
     assert!(
         !serde_json::to_string(&manager.stored)
@@ -710,7 +710,7 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
         book.select(&[], &[], EPOCH, u64::MAX, |_| true),
         Some(target())
     );
-    book.learn_peer(addr(2).ip(), &[(target(), 1, EPOCH)], EPOCH);
+    book.learn_peer(addr(2).address(), &[(target(), 1, EPOCH)], EPOCH);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
     book.state.lock().stored.records[0].services = Some(1024);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
@@ -721,7 +721,7 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
 #[test]
 fn regular_queue_admission_never_takes_probe_or_anchor_claims() {
     let book = book();
-    let alias: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
+    let alias: PeerEndpoint = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
     assert!(book.queued_feeler(target()));
     assert!(!book.queued(alias));
     assert!(book.is_feeler(target()));
@@ -752,8 +752,8 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
     .expect("Core map");
     let book = AddressBook::open(None, [1; 4], false, Some(&map));
     book.state.lock().stored.secret = [1; 32];
-    let anchor: SocketAddr = "8.8.0.1:8333".parse().expect("anchor");
-    let other: SocketAddr = "9.9.0.1:8333".parse().expect("same Core ASN");
+    let anchor: PeerEndpoint = "8.8.0.1:8333".parse().expect("anchor");
+    let other: PeerEndpoint = "9.9.0.1:8333".parse().expect("same Core ASN");
     book.learn_dns("seed", &[anchor, other], EPOCH);
     assert_eq!(book.len(), 2);
     book.succeeded(anchor, 9, EPOCH);

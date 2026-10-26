@@ -450,9 +450,9 @@ mod tests {
     use super::*;
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::PeerEndpoint;
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
-    use std::net::SocketAddr;
     use std::sync::atomic::AtomicBool;
 
     /// A peer in the fake sink: a node id and a remaining send budget.
@@ -969,7 +969,7 @@ mod tests {
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
-                    addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    addr: PeerEndpoint::from(([127, 0, 0, 1], 8333)),
                     connection_id: 7,
                 }),
                 false,
@@ -1094,7 +1094,7 @@ mod tests {
     }
     fn relay_identity_peer() -> AdmissionOrigin {
         AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
-            addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+            addr: PeerEndpoint::from(([127, 0, 0, 1], 8333)),
             connection_id: 7,
         })
     }

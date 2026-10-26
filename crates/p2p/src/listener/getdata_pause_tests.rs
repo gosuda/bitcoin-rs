@@ -2,8 +2,9 @@
 //! the peer: the session reads nothing until the writer drains, answers in
 //! request order, and ends when the writer dies or the lease is cancelled.
 
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io::{self, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -262,7 +263,11 @@ impl Served {
         aggregate: Option<&Arc<SharedOutboundBudget>>,
         writer: &WriterKind,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let client_stream = TcpStream::connect(listener.local_addr()?)?;
         let (server_stream, addr) = listener.accept()?;
         configure_peer_stream(&client_stream)?;
@@ -316,7 +321,7 @@ impl Served {
                     outbound_rx,
                     close,
                     Arc::clone(&handle),
-                    addr,
+                    addr.into(),
                     None,
                 )?;
                 (None, thread)
@@ -328,7 +333,7 @@ impl Served {
         let session_lease = lease.clone();
         let (outcome_tx, outcome) = crossbeam_channel::bounded(1);
         let session = std::thread::spawn(move || {
-            let result = run_message_loop(&mut peer, addr, &session_lease, &shared, None);
+            let result = run_message_loop(&mut peer, addr.into(), &session_lease, &shared, None);
             let _ = outcome_tx.send(result);
         });
         Ok(Self {
@@ -734,7 +739,11 @@ fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResul
 /// dead when a write fails: a peer that has gone away fails the second write.
 #[test]
 fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let client = TcpStream::connect(listener.local_addr()?)?;
     let (server, addr) = listener.accept()?;
     drop(client);
@@ -746,7 +755,7 @@ fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
         outbound_rx,
         lease.close_signal(),
         lease.budget_handle(),
-        addr,
+        addr.into(),
         None,
     )?;
 

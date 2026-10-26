@@ -1,6 +1,6 @@
 //! Per-connection identity and cancellation.
 
-use std::net::SocketAddr;
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -42,8 +42,8 @@ impl ConnectionId {
 /// Attribution token for an event delivered by one connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PeerSource {
-    /// Remote socket address at delivery time.
-    pub(crate) addr: SocketAddr,
+    /// Logical remote Bitcoin endpoint at delivery time.
+    pub(crate) addr: PeerEndpoint,
     connection_id: ConnectionId,
 }
 
@@ -56,7 +56,7 @@ impl PeerSource {
 
     /// Mints a source with a fresh process-unique identity for tests.
     #[cfg(test)]
-    pub(crate) fn for_test(addr: SocketAddr) -> Self {
+    pub(crate) fn for_test(addr: PeerEndpoint) -> Self {
         Self {
             addr,
             connection_id: ConnectionId::allocate(),
@@ -710,6 +710,7 @@ pub struct PeerLease {
     id: ConnectionId,
     outbound: Sender<QueuedFrame>,
     cancel: Arc<AtomicBool>,
+    transport_alive: Option<Arc<AtomicBool>>,
     close_tx: Sender<()>,
     close_rx: Receiver<()>,
     budget: Arc<OutboundBudget>,
@@ -722,7 +723,7 @@ pub struct PeerLease {
     /// Whether the operator pinned this dial by hand (`--connect` or
     /// `addnode`). Core: `ConnectionType::MANUAL`.
     manual: bool,
-    /// Granted only from operator configuration using the actual socket IP.
+    /// Granted only when the logical remote IP matches operator configuration.
     no_ban: bool,
     /// Monotonic instant the connection was created.
     connected: Instant,
@@ -816,6 +817,7 @@ impl PeerLease {
             id: ConnectionId::allocate(),
             outbound,
             cancel: Arc::new(AtomicBool::new(false)),
+            transport_alive: None,
             close_tx,
             close_rx,
             budget: Arc::new(budget),
@@ -842,6 +844,11 @@ impl PeerLease {
             false,
             budget,
         )
+    }
+
+    pub(crate) fn with_transport_alive(mut self, alive: Option<Arc<AtomicBool>>) -> Self {
+        self.transport_alive = alive;
+        self
     }
 
     pub(crate) fn with_no_ban(mut self, no_ban: bool) -> Self {
@@ -1000,7 +1007,7 @@ impl PeerLease {
 
     /// Stamps an inbound event with this connection's identity and address.
     #[must_use]
-    pub fn source(&self, addr: SocketAddr) -> PeerSource {
+    pub fn source(&self, addr: PeerEndpoint) -> PeerSource {
         PeerSource {
             addr,
             connection_id: self.id,
@@ -1136,6 +1143,10 @@ impl PeerLease {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
+            || self
+                .transport_alive
+                .as_ref()
+                .is_some_and(|alive| !alive.load(Ordering::Acquire))
     }
 
     /// The flag [`Self::cancel`] sets, for a socket wrapper to observe.
@@ -1150,8 +1161,8 @@ mod tests {
         OutboundBudget, OutboundCredit, OutboundRefusal, PeerLease, QueuedFrame, Refusal,
         SharedOutboundBudget,
     };
+    use bitcoin_rs_primitives::PeerEndpoint;
     use crossbeam_channel::Receiver;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -1200,7 +1211,7 @@ mod tests {
         (PeerLease::new(tx).with_shared_budget(shared), rx)
     }
 
-    fn peer_info(addr: SocketAddr, conn_time: u64) -> crate::PeerInfo {
+    fn peer_info(addr: PeerEndpoint, conn_time: u64) -> crate::PeerInfo {
         crate::PeerInfo {
             addr,
             version: 70_016,
@@ -1214,7 +1225,9 @@ mod tests {
             best_known_height: 0,
             conn_time,
             inbound: false,
-            addr_bind: addr,
+            addr_bind: addr
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
             time_offset: 0,
             counters: std::sync::Arc::new(crate::PeerCounters::default()),
             transport: crate::TransportProtocol::V1,
@@ -1266,7 +1279,7 @@ mod tests {
     #[test]
     fn stale_connection_cannot_publish_over_replacement() {
         let table = crate::PeerTable::new();
-        let addr = SocketAddr::from(([127, 0, 0, 1], 18_450));
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_450));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
         assert!(!table.register(addr, old.clone()));
@@ -1294,7 +1307,7 @@ mod tests {
     #[test]
     fn stale_disconnect_source_preserves_replacement() {
         let table = crate::PeerTable::new();
-        let addr = SocketAddr::from(([127, 0, 0, 1], 18_451));
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_451));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
         table.register(addr, old.clone());
@@ -1319,7 +1332,7 @@ mod tests {
     #[test]
     fn ready_snapshot_keeps_identity_across_same_address_replacement() {
         let table = crate::PeerTable::new();
-        let addr = SocketAddr::from(([127, 0, 0, 1], 18_452));
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_452));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
         table.register(addr, old.clone());

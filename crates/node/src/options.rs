@@ -34,7 +34,7 @@ use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
 
 /// Canonical subnet type shared by every process-input surface.
-pub use bitcoin_rs_p2p::IpSubnet;
+pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
 
 /// Parses a network selection spelling.
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
@@ -101,6 +101,17 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String
     port.parse::<u16>()
         .map_err(|error| format!("connect peer `{value}` has an invalid port: {error}"))?;
     Ok(value.to_owned())
+}
+
+/// Parse one allowed remote network without DNS resolution.
+pub fn parse_peer_network(value: &str) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, String> {
+    value.parse().map_err(str::to_owned)
+}
+fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> {
+    value
+        .split(',')
+        .map(|network| parse_peer_network(network.trim()).map_err(anyhow::Error::msg))
+        .collect()
 }
 
 /// Parses a comma-separated listener bind list.
@@ -556,6 +567,60 @@ macro_rules! option_rows {
                         cli[#[arg(long = "connect", value_delimiter = ',', value_parser = parse_connect_endpoint)]]
                         env["BITCOIN_RS_CONNECT", parse_connect_list]
                         toml each("connect", parse_connect_endpoint)
+                    }
+                    /// Opt-in overlay routing: proxy.
+                    proxy as proxy: Option<SocketAddr> {
+                        cli[#[arg(long = "proxy")]]
+                        env["BITCOIN_RS_PROXY", str::parse]
+                        toml native("proxy")
+                    }
+                    /// Opt-in overlay routing: onion-proxy.
+                    onion_proxy as onion_proxy: Option<SocketAddr> {
+                        cli[#[arg(long = "onion-proxy")]]
+                        env["BITCOIN_RS_ONION_PROXY", str::parse]
+                        toml native("onion_proxy")
+                    }
+                    /// Opt-in overlay routing: i2p-sam.
+                    i2p_sam as i2p_sam: Option<SocketAddr> {
+                        cli[#[arg(long = "i2p-sam")]]
+                        env["BITCOIN_RS_I2P_SAM", str::parse]
+                        toml native("i2p_sam")
+                    }
+                    /// Opt-in overlay routing: tor-control.
+                    tor_control as tor_control: Option<SocketAddr> {
+                        cli[#[arg(long = "tor-control")]]
+                        env["BITCOIN_RS_TOR_CONTROL", str::parse]
+                        toml native("tor_control")
+                    }
+                    /// Opt-in overlay routing: tor-cookie.
+                    tor_cookie as tor_cookie: Option<PathBuf> {
+                        cli[#[arg(long = "tor-cookie")]]
+                        env["BITCOIN_RS_TOR_COOKIE", parse_path]
+                        toml native("tor_cookie")
+                    }
+                    /// Opt-in overlay setting: i2p-accept.
+                    i2p_accept as i2p_accept: Option<bool> {
+                        cli[#[arg(long = "i2p-accept", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_I2P_ACCEPT", parse_bool]
+                        toml native("i2p_accept")
+                    }
+                    /// Opt-in overlay setting: proxy-randomize-credentials.
+                    proxy_randomize_credentials as proxy_randomize_credentials: Option<bool> {
+                        cli[#[arg(long = "proxy-randomize-credentials", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_PROXY_RANDOMIZE_CREDENTIALS", parse_bool]
+                        toml native("proxy_randomize_credentials")
+                    }
+                    /// Public Bitcoin service port for inbound overlay services.
+                    overlay_port as overlay_port: Option<u16> {
+                        cli[#[arg(long = "overlay-port")]]
+                        env["BITCOIN_RS_OVERLAY_PORT", str::parse]
+                        toml native("overlay_port")
+                    }
+                    /// Restrict every peer connection to these remote networks.
+                    onlynet as onlynet: Option<Vec<$crate::options::PeerNetwork>> {
+                        cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_peer_network)]]
+                        env["BITCOIN_RS_ONLYNET", parse_peer_networks]
+                        toml each("onlynet", parse_peer_network)
                     }
                     /// Whether fast sync (shallow, early fan-out over a larger
                     /// outbound set) is enabled.

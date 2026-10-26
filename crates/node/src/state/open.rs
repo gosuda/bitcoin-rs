@@ -373,6 +373,10 @@ impl NodeState {
         };
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig {
+                overlay: bitcoin_rs_p2p::OverlayConfig {
+                    identity_dir: config.data_dir.join(&config.p2p.overlay.identity_dir),
+                    ..config.p2p.overlay.clone()
+                },
                 listen_addrs: config.p2p.listen.clone(),
                 address_book_path: Some(config.data_dir.join("peers.dat")),
                 asmap_path: config.p2p.asmap.clone(),

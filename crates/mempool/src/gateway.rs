@@ -3705,7 +3705,7 @@ mod tests {
         candidate.inputs.push(candidate.inputs[0].clone());
         candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let origin = AdmissionOrigin::Peer(crate::PeerToken {
-            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            addr: bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
             connection_id: 7,
         });
         let request = admit_request(&gateway, &candidate, origin);

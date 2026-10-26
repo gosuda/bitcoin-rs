@@ -142,7 +142,7 @@ impl MutationResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
     /// The peer's wire address.
-    pub addr: core::net::SocketAddr,
+    pub addr: bitcoin_rs_primitives::PeerEndpoint,
     /// The node-local id of the connection the peer arrived on.
     pub connection_id: u64,
 }

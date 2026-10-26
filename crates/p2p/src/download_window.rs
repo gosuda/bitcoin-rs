@@ -5,7 +5,7 @@
 //! to manage the in-flight window budget. `crate::BlockStager` owns the
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
-use std::net::SocketAddr;
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -381,7 +381,7 @@ pub(crate) struct DownloadWindow {
     /// time. While inside `staller_cooldown` such a peer is not fan-out
     /// eligible and receives no block requests except as the last-resort peer.
     /// This prevents immediate re-acquisition of the same block stripe.
-    recent_stallers: HashMap<SocketAddr, Instant>,
+    recent_stallers: HashMap<PeerEndpoint, Instant>,
 }
 
 impl DownloadWindow {
@@ -1153,7 +1153,7 @@ impl DownloadWindow {
     /// peer delivering each front block just under the adaptive threshold is
     /// never disconnected (same exposure as Core) but is visible here and on
     /// the `node.sync.stall_seconds` gauge.
-    pub(crate) fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(PeerEndpoint, Instant)> {
         self.stall
             .map(|episode| (episode.owner.addr, episode.since))
     }
@@ -1342,7 +1342,7 @@ impl DownloadWindow {
     }
 
     /// Starts the re-acquisition cooldown for an unresponsive peer.
-    pub(crate) fn mark_peer_unresponsive(&mut self, peer_addr: SocketAddr, now: Instant) {
+    pub(crate) fn mark_peer_unresponsive(&mut self, peer_addr: PeerEndpoint, now: Instant) {
         let cooldown = self.budget.staller_cooldown;
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < cooldown);
@@ -1351,7 +1351,7 @@ impl DownloadWindow {
 
     /// Whether `peer_addr` is in cooldown; such peers are a last resort so a
     /// reconnecting staller cannot immediately reacquire the window front.
-    pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: PeerEndpoint, now: Instant) -> bool {
         self.recent_stallers
             .get(&peer_addr)
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
@@ -2390,7 +2390,7 @@ impl DownloadWindow {
     /// POST: returns the number of distinct `pending.owner.addr` values.
     /// INVARIANT: each address counts once, however many requests it owns.
     fn owner_address_count(&self) -> usize {
-        let mut owners: SmallVec<[SocketAddr; 16]> = SmallVec::new();
+        let mut owners: SmallVec<[PeerEndpoint; 16]> = SmallVec::new();
         for pending in self.pending.values() {
             if !owners.contains(&pending.owner.addr) {
                 owners.push(pending.owner.addr);

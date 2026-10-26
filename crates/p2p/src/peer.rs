@@ -1,5 +1,6 @@
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -351,7 +352,7 @@ impl<S: Read> Peer<S> {
 /// DNS resolver injection point for peer discovery.
 pub(crate) trait DnsResolver: Send + Sync {
     /// Resolve a DNS seed name into socket addresses.
-    fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError>;
+    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError>;
 }
 
 /// DNS resolver backed by the operating system resolver.
@@ -369,11 +370,11 @@ impl SystemDnsResolver {
 }
 
 impl DnsResolver for SystemDnsResolver {
-    fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
+    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError> {
         let seed = seed.trim_end_matches('.');
         (seed, self.port)
             .to_socket_addrs()
-            .map(std::iter::Iterator::collect)
+            .map(|addresses| addresses.map(PeerEndpoint::from).collect())
             .map_err(PeerError::Io)
     }
 }
@@ -521,7 +522,7 @@ mod tests {
         assert!(
             resolver
                 .resolve("127.0.0.1.")?
-                .contains(&SocketAddr::from(([127, 0, 0, 1], 8333)))
+                .contains(&PeerEndpoint::from(([127, 0, 0, 1], 8333)))
         );
         Ok(())
     }
@@ -533,7 +534,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
             4,
-            SocketAddr::from(([127, 0, 0, 1], 8333)),
+            PeerEndpoint::from(([127, 0, 0, 1], 8333)),
             crate::peer_info::PeerRole::FullRelay,
             false,
         ));
@@ -563,7 +564,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(frame), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
             2,
-            SocketAddr::from(([127, 0, 0, 1], 8333)),
+            PeerEndpoint::from(([127, 0, 0, 1], 8333)),
         ));
 
         let (message, payload) = peer
@@ -581,7 +582,11 @@ mod tests {
         use std::net::{TcpListener, TcpStream};
         use std::time::{Duration, Instant};
 
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let mut sender = TcpStream::connect(listener.local_addr()?)?;
         let (receiver, _) = listener.accept()?;
         receiver.set_read_timeout(Some(Duration::from_millis(20)))?;

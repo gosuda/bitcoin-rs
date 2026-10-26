@@ -36,6 +36,9 @@ pub mod inv;
 /// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
 pub(crate) mod netgroup;
+/// Opt-in Tor and IVNP I2P transport configuration.
+pub mod overlay;
+pub use overlay::{OverlayConfig, OverlayNetworkState};
 
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
@@ -101,3 +104,5 @@ pub use download_window::default_sync_budget;
 
 /// Bounded automatic reconnect avoidance; manual bans retain their owner.
 pub mod discouragement;
+
+pub use bitcoin_rs_primitives::{PeerAddress, PeerEndpoint, PeerNetwork};

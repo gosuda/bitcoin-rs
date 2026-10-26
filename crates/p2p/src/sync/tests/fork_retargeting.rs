@@ -90,7 +90,7 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
         inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
-    let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
+    let peer = PeerEndpoint::from(([127, 0, 0, 1], 18_461));
     let rx = connect_peer(&peers, synthetic_peer(peer, 100));
     let source = current_source(&sync.peer_table, peer);
 
@@ -299,7 +299,7 @@ fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
         max_pending_blocks: LOSING_LEN,
         ..crate::sync::default_sync_budget(Network::Regtest)
     });
-    let peer = SocketAddr::from(([127, 0, 0, 1], 18_462));
+    let peer = PeerEndpoint::from(([127, 0, 0, 1], 18_462));
     let _rx = connect_peer(&peers, synthetic_peer(peer, 100));
     let source = current_source(&sync.peer_table, peer);
     assert!(

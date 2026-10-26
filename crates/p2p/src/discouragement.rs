@@ -1,20 +1,21 @@
-//! Bounded, process-local avoidance of protocol-invalid remote IP addresses.
+//! Bounded, process-local avoidance of protocol-invalid remote peer addresses.
 
+use bitcoin_rs_primitives::PeerAddress;
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, Instant, SystemTime};
 
 use hashbrown::{HashMap, HashSet};
 
-/// Maximum exact IPs retained independently of the auxiliary address book.
+/// Maximum exact peer addresses retained independently of the auxiliary address book.
 pub const MAX_DISCOURAGED_IPS: usize = 4_096;
 /// A single violation temporarily avoids automatic reconnection for one hour.
 pub const DISCOURAGEMENT_LIFETIME: Duration = Duration::from_hours(1);
 
 #[derive(Debug, Default)]
 pub(crate) struct DiscouragedPeers {
-    deadlines: HashMap<IpAddr, Instant>,
-    oldest: VecDeque<IpAddr>,
+    deadlines: HashMap<PeerAddress, Instant>,
+    oldest: VecDeque<PeerAddress>,
 }
 
 impl DiscouragedPeers {
@@ -30,9 +31,9 @@ impl DiscouragedPeers {
         }
     }
 
-    pub(crate) fn insert(&mut self, ip: IpAddr, now: Instant) {
+    pub(crate) fn insert(&mut self, ip: impl Into<PeerAddress>, now: Instant) {
         self.expire(now);
-        let ip = ip.to_canonical();
+        let ip = ip.into().to_canonical();
         if self.deadlines.contains_key(&ip) {
             return;
         }
@@ -48,12 +49,12 @@ impl DiscouragedPeers {
         self.oldest.push_back(ip);
     }
 
-    pub(crate) fn contains(&mut self, ip: IpAddr, now: Instant) -> bool {
+    pub(crate) fn contains(&mut self, ip: impl Into<PeerAddress>, now: Instant) -> bool {
         self.expire(now);
-        self.deadlines.contains_key(&ip.to_canonical())
+        self.deadlines.contains_key(&ip.into().to_canonical())
     }
 
-    pub(crate) fn snapshot(&mut self, now: Instant) -> HashSet<IpAddr> {
+    pub(crate) fn snapshot(&mut self, now: Instant) -> HashSet<PeerAddress> {
         self.expire(now);
         self.deadlines.keys().copied().collect()
     }
@@ -63,24 +64,33 @@ impl DiscouragedPeers {
 #[derive(Clone, Debug)]
 pub struct AutomaticPeerPolicy {
     pub(crate) banned: Vec<crate::BannedSubnet>,
-    pub(crate) discouraged: HashSet<IpAddr>,
+    pub(crate) discouraged: HashSet<PeerAddress>,
     pub(crate) protected: std::sync::Arc<[crate::IpSubnet]>,
     pub(crate) now: SystemTime,
+    pub(crate) routing: std::sync::Arc<crate::OverlayConfig>,
 }
 
 impl AutomaticPeerPolicy {
     /// Explicit operator bans take precedence over automatic protection.
     #[must_use]
-    pub fn allows(&self, ip: IpAddr) -> bool {
-        let ip = ip.to_canonical();
-        !crate::subnet::is_banned(&self.banned, ip, self.now)
+    pub fn allows(&self, ip: impl Into<PeerAddress>) -> bool {
+        let ip = ip.into().to_canonical();
+        self.routing.allows(ip.network())
+            && !ip
+                .ip()
+                .is_some_and(|ip| crate::subnet::is_banned(&self.banned, ip, self.now))
             && (!self.discouraged.contains(&ip)
-                || self.protected.iter().any(|subnet| subnet.contains(ip)))
+                || ip
+                    .ip()
+                    .is_some_and(|ip| self.protected.iter().any(|subnet| subnet.contains(ip))))
     }
 }
 
 /// Core `CNetAddr::IsLocal`: IPv4 0/8, 127/8 and IPv6 loopback.
-pub(crate) fn is_local(ip: IpAddr) -> bool {
+pub(crate) fn is_local(address: impl Into<PeerAddress>) -> bool {
+    let Some(ip) = address.into().ip() else {
+        return false;
+    };
     match ip.to_canonical() {
         IpAddr::V4(ip) => matches!(ip.octets()[0], 0 | 127),
         IpAddr::V6(ip) => ip.is_loopback(),
@@ -120,8 +130,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         let mut entries = DiscouragedPeers::default();
-        entries.insert("::ffff:8.8.8.8".parse()?, now);
-        assert!(entries.contains("8.8.8.8".parse()?, now));
+        entries.insert("::ffff:8.8.8.8".parse::<std::net::IpAddr>()?, now);
+        assert!(entries.contains("8.8.8.8".parse::<std::net::IpAddr>()?, now));
         for ip in [
             "127.0.0.1",
             "127.4.3.2",
@@ -129,10 +139,10 @@ mod tests {
             "::1",
             "::ffff:127.0.0.1",
         ] {
-            assert!(is_local(ip.parse()?));
+            assert!(is_local(ip.parse::<IpAddr>()?));
         }
         for ip in ["8.8.8.8", "10.1.2.3", "::", "2001:4860::1"] {
-            assert!(!is_local(ip.parse()?));
+            assert!(!is_local(ip.parse::<IpAddr>()?));
         }
         Ok(())
     }

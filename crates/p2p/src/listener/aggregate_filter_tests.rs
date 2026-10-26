@@ -5,8 +5,8 @@
 //! listener decides which by recording why each pass stopped
 //! (`ParkedFilter::last`), which only a session can show.
 
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -226,7 +226,7 @@ fn the_first_filter_pass_records_an_aggregate_refusal() -> TestResult {
     crate::wire::write_message(&mut input, MAGIC, &get_cfilters())?;
     let mut peer = Peer::new(io::Cursor::new(input), MAGIC);
     peer.state = PeerState::Ready;
-    let addr = SocketAddr::from(([127, 0, 0, 1], 18_444));
+    let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_444));
 
     run_message_loop(&mut peer, addr, &lease, &shared, None)?;
 

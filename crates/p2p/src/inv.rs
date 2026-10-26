@@ -118,7 +118,7 @@ pub(crate) const fn is_within_inventory_bound(items: &[Inventory]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use bitcoin_rs_primitives::PeerEndpoint;
 
     use bitcoin::hashes::Hash as _;
 
@@ -131,7 +131,7 @@ mod tests {
 
     fn source(lease: &PeerLease) -> PeerToken {
         lease
-            .source(SocketAddr::from(([127, 0, 0, 1], 8333)))
+            .source(PeerEndpoint::from(([127, 0, 0, 1], 8333)))
             .into()
     }
 
@@ -183,7 +183,10 @@ mod tests {
                 };
                 let mut info = crate::PeerInfo::inbound_from_version(
                     source.addr,
-                    source.addr,
+                    source
+                        .addr
+                        .socket_addr()
+                        .unwrap_or_else(|| panic!("expected IP fixture")),
                     &version,
                     0,
                     0,

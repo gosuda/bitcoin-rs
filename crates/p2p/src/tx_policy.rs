@@ -1030,7 +1030,8 @@ mod tests {
             &lease,
             crate::PeerInfo::outbound_from_version(
                 addr,
-                addr,
+                addr.socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,
@@ -1071,7 +1072,9 @@ mod tests {
                     &new_lease,
                     crate::PeerInfo::outbound_from_version(
                         new_addr,
-                        new_addr,
+                        new_addr
+                            .socket_addr()
+                            .unwrap_or_else(|| panic!("expected IP fixture")),
                         &version,
                         0,
                         0,
@@ -1120,7 +1123,8 @@ mod tests {
             lease,
             crate::PeerInfo::outbound_from_version(
                 addr,
-                addr,
+                addr.socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,

@@ -1,7 +1,9 @@
 //! Fee-aware queued inventory, contained in the transaction policy owner.
+#[cfg(test)]
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::Hash as _;
@@ -32,7 +34,7 @@ pub(super) struct InboundClockKey {
 }
 
 impl InboundClockKey {
-    fn new(remote: IpAddr, bind: SocketAddr) -> Self {
+    fn new(remote: crate::PeerAddress, bind: std::net::SocketAddr) -> Self {
         Self {
             network: network_class(remote),
             bind_ip: canonical_ip(bind.ip()),
@@ -201,7 +203,7 @@ impl PeerTable {
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+                .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
             let TxPolicy {
                 relay, inbound_inv, ..
             } = &mut *policy;
@@ -258,7 +260,7 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+            .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -303,7 +305,7 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+            .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -362,7 +364,7 @@ impl PeerTable {
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.ip(), info.addr_bind));
+                .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
             let requests = {
                 let mut policy = self.tx_policy.lock();
                 let TxPolicy {
@@ -654,8 +656,8 @@ mod tests {
 
     fn connect_at(
         table: &PeerTable,
-        addr: SocketAddr,
-        bind: SocketAddr,
+        addr: PeerEndpoint,
+        bind: PeerEndpoint,
         inbound: bool,
         wtxid: bool,
         role: crate::PeerRole,
@@ -680,7 +682,8 @@ mod tests {
             );
             let mut info = crate::PeerInfo::outbound_from_version(
                 addr,
-                bind,
+                bind.socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,
@@ -817,10 +820,10 @@ mod tests {
         let plain: std::net::Ipv6Addr = "fe80::1"
             .parse()
             .unwrap_or_else(|error| panic!("IPv6: {error}"));
-        let bind = SocketAddr::V6(std::net::SocketAddrV6::new(plain, 8333, 123, 456));
+        let bind = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(plain, 8333, 123, 456));
         assert_eq!(
             key("8.8.8.8", "[fe80::1]:8333"),
-            InboundClockKey::new(([8, 8, 8, 8]).into(), bind),
+            InboundClockKey::new(std::net::IpAddr::from([8, 8, 8, 8]).into(), bind),
         );
     }
 
@@ -1057,7 +1060,8 @@ mod tests {
         );
         let mut info = crate::PeerInfo::outbound_from_version(
             addr,
-            addr,
+            addr.socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             0,
             0,

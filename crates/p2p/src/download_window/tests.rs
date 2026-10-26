@@ -124,7 +124,7 @@ fn apply_staged(stager: &mut BlockStager, hash: &Hash256) {
     stager.retire_applied(hash);
 }
 
-fn test_source(addr: std::net::SocketAddr) -> PeerSource {
+fn test_source(addr: bitcoin_rs_primitives::PeerEndpoint) -> PeerSource {
     PeerSource::for_test(addr)
 }
 
@@ -135,7 +135,7 @@ fn stall_owner(
     next_apply_height: u32,
     apply_side_busy: bool,
     now: Instant,
-) -> Option<std::net::SocketAddr> {
+) -> Option<bitcoin_rs_primitives::PeerEndpoint> {
     if apply_side_busy {
         assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
         return None;
@@ -149,7 +149,7 @@ fn timeout_owner(
     window: &mut DownloadWindow,
     apply_side_busy: bool,
     now: Instant,
-) -> Option<std::net::SocketAddr> {
+) -> Option<bitcoin_rs_primitives::PeerEndpoint> {
     if apply_side_busy {
         assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
         return None;
@@ -165,7 +165,7 @@ fn cold_front_owner(
     next_apply_height: u32,
     apply_side_busy: bool,
     now: Instant,
-) -> Option<(std::net::SocketAddr, Hash256)> {
+) -> Option<(bitcoin_rs_primitives::PeerEndpoint, Hash256)> {
     if apply_side_busy {
         assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
         return None;
@@ -214,7 +214,10 @@ fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
     });
     let stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     insert_pending(&mut window, owner, hash(1), 1, now);
     insert_pending(&mut window, owner, hash(2), 2, now);
     window.pending_bytes = 256 * 1024;
@@ -236,7 +239,7 @@ fn request_peer_scan_limit_counts_expired_pending_capacity() {
     );
     let stager = test_stager(&window);
     let now = Instant::now();
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let owner = test_source(peer_addr);
     for (byte, height) in [(1, 1_u32), (2, 2)] {
         window.pending.insert(
@@ -262,7 +265,7 @@ fn pending_timeout_waits_for_second_delivery_drain() {
     let mut stager = test_stager(&window);
     let requested_at = Instant::now();
     let observed_at = requested_at + Duration::from_secs(10);
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let block_hash = hash(0x90);
     let owner = test_source(peer_addr);
     window.pending.insert(
@@ -319,8 +322,8 @@ fn retry_delivery_resolves_original_peer_timeout_without_blame() {
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let requested_at = Instant::now();
     let observed_at = requested_at + Duration::from_secs(10);
-    let original_peer = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
-    let retry_peer = std::net::SocketAddr::from(([127, 0, 0, 2], 8333));
+    let original_peer = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+    let retry_peer = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 2], 8333));
     let block_hash = hash(0x91);
     let original_owner = test_source(original_peer);
     window.pending.insert(
@@ -355,7 +358,10 @@ fn batched_non_front_deliveries_do_not_postpone_the_owner_timeout() {
     let mut window = DownloadWindow::new(test_budget());
     let stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     let front = hash(0xe5);
     let first = super::non_empty_request(
         owner,
@@ -412,7 +418,10 @@ fn tied_removal_never_rewinds_the_owner_queue_clock() {
     let mut window = DownloadWindow::new(test_budget());
     let stager = test_stager(&window);
     let t0 = Instant::now();
-    let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     let batch_a = super::non_empty_request(
         owner,
         vec![
@@ -467,7 +476,7 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let requested_at = Instant::now();
     let observed_at = requested_at + Duration::from_secs(10);
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let block_hash = hash(0x93);
     let owner = insert_pending(
         &mut window,
@@ -510,8 +519,14 @@ fn releasing_a_dead_owner_drops_its_queue_start() {
     let mut window =
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let now = Instant::now();
-    let stale_owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
-    let live_owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)));
+    let stale_owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
+    let live_owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 2],
+        8333,
+    )));
     let stale_requested_at = now
         .checked_sub(Duration::from_secs(9))
         .unwrap_or_else(|| panic!("test instant underflow"));
@@ -553,7 +568,10 @@ fn receiving_the_oldest_pending_resets_the_owner_queue_start() {
         DownloadWindow::new(test_budget().with_pending_timeout_override(Duration::from_secs(10)));
     let mut stager = test_stager(&window);
     let now = Instant::now();
-    let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     let earliest = hash(0x91);
     let later = hash(0x92);
     let earliest_requested_at = now
@@ -610,7 +628,10 @@ fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
         pending_timeout_override: None,
         ..test_budget()
     });
-    let solo = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let solo = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     insert_pending(&mut window, solo, hash(0xb1), 1, requested_at);
     assert_eq!(
         timeout_owner(
@@ -638,7 +659,10 @@ fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
     });
     let owners: Vec<PeerSource> = (1..=3_u8)
         .map(|byte| {
-            let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 20 + byte], 8333)));
+            let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 20 + byte],
+                8333,
+            )));
             insert_pending(
                 &mut window,
                 owner,
@@ -682,7 +706,10 @@ fn pending_timeout_override_wins_over_spacing_policy() {
         .with_pending_timeout_override(Duration::from_secs(5)),
     );
     let requested_at = Instant::now();
-    let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let owner = test_source(bitcoin_rs_primitives::PeerEndpoint::from((
+        [127, 0, 0, 1],
+        8333,
+    )));
     insert_pending(&mut window, owner, hash(0xd1), 1, requested_at);
     assert_eq!(
         timeout_owner(&mut window, false, requested_at + Duration::from_secs(5)),
@@ -696,7 +723,7 @@ fn retire_applied_leaves_pending_accounting_untouched() {
     let mut window = DownloadWindow::new(test_budget());
     let mut stager = test_stager(&window);
     let now = Instant::now();
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let applied = hash(0xa1);
     let pending = hash(0xa2);
     let pending_bytes = 256 * 1024;
@@ -856,7 +883,7 @@ fn expired_pendings_reopen_scan_limit_through_count_headroom() {
     );
     let mut stager = test_stager(&window);
     let now = Instant::now();
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let owner = test_source(peer_addr);
     for (byte, height) in [(0xe1, 1_u32), (0xe2, 2)] {
         window.pending.insert(
@@ -951,7 +978,7 @@ fn insert_pending(
 /// immediately.
 fn seed_front_cadence(
     window: &mut DownloadWindow,
-    peer: std::net::SocketAddr,
+    peer: bitcoin_rs_primitives::PeerEndpoint,
     t0: Instant,
     gap: Duration,
 ) -> Instant {
@@ -974,8 +1001,8 @@ fn seed_front_cadence(
 /// `healthy` delivered heights 4..=6, leaving zero staged-count headroom —
 /// every stall-predicate term holds.
 fn window_blocked_on_staller(
-    staller: std::net::SocketAddr,
-    healthy: std::net::SocketAddr,
+    staller: bitcoin_rs_primitives::PeerEndpoint,
+    healthy: bitcoin_rs_primitives::PeerEndpoint,
     t0: Instant,
 ) -> (DownloadWindow, BlockStager, Instant) {
     let mut window = DownloadWindow::new(stall_budget());
@@ -990,12 +1017,12 @@ fn window_blocked_on_staller(
     (window, stager, t1)
 }
 
-fn staller_addr() -> std::net::SocketAddr {
-    std::net::SocketAddr::from(([127, 0, 0, 1], 8333))
+fn staller_addr() -> bitcoin_rs_primitives::PeerEndpoint {
+    bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333))
 }
 
-fn healthy_addr() -> std::net::SocketAddr {
-    std::net::SocketAddr::from(([127, 0, 0, 2], 8333))
+fn healthy_addr() -> bitcoin_rs_primitives::PeerEndpoint {
+    bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 2], 8333))
 }
 
 #[test]
@@ -1856,8 +1883,8 @@ fn at_most_one_action_per_tick_blame_outranks_hedge() {
     );
 }
 
-fn peer_addr(idx: u8) -> std::net::SocketAddr {
-    std::net::SocketAddr::from(([10, 0, 0, idx], 8333))
+fn peer_addr(idx: u8) -> bitcoin_rs_primitives::PeerEndpoint {
+    bitcoin_rs_primitives::PeerEndpoint::from(([10, 0, 0, idx], 8333))
 }
 
 #[test]
@@ -2191,7 +2218,7 @@ fn limit_cycle_window_state() -> (
     BlockStager,
     u8,
     Instant,
-    std::net::SocketAddr,
+    bitcoin_rs_primitives::PeerEndpoint,
 ) {
     let mut window = DownloadWindow::new(stall_budget());
     let healthy = test_source(healthy_addr());
@@ -2818,7 +2845,7 @@ fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate()
 #[test]
 fn release_of_a_dead_connection_clears_state_but_preserves_cooldown() {
     let mut window = DownloadWindow::new(test_budget());
-    let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let peer_addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     let now = Instant::now();
     let source = test_source(peer_addr);
     insert_pending(&mut window, source, hash(1), 1, now);
@@ -3316,12 +3343,13 @@ fn owned_fetch_respects_window_capacity_and_frontier() {
 
 #[test]
 fn fanout_eligibility_requires_block_service_flags() {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use bitcoin_rs_primitives::PeerEndpoint;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use crate::{PeerCounters, PeerInfo};
 
     fn peer(services: u64, inbound: bool) -> PeerInfo {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         PeerInfo {
             addr,
             version: 70_016,
@@ -3335,7 +3363,9 @@ fn fanout_eligibility_requires_block_service_flags() {
             best_known_height: 0,
             conn_time: 0,
             inbound,
-            addr_bind: addr,
+            addr_bind: addr
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
             time_offset: 0,
             counters: std::sync::Arc::new(PeerCounters::default()),
             transport: crate::TransportProtocol::V1,

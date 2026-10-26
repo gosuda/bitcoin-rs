@@ -56,8 +56,8 @@ fn hash(byte: u8) -> Hash256 {
     Hash256::from_le_bytes(&[byte; 32])
 }
 
-fn addr_of(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+fn addr_of(port: u16) -> PeerEndpoint {
+    PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
 fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer {

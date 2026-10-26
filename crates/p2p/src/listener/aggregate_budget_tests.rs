@@ -165,9 +165,17 @@ fn reply_bound_covers_actual_replies() -> TestResult {
     // `getaddr` is reserved for only while it is answered from the book, in
     // either encoding, at its worst-case row size.
     assert_eq!(reply_bound(&Message::GetAddr, false), None);
-    let socket = std::net::SocketAddr::from(([1, 2, 3, 4], 8333));
+    let socket = bitcoin_rs_primitives::PeerEndpoint::from(([1, 2, 3, 4], 8333));
     let addr_v1 = Message::Addr(vec![
-        (0, Address::new(&socket, ServiceFlags::NONE));
+        (
+            0,
+            Address::new(
+                &socket
+                    .socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
+                ServiceFlags::NONE
+            )
+        );
         crate::wire::MAX_ADDR_MESSAGE_COUNT
     ]);
     let addr_v2 = Message::AddrV2(vec![
@@ -715,7 +723,7 @@ fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     assert!(matches!(outcome, crate::compact_blocks::Outcome::Idle));
     let sink = ProductionSink::new(&lease, Some(credit));
     let shared = shared_with(ScriptedChain { blocks: Vec::new() });
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+    let addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     assert!(!super::handle_compact_outcome(
         outcome, &sink, addr, &shared
     ));
