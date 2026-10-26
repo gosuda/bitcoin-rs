@@ -723,6 +723,17 @@ pub(crate) fn start_node(
         state: Some(state),
         services: NodeServices::default(),
     };
+    guard.services.metrics = {
+        let Some(state) = guard.state.as_ref() else {
+            panic!("state recorded above");
+        };
+        if let Some(bind) = state.config().observability.metrics_bind {
+            let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
+            crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
+        } else {
+            None
+        }
+    };
     {
         let Some(state) = guard.state.as_mut() else {
             panic!("state recorded above");
@@ -733,12 +744,6 @@ pub(crate) fn start_node(
         panic!("state recorded above");
     };
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
-    guard.services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
-        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
-    } else {
-        None
-    };
     // The sampler only publishes to the metrics recorder: without a bound
     // server its writes go nowhere, so do not spend the thread (and its
     // join latency in every start_node test) when metrics are off.

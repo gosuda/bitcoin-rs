@@ -71,7 +71,16 @@ rule in the next table (`PendingRows::encoded_bytes_by_family` in
 before the commit merges, sorts, and de-duplicates the batch rows. The value is
 row-size arithmetic over the prepared rows. It does not read the store, so it
 does not include write-ahead-log, storage-engine, or device write volume, and
-it is not a count of bytes written.
+it is not a count of bytes written. The derived-index worker emits these
+observations from its own thread, and a metric emitted before the
+process-global Prometheus recorder is installed reaches a no-op recorder and is
+lost for good. `start_node` (`crates/node/src/lifecycle.rs`) therefore installs
+the recorder and binds the metrics listener before it starts that worker, on
+the embedded and daemon paths alike. A listener bind failure or recorder
+install failure aborts startup before the worker exists. Without
+`observability.metrics_bind` nothing is installed and the observations are
+dropped by design. Histogram counts and sums for a seed are complete only when
+the recorder was installed first.
 
 | `family` | Planned bytes per block |
 | --- | --- |
