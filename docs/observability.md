@@ -58,8 +58,13 @@ and spending rows, the live-view mutations, the block header identity rows, and
 the basic compact-filter rows. A forward batch commit records one observation
 for each family whose planned bytes are non-zero, after the store commit
 succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
-`commit_forward` and `commit_block` use it). A failed commit records nothing,
-and no other commit path records this metric. The value is the sum, over the
+`commit_forward` and `commit_block` use it). A failed commit records nothing.
+A `ScriptLive` reseed records one `script_live` observation per committed seed
+batch, after that batch's store commit succeeds (`seed_script_live_stream` in
+the same file; `seed_script_live` uses it). Each bounded batch and the final
+watermark batch is its own observation, valued at the `script_live` row rule in
+the next table over the rows that batch committed. No other commit path records
+this metric. The value is the sum, over the
 blocks of the batch, of the bytes each block planned for that family under the
 rule in the next table (`PendingRows::encoded_bytes_by_family` in
 `crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,

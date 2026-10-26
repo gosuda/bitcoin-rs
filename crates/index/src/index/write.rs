@@ -23,6 +23,9 @@ pub struct IndexWriter<S: KvStore> {
     pub(super) generation: u64,
 }
 
+/// Rows per bounded batch in `seed_script_live_stream`.
+const SEED_BATCH_ROWS: usize = 4_096;
+
 impl<S: KvStore> IndexWriter<S> {
     /// Read access to the owned indexer, for queries beside the write path.
     pub fn indexer(&self) -> &Indexer<S> {
@@ -120,7 +123,6 @@ impl<S: KvStore> IndexWriter<S> {
             &mut dyn FnMut(OutPoint, crate::ScriptHash) -> Result<(), IndexError>,
         ) -> Result<(), IndexError>,
     {
-        const SEED_BATCH_ROWS: usize = 4_096;
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
@@ -142,15 +144,26 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         let mut in_batch = 0;
+        // Planned `script_live` bytes in the open batch: the already-encoded
+        // row key length per put (the value is empty). Mirrors
+        // `PendingRows::encoded_bytes_by_family`'s `live_ops.len() *
+        // SCRIPT_LIVE_ROW_SIZE` rule; version and watermark keys are
+        // metadata overhead and are not counted.
+        let mut batch_script_live_bytes = 0_usize;
         let mut add = |outpoint, scripthash| -> Result<(), IndexError> {
             let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);
             batch.put(ColumnFamily::ScriptLive, row.as_bytes(), &[]);
+            batch_script_live_bytes = batch_script_live_bytes.saturating_add(row.as_bytes().len());
             written += 1;
             in_batch += 1;
             if in_batch >= SEED_BATCH_ROWS {
                 let next = self.indexer.store.new_batch();
                 let old = std::mem::replace(&mut batch, next);
                 commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
+                record_family_byte_histograms(&IndexRowBytes {
+                    script_live: batch_script_live_bytes,
+                    ..IndexRowBytes::ZERO
+                });
                 fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
                 if fence.watermarks.script_live.is_some() {
                     return Err(IndexError::LiveAlreadySeeded);
@@ -161,6 +174,7 @@ impl<S: KvStore> IndexWriter<S> {
                     &FORMAT_VERSION_VALUE,
                 );
                 in_batch = 0;
+                batch_script_live_bytes = 0;
             }
             Ok(())
         };
@@ -176,6 +190,10 @@ impl<S: KvStore> IndexWriter<S> {
             &seed_tip.to_bytes(),
         );
         commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
+        record_family_byte_histograms(&IndexRowBytes {
+            script_live: batch_script_live_bytes,
+            ..IndexRowBytes::ZERO
+        });
         Ok(written)
     }
 
@@ -814,5 +832,152 @@ pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
     if family_bytes.filters > 0 {
         metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_FILTERS)
             .record(metric_f64_from_usize(family_bytes.filters));
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb"))]
+mod tests {
+    use super::super::tests::{spent_outpoint, writer};
+    use super::*;
+
+    #[test]
+    fn seed_script_live_records_planned_script_live_bytes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const EXTRA_ROWS: usize = 2;
+        let (_dir, mut writer) = writer()?;
+        let scripthash = crate::ScriptHash::from_script_bytes(&[0x51, 0x09]);
+        let total_rows = SEED_BATCH_ROWS
+            .checked_add(EXTRA_ROWS)
+            .ok_or_else(|| std::io::Error::other("seed row count overflow"))?;
+        let coins = (0..total_rows)
+            .map(|i| u32::try_from(i).map(|vout| (spent_outpoint(11, vout), scripthash)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_len = crate::types::ScriptLiveRow::new(scripthash, &spent_outpoint(11, 0))
+            .as_bytes()
+            .len();
+        let first_bytes = SEED_BATCH_ROWS
+            .checked_mul(row_len)
+            .ok_or_else(|| std::io::Error::other("bounded batch bytes overflow"))?;
+        let rest_bytes = EXTRA_ROWS
+            .checked_mul(row_len)
+            .ok_or_else(|| std::io::Error::other("tail batch bytes overflow"))?;
+        let seed_tip = IndexWatermark {
+            height: 7,
+            hash: [0x07; 32],
+        };
+
+        let recorder = RecordedSeedHistograms::default();
+        let written =
+            metrics::with_local_recorder(&recorder, || writer.seed_script_live(coins, seed_tip))?;
+        assert_eq!(written, total_rows, "all seed rows commit");
+
+        assert_eq!(
+            writer.watermarks()?.script_live,
+            Some(seed_tip),
+            "reseed publishes the live watermark with the final batch"
+        );
+        let live: Vec<OutPoint> = writer.indexer().iter_live_outpoints(scripthash)?;
+        assert_eq!(
+            live.len(),
+            total_rows,
+            "counted bytes name rows that really stored"
+        );
+
+        let recorded = recorder.samples.lock().clone();
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"script_live\"}"),
+            Some(&vec![
+                f64::from(u32::try_from(first_bytes)?),
+                f64::from(u32::try_from(rest_bytes)?),
+            ]),
+            "one observation per committed batch with exact key bytes, no double count"
+        );
+        assert_eq!(
+            recorded.len(),
+            1,
+            "seed records no family besides script_live"
+        );
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedSeedHistograms {
+        samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+    }
+
+    impl metrics::Recorder for RecordedSeedHistograms {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::noop()
+        }
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            if key.name() != FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM {
+                return metrics::Histogram::noop();
+            }
+            let labels = key
+                .labels()
+                .map(|l| format!("{}=\"{}\"", l.key(), l.value()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let metric_name = if labels.is_empty() {
+                key.name().to_owned()
+            } else {
+                format!("{}{{{labels}}}", key.name())
+            };
+            metrics::Histogram::from_arc(std::sync::Arc::new(RecordedSeedHistogramHandle {
+                samples: std::sync::Arc::clone(&self.samples),
+                name: metric_name,
+            }))
+        }
+    }
+
+    struct RecordedSeedHistogramHandle {
+        samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+        name: String,
+    }
+
+    impl metrics::HistogramFn for RecordedSeedHistogramHandle {
+        fn record(&self, value: f64) {
+            self.samples
+                .lock()
+                .entry(self.name.clone())
+                .or_default()
+                .push(value);
+        }
     }
 }

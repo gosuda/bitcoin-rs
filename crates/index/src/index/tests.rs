@@ -406,7 +406,8 @@ fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
     Ok(())
 }
 
-fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
+pub(super) fn writer()
+-> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     Ok((dir, IndexWriter::open(store, 1)?))
@@ -477,6 +478,6 @@ fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
     }
 }
 
-fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
+pub(super) fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
 }
