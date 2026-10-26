@@ -17,6 +17,7 @@
 | Organize source modules, tests, and fixtures | [Source and test organization policy](policies/source-organization.md) |
 | Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
 | Evaluate the experimental keyless BIP352 codec | [Silent Payments feasibility](silent-payments.md) |
+| Assess in-process Lightning integration and qualify external Lightning interop | [In-process Lightning integration](lightning-integration.md) and [Lightning interop matrix](lightning-interop-matrix.md) |
 | Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 | Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
 | Mine regtest blocks and inspect templates | [Solo-mining generate path](contracts/external-api.md#api-05-solo-mining-generate-path) and [template extras](contracts/external-api.md#api-11-bip22bip23-template-extras) |
