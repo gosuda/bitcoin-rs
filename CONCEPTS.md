@@ -291,12 +291,14 @@ or restart re-establishes a consistent gateway.
 ### Admission origin
 The `AdmissionOrigin` enum on `MutationEnvelope` that identifies how a
 transaction entered the node (`crates/mempool/src/mutation.rs`): `Rpc`
-(submitted through `sendrawtransaction`), `Peer` (relayed from a network
-peer, carrying a `PeerToken`), `Reorg` (re-admitted by a disconnect walk via
-`reconsider_disconnected`), or `Block` (confirmed by block application). The
-observer receives the origin alongside the committed `MutationResult` so
-downstream consumers (ZMQ publisher, metrics) can distinguish relay from
-reorg re-admission without inspecting call sites.
+(submitted through `sendrawtransaction`), `Esplora` (submitted through an
+Esplora raw-transaction broadcast route), `Snapshot` (revalidated from the
+optional restart snapshot before services start), `Peer` (relayed from a
+network peer, carrying a `PeerToken`), `Reorg` (re-admitted by a disconnect
+walk via `reconsider_disconnected`), or `Block` (confirmed by block
+application). The observer receives the origin alongside the committed
+`MutationResult` so downstream consumers (ZMQ publisher, metrics) can
+distinguish relay from reorg re-admission without inspecting call sites.
 
 ### Chainstate facade
 The in-process owner of applied-tip mutation (`bitcoin_rs_chainstate::Chainstate`).
@@ -333,7 +335,7 @@ The durable record that an authoritative disconnect started and how far it got. 
 The per-block inverse of a UTXO commit, queued before later apply mutations and made durable by the clean checkpoint rather than a per-block fsync. Keyed by height **and** block hash so an abandoned-branch record cannot replay against another block at the same height. Retained after a disconnect because branch flip-flop is normal.
 
 ### Owed derived state
-State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg_effects.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
+State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
 
 ## Derived indexes
 
