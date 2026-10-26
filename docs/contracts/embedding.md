@@ -176,14 +176,99 @@ service thread is spawned; `snapshot()`/`sync_progress()` at that point
 reflect the resumed applied tip. There is no separate ready flag and no
 sleep-based readiness: the snapshot is the readiness fact.
 
+## Historical prefix reads
+
+Three synchronous `Node` operations expose the confirmed-index prefix
+contract owned by [`IDX-12`](indexing.md#idx-12-historical-prefix-queries-one-shot-server-selected).
+Consistency rules (anchor selection, floors, freshness, errors) live there;
+this section covers only how embedders call the operations.
+
+```rust
+impl Node {
+    pub fn transaction_at_prefix(&self, txid: &Txid)
+        -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError>;
+    pub fn script_history_at_prefix(&self, script: ScriptHash)
+        -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError>;
+    pub fn spender_at_prefix(&self, outpoint: OutPoint)
+        -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError>;
+}
+```
+
+`AtPrefix<T>` carries the qualifying prefix with the answer:
+`prefix.floor`, `prefix.height`, and the full chain hash `prefix.hash`, plus
+`answer` (`Some((height, tx))` with `floor <= height <= prefix.height` for a
+found transaction, `ScriptIndexSnapshot` for history, `Some(record)` for a
+found spend). The types are `bitcoin_rs_index::query_api` types; that module
+is already public and nothing here is re-exported. `Txid`, `Tx`, and
+`OutPoint` are `bitcoin_rs_primitives` types; `ScriptHash`,
+`ScriptIndexSnapshot`, and `SpendingRecord` keep their existing index paths.
+
+- Execution: these are synchronous bounded blocking reads on the calling
+  thread: gating, the bounded ancestry walk, and body reads all happen inside
+  the call. They create no executor, future, or promise, and there is nothing
+  to `.await`. Embedders place them on a blocking worker the same way they
+  place other blocking reads. The existing `async` `Node` methods
+  (`tx_by_id`, `block_by_hash`, `broadcast`, and the rest) are unchanged and
+  are not a pattern for these calls.
+- Per-call coverage: `transaction_at_prefix` needs `TxLookup` only and
+  works on tx-only nodes; the two script operations need `ScriptHistory`.
+  Each call returns its own prefix from its own required capabilities: a tx
+  call and a script call against skewed watermarks anchor at different
+  heights, and composing them means comparing the returned prefixes, not
+  assuming one shared anchor.
+- What answers mean: absence is scoped to `[prefix.floor, prefix.height]`
+  on `chain(prefix.hash)`: a `None` tx or spender answer reports no verified
+  record in that range, not global absence, unspentness, or existence. No
+  mempool contents are merged into historical answers; callers that also want
+  unconfirmed state read the mempool paths separately.
+- Positive floors: a pruned prefix stays visible in the type: full script
+  history refuses a positive floor with
+  `Unavailable(Shared(HistoryUnproven { floor }))`, because funding below the
+  floor can hide in-range spends, while a standalone spend lookup over its
+  exact `OutPoint` may return a scoped `None`. See `IDX-12` for the shared
+  funding-dependency context.
+- Failures are typed, not textual: `Retry` means the chain or index moved
+  under the read, so reissue the call for a fresh prefix. `Unavailable(cause)`
+  names the covering gap (`NoCoveredPrefix`, `AncestryBudgetExhausted`,
+  `PrefixBelowFloor`, or a shared budget/body/capability cause); match the
+  variant, never the rendered string. `Storage` reports a durable read
+  failure. Strict `ScriptLive` reads and current Core RPC behavior are
+  unchanged by these operations.
+- Calling shape: handle the prefix with the answer and the typed error at
+  the call site; confirmed history never needs the mempool-first ladder that
+  exact-tip `tx_by_id` uses:
+  ```rust
+  use bitcoin_rs_index::query_api::{AtPrefix, HistoricalQueryError};
+
+  match node.transaction_at_prefix(&txid) {
+      Ok(AtPrefix { prefix, answer }) => {
+          // `prefix.floor`, `prefix.height`, and `prefix.hash` qualify
+          // `answer`: Some((height, tx)) with height in range, or scoped
+          // absence in [prefix.floor, prefix.height].
+          let _ = (prefix, answer);
+      }
+      // Chain or index progress moved under the read; reissue the call.
+      Err(HistoricalQueryError::Retry) => {}
+      // NoCoveredPrefix, AncestryBudgetExhausted, PrefixBelowFloor, or a
+      // shared budget/body/capability cause; match the variant.
+      Err(HistoricalQueryError::Unavailable(_)) => {}
+      // Durable read failure.
+      Err(HistoricalQueryError::Storage(_)) => {}
+  }
+  ```
+  The arms above carry the caller policy as comments; only the matched
+  variants and the prefix-qualified answer are load-bearing here.
+
 ## Error behavior
 
-Errors at the typed boundary are `NodeError`: `Startup` (configuration,
-storage, recovery, or service-bind failure, with rollback as described
-above), `Shutdown` (join or checkpoint failure — reported only by
-consuming shutdown, never by Drop), `Unavailable` (a capability cannot
-answer), `NotFound` (a proven-absent object), and `Broadcast` (policy
-rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
+Errors at the typed lifecycle, readiness, mining, and broadcast boundary are
+`NodeError`: `Startup` (configuration, storage, recovery, or service-bind
+failure, with rollback as described above), `Shutdown` (join or checkpoint
+failure, reported only by consuming shutdown, never by Drop), `Unavailable`
+(a capability cannot answer), `NotFound` (a proven-absent object), and
+`Broadcast` (policy rejection). The historical prefix reads above are outside
+that sentence: they return `HistoricalQueryError`, as documented in their own
+section. Daemon `run()` exposes teardown failures as `anyhow` errors.
 
 ## Proof
 

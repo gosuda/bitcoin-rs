@@ -9,7 +9,10 @@ use std::task::{Context, Poll, Waker};
 
 use anyhow::{Result, bail};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_index::query_api::HistoricalQueryError;
 use bitcoin_rs_mempool::MutationOutcome;
+use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
 use bitcoin_rs_primitives::{
@@ -266,6 +269,130 @@ fn embedded_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     let rpc_bind: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     config.rpc.bind = rpc_bind;
     Ok(config)
+}
+
+/// `NodeConfig` for the historical-prefix node: seeded datadir plus full
+/// derived-index capabilities, ephemeral RPC bind, P2P listeners off.
+fn historical_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
+    let mut config = seed_config(data_dir);
+    config.indexes.txindex = true;
+    config.indexes.script_index = ScriptIndexMode::Full;
+    let rpc_bind: std::net::SocketAddr = "127.0.0.1:0".parse()?;
+    config.rpc.bind = rpc_bind;
+    Ok(config)
+}
+
+/// Polls the synchronous historical surface until the index worker proves a
+/// complete answer or the bounded wait expires. Retry and unavailable answers
+/// keep polling; a storage error ends the wait.
+fn wait_historical_transaction(
+    node: &Node,
+    txid: &Txid,
+) -> Result<bitcoin_rs_index::query_api::AtPrefix<Option<(u32, Tx)>>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match node.transaction_at_prefix(txid) {
+            Ok(answer) => return Ok(answer),
+            Err(HistoricalQueryError::Retry | HistoricalQueryError::Unavailable(_)) => {}
+            Err(HistoricalQueryError::Storage(message)) => {
+                bail!("historical index storage error while waiting: {message}")
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("historical index did not become ready in 60s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn embedded_node_historical_prefix_queries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path().join("node");
+
+    // --- seed chain state through the existing seam (fixture prep only) ----
+    {
+        let state = NodeState::open(seed_config(&data_dir), None)?;
+        state.apply_block(&Network::Regtest.genesis_block())?;
+        let _ = seed_chain(&state, SEED_BLOCKS)?;
+        let _ = state.publish_checkpoint()?;
+    }
+
+    // --- start a real node with full index capabilities --------------------
+    let node = block_on(Node::start(
+        historical_config(&data_dir)?,
+        bitcoin_rs_node::RuntimeInputs::default(),
+    ))?;
+
+    // Known fixture: the height-1 coinbase pays anyone-can-spend OP_1.
+    let known_tx = seed_coinbase(1);
+    let known_txid = known_tx.txid();
+    let known_outpoint = OutPoint::new(known_txid, 0);
+    let script = ScriptHash::from_script_bytes(&[0x51]);
+
+    // Bounded readiness through the public sync surface (no seam queries).
+    let ready = wait_historical_transaction(&node, &known_txid)?;
+    assert_eq!(ready.prefix.floor, 0, "seeded chain covers from genesis");
+    assert_eq!(ready.prefix.height, SEED_BLOCKS);
+    assert_eq!(ready.prefix.hash, node.snapshot().tip_hash);
+
+    // Positive known transaction with its actual confirmation height.
+    let at = node.transaction_at_prefix(&known_txid)?;
+    assert_eq!(at.prefix.floor, 0);
+    assert_eq!(at.prefix.height, SEED_BLOCKS);
+    assert_eq!(at.prefix.hash, node.snapshot().tip_hash);
+    let Some((height, tx)) = at.answer else {
+        bail!("known seed coinbase must resolve historically")
+    };
+    assert_eq!(height, 1);
+    assert!(at.prefix.floor <= height && height <= at.prefix.height);
+    assert_eq!(consensus_bytes(&tx), consensus_bytes(&known_tx));
+
+    // Scoped negative: an unknown txid proves absence in range, not Retry.
+    let unknown_txid = Txid(Hash256::from_le_bytes(&[0xAA; 32]));
+    let absent = node.transaction_at_prefix(&unknown_txid)?;
+    assert!(absent.answer.is_none(), "unknown txid is a scoped None");
+    assert_eq!(absent.prefix.height, SEED_BLOCKS);
+    assert_eq!(absent.prefix.hash, node.snapshot().tip_hash);
+
+    // Script output history for the OP_1 fixture script.
+    let history = node.script_history_at_prefix(script)?;
+    assert_eq!(history.prefix.floor, 0);
+    assert_eq!(history.prefix.height, SEED_BLOCKS);
+    assert_eq!(history.prefix.hash, node.snapshot().tip_hash);
+    assert!(
+        history
+            .answer
+            .history
+            .iter()
+            .any(|record| record.height == 1),
+        "history must contain the height-1 funding"
+    );
+    assert!(
+        history
+            .answer
+            .history
+            .iter()
+            .all(|record| history.prefix.floor <= record.height
+                && record.height <= history.prefix.height),
+        "history rows stay inside the covered prefix"
+    );
+
+    // Spender of an unspent seed outpoint: no spend in range.
+    let spend = node.spender_at_prefix(known_outpoint)?;
+    assert_eq!(spend.prefix.height, SEED_BLOCKS);
+    assert_eq!(spend.prefix.hash, node.snapshot().tip_hash);
+    assert!(
+        spend.answer.is_none(),
+        "unspent seed outpoint has no spend in range"
+    );
+
+    // Existing typed surfaces keep their behavior with the index enabled.
+    let via_index = block_on(node.tx_by_id(known_txid))?;
+    assert_eq!(consensus_bytes(&via_index), consensus_bytes(&known_tx));
+
+    block_on(node.shutdown())?;
+    Ok(())
 }
 
 /// Applies genesis plus `count` trivial-PoW regtest blocks through ordinary

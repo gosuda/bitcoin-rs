@@ -1,11 +1,11 @@
 //! Derived-index query contract: typed errors, progress info, and the
 //! object-safe read traits the RPC surface and node composition consume.
 //!
-//! These are index-owned contracts — answers are complete only at a durable
-//! watermark equal to the applied tip. `bitcoin_rs_rpc::context` re-exports
-//! them under its historical paths.
+//! Strict queries require a durable watermark equal to the applied tip.
+//! Historical answers name their interval through [`AtPrefix`](crate::query_api::AtPrefix).
+//! `bitcoin_rs_rpc::context` retains its existing strict-query re-exports.
 
-use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::{IndexCapability, ScriptHash};
@@ -128,6 +128,97 @@ impl core::fmt::Display for TxUnavailableCause {
                 write!(f, "block body missing for txindex query at height {height}")
             }
             Self::FilterDataMissing => f.write_str("compact filter data is missing"),
+        }
+    }
+}
+
+/// Server-selected covered prefix proving a historical answer.
+///
+/// `floor` is the lowest provable height (`0` means genesis, positive means a
+/// pruned prefix). `height` is the anchor height and `hash` the full chain
+/// hash at that height on `chain(anchor)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoveredPrefix {
+    /// Lowest provable height for this call.
+    pub floor: u32,
+    /// Anchor height: the common covered ancestor.
+    pub height: u32,
+    /// Full chain hash at the anchor height.
+    pub hash: Hash256,
+}
+
+/// Historical answer qualified by the prefix it was proven against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtPrefix<T> {
+    /// Prefix the answer was proven against.
+    pub prefix: CoveredPrefix,
+    /// Confirmed-only answer scoped to `[floor, anchor]` on `chain(anchor)`.
+    pub answer: T,
+}
+
+/// Failure from a server-selected historical query.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HistoricalQueryError {
+    /// The query raced chain or index progress and should be retried.
+    #[error("historical index query raced chain or index progress; retry")]
+    Retry,
+    /// The historical query cannot currently prove a complete answer.
+    #[error("historical index query unavailable: {0}")]
+    Unavailable(HistoricalUnavailableCause),
+    /// Durable index storage failed.
+    #[error("historical index storage error: {0}")]
+    Storage(CompactString),
+}
+
+/// Why a historical query could not prove a complete answer.
+///
+/// Matchers MUST use the variant, never the rendered text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoricalUnavailableCause {
+    /// Wrapped exact-tip cause: row, scan, body, capability, worker,
+    /// lifecycle, and pruned-prefix refusals keep their identical variant.
+    Shared(TxUnavailableCause),
+    /// A required watermark is absent in the snapshot (reset claim or
+    /// rebuild in progress). Unavailable so rebuilds do not spin on `Retry`.
+    NoCoveredPrefix {
+        /// Capability whose watermark is absent.
+        capability: IndexCapability,
+    },
+    /// A required watermark names a stale branch deeper than the shared
+    /// bounded ancestry budget. Present but too deep, distinct from absent.
+    AncestryBudgetExhausted {
+        /// Capability whose watermark is too deep.
+        capability: IndexCapability,
+        /// Watermark height that could not be joined within budget.
+        watermark_height: u32,
+    },
+    /// The derived anchor lies below the maximum consumed floor.
+    PrefixBelowFloor {
+        /// Maximum consumed floor for the call.
+        floor: u32,
+    },
+}
+
+impl core::fmt::Display for HistoricalUnavailableCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Shared(cause) => core::fmt::Display::fmt(cause, f),
+            Self::NoCoveredPrefix { capability } => write!(
+                f,
+                "historical index has no covered prefix for {}",
+                capability.name()
+            ),
+            Self::AncestryBudgetExhausted {
+                capability,
+                watermark_height,
+            } => write!(
+                f,
+                "historical index ancestry budget exhausted for {} at height {watermark_height}",
+                capability.name()
+            ),
+            Self::PrefixBelowFloor { floor } => {
+                write!(f, "historical index prefix below floor {floor}")
+            }
         }
     }
 }

@@ -2,8 +2,8 @@
 
 use super::{
     Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
-    QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError,
-    TxUnavailableCause, Txid, deserialize,
+    PrefixBound, QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
+    TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
 use bitcoin_rs_primitives::BlockHash;
 
@@ -11,10 +11,24 @@ impl DerivedIndexQueryEngine {
     pub(super) fn resolve_hash_at_height(
         &self,
         height: u32,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
     ) -> Result<Hash256, TxQueryError> {
-        let tree = self.block_tree.read();
-        Self::hash_at_height(&tree, tip.tip_id, height).ok_or(TxQueryError::Retry)
+        match prefix.bound {
+            PrefixBound::ExactTip => {
+                let tree = self.block_tree.read();
+                Self::hash_at_height(&tree, prefix.anchor_id, height).ok_or(TxQueryError::Retry)
+            }
+            PrefixBound::AtMost => {
+                let tree = self.block_tree.read();
+                let mut remaining = super::HISTORICAL_ANCESTRY_BUDGET;
+                let found = tree
+                    .node_at_height_from_bounded(prefix.anchor_id, height, &mut remaining)
+                    .map_err(|_| TxQueryError::Retry)?;
+                found
+                    .and_then(|id| tree.node(id).ok().map(|n| n.hash))
+                    .ok_or(TxQueryError::Retry)
+            }
+        }
     }
 
     fn hash_at_height(
@@ -150,13 +164,12 @@ impl DerivedIndexQueryEngine {
     pub(super) fn transaction_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         txid: &Txid,
-        floor: u32,
     ) -> Result<Option<Tx>, TxQueryError> {
         Ok(self
-            .locate_transaction_for(snapshot, tip, budget, txid, floor)?
+            .locate_transaction_for(snapshot, prefix, budget, txid)?
             .map(|(_, transaction)| transaction))
     }
 
@@ -171,10 +184,9 @@ impl DerivedIndexQueryEngine {
     pub(super) fn locate_transaction_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         txid: &Txid,
-        floor: u32,
     ) -> Result<Option<(u32, Tx)>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
@@ -182,13 +194,16 @@ impl DerivedIndexQueryEngine {
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
         let rows = budget.accept_scan(scan)?;
         if rows.is_empty() {
-            return Self::none_below_floor(floor, "transaction index");
+            return Self::scoped_absence(prefix, "transaction index");
         }
 
         for row in rows {
             let height = row.row.height();
+            if !prefix.covers(height) {
+                continue;
+            }
             let Some(positions) = Self::validated_positions(&row.value) else {
-                let hash = self.resolve_hash_at_height(height, tip)?;
+                let hash = self.resolve_hash_at_height(height, prefix)?;
                 if let Some(transaction) =
                     self.transaction_from_full_block(budget, height, hash, txid)?
                 {
@@ -197,7 +212,7 @@ impl DerivedIndexQueryEngine {
                 continue;
             };
             let position = positions[0];
-            let hash = self.resolve_hash_at_height(height, tip)?;
+            let hash = self.resolve_hash_at_height(height, prefix)?;
             match self.resolve_positioned_transaction(budget, height, hash, position)? {
                 Some(transaction) if transaction.txid() == *txid => {
                     return Ok(Some((height, transaction)));
@@ -211,7 +226,7 @@ impl DerivedIndexQueryEngine {
                 }
             }
         }
-        Self::none_below_floor(floor, "transaction index")
+        Self::scoped_absence(prefix, "transaction index")
     }
 
     /// A row's absence is only proven when the index covers the chain from
@@ -229,15 +244,31 @@ impl DerivedIndexQueryEngine {
         }
     }
 
+    /// Scoped absence for one [`ReadPrefix`].
+    ///
+    /// `ExactTip` preserves [`Self::none_below_floor`]; `AtMost` reports
+    /// scoped `Ok(None)` for transaction-family absence in
+    /// `[floor, anchor]`, never a pruned-prefix refusal. Full history never
+    /// reaches here on a positive floor: it returns `HistoryUnproven`
+    /// before scanning.
+    pub(super) fn scoped_absence<T>(
+        prefix: &ReadPrefix,
+        family: &'static str,
+    ) -> Result<Option<T>, TxQueryError> {
+        match prefix.bound {
+            PrefixBound::ExactTip => Self::none_below_floor(prefix.floor, family),
+            PrefixBound::AtMost => Ok(None),
+        }
+    }
+
     pub(super) fn outpoint_value_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-        floor: u32,
     ) -> Result<Option<u64>, TxQueryError> {
-        let tx = self.transaction_for(snapshot, tip, budget, &outpoint.txid, floor)?;
+        let tx = self.transaction_for(snapshot, prefix, budget, &outpoint.txid)?;
         let Some(tx) = tx else {
             return Ok(None);
         };

@@ -3,14 +3,17 @@
 //! entrypoints retain health, revision, watermark, and chain-transition checks.
 
 use super::{
-    Arc, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
-    DerivedIndexRuntime, Hash256, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark,
-    MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT,
-    QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, ScriptHash,
-    ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan,
-    SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition,
-    TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
+    Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
+    DerivedIndexRuntime, Hash256, HistoricalQueryError, HistoricalUnavailableCause,
+    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES,
+    Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT,
+    QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryRecord,
+    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
+    TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue,
+    TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
+use crate::query_api::CoveredPrefix;
+use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
 mod scripts;
@@ -181,13 +184,79 @@ impl CapabilityFloors {
     }
 }
 
+/// Shared hop budget for one historical query's ancestry walks.
+///
+/// The budget is shared across every watermark join in one call, so a fleet
+/// of deep stale branches cannot each spend a full budget. Trusted
+/// active-prefix joins are free via the height index; only side-branch
+/// parent hops consume the budget. `256` covers organic reorgs (tens of
+/// blocks) with wide margin while still failing closed on deep stale
+/// branches instead of walking unbounded history.
+pub(super) const HISTORICAL_ANCESTRY_BUDGET: usize = 256;
+
+/// Which row-filtering and absence rule a [`ReadPrefix`] carries.
+///
+/// `ExactTip` preserves the strict exact-tip contract byte for byte: no
+/// above-anchor/below-floor skip, pruned-prefix refusals on positive floors.
+/// `AtMost` serves historical `[floor, anchor]` coverage on `chain(anchor)`:
+/// rows outside the range are skipped before body reads and scoped absence
+/// is `Ok(None)` (full history stays `HistoryUnproven` via the shared
+/// helper, never silent partial completeness).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrefixBound {
+    /// Strict exact-tip read: anchor equals the published tip.
+    ExactTip,
+    /// Historical covered-prefix read: rows prove `[floor, anchor]`.
+    AtMost,
+}
+
+/// One stack-owned historical read descriptor.
+///
+/// Built on the stack per query from one immutable snapshot plus one bounded
+/// ancestry walk; it carries no heap, no cache, and no persistent state.
+/// `anchor_id` names the common covered ancestor in the live tree,
+/// `height`/`hash` its chain identity, `floor` the maximum consumed floor,
+/// and `bound` the filtering/absence rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReadPrefix {
+    /// Tree identity of the common covered ancestor.
+    pub(super) anchor_id: NodeId,
+    /// Anchor height on `chain(anchor)`.
+    pub(super) height: u32,
+    /// Full chain hash at the anchor height.
+    pub(super) hash: Hash256,
+    /// Maximum consumed floor for the call.
+    pub(super) floor: u32,
+    /// Filtering and absence rule.
+    pub(super) bound: PrefixBound,
+}
+
+impl ReadPrefix {
+    /// Returns whether `height` is provable under this prefix.
+    pub(super) fn covers(&self, height: u32) -> bool {
+        match self.bound {
+            PrefixBound::ExactTip => true,
+            PrefixBound::AtMost => height >= self.floor && height <= self.height,
+        }
+    }
+}
+
+pub(super) fn map_historical_error(error: TxQueryError) -> HistoricalQueryError {
+    match error {
+        TxQueryError::Retry => HistoricalQueryError::Retry,
+        TxQueryError::Storage(message) => HistoricalQueryError::Storage(message),
+        TxQueryError::Unavailable(cause) => {
+            HistoricalQueryError::Unavailable(HistoricalUnavailableCause::Shared(cause))
+        }
+    }
+}
+
 /// Node-owned, snapshot-gated transaction-index query engine.
 ///
-/// Implements `crate::query_api::DerivedIndexQuery` and [`ScriptIndexQuery`] as the
-/// only public read paths for the transaction index. Every query runs against
-/// one typed point-in-time snapshot, captures
-/// health/shutdown/revision/tip before and after work, and returns typed
-/// `Retry`/`Unavailable` when the answer cannot be proven.
+/// Each query reads one typed point-in-time snapshot and checks worker health.
+/// Strict queries require an unchanged revision and applied tip. Historical
+/// queries retain a covered ancestor and require that ancestor to remain active.
+/// Both paths return typed `Retry` or `Unavailable` when the answer is unproven.
 #[derive(Clone)]
 pub struct DerivedIndexQueryEngine {
     runtime: Arc<DerivedIndexRuntime>,
@@ -356,6 +425,212 @@ impl DerivedIndexQueryEngine {
         result
     }
 
+    fn bounded_common_ancestor(
+        tree: &BlockTree,
+        a: NodeId,
+        b: NodeId,
+        remaining: &mut usize,
+    ) -> Result<Option<NodeId>, AncestryBudgetExceeded> {
+        let a_node = tree.node(a).map_err(|_| AncestryBudgetExceeded)?;
+        let b_node = tree.node(b).map_err(|_| AncestryBudgetExceeded)?;
+        let (mut cursor_a, mut cursor_b) = (a, b);
+        let (mut height_a, mut height_b) = (a_node.height, b_node.height);
+        if height_a > height_b {
+            let aligned = tree.node_at_height_from_bounded(cursor_a, height_b, remaining)?;
+            let Some(aligned) = aligned else {
+                return Ok(None);
+            };
+            cursor_a = aligned;
+            height_a = height_b;
+        } else if height_b > height_a {
+            let aligned = tree.node_at_height_from_bounded(cursor_b, height_a, remaining)?;
+            let Some(aligned) = aligned else {
+                return Ok(None);
+            };
+            cursor_b = aligned;
+            height_b = height_a;
+        }
+        debug_assert_eq!(height_a, height_b);
+        if cursor_a == cursor_b {
+            return Ok(Some(cursor_a));
+        }
+        loop {
+            let node_a = tree.node(cursor_a).map_err(|_| AncestryBudgetExceeded)?;
+            let node_b = tree.node(cursor_b).map_err(|_| AncestryBudgetExceeded)?;
+            let (Some(parent_a), Some(parent_b)) = (node_a.parent, node_b.parent) else {
+                return Ok(None);
+            };
+            *remaining = remaining.checked_sub(1).ok_or(AncestryBudgetExceeded)?;
+            if parent_a == parent_b {
+                return Ok(Some(parent_a));
+            }
+            cursor_a = parent_a;
+            cursor_b = parent_b;
+        }
+    }
+
+    fn covered_anchor(
+        &self,
+        tip_id: NodeId,
+        watermarks: &[(IndexCapability, IndexWatermark)],
+        remaining: &mut usize,
+    ) -> Result<(NodeId, u32, Hash256), HistoricalQueryError> {
+        let tree = self.block_tree.read();
+        tree.node(tip_id).map_err(|_| HistoricalQueryError::Retry)?;
+        let mut anchor_id = tip_id;
+        for (capability, watermark) in watermarks {
+            let hash = Hash256::from_le_bytes(&watermark.hash);
+            let Some(watermark_id) = tree.lookup(hash) else {
+                return Err(HistoricalQueryError::Retry);
+            };
+            match Self::bounded_common_ancestor(&tree, anchor_id, watermark_id, remaining) {
+                Ok(Some(joined)) => anchor_id = joined,
+                Ok(None) => return Err(HistoricalQueryError::Retry),
+                Err(_) => {
+                    return Err(HistoricalQueryError::Unavailable(
+                        HistoricalUnavailableCause::AncestryBudgetExhausted {
+                            capability: *capability,
+                            watermark_height: watermark.height,
+                        },
+                    ));
+                }
+            }
+        }
+        let anchor = tree
+            .node(anchor_id)
+            .map_err(|_| HistoricalQueryError::Retry)?;
+        Ok((anchor_id, anchor.height, anchor.hash))
+    }
+
+    fn require_anchor_still_covers(&self, anchor: &ReadPrefix) -> Result<(), HistoricalQueryError> {
+        let tip_after = self
+            .applied_tip
+            .load_full()
+            .ok_or(HistoricalQueryError::Retry)?;
+        let tree = self.block_tree.read();
+        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
+        let found = tree
+            .node_at_height_from_bounded(tip_after.tip_id, anchor.height, &mut remaining)
+            .map_err(|_| HistoricalQueryError::Retry)?;
+        match found {
+            Some(id) if id == anchor.anchor_id => Ok(()),
+            _ => Err(HistoricalQueryError::Retry),
+        }
+    }
+
+    fn with_prefix<F, T>(
+        &self,
+        required: IndexCapabilities,
+        f: F,
+    ) -> Result<AtPrefix<T>, HistoricalQueryError>
+    where
+        F: for<'s> FnOnce(
+            &'s dyn TxIndexSnapshot,
+            &ReadPrefix,
+            &mut QueryBudget,
+        ) -> Result<T, TxQueryError>,
+    {
+        self.query_health().map_err(map_historical_error)?;
+        self.require_enabled(required)
+            .map_err(map_historical_error)?;
+        if required.contains(IndexCapability::CompactFilters)
+            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
+        {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::Shared(TxUnavailableCause::CompactFilterFailed(reason)),
+            ));
+        }
+        let tip_before = self
+            .applied_tip
+            .load_full()
+            .ok_or(HistoricalQueryError::Retry)?;
+        let reader: &dyn IndexReader = self.reader.as_ref();
+        let snapshot = reader
+            .snapshot()
+            .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
+        let mut floor: u32 = 0;
+        let mut watermarks = Vec::new();
+        for capability in required.iter() {
+            let capability_floor = snapshot
+                .capability_floor(capability)
+                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
+            floor = floor.max(capability_floor);
+            let watermark = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
+            let Some(watermark) = watermark else {
+                return Err(HistoricalQueryError::Unavailable(
+                    HistoricalUnavailableCause::NoCoveredPrefix { capability },
+                ));
+            };
+            watermarks.push((capability, watermark));
+        }
+        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
+        let (anchor_id, anchor_height, anchor_hash) =
+            self.covered_anchor(tip_before.tip_id, &watermarks, &mut remaining)?;
+        if anchor_height < floor {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::PrefixBelowFloor { floor },
+            ));
+        }
+        let prefix = ReadPrefix {
+            anchor_id,
+            height: anchor_height,
+            hash: anchor_hash,
+            floor,
+            bound: PrefixBound::AtMost,
+        };
+        let mut budget = QueryBudget::new();
+        let answer = f(snapshot.as_ref(), &prefix, &mut budget).map_err(map_historical_error)?;
+        self.query_health().map_err(map_historical_error)?;
+        if required.contains(IndexCapability::CompactFilters)
+            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
+        {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::Shared(TxUnavailableCause::CompactFilterFailed(reason)),
+            ));
+        }
+        self.require_anchor_still_covers(&prefix)?;
+        self.query_health().map_err(map_historical_error)?;
+        Ok(AtPrefix {
+            prefix: CoveredPrefix {
+                floor: prefix.floor,
+                height: prefix.height,
+                hash: prefix.hash,
+            },
+            answer,
+        })
+    }
+
+    pub(crate) fn transaction_at_prefix(
+        &self,
+        txid: &Txid,
+    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
+        self.with_prefix(IndexCapabilities::TX_LOOKUP, |snapshot, prefix, budget| {
+            self.locate_transaction_for(snapshot, prefix, budget, txid)
+        })
+    }
+
+    pub(crate) fn script_history_at_prefix(
+        &self,
+        script: ScriptHash,
+    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
+        self.with_prefix(
+            IndexCapabilities::SCRIPT_HISTORY,
+            |snapshot, prefix, budget| self.history_snapshot_for(snapshot, prefix, budget, script),
+        )
+    }
+
+    pub(crate) fn spender_at_prefix(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
+        self.with_prefix(
+            IndexCapabilities::SCRIPT_HISTORY,
+            |snapshot, prefix, budget| self.spender_for(snapshot, prefix, budget, &outpoint),
+        )
+    }
+
     /// Watermark progress of `required` capabilities against one applied
     /// tip: `synced` when every one names that tip, `processed_height` the
     /// lowest of their heights, `target_height` the tip they were measured
@@ -430,7 +705,14 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::TX_LOOKUP,
             |snapshot, tip, budget, floors| {
-                self.transaction_for(snapshot, tip, budget, txid, floors.tx_lookup)
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.tx_lookup,
+                    bound: PrefixBound::ExactTip,
+                };
+                self.transaction_for(snapshot, &prefix, budget, txid)
             },
         )
     }
@@ -439,7 +721,14 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::TX_LOOKUP,
             |snapshot, tip, budget, floors| {
-                self.outpoint_value_for(snapshot, tip, budget, outpoint, floors.tx_lookup)
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.tx_lookup,
+                    bound: PrefixBound::ExactTip,
+                };
+                self.outpoint_value_for(snapshot, &prefix, budget, outpoint)
             },
         )
     }
@@ -448,8 +737,15 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::TX_LOOKUP,
             |snapshot, tip, budget, floors| {
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.tx_lookup,
+                    bound: PrefixBound::ExactTip,
+                };
                 Ok(self
-                    .locate_transaction_for(snapshot, tip, budget, txid, floors.tx_lookup)?
+                    .locate_transaction_for(snapshot, &prefix, budget, txid)?
                     .map(|(height, _)| height))
             },
         )
@@ -472,7 +768,14 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
-                self.history_snapshot_for(snapshot, tip, budget, scripthash, floors.script_history)
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.script_history,
+                    bound: PrefixBound::ExactTip,
+                };
+                self.history_snapshot_for(snapshot, &prefix, budget, scripthash)
             },
         )
     }
@@ -484,7 +787,14 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
-                self.confirmed_history_for(snapshot, tip, budget, scripthash, floors.script_history)
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.script_history,
+                    bound: PrefixBound::ExactTip,
+                };
+                self.confirmed_history_for(snapshot, &prefix, budget, scripthash)
             },
         )
     }
@@ -505,7 +815,14 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
-                self.spender_for(snapshot, tip, budget, &outpoint, floors.script_history)
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.script_history,
+                    bound: PrefixBound::ExactTip,
+                };
+                self.spender_for(snapshot, &prefix, budget, &outpoint)
             },
         )
     }

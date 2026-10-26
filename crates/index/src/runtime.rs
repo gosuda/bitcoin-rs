@@ -36,7 +36,8 @@ use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use crate::query_api::{
-    DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
+    AtPrefix, DerivedIndexInfo, DerivedIndexQuery, HistoricalQueryError,
+    HistoricalUnavailableCause, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
     ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 
@@ -392,11 +393,54 @@ pub struct DerivedIndexQueryAdapter {
     lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
 }
 
+fn map_historical_load_error(error: TxQueryError) -> HistoricalQueryError {
+    match error {
+        TxQueryError::Retry => HistoricalQueryError::Retry,
+        TxQueryError::Storage(message) => HistoricalQueryError::Storage(message),
+        TxQueryError::Unavailable(cause) => {
+            HistoricalQueryError::Unavailable(HistoricalUnavailableCause::Shared(cause))
+        }
+    }
+}
+
 impl DerivedIndexQueryAdapter {
     /// Constructs the stable adapter over the lifecycle publication cell.
     #[must_use]
     pub fn new(lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>) -> Self {
         Self { lifecycle }
+    }
+
+    /// Serves one historical transaction lookup against a server-selected covered prefix.
+    ///
+    /// Loads exactly one engine handle and delegates the bounded work to it.
+    pub fn transaction_at_prefix(
+        &self,
+        txid: &Txid,
+    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
+        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        engine.transaction_at_prefix(txid)
+    }
+
+    /// Serves one historical script-history lookup against a server-selected covered prefix.
+    ///
+    /// Loads exactly one engine handle and delegates the bounded work to it.
+    pub fn script_history_at_prefix(
+        &self,
+        script: ScriptHash,
+    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
+        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        engine.script_history_at_prefix(script)
+    }
+
+    /// Serves one historical spender lookup against a server-selected covered prefix.
+    ///
+    /// Loads exactly one engine handle and delegates the bounded work to it.
+    pub fn spender_at_prefix(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
+        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        engine.spender_at_prefix(outpoint)
     }
 
     fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {

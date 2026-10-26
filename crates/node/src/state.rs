@@ -455,6 +455,18 @@ impl NodeState {
         })
     }
 
+    /// Returns the node-owned historical query adapter when any index capability is enabled.
+    ///
+    /// Capability selection stays with the engine: a tx-only node serves
+    /// historical transactions while script calls fail closed with the typed
+    /// disabled cause. A node with no index capability returns `None` so the
+    /// caller maps to the per-call disabled cause.
+    pub(crate) fn historical_index_adapter(
+        &self,
+    ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
+        self.derived_index.adapter().cloned()
+    }
+
     /// Returns the optional compact-filter query owner for RPC and P2P.
     #[must_use]
     pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {

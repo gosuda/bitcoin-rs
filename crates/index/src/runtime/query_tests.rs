@@ -6,12 +6,16 @@ use crate::{HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, Spen
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Amount, Block, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
 use super::*;
+use crate::query_api::{HistoricalQueryError, HistoricalUnavailableCause};
+use crate::{IndexCapability, IndexWatermark};
+use bitcoin_rs_chain::{BlockTree, NodeId};
+use parking_lot::Mutex as ParkMutex;
 
 #[derive(Clone)]
 struct ScanResponse {
@@ -1295,5 +1299,1312 @@ fn confirmed_history_with_nonmatching_script_falls_back_per_height_and_stays_emp
     let second = fixture.engine.confirmed_history(foreign)?;
     assert_eq!(second.len(), 0);
     assert_eq!(fixture.full_reads()?, 6);
+    Ok(())
+}
+
+#[derive(Clone)]
+struct HistoricalSnapshot {
+    tx_watermark: Option<IndexWatermark>,
+    sh_watermark: Option<IndexWatermark>,
+    tx_floor: u32,
+    sh_floor: u32,
+    scans: Vec<ScanResponse>,
+}
+
+impl HistoricalSnapshot {
+    fn scan_for(&self, cf: ColumnFamily, prefix: &[u8]) -> PrefixScan {
+        self.scans
+            .iter()
+            .find(|response| response.cf == cf && response.prefix == prefix)
+            .map_or(
+                PrefixScan {
+                    rows: Vec::new(),
+                    complete: true,
+                },
+                |response| response.scan.clone(),
+            )
+    }
+
+    fn typed_scan(&self, cf: ColumnFamily, prefix: &[u8]) -> Result<TxIndexScan, IndexError> {
+        let scan = self.scan_for(cf, prefix);
+        let encoded_bytes = scan.rows.iter().fold(0_usize, |total, (key, value)| {
+            total.saturating_add(key.len()).saturating_add(value.len())
+        });
+        let mut rows = Vec::with_capacity(scan.rows.len());
+        for (key, value) in scan.rows {
+            if key.len() != crate::HASH_PREFIX_ROW_SIZE {
+                return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
+            }
+            let prefix_bytes: [u8; 8] = key[..crate::types::HASH_PREFIX_LEN]
+                .try_into()
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            let height_bytes: [u8; 4] = key
+                [crate::types::HASH_PREFIX_LEN..crate::HASH_PREFIX_ROW_SIZE]
+                .try_into()
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            rows.push(TxIndexScanRow {
+                row: HashPrefixRow {
+                    prefix: prefix_bytes,
+                    height: height_bytes,
+                },
+                value,
+            });
+        }
+        Ok(TxIndexScan {
+            rows,
+            encoded_bytes,
+            complete: scan.complete,
+        })
+    }
+}
+
+impl TxIndexSnapshot for HistoricalSnapshot {
+    fn capability_watermark(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<IndexWatermark>, IndexError> {
+        match capability {
+            IndexCapability::TxLookup => Ok(self.tx_watermark),
+            IndexCapability::ScriptHistory => Ok(self.sh_watermark),
+            _ => Ok(None),
+        }
+    }
+
+    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
+        match capability {
+            IndexCapability::TxLookup => Ok(self.tx_floor),
+            IndexCapability::ScriptHistory => Ok(self.sh_floor),
+            _ => Ok(0),
+        }
+    }
+
+    fn for_each_row(
+        &self,
+        family: crate::TxIndexFamily,
+        visit: &mut crate::index::RowVisitor<'_>,
+    ) -> Result<(), IndexError> {
+        let cf = match family {
+            crate::TxIndexFamily::TxConfirmed => ColumnFamily::TxConfirmed,
+        };
+        let mut rows: Vec<_> = self
+            .scans
+            .iter()
+            .filter(|response| response.cf == cf)
+            .flat_map(|response| response.scan.rows.iter().cloned())
+            .collect();
+        rows.sort();
+        rows.dedup_by(|left, right| left.0 == right.0);
+        for (key, value) in rows {
+            let row = zerocopy::FromBytes::read_from_bytes(&key)
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            if visit(row, &value)?.is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn transaction_rows(
+        &self,
+        txid: &Txid,
+        _limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.typed_scan(ColumnFamily::TxConfirmed, &TxidRow::scan_prefix(txid))
+    }
+
+    fn funding_rows(
+        &self,
+        scripthash: ScriptHash,
+        _limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.typed_scan(
+            ColumnFamily::Funding,
+            &ScriptHashRow::scan_prefix(scripthash),
+        )
+    }
+
+    fn spending_rows(
+        &self,
+        outpoint: &OutPoint,
+        _limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.typed_scan(
+            ColumnFamily::Spending,
+            &SpendingPrefixRow::scan_prefix(outpoint),
+        )
+    }
+
+    fn live_rows(
+        &self,
+        _scripthash: ScriptHash,
+        _limit: PrefixScanLimit,
+    ) -> Result<crate::ScriptLiveScan, IndexError> {
+        Ok(crate::ScriptLiveScan {
+            rows: Vec::new(),
+            encoded_bytes: 0,
+            complete: true,
+        })
+    }
+}
+
+struct HistoricalReader {
+    snapshot: HistoricalSnapshot,
+}
+
+impl IndexReader for HistoricalReader {
+    fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, IndexError> {
+        Ok(Box::new(self.snapshot.clone()))
+    }
+}
+
+struct ResetReader {
+    state: Arc<ParkMutex<HistoricalSnapshot>>,
+}
+
+impl IndexReader for ResetReader {
+    fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, IndexError> {
+        Ok(Box::new(self.state.lock().clone()))
+    }
+}
+
+struct MovingBody {
+    bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+    full_reads: AtomicUsize,
+    on_first_read: ParkMutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl MovingBody {
+    fn new(
+        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+        on_first_read: Option<Box<dyn Fn() + Send>>,
+    ) -> Self {
+        Self {
+            bodies,
+            full_reads: AtomicUsize::new(0),
+            on_first_read: ParkMutex::new(on_first_read),
+        }
+    }
+
+    fn fire_once(&self) {
+        let taken = self.on_first_read.lock().take();
+        if let Some(callback) = taken {
+            callback();
+        }
+    }
+
+    fn lookup(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        self.bodies
+            .iter()
+            .find(|(h, hh, _)| *h == height && *hh == hash)
+            .map(|(_, _, body)| body.clone())
+    }
+}
+
+impl BlockBodySource for MovingBody {
+    fn block_body(
+        &self,
+        height: u32,
+        hash: BlockHash,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        self.fire_once();
+        let hit = self.lookup(height, hash);
+        if hit.is_some() {
+            self.full_reads.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(hit)
+    }
+
+    fn block_body_range(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        offset: u32,
+        len: u32,
+    ) -> Option<Vec<u8>> {
+        self.fire_once();
+        let (_, _, body) = self
+            .bodies
+            .iter()
+            .find(|(h, hh, _)| *h == height && *hh == hash)?;
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        body.get(start..end).map(<[u8]>::to_vec)
+    }
+}
+
+struct HistoricalFixture {
+    engine: DerivedIndexQueryEngine,
+    runtime: Arc<DerivedIndexRuntime>,
+}
+
+fn tip_snapshot_for(
+    tree: &BlockTree,
+    tip_id: NodeId,
+) -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+    let node = tree.node(tip_id)?;
+    Ok(TipSnapshot {
+        tip_id,
+        height: node.height,
+        chainwork: node.chainwork,
+        hash: node.hash,
+        chain_tx_count: node.chain_tx_count,
+    })
+}
+
+fn watermark_for(
+    tree: &BlockTree,
+    node_id: NodeId,
+) -> Result<IndexWatermark, Box<dyn std::error::Error>> {
+    let node = tree.node(node_id)?;
+    Ok(IndexWatermark {
+        height: node.height,
+        hash: *node.hash.as_byte_array(),
+    })
+}
+
+struct HistoricalConfig {
+    tx_watermark: Option<IndexWatermark>,
+    sh_watermark: Option<IndexWatermark>,
+    tx_floor: u32,
+    sh_floor: u32,
+    scans: Vec<ScanResponse>,
+    bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+    on_first_read: Option<Box<dyn Fn() + Send>>,
+    enabled: IndexCapabilities,
+}
+
+impl HistoricalFixture {
+    fn build(
+        tree: BlockTree,
+        tip_id: NodeId,
+        config: HistoricalConfig,
+    ) -> Result<(Self, Arc<MovingBody>), Box<dyn std::error::Error>> {
+        let HistoricalConfig {
+            tx_watermark,
+            sh_watermark,
+            tx_floor,
+            sh_floor,
+            scans,
+            bodies,
+            on_first_read,
+            enabled,
+        } = config;
+        let tip = tip_snapshot_for(&tree, tip_id)?;
+        let tree = Arc::new(RwLock::new(tree));
+        let tip_cell = Arc::new(ArcSwapOption::empty());
+        tip_cell.store(Some(Arc::new(tip)));
+        let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let reader = Arc::new(HistoricalReader {
+            snapshot: HistoricalSnapshot {
+                tx_watermark,
+                sh_watermark,
+                tx_floor,
+                sh_floor,
+                scans,
+            },
+        });
+        let body = Arc::new(MovingBody::new(bodies, on_first_read));
+        let body_source: Option<Arc<dyn BlockBodySource>> = Some(body.clone());
+        let engine = DerivedIndexQueryEngine::new(
+            Arc::clone(&runtime),
+            reader,
+            bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree)),
+            bitcoin_rs_chain::TipReader::new(Arc::clone(&tip_cell)),
+            body_source,
+            QueryEngineLive {
+                utxo: None,
+                chain_transition: Some(chain_transition),
+                enabled,
+            },
+        );
+        let fixture = Self { engine, runtime };
+        Ok((fixture, body))
+    }
+}
+
+#[test]
+fn historical_extension_during_read_keeps_same_anchor() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let tip_block = child_block(&block, vec![block.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let tip_id = tree.insert_header(tip_block.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+    let tip_snapshot = tip_snapshot_for(&tree, tip_id)?;
+    let extension_block = child_block(&tip_block, vec![tip_block.txs[0].clone()])?;
+    let extension_id = tree.insert_header(extension_block.header, NodeStatus::HeaderValid)?;
+    let extension_tip = tip_snapshot_for(&tree, extension_id)?;
+    let bodies = vec![(0, block.block_hash(), consensus_bytes(&block))];
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip_snapshot)));
+    let tip_cell_clone = Arc::clone(&tip_cell);
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime_clone = Arc::clone(&runtime);
+    let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
+        tip_cell_clone.store(Some(Arc::new(extension_tip.clone())));
+        runtime_clone.wake();
+    }));
+    let body = Arc::new(MovingBody::new(bodies, on_read));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        Arc::clone(&runtime),
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.prefix.height, 0);
+    assert_eq!(at.prefix.floor, 0);
+    assert!(at.answer.is_some());
+    Ok(())
+}
+
+#[test]
+fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+    let tip_snapshot = tip_snapshot_for(&tree, genesis_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip_snapshot)));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime_clone = Arc::clone(&runtime);
+    let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || runtime_clone.wake()));
+    let body = Arc::new(MovingBody::new(
+        vec![(0, block.block_hash(), consensus_bytes(&block))],
+        on_read,
+    ));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let reader: Arc<dyn IndexReader> = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+        },
+    });
+    let strict_reader: Arc<dyn IndexReader> = Arc::new(QueryReader {
+        snapshot: QuerySnapshot {
+            watermark: genesis_watermark,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+            chain_transition: chain_transition.clone(),
+        },
+    });
+    let tree_handle = Arc::new(RwLock::new(tree));
+    let historical = DerivedIndexQueryEngine::new(
+        Arc::clone(&runtime),
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree_handle)),
+        bitcoin_rs_chain::TipReader::new(Arc::clone(&tip_cell)),
+        Some(body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition.clone()),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    let at = historical.transaction_at_prefix(&txid)?;
+    assert_eq!(at.prefix.height, 0);
+    assert!(at.answer.is_some());
+    let runtime_clone = Arc::clone(&runtime);
+    let strict_body = Arc::new(MovingBody::new(
+        vec![(0, block.block_hash(), consensus_bytes(&block))],
+        Some(Box::new(move || runtime_clone.wake())),
+    ));
+    let strict = DerivedIndexQueryEngine::new(
+        runtime,
+        strict_reader,
+        bitcoin_rs_chain::BlockTreeReader::new(tree_handle),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(strict_body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    assert!(matches!(
+        strict.transaction(&txid),
+        Err(TxQueryError::Retry)
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_reorg_above_anchor_stays_valid() -> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let txid = genesis.txs[0].txid();
+    let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let side_child = {
+        let mut tx = genesis.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(1));
+        child_block(&genesis, vec![tx])?
+    };
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let main_id = tree.insert_header(main_child.header, NodeStatus::HeaderValid)?;
+    let side_id = tree.insert_header(side_child.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+    let main_tip = tip_snapshot_for(&tree, main_id)?;
+    let side_tip = tip_snapshot_for(&tree, side_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(main_tip)));
+    let tip_cell_clone = Arc::clone(&tip_cell);
+    let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
+        tip_cell_clone.store(Some(Arc::new(side_tip.clone())));
+    }));
+    let body = Arc::new(MovingBody::new(
+        vec![(0, genesis.block_hash(), consensus_bytes(&genesis))],
+        on_read,
+    ));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.prefix.height, 0);
+    assert!(at.answer.is_some());
+    Ok(())
+}
+
+#[test]
+fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), Box<dyn std::error::Error>>
+{
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut tree = BlockTree::new();
+    let tip_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let watermark = watermark_for(&tree, tip_id)?;
+    let tip_snapshot = tip_snapshot_for(&tree, tip_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip_snapshot)));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let shared_state = Arc::new(ParkMutex::new(HistoricalSnapshot {
+        tx_watermark: Some(watermark),
+        sh_watermark: Some(watermark),
+        tx_floor: 0,
+        sh_floor: 0,
+        scans: vec![scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(&txid),
+            vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+            true,
+        )],
+    }));
+    let reset_state = Arc::clone(&shared_state);
+    let runtime_clone = Arc::clone(&runtime);
+    let body = Arc::new(MovingBody::new(
+        vec![(0, block.block_hash(), consensus_bytes(&block))],
+        Some(Box::new(move || {
+            reset_state.lock().tx_watermark = None;
+            reset_state.lock().sh_watermark = None;
+            reset_state.lock().tx_watermark = Some(watermark);
+            reset_state.lock().sh_watermark = Some(watermark);
+            runtime_clone.wake();
+        })),
+    ));
+    let reader: Arc<dyn IndexReader> = Arc::new(ResetReader {
+        state: shared_state,
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.prefix.height, 0);
+    assert_eq!(at.prefix.floor, 0);
+    assert!(at.answer.is_some());
+    Ok(())
+}
+
+#[test]
+fn historical_reorg_below_anchor_retries() -> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let txid = genesis.txs[0].txid();
+    let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let main_grandchild = child_block(&main_child, vec![main_child.txs[0].clone()])?;
+    let side_child = {
+        let mut tx = genesis.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(1));
+        child_block(&genesis, vec![tx])?
+    };
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    tree.insert_header(main_child.header, NodeStatus::HeaderValid)?;
+    let main_tip_id = tree.insert_header(main_grandchild.header, NodeStatus::HeaderValid)?;
+    let side_id = tree.insert_header(side_child.header, NodeStatus::HeaderValid)?;
+    let main_watermark = watermark_for(&tree, main_tip_id)?;
+    let main_tip = tip_snapshot_for(&tree, main_tip_id)?;
+    let side_tip = tip_snapshot_for(&tree, side_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(main_tip)));
+    let tip_cell_clone = Arc::clone(&tip_cell);
+    let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
+        tip_cell_clone.store(Some(Arc::new(side_tip.clone())));
+    }));
+    let body = Arc::new(MovingBody::new(
+        vec![
+            (1, main_child.block_hash(), consensus_bytes(&main_child)),
+            (
+                2,
+                main_grandchild.block_hash(),
+                consensus_bytes(&main_grandchild),
+            ),
+        ],
+        on_read,
+    ));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(main_watermark),
+            sh_watermark: Some(main_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![
+                    (TxidRow::row(&txid, 1).to_db_row().to_vec(), Vec::new()),
+                    (TxidRow::row(&txid, 2).to_db_row().to_vec(), Vec::new()),
+                ],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    assert!(matches!(
+        engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Retry)
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_unknown_watermark_hash_retries() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut tree = BlockTree::new();
+    let tip_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let tip = tip_snapshot_for(&tree, tip_id)?;
+    let unknown = IndexWatermark {
+        height: 0,
+        hash: [0x77; 32],
+    };
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip)));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(unknown),
+            sh_watermark: Some(unknown),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        None,
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    assert!(matches!(
+        engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Retry)
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let stale_child = {
+        let mut tx = genesis.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(5));
+        child_block(&genesis, vec![tx])?
+    };
+    let stale_txid = stale_child.txs[0].txid();
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let main_id = tree.insert_header(main_child.header, NodeStatus::HeaderValid)?;
+    let stale_id = tree.insert_header(stale_child.header, NodeStatus::HeaderValid)?;
+    let stale_watermark = watermark_for(&tree, stale_id)?;
+    let main_tip = tip_snapshot_for(&tree, main_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(main_tip)));
+    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let stale_prefix = TxidRow::scan_prefix(&stale_txid);
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(stale_watermark),
+            sh_watermark: Some(stale_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                stale_prefix,
+                vec![(
+                    TxidRow::row(&stale_txid, 1).to_db_row().to_vec(),
+                    Vec::new(),
+                )],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_chain::TipReader::new(tip_cell),
+        Some(Arc::new(MovingBody::new(
+            vec![(1, main_child.block_hash(), consensus_bytes(&main_child))],
+            None,
+        ))),
+        QueryEngineLive {
+            utxo: None,
+            chain_transition: Some(chain_transition),
+            enabled: IndexCapabilities::ALL,
+        },
+    );
+    let at = engine.transaction_at_prefix(&stale_txid)?;
+    assert_eq!(at.prefix.height, 0);
+    assert_eq!(at.prefix.floor, 0);
+    assert_eq!(at.answer, None);
+    Ok(())
+}
+
+#[test]
+fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let txid = genesis.txs[0].txid();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let tip_watermark = watermark_for(&tree, tip_id)?;
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(tip_watermark),
+            sh_watermark: Some(tip_watermark),
+            tx_floor: 1,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+            bodies: vec![
+                (0, genesis.block_hash(), consensus_bytes(&genesis)),
+                (1, child.block_hash(), consensus_bytes(&child)),
+            ],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    let at = fixture.engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.prefix.floor, 1);
+    assert_eq!(at.prefix.height, 1);
+    assert_eq!(at.answer, None);
+    let mut deep_tree = BlockTree::new();
+    let deep_genesis_id = deep_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let floor_watermark = IndexWatermark {
+        height: 0,
+        hash: *deep_tree.node(deep_genesis_id)?.hash.as_byte_array(),
+    };
+    let (floor_fixture, _) = HistoricalFixture::build(
+        deep_tree,
+        deep_genesis_id,
+        HistoricalConfig {
+            tx_watermark: Some(floor_watermark),
+            sh_watermark: Some(floor_watermark),
+            tx_floor: 5,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    assert!(matches!(
+        floor_fixture.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::PrefixBelowFloor { floor: 5 }
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_full_history_positive_floor_is_unproven() -> Result<(), Box<dyn std::error::Error>> {
+    let (block, _, scripthash, _) = block_with_spending_transaction()?;
+    let child = child_block(&block, vec![block.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let watermark = watermark_for(&tree, tip_id)?;
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 0,
+            sh_floor: 1,
+            scans: vec![scan_response(
+                ColumnFamily::Funding,
+                ScriptHashRow::scan_prefix(scripthash),
+                vec![(
+                    ScriptHashRow::row(scripthash, 0).to_db_row().to_vec(),
+                    Vec::new(),
+                )],
+                true,
+            )],
+            bodies: vec![
+                (0, block.block_hash(), consensus_bytes(&block)),
+                (1, child.block_hash(), consensus_bytes(&child)),
+            ],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    assert!(matches!(
+        fixture.engine.script_history_at_prefix(scripthash),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::Shared(TxUnavailableCause::HistoryUnproven { floor: 1 })
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (block, outpoint, _, _) = block_with_spending_transaction()?;
+    let child = child_block(&block, vec![block.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let watermark = watermark_for(&tree, tip_id)?;
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 0,
+            sh_floor: 1,
+            scans: vec![scan_response(
+                ColumnFamily::Spending,
+                SpendingPrefixRow::scan_prefix(&outpoint),
+                vec![(
+                    SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec(),
+                    Vec::new(),
+                )],
+                true,
+            )],
+            bodies: vec![
+                (0, block.block_hash(), consensus_bytes(&block)),
+                (1, child.block_hash(), consensus_bytes(&child)),
+            ],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    let at = fixture.engine.spender_at_prefix(outpoint)?;
+    assert_eq!(at.prefix.floor, 1);
+    assert_eq!(at.prefix.height, 1);
+    assert_eq!(at.answer, None);
+    Ok(())
+}
+
+#[test]
+fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), Box<dyn std::error::Error>> {
+    let (genesis, chain, scripthash) = paying_chain()?;
+    let mut script_tree = BlockTree::new();
+    let mut script_tip_id = script_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    for block in &chain {
+        script_tip_id = script_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    }
+    assert_eq!(script_tree.node(script_tip_id)?.height, 2);
+    let script_middle_id = script_tree
+        .node_at_height_from(script_tip_id, 1)
+        .ok_or_else(|| std::io::Error::other("middle present"))?;
+    let mut bodies = Vec::new();
+    bodies.push((0, genesis.block_hash(), consensus_bytes(&genesis)));
+    for (height, block) in [1u32, 2u32].iter().zip(chain.iter()) {
+        bodies.push((*height, block.block_hash(), consensus_bytes(block)));
+    }
+    let funding_scans = vec![scan_response(
+        ColumnFamily::Funding,
+        ScriptHashRow::scan_prefix(scripthash),
+        vec![
+            (
+                ScriptHashRow::row(scripthash, 0).to_db_row().to_vec(),
+                Vec::new(),
+            ),
+            (
+                ScriptHashRow::row(scripthash, 1).to_db_row().to_vec(),
+                Vec::new(),
+            ),
+            (
+                ScriptHashRow::row(scripthash, 2).to_db_row().to_vec(),
+                Vec::new(),
+            ),
+        ],
+        true,
+    )];
+    let script_tx_watermark = watermark_for(&script_tree, script_tip_id)?;
+    let script_sh_watermark = watermark_for(&script_tree, script_middle_id)?;
+    let (script_fixture, _) = HistoricalFixture::build(
+        script_tree,
+        script_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(script_tx_watermark),
+            sh_watermark: Some(script_sh_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: funding_scans,
+            bodies,
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    let script_at = script_fixture.engine.script_history_at_prefix(scripthash)?;
+    assert_eq!(script_at.prefix.height, 1);
+    assert_eq!(script_at.prefix.floor, 0);
+    for record in &script_at.answer.history {
+        assert!(record.height <= 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), Box<dyn std::error::Error>> {
+    let (genesis, chain, _scripthash) = paying_chain()?;
+    let mut tx_tree = BlockTree::new();
+    let mut tx_tip_id = tx_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    for block in &chain {
+        tx_tip_id = tx_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    }
+    assert_eq!(tx_tree.node(tx_tip_id)?.height, 2);
+    let tx_middle_id = tx_tree
+        .node_at_height_from(tx_tip_id, 1)
+        .ok_or_else(|| std::io::Error::other("middle present"))?;
+    let mut bodies = Vec::new();
+    bodies.push((0, genesis.block_hash(), consensus_bytes(&genesis)));
+    for (height, block) in [1u32, 2u32].iter().zip(chain.iter()) {
+        bodies.push((*height, block.block_hash(), consensus_bytes(block)));
+    }
+    let funding_txid_height_two = chain[1].txs[0].txid();
+    let tx_scans = vec![scan_response(
+        ColumnFamily::TxConfirmed,
+        TxidRow::scan_prefix(&funding_txid_height_two),
+        vec![(
+            TxidRow::row(&funding_txid_height_two, 2)
+                .to_db_row()
+                .to_vec(),
+            Vec::new(),
+        )],
+        true,
+    )];
+    let tx_tx_watermark = watermark_for(&tx_tree, tx_tip_id)?;
+    let tx_sh_watermark = watermark_for(&tx_tree, tx_middle_id)?;
+    let (tx_fixture, _) = HistoricalFixture::build(
+        tx_tree,
+        tx_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(tx_tx_watermark),
+            sh_watermark: Some(tx_sh_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: tx_scans,
+            bodies,
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    let tx_at = tx_fixture
+        .engine
+        .transaction_at_prefix(&funding_txid_height_two)?;
+    assert_eq!(tx_at.prefix.height, 2);
+    assert!(tx_at.answer.is_some());
+    assert_eq!(tx_at.answer.as_ref().map(|(h, _)| *h), Some(2));
+    Ok(())
+}
+
+#[test]
+fn historical_duplicate_txid_returns_earliest_verified_and_skips_stale()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let mut target = genesis.txs[0].clone();
+    target.outputs[0].value = target.outputs[0].value.saturating_add(Amount::from_sat(7));
+    let target_txid = target.txid();
+    let main_plain = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let main_mid = child_block(&main_plain, vec![target.clone()])?;
+    let main_tip = child_block(&main_mid, vec![target.clone()])?;
+    let stale_child = child_block(&genesis, vec![target.clone(), genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let _plain_id = tree.insert_header(main_plain.header, NodeStatus::HeaderValid)?;
+    let _mid_id = tree.insert_header(main_mid.header, NodeStatus::HeaderValid)?;
+    let main_tip_id = tree.insert_header(main_tip.header, NodeStatus::HeaderValid)?;
+    let _stale_id = tree.insert_header(stale_child.header, NodeStatus::HeaderValid)?;
+    let watermark = watermark_for(&tree, main_tip_id)?;
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        main_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&target_txid),
+                vec![
+                    (
+                        TxidRow::row(&target_txid, 1).to_db_row().to_vec(),
+                        Vec::new(),
+                    ),
+                    (
+                        TxidRow::row(&target_txid, 2).to_db_row().to_vec(),
+                        Vec::new(),
+                    ),
+                    (
+                        TxidRow::row(&target_txid, 3).to_db_row().to_vec(),
+                        Vec::new(),
+                    ),
+                ],
+                true,
+            )],
+            bodies: vec![
+                (1, main_plain.block_hash(), consensus_bytes(&main_plain)),
+                (2, main_mid.block_hash(), consensus_bytes(&main_mid)),
+                (3, main_tip.block_hash(), consensus_bytes(&main_tip)),
+            ],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    let at = fixture.engine.transaction_at_prefix(&target_txid)?;
+    assert_eq!(at.prefix.height, 3);
+    let Some((height, _)) = at.answer else {
+        return Err(std::io::Error::other("duplicate must verify").into());
+    };
+    assert_eq!(height, 2);
+    Ok(())
+}
+
+#[test]
+fn historical_no_covered_prefix_for_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut tree = BlockTree::new();
+    let tip_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        tip_id,
+        HistoricalConfig {
+            tx_watermark: None,
+            sh_watermark: None,
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    assert!(matches!(
+        fixture.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::NoCoveredPrefix { .. }
+        ))
+    ));
+    assert!(matches!(
+        fixture
+            .engine
+            .script_history_at_prefix(ScriptHash::new(&[])),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::NoCoveredPrefix { .. }
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_budgets_truncation_and_missing_map_to_shared()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut truncated_tree = BlockTree::new();
+    let truncated_tip_id = truncated_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let truncated_watermark = watermark_for(&truncated_tree, truncated_tip_id)?;
+    let truncated = HistoricalFixture::build(
+        truncated_tree,
+        truncated_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(truncated_watermark),
+            sh_watermark: Some(truncated_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                false,
+            )],
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?
+    .0;
+    assert!(matches!(
+        truncated.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::Shared(_)
+        ))
+    ));
+    let mut missing_tree = BlockTree::new();
+    let missing_tip_id = missing_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let missing_watermark = watermark_for(&missing_tree, missing_tip_id)?;
+    let missing = HistoricalFixture::build(
+        missing_tree,
+        missing_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(missing_watermark),
+            sh_watermark: Some(missing_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), Vec::new())],
+                true,
+            )],
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?
+    .0;
+    assert!(matches!(
+        missing.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::Shared(TxUnavailableCause::BlockBodyMissing { .. })
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), Box<dyn std::error::Error>>
+{
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let mut failed_tree = BlockTree::new();
+    let failed_tip_id = failed_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let failed_watermark = watermark_for(&failed_tree, failed_tip_id)?;
+    let (failed_fixture, _) = HistoricalFixture::build(
+        failed_tree,
+        failed_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(failed_watermark),
+            sh_watermark: Some(failed_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    failed_fixture
+        .runtime
+        .publish_failed("injected worker failure");
+    assert!(matches!(
+        failed_fixture.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::Shared(_)
+        ))
+    ));
+    let mut disabled_tree = BlockTree::new();
+    let disabled_tip_id = disabled_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    let disabled_watermark = watermark_for(&disabled_tree, disabled_tip_id)?;
+    let (disabled_fixture, _) = HistoricalFixture::build(
+        disabled_tree,
+        disabled_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(disabled_watermark),
+            sh_watermark: Some(disabled_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::TX_LOOKUP,
+        },
+    )?;
+    assert!(matches!(
+        disabled_fixture
+            .engine
+            .script_history_at_prefix(ScriptHash::new(&[])),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(_))
+        ))
+    ));
+    let tx_only = disabled_fixture.engine.transaction_at_prefix(&txid)?;
+    assert_eq!(tx_only.prefix.height, 0);
+    Ok(())
+}
+
+#[test]
+fn historical_deep_stale_branch_exhausts_shared_ancestry_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let mut main_tip_id = genesis_id;
+    let mut main_tip_block = genesis.clone();
+    for _ in 0..320 {
+        let child = child_block(&main_tip_block, vec![main_tip_block.txs[0].clone()])?;
+        main_tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+        main_tip_block = child;
+    }
+    let mut stale_tip_id = genesis_id;
+    let mut stale_tip_block = genesis.clone();
+    for _ in 0..320 {
+        let mut tx = stale_tip_block.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(1));
+        let child = child_block(&stale_tip_block, vec![tx])?;
+        stale_tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+        stale_tip_block = child;
+    }
+    let stale_watermark = watermark_for(&tree, stale_tip_id)?;
+    let txid = genesis.txs[0].txid();
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        main_tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(stale_watermark),
+            sh_watermark: Some(stale_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+    assert!(matches!(
+        fixture.engine.transaction_at_prefix(&txid),
+        Err(HistoricalQueryError::Unavailable(
+            HistoricalUnavailableCause::AncestryBudgetExhausted { .. }
+        ))
+    ));
     Ok(())
 }
