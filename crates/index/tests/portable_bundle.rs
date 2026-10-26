@@ -41,8 +41,8 @@ use bitcoin::{
     script::Builder,
 };
 use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, NodeStatus, TipReader,
-    TipSnapshot,
+    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, NodeStatus,
+    TipReader, TipSnapshot,
 };
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
@@ -138,6 +138,23 @@ impl ChainFixture {
             tip,
             txids,
         }
+    }
+
+    /// The block tree as a checkpoint restart leaves it: the applied tip keeps
+    /// its cumulative transaction count and every ancestor is uncounted
+    /// (`crates/chainstate/src/checkpoint.rs`, `load_payloads`, restores the
+    /// count through the same `restore_chain_tx_count` on the tip alone).
+    fn restarted(self) -> Self {
+        {
+            let mut tree = self.tree.write();
+            let mut cursor = tree.node(self.tip.tip_id).expect("tip node").parent;
+            while let Some(id) = cursor {
+                cursor = tree.node(id).expect("ancestor node").parent;
+                tree.restore_chain_tx_count(id, ChainTxCount::UNKNOWN)
+                    .expect("ancestor node exists");
+            }
+        }
+        self
     }
 
     /// Distinct `(txid prefix, height)` keys: one `TxConfirmed` row each.
@@ -332,6 +349,8 @@ impl BlockBodySource for SourceBodies {
 struct StoreBodies {
     bodies: Arc<BodyMap>,
     serve: bool,
+    /// Heights below this are never served, even when `serve` is set.
+    from_height: u32,
     probe: Arc<Probe>,
 }
 
@@ -347,7 +366,7 @@ impl BlockBodyStore for StoreBodies {
 
     fn load_block_body(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
         self.probe.reconciling.store(true, Ordering::Release);
-        if !self.serve {
+        if !self.serve || height < self.from_height {
             return Ok(None);
         }
         Ok(self.bodies.get(&(height, hash.to_le_bytes())).cloned())
@@ -501,6 +520,8 @@ struct Start {
     bundle: IndexBundleDirective,
     /// Ordinary backfill can read bodies.
     backfill: bool,
+    /// Ordinary backfill serves no body below this height.
+    backfill_from: u32,
     bodies: Bodies,
     /// Trip shutdown on the first body-source read.
     cancel_on_body_read: bool,
@@ -570,6 +591,7 @@ impl Node {
         let body_store: Arc<dyn BlockBodyStore> = Arc::new(StoreBodies {
             bodies: Arc::clone(&fixture.bodies),
             serve: start.backfill,
+            from_height: start.backfill_from,
             probe: Arc::clone(&probe),
         });
         let body_source: Option<Arc<dyn BlockBodySource>> = match start.bodies {
@@ -868,6 +890,81 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
         fs::read(again.join(MANIFEST)).expect("re-exported manifest"),
         fs::read(bundle.join(MANIFEST)).expect("original manifest"),
     );
+}
+
+/// A restart restores the cumulative transaction count on the applied tip
+/// only, so a receiver that restarted and is ahead of the bundle base holds no
+/// count at the base. Restore must still prove that count from the
+/// receiver's own blocks above the base, import through the base without any
+/// backfill, and leave the blocks above it to ordinary reconciliation. A
+/// receiver whose blocks above the base cannot be read withholds the bundle.
+#[test]
+fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
+    let bundle_chain = ChainFixture::new(5, 25);
+    let receiver_chain = ChainFixture::new(7, 25).restarted();
+    let base = bundle_chain.tip.height;
+    assert!(
+        receiver_chain
+            .bodies
+            .contains_key(&(base, bundle_chain.tip.hash.to_le_bytes())),
+        "the receiver must hold the bundle's base block"
+    );
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, truth, receiver, bundle) = (
+        root.path().join("source"),
+        root.path().join("truth"),
+        root.path().join("receiver"),
+        root.path().join("bundle"),
+    );
+    let source_state = backfilled_source(&bundle_chain, &source);
+    exported_bundle(&bundle_chain, &source, &bundle);
+    let truth_state = backfilled_source(&receiver_chain, &truth);
+
+    let withheld = root.path().join("receiver-withheld");
+    let node = Node::start(
+        &receiver_chain,
+        &withheld,
+        Start {
+            bundle: restore(&bundle),
+            bodies: Bodies::Hidden(receiver_chain.tip.height),
+            ..Start::default()
+        },
+    );
+    node.wait_reconciling();
+    node.stop();
+    assert_untouched_fresh(&withheld);
+
+    let node = Node::start(
+        &receiver_chain,
+        &receiver,
+        Start {
+            bundle: restore(&bundle),
+            ..Start::default()
+        },
+    );
+    node.wait_reconciling();
+    node.stop();
+    assert_eq!(
+        durable(&receiver),
+        source_state,
+        "the bundle must be restored through its base"
+    );
+
+    let node = Node::start(
+        &receiver_chain,
+        &receiver,
+        Start {
+            backfill: true,
+            backfill_from: base + 1,
+            ..Start::default()
+        },
+    );
+    node.wait_synced(receiver_chain.tip.height);
+    for (txid, height) in &receiver_chain.txids {
+        assert_eq!(node.adapter.transaction_height(txid), Ok(Some(*height)));
+    }
+    node.stop();
+    assert_eq!(durable(&receiver), truth_state);
 }
 
 /// Corrupt, truncated, and incomplete bundles are refused before anything is

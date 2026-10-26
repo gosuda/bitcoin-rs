@@ -198,6 +198,8 @@ fn write_manifest(
 struct Captured<'a> {
     fence: IndexWriteFence,
     chain: ChainBase,
+    /// The applied tip's cumulative transaction count, which is the base's.
+    chain_tx_count: u64,
     snapshot: Box<dyn TxIndexSnapshot + 'a>,
     floor: u32,
     bodies: &'a dyn BlockBodySource,
@@ -226,6 +228,10 @@ impl<'a> Captured<'a> {
                 "the base block is not on the active chain",
             ));
         }
+        // The base is the applied tip, so no block lies above it to read.
+        let chain_tx_count = chain.counted_base().ok_or(IndexBundleError::NotReady(
+            "the chain transaction count at the base is not established",
+        ))?;
         let bodies = host
             .body_source
             .ok_or(IndexBundleError::NotReady("there is no block body source"))?;
@@ -237,6 +243,7 @@ impl<'a> Captured<'a> {
         Ok(Self {
             fence,
             chain,
+            chain_tx_count,
             snapshot,
             floor,
             bodies,
@@ -251,7 +258,7 @@ impl<'a> Captured<'a> {
             base_height: self.chain.height,
             base_hash: self.chain.hash,
             chainwork: self.chain.chainwork,
-            chain_tx_count: self.chain.chain_tx_count,
+            chain_tx_count: self.chain_tx_count,
         }
     }
 

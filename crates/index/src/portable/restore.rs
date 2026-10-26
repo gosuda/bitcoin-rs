@@ -25,7 +25,7 @@ use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
     RowAssembler, TxLookupRecord, into_digest, open_hashed,
 };
-use super::chain::{BodyReader, ChainBase, Located};
+use super::chain::{BaseCount, BodyReader, ChainBase, Located};
 use super::manifest::{
     BundleFamily, IndexBundleManifestV1, MANIFEST_FILE, MAX_MANIFEST_BYTES, ValidatedManifest,
 };
@@ -71,12 +71,17 @@ pub(super) fn restore(
     let identity = check_identity(host, request, &manifest);
     let fresh = ensure_fresh(host);
     let verify_with = match (&identity, &fresh) {
-        (Ok(chain), Ok(())) => Some(chain),
+        (Ok((chain, None)), Ok(())) => Some(chain),
         _ => None,
     };
     let (header, located) = validate_artifact(host, &artifact_path, &manifest, verify_with)?;
-    let chain = identity?;
+    let (chain, count_withheld) = identity?;
     fresh?;
+    // Without the receiver's count at the base the identity is unproven, so
+    // the locator outcome above is a placeholder and nothing activates.
+    if let Some(withheld) = count_withheld {
+        return Ok(BundleOutcome::RestoreWithheld(withheld));
+    }
     match located {
         LocatorOutcome::Verified => {}
         LocatorOutcome::Mismatch { height } => return Err(IndexBundleError::Locator { height }),
@@ -144,11 +149,15 @@ fn read_manifest(path: &Path) -> Result<IndexBundleManifestV1, IndexBundleError>
 }
 
 /// Compares the bundle's chain and format identity with the receiver's.
+///
+/// Also returns why the receiver's chain transaction count at the base could
+/// not be established, when a block body it needs is unavailable: that is a
+/// withheld bundle, not a refusal, and it is reported after every refusal.
 fn check_identity(
     host: &BundleHost<'_>,
     request: &IndexBundleRequest,
     manifest: &ValidatedManifest,
-) -> Result<ChainBase, IndexBundleError> {
+) -> Result<(ChainBase, Option<Withheld>), IndexBundleError> {
     let identity = &manifest.identity;
     let refuse = |reason: &str| IndexBundleError::Identity(reason.to_owned());
     if identity.network != request.network {
@@ -175,15 +184,19 @@ fn check_identity(
             "the receiver's chainwork differs at the bundle base",
         ));
     }
-    if chain.chain_tx_count != identity.chain_tx_count {
-        return Err(refuse(
-            "the receiver's chain transaction count differs at the bundle base",
-        ));
-    }
     if !chain.validated {
         return Err(refuse("the receiver's base block is marked invalid"));
     }
-    Ok(chain)
+    let withheld = match chain.base_count(host.block_tree, host.body_source, host.cancelled)? {
+        BaseCount::Known(count) if count != identity.chain_tx_count => {
+            return Err(refuse(
+                "the receiver's chain transaction count differs at the bundle base",
+            ));
+        }
+        BaseCount::Known(_) => None,
+        BaseCount::Withheld(withheld) => Some(withheld),
+    };
+    Ok((chain, withheld))
 }
 
 /// Restore only fills a fresh `TxLookup`; a ready index is never reset.

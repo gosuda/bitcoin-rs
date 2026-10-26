@@ -201,9 +201,11 @@ pub(crate) struct RestoreReport {
 /// Why a valid bundle was not activated.
 #[derive(Debug)]
 pub(crate) enum Withheld {
-    /// The node has no block body source to verify locators against.
+    /// The node has no block body source to verify locators or count
+    /// transactions above the base against.
     NoBodySource,
-    /// A block body the locators need is absent or pruned.
+    /// A block body that the locators, or the receiver's transaction count at
+    /// the base, need is absent or pruned.
     BodyUnavailable {
         /// Height of the missing block.
         height: u32,
