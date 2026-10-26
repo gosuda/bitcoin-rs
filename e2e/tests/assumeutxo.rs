@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
+use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::hex::FromHex as _;
 use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin::{Block, Witness};
@@ -76,31 +77,137 @@ fn reject(node: &mut ProcessNode, path: &Path, code: i64) -> Result<()> {
     Ok(())
 }
 
-fn record_import_resources(node: &ProcessNode, snapshot: &Path) -> Result<()> {
-    // Linux reports the process-wide high-water RSS, including startup. Other
-    // platforms report unavailable instead of inventing an equivalent metric.
-    let peak_rss_kib = if cfg!(target_os = "linux") {
-        std::fs::read_to_string(format!("/proc/{}/status", node.pid()))
-            .ok()
-            .and_then(|status| {
-                status.lines().find_map(|line| {
-                    line.strip_prefix("VmHWM:")?
-                        .split_whitespace()
-                        .next()?
-                        .parse::<u64>()
-                        .ok()
-                })
-            })
-    } else {
-        None
+/// Monotonic microseconds, saturating; every phase below is an `Instant` delta.
+fn micros(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Linux reports `VmRSS` (now) and `VmHWM` (process high-water, including
+/// startup). Other platforms report null instead of inventing an equivalent.
+fn memory_sample(pid: u32) -> Value {
+    if !cfg!(target_os = "linux") {
+        return Value::Null;
+    }
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return Value::Null;
     };
+    let field = |name: &str| {
+        status.lines().find_map(|line| {
+            line.strip_prefix(name)?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+    };
+    json!({"vm_rss_kib": field("VmRSS:"), "vm_hwm_kib": field("VmHWM:")})
+}
+
+/// Sets one section of `snapshot-import-resources.json`, preserving the others,
+/// so import and restart samples of one run share a single evidence file.
+fn merge_resources(evidence: &Path, section: &str, value: Value) -> Result<()> {
+    let path = evidence.join("snapshot-import-resources.json");
+    let mut document: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    document[section] = value;
+    std::fs::write(&path, serde_json::to_vec_pretty(&document)?)?;
+    Ok(())
+}
+
+/// The node's own decode/verify and activation durations for the import it just
+/// served, read from its structured stderr under one bounded deadline.
+fn node_import_phases(node: &mut ProcessNode) -> Result<Value> {
+    let log = node.evidence.join("stderr.log");
+    node.wait_for(
+        "snapshot import phase record",
+        Duration::from_secs(15),
+        |_| {
+            let Ok(text) = std::fs::read_to_string(&log) else {
+                return Ok(None);
+            };
+            Ok(text.lines().rev().find_map(|line| {
+                let record: Value = serde_json::from_str(line).ok()?;
+                (record["fields"]["message"] == "snapshot import phases")
+                    .then(|| record["fields"].clone())
+            }))
+        },
+    )
+}
+
+/// Time to the first successful lookup of an imported coin by txid, then one
+/// address-descriptor scan of the same set. The scan outcome is recorded, not
+/// asserted: only the txid lookup is a pass condition.
+fn first_indexed_queries(node: &mut ProcessNode, blocks: &[Block]) -> Result<Value> {
+    let (outpoint, _) = funding_output(&blocks[0].txdata[0])?;
+    let txid = outpoint.txid.to_string();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(15);
+    let mut polls = 0_u32;
+    loop {
+        polls += 1;
+        if !node
+            .rpc("gettxout", &json!([txid, outpoint.vout, false]))?
+            .is_null()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Assertion(
+                "imported coin never became queryable by txid".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let txid_micros = micros(started.elapsed());
+    let scan_started = Instant::now();
+    let scan = node.rpc_raw(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "scantxoutset",
+        "params": ["start", [format!("addr({})", funding_address()?)]],
+    }))?;
+    Ok(json!({
+        "gettxout_first_success_micros": txid_micros,
+        "gettxout_polls": polls,
+        "scantxoutset_addr_micros": micros(scan_started.elapsed()),
+        "scantxoutset_addr_error_code": scan["error"]["code"],
+        "scantxoutset_addr_unspents": scan["result"]["unspents"].as_array().map(Vec::len),
+    }))
+}
+
+/// Extends the import resource proof in place with the same Core-produced
+/// artifact's phases. Raw single-run samples only: there is no baseline here,
+/// so nothing in this file is a comparison or a claimed gain.
+fn record_import_resources(
+    node: &mut ProcessNode,
+    snapshot: &Path,
+    blocks: &[Block],
+    memory_before: &Value,
+    loadtxoutset_micros: u64,
+) -> Result<()> {
+    let memory_after_import = memory_sample(node.pid());
+    let phases = node_import_phases(node)?;
+    let queries = first_indexed_queries(node, blocks)?;
+    let memory_after_queries = memory_sample(node.pid());
+    let bytes = std::fs::read(snapshot)?;
     let evidence = json!({
         "platform": std::env::consts::OS,
         "architecture": std::env::consts::ARCH,
-        "snapshot_bytes": std::fs::metadata(snapshot)?.len(),
+        "snapshot_bytes": bytes.len(),
+        "snapshot_sha256": sha256::Hash::hash(&bytes).to_string(),
         "unspent_outputs": 200,
-        "process_peak_rss_kib_at_import": peak_rss_kib,
+        "process_peak_rss_kib_at_import": memory_after_import["vm_hwm_kib"],
+        "loadtxoutset_rpc_micros": loadtxoutset_micros,
+        "node_phases": phases,
+        "indexed_query": queries,
+        "memory": {
+            "before_import": memory_before,
+            "after_import": memory_after_import,
+            "after_indexed_queries": memory_after_queries,
+        },
         "scope": "Core regtest 200-height import; whole-process high-water, not incremental import RSS or mainnet qualification",
+        "comparison": "none: single-run samples of one binary; no baseline, ratio or gain is claimed",
     });
     std::fs::write(
         node.evidence.join("snapshot-import-resources.json"),
@@ -203,11 +310,21 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     assert_eq!(ordinary["chainstates"].as_array().unwrap().len(), 1);
     assert_eq!(ordinary["chainstates"][0]["validated"], true);
     admit_headers(&mut node, &blocks)?;
+    let import_evidence = node.evidence.clone();
+    let memory_before = memory_sample(node.pid());
+    let import_started = Instant::now();
     let imported = node.rpc("loadtxoutset", &json!([snapshot_path]))?;
+    let loadtxoutset_micros = micros(import_started.elapsed());
     assert_eq!(imported["coins_loaded"], 200);
     assert_eq!(imported["tip_hash"], BASE);
     assert_eq!(imported["base_height"], 200);
-    record_import_resources(&node, &snapshot_path)?;
+    record_import_resources(
+        &mut node,
+        &snapshot_path,
+        &blocks,
+        &memory_before,
+        loadtxoutset_micros,
+    )?;
     let assumed = states(&mut node)?;
     assert_eq!(assumed["headers"], 206);
     assert_eq!(assumed["chainstates"].as_array().unwrap().len(), 2);
@@ -220,8 +337,10 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
 
     reach_partial_history(&mut node, &blocks)?;
     let datadir = node.stop_keep_datadir()?;
+    let restart_started = Instant::now();
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
+    let restart_ready_micros = micros(restart_started.elapsed());
     // Recovery reconstructs coins from the retained historical archive; it
     // must not fabricate the durable cursor before that replay completes.
     let recovered = node.wait_for(
@@ -232,9 +351,22 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
             Ok((view["chainstates"][0]["blocks"] == 10).then_some(view))
         },
     )?;
+    let restart_coherent_micros = micros(restart_started.elapsed());
     assert_eq!(recovered["chainstates"][0]["blocks"], 10, "{recovered}");
     assert_eq!(recovered["chainstates"][1]["blocks"], 206, "{recovered}");
     assert_eq!(recovered["chainstates"][1]["validated"], false);
+    let restart_queries = first_indexed_queries(&mut node, &blocks)?;
+    merge_resources(
+        &import_evidence,
+        "restart",
+        json!({
+            "spawn_ready_micros": restart_ready_micros,
+            "coherent_chainstates_micros": restart_coherent_micros,
+            "indexed_query": restart_queries,
+            "memory": memory_sample(node.pid()),
+            "scope": "SIGTERM restart of the same datadir after partial historical validation; wall time from spawn to RPC ready and to the first coherent two-chainstate view",
+        }),
+    )?;
 
     // A genuine Core P2P peer supplies the remaining historical bodies.
     node.rpc("addnode", &json!([core.p2p_addr.to_string(), "onetry"]))?;
@@ -823,4 +955,51 @@ fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
     );
     node.stop()?;
     core.stop()
+}
+
+/// A directory at the final headers name fails archive publication after the
+/// coin archive exists and before the durable head names either file. The
+/// durable head is the sole authority, so the killed node restarts as an
+/// ordinary single chainstate and the same Core artifact then imports.
+#[cfg(unix)]
+#[test]
+fn interrupted_core_activation_restarts_ordinary_and_retries() -> Result<()> {
+    let datadir = tempfile::tempdir()?;
+    let snapshot = datadir.path().join("node/core200.dat");
+    let archive = datadir.path().join("node/assumeutxo").join(BASE);
+    let mut node =
+        ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
+    std::fs::write(&snapshot, CORE_SNAPSHOT)?;
+    admit_headers(&mut node, &core_blocks()?)?;
+    std::fs::create_dir_all(archive.join("headers.dat"))?;
+    let reply =
+        node.rpc_raw(&json!({"jsonrpc":"2.0","id":1,"method":"loadtxoutset","params":[snapshot]}))?;
+    assert!(!reply["error"].is_null(), "{reply}");
+    assert!(archive.join("coins.dat").is_file(), "orphan coin archive");
+    let datadir = node.take_datadir()?;
+    node.send_sigkill();
+    drop(node);
+
+    std::fs::remove_dir(archive.join("headers.dat"))?;
+    let mut node =
+        ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
+    let restarted = states(&mut node)?;
+    assert_eq!(
+        restarted["chainstates"].as_array().unwrap().len(),
+        1,
+        "{restarted}"
+    );
+    assert_eq!(
+        restarted["chainstates"][0]["validated"], true,
+        "{restarted}"
+    );
+    admit_headers(&mut node, &core_blocks()?)?;
+    let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+    assert_eq!(imported["coins_loaded"], 200);
+    assert_eq!(imported["tip_hash"], BASE);
+    let assumed = states(&mut node)?;
+    assert_eq!(assumed["chainstates"][1]["blocks"], 200, "{assumed}");
+    assert_eq!(assumed["chainstates"][1]["snapshot_blockhash"], BASE);
+    assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
+    node.stop()
 }

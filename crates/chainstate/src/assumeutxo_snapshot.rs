@@ -12,8 +12,12 @@ use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::{AssumeUtxoData, Network, consensus_bytes, deserialize};
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
+use bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState;
 use bitcoin_rs_utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
-use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed};
+use bitcoin_rs_utxo::stats::CoinStats;
+use bitcoin_rs_utxo::{
+    SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed,
+};
 
 use crate::AssumeUtxoDiskStatus;
 use crate::recovery::{InitialChainstate, ResumeSource};
@@ -233,6 +237,10 @@ fn reclaim_reservation(
 
 /// Stage durable coins before the root can name them. Uncommitted files never
 /// establish an anchor. One activation is admitted per datadir.
+///
+/// Test-only: crash fixtures stage archives without a proof. Production
+/// activation seals through `write_coins_sealed`.
+#[cfg(test)]
 pub(super) fn write_coins(
     data_dir: &Path,
     set: &UtxoSet,
@@ -249,6 +257,53 @@ pub(super) fn write_coins(
         )?;
         Ok(witness)
     })
+}
+
+/// Observer that emits an already-proven trailer without refolding `MuHash`.
+///
+/// The coins are still walked once to write them; only the per-coin hashing
+/// and totals fold is skipped. Proofless fixtures without sealed statistics
+/// keep `write_coins` (test-only).
+struct SealedTrailer([u8; 384]);
+
+impl SnapshotCoinObserver for SealedTrailer {
+    fn observe_coin(&mut self, _: SnapshotCoin<'_>) {}
+    fn select_trailer(&mut self, _: [u8; 384]) -> [u8; 384] {
+        self.0
+    }
+}
+
+/// Stage durable coins whose trailer is already sealed with the set.
+///
+/// Consumes the
+/// [`VerifiedSnapshotState`](bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState)
+/// proof and returns its parts for installation, so a mismatched
+/// set/statistics pair is unrepresentable at the call site: the proof was
+/// consumed to produce them, so no shared-reference holder
+/// (`UtxoSet::replace_from`, `contract::commit_block_changes`) could have
+/// mutated the set after sealing. The emitted trailer is
+/// `stats.muhash.finalize()`, the same bytes the recomputing `write_coins`
+/// would fold from the identical coins. Staging, locking, error propagation
+/// and call order relative to the durable commit are unchanged.
+pub(super) fn write_coins_sealed(
+    data_dir: &Path,
+    state: VerifiedSnapshotState,
+    pinned: &AssumeUtxoData,
+) -> Result<(UtxoSet, CoinStats, Option<bitcoin_rs_utxo::V4Witness>)> {
+    let (set, stats) = state.into_parts();
+    let trailer = stats.muhash.finalize();
+    let directory = archive_directory(data_dir, pinned.block_hash)?;
+    let witness = write_archive(&directory, "coins.dat", |writer| {
+        let (_, _, witness) = bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(
+            &set,
+            &pinned.block_hash,
+            pinned.height,
+            writer,
+            SealedTrailer(trailer),
+        )?;
+        Ok(witness)
+    })?;
+    Ok((set, stats, witness))
 }
 
 pub(super) fn write_headers(data_dir: &Path, tree: &BlockTree, base: &TipSnapshot) -> Result<()> {
@@ -516,6 +571,45 @@ mod tests {
         ] {
             assert_eq!(archive.read(name)?, bytes, "preserve {name}");
         }
+        Ok(())
+    }
+
+    /// The sealed writer must emit the exact bytes the recomputing writer
+    /// folds: header, records and `MuHash` trailer. The restart path rescans
+    /// and ignores the trailer, so only this comparison guards it.
+    #[test]
+    fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> Result<()> {
+        let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
+        let bare = bitcoin_rs_utxo::core_snapshot::read_and_verify(
+            &mut core.as_slice(),
+            Network::Regtest,
+            bitcoin_rs_utxo::core_snapshot::SnapshotLimits::default(),
+        )?;
+        let pinned = bare.anchor;
+        // Oracle first: borrows the set, consumes nothing.
+        let dir_old = tempfile::tempdir()?;
+        write_coins(dir_old.path(), &bare.set, pinned)?;
+        // Then seal the SAME owned set: no clone, no caller-paired parts.
+        let state =
+            bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState::verify(bare.set, pinned)?;
+        let dir_new = tempfile::tempdir()?;
+        let _ = write_coins_sealed(dir_new.path(), state, pinned)?;
+        let archive_name = pinned.block_hash.to_string();
+        let old_bytes = std::fs::read(
+            dir_old
+                .path()
+                .join(DIRECTORY)
+                .join(&archive_name)
+                .join("coins.dat"),
+        )?;
+        let new_bytes = std::fs::read(
+            dir_new
+                .path()
+                .join(DIRECTORY)
+                .join(&archive_name)
+                .join("coins.dat"),
+        )?;
+        assert_eq!(old_bytes, new_bytes);
         Ok(())
     }
 }

@@ -1029,7 +1029,9 @@ The path is rendered before activation; non-UTF-8 filesystem bytes are replaced
 only in this JSON display. Path/open failures return -8, malformed codec/trust
 failures -22, and underlying read-I/O, lifecycle, storage or settlement failures
 -32603. These explicit error-code deviations are not a full Core RPC parity
-claim. Historical validation continues through the existing P2P scheduler.
+claim. A file that repeats txid groups returns `-22`; Core 31.1 accepts it,
+reports `coins_loaded` 400, and keeps 200 unique outputs (`ARCH-07b`).
+Historical validation continues through the existing P2P scheduler.
 
 `getchainstates()` attempts lifecycle exclusion before capturing both roles.
 If activation or historical lifecycle work owns it, the query reports typed

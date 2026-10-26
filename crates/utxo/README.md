@@ -50,6 +50,18 @@ and cumulative transaction count come from the compiled pin, never the file.
 A successful result establishes pinned-state consistency; historical validation
 from genesis remains the chainstate manager's responsibility.
 
+`read_verified` shares that authentication and returns a `VerifiedCoreSnapshot`
+whose `VerifiedSnapshotState` seals the owned set with its base hash, height,
+`hash_serialized_3` and `CoinStats`. The statistics (including MuHash) are
+folded from the authenticated records while they move into the table, so
+activation needs no second commitment pass or statistics scan; a mismatching
+file never reaches the fold. `VerifiedSnapshotState::verify` is the one
+verification for a set that arrives without proof (native v4 input): it
+recomputes the commitment in one stable view and scans statistics only after
+it matched. The state exposes no `&UtxoSet`; `into_parts` consumes the proof.
+`read_and_verify` remains the proofless inspection reader for offline tools,
+fuzzing and fixtures.
+
 The portable reader does not alter the source or a datadir. It handles Core's
 txid groups, CompactSize counts/indices, subtract-one Core VARINT fields, amount
 compression and all six special script encodings. Core's uncompressed P2PK forms
@@ -63,7 +75,12 @@ aggregate decompressed script bytes, and outputs per txid before growing the
 corresponding state. Defaults are 32 GiB encoded bytes, 250 million coins,
 32 GiB aggregate scripts and one million outputs per group. Before authentication,
 strict txid order and per-group numeric-vout sorting detect duplicates without
-hashing attacker-controlled keys. A temporary vector owns the existing compact
+hashing attacker-controlled keys. The commitment covers that staged stream, so
+a file repeating txid groups is refused (`TransactionOrder`). Core 31.1 accepts
+such a file (it reports 400 loaded coins while its `gettxoutsetinfo` shows 200
+txouts with the same `hash_serialized_3` as the valid case); this is a recorded
+compatibility divergence, not a stricter-safety claim.
+A temporary vector owns the existing compact
 records; its allocation remains while authenticated payloads move into the UTXO
 hash table. Forged collision families are rejected before that insertion boundary.
 No alternate coin model or durable staging format is introduced. The EOF check

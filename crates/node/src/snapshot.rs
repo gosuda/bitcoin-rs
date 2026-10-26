@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::LatchReader;
 use bitcoin_rs_chainstate::{
@@ -19,7 +20,7 @@ use bitcoin_rs_rpc::context::{
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::{
-    CoreV2WriteReport, SnapshotError, SnapshotLimits, read_and_verify, write_core_v2,
+    CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
 };
 use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
 use parking_lot::Mutex;
@@ -474,7 +475,12 @@ impl SnapshotControl {
             return Err(SnapshotImportError::RecoveryInput);
         }
         let mut file = BufReader::new(open_regular_input(&path)?);
-        let snapshot = read_and_verify(&mut file, self.network, SnapshotLimits::default())?;
+        // The reader seals the set with the commitment and statistics folded
+        // from its authenticated records; activation consumes that proof and
+        // does not traverse the set again.
+        let read_started = Instant::now();
+        let snapshot = read_verified(&mut file, self.network, SnapshotLimits::default())?;
+        let read_verify = read_started.elapsed();
         let result = SnapshotImport {
             coins_loaded: snapshot.metadata.coins_count,
             tip_hash: snapshot.anchor.block_hash.to_string_be(),
@@ -484,11 +490,24 @@ impl SnapshotControl {
             // post-commit response error.
             path: path.to_string_lossy().into_owned(),
         };
-        self.activate(
-            snapshot.set,
-            snapshot.metadata.base_block_hash,
-            snapshot.anchor.height,
-        )?;
+        let file_bytes = snapshot.bytes_read;
+        let base_hash = snapshot.anchor.block_hash;
+        let state = snapshot.into_state();
+        let activate_started = Instant::now();
+        self.activate(base_hash, |manager| {
+            manager.activate_verified_snapshot(state)
+        })?;
+        // One structured record per successful import: the e2e resource proof
+        // reads these phases from the node's stderr JSON. No other consumer.
+        tracing::info!(
+            target: "bitcoin_rs::snapshot_import",
+            coins = result.coins_loaded,
+            file_bytes,
+            base_height = result.base_height,
+            read_verify_micros = micros(read_verify),
+            activate_micros = micros(activate_started.elapsed()),
+            "snapshot import phases"
+        );
         Ok(result)
     }
 
@@ -498,14 +517,17 @@ impl SnapshotControl {
         let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
         let snapshot = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
-        self.activate(snapshot.set, snapshot.tip_hash, snapshot.height)
+        // Native v4 input carries no proof; the manager verifies it once.
+        let base_hash = snapshot.tip_hash;
+        self.activate(base_hash, |manager| {
+            manager.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)
+        })
     }
 
     fn activate(
         &self,
-        set: bitcoin_rs_utxo::UtxoSet,
-        base_hash: bitcoin_rs_primitives::Hash256,
-        height: u32,
+        base_hash: Hash256,
+        activation: impl FnOnce(&AssumeUtxoManager) -> Result<(), AssumeUtxoError>,
     ) -> Result<(), SnapshotImportError> {
         // Take-and-drop on this early exit too: every return from `activate`
         // leaves no staged witness behind, so none can pair with a later call.
@@ -535,7 +557,7 @@ impl SnapshotControl {
             self.drop_activation_witness();
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
-        let result = self.manager.activate_snapshot_state(set, base_hash, height);
+        let result = activation(self.manager.as_ref());
         if result.is_ok() {
             self.followers.on_snapshot();
         }
@@ -672,6 +694,10 @@ impl SnapshotControl {
     }
 }
 
+fn micros(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+}
+
 // Core v31.1 keeps m_from_snapshot_blockhash after marking the snapshot
 // validated (validation.cpp:6104-6111). A failure likewise does not erase an
 // active assumed role's origin merely because the disk status is Failed.
@@ -692,6 +718,7 @@ fn active_snapshot_base(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_utxo::core_snapshot::{SnapshotError, read_and_verify};
 
     #[test]
     fn active_origin_survives_failure_and_validated_provenance_survives_finalization() {
@@ -759,26 +786,32 @@ mod tests {
         Ok(())
     }
 
-    fn snapshot_inputs(dir: &Path) -> anyhow::Result<(crate::state::NodeState, PathBuf, PathBuf)> {
+    fn node_config(dir: &Path) -> crate::NodeConfig {
         let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = dir.join("node");
         config.p2p.listen.clear();
-        let state = crate::state::NodeState::open(config, None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-            Network::Regtest.genesis_block(),
-        ))?;
+        config
+    }
+
+    fn core_headers() -> anyhow::Result<Vec<bitcoin_rs_primitives::Header>> {
         let raw: Vec<String> = serde_json::from_str(include_str!(
             "../../utxo/tests/fixtures/core-v2/blocks200.json"
         ))?;
-        let headers = raw
-            .iter()
+        raw.iter()
             .map(|hex| {
                 let block: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(hex)?;
                 bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&block.header))
                     .map_err(anyhow::Error::from)
             })
-            .collect::<anyhow::Result<Vec<bitcoin_rs_primitives::Header>>>()?;
-        state.chainstate().admit_headers(&headers)?;
+            .collect()
+    }
+
+    fn snapshot_inputs(dir: &Path) -> anyhow::Result<(crate::state::NodeState, PathBuf, PathBuf)> {
+        let state = crate::state::NodeState::open(node_config(dir), None)?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            Network::Regtest.genesis_block(),
+        ))?;
+        state.chainstate().admit_headers(&core_headers()?)?;
         let core_bytes = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
         let core_path = dir.join("core.dat");
         std::fs::write(&core_path, core_bytes)?;
@@ -1125,6 +1158,250 @@ mod tests {
             ));
         }
         assert!(!output.exists());
+        Ok(())
+    }
+
+    fn regtest_pin() -> anyhow::Result<&'static bitcoin_rs_primitives::AssumeUtxoData> {
+        Network::Regtest
+            .assume_utxo_for_height(200)
+            .ok_or_else(|| anyhow::anyhow!("regtest height-200 anchor missing"))
+    }
+
+    type ValidatingIdentity = (
+        u32,
+        bitcoin_rs_primitives::Hash256,
+        bitcoin_rs_primitives::Hash256,
+        u64,
+    );
+
+    fn validating_identity(status: &AssumeUtxoDiskStatus) -> anyhow::Result<ValidatingIdentity> {
+        match status {
+            AssumeUtxoDiskStatus::Validating {
+                base_height,
+                base_hash,
+                expected_hash_serialized,
+                chain_tx_count,
+                ..
+            } => Ok((
+                *base_height,
+                *base_hash,
+                *expected_hash_serialized,
+                *chain_tx_count,
+            )),
+            other => anyhow::bail!("expected a validating lifecycle, found {other:?}"),
+        }
+    }
+
+    fn tip_identity(
+        state: &crate::state::NodeState,
+    ) -> Option<(u32, bitcoin_rs_primitives::Hash256)> {
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| (tip.height, tip.hash))
+    }
+
+    // Activation is one linearizable writer: the lifecycle mutex plus the
+    // durable-head compare-and-swap. The sealed state needs no further
+    // consistency model because it has exactly one owner and no shared handle.
+    // Both entries must install byte-identical statistics, and the restarted
+    // node (which recomputes them from the archive) must agree.
+    #[test]
+    fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
+    -> anyhow::Result<()> {
+        let pinned = regtest_pin()?;
+        let mut installed = Vec::new();
+        for native in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+            if native {
+                state.snapshots.import_native(&native_path)?;
+            } else {
+                state.snapshots.import(&core_path)?;
+            }
+            let stats = state.chainstate().coin_stats_handle().snapshot();
+            let (commitment, mut scanned) = state.chainstate().utxo().with_stable_view(|view| {
+                Ok::<_, bitcoin_rs_utxo::UtxoError>((
+                    view.hash_serialized_3_at_height(pinned.height)?,
+                    bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+                ))
+            })?;
+            assert_eq!(commitment, pinned.hash_serialized, "native={native}");
+            scanned.tx_count = pinned.chain_tx_count;
+            assert_eq!(
+                stats.to_bytes(),
+                scanned.to_bytes(),
+                "native={native}: installed statistics equal an independent scan"
+            );
+            assert_eq!(stats.utxo_count, 200);
+            let identity = validating_identity(&state.snapshots.manager.status()?)?;
+            assert_eq!(identity.1, pinned.block_hash);
+            drop(state);
+
+            let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
+            assert_eq!(
+                resumed
+                    .chainstate()
+                    .coin_stats_handle()
+                    .snapshot()
+                    .to_bytes(),
+                stats.to_bytes(),
+                "native={native}: restart recomputation agrees with installed statistics"
+            );
+            assert_eq!(
+                validating_identity(&resumed.snapshots.manager.status()?)?,
+                identity
+            );
+            assert!(resumed.chainstate().role().is_assumed_active());
+            assert_eq!(
+                tip_identity(&resumed),
+                Some((pinned.height, pinned.block_hash))
+            );
+            assert!(
+                resumed
+                    .chainstates_summary()?
+                    .historical_chainstate
+                    .is_some()
+            );
+            installed.push(stats.to_bytes());
+        }
+        assert_eq!(
+            installed[0], installed[1],
+            "typed and proofless activation must be indistinguishable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _) = snapshot_inputs(dir.path())?;
+        let mut forged = std::fs::read(&core_path)?;
+        *forged
+            .last_mut()
+            .ok_or_else(|| anyhow::anyhow!("empty fixture"))? ^= 1;
+        let forged_path = dir.path().join("forged.dat");
+        std::fs::write(&forged_path, &forged)?;
+        let before_tip = state.chainstate().applied_tip_snapshot();
+        let before_stats = state.chainstate().coin_stats_handle().snapshot();
+        assert!(matches!(
+            state.snapshots.import(&forged_path),
+            Err(SnapshotImportError::Codec(
+                SnapshotError::CommitmentMismatch { .. }
+            ))
+        ));
+        assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+        assert_eq!(
+            state.chainstate().coin_stats_handle().snapshot(),
+            before_stats
+        );
+        assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+        assert!(matches!(
+            state.snapshots.manager.status()?,
+            AssumeUtxoDiskStatus::Uninitialized
+        ));
+        assert!(!state.chainstate().is_closed_for_recovery());
+        assert!(!dir.path().join("node/assumeutxo").exists());
+        assert_eq!(std::fs::read(&forged_path)?, forged);
+        state.snapshots.import(&core_path)?;
+        assert_eq!(tip_identity(&state).map(|tip| tip.0), Some(200));
+        Ok(())
+    }
+
+    // A set without proof is mutable through shared access (`replace_from`);
+    // the sealed type exists to forbid exactly that. The proofless entry must
+    // therefore recompute and refuse, leaving the node reusable.
+    #[test]
+    fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> anyhow::Result<()> {
+        let pinned = regtest_pin()?;
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _) = snapshot_inputs(dir.path())?;
+        let bytes = std::fs::read(&core_path)?;
+        let loaded = read_and_verify(
+            &mut bytes.as_slice(),
+            Network::Regtest,
+            SnapshotLimits::default(),
+        )?;
+        loaded.set.replace_from(bitcoin_rs_utxo::UtxoSet::new());
+        let before_tip = state.chainstate().applied_tip_snapshot();
+        let before_stats = state.chainstate().coin_stats_handle().snapshot();
+        let result = state.snapshots.manager.activate_snapshot_state(
+            loaded.set,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+        );
+        assert!(matches!(
+            result,
+            Err(AssumeUtxoError::SnapshotCommitmentMismatch { expected, .. })
+                if expected == pinned.hash_serialized
+        ));
+        assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+        assert_eq!(
+            state.chainstate().coin_stats_handle().snapshot(),
+            before_stats
+        );
+        assert!(matches!(
+            state.snapshots.manager.status()?,
+            AssumeUtxoDiskStatus::Uninitialized
+        ));
+        assert!(!state.chainstate().is_closed_for_recovery());
+        assert!(!dir.path().join("node/assumeutxo").exists());
+        state.snapshots.import(&core_path)?;
+        assert_eq!(tip_identity(&state).map(|tip| tip.0), Some(200));
+        Ok(())
+    }
+
+    // A directory at the final headers name makes archive publication fail
+    // after coins.dat was published and before any durable head names either
+    // file. The durable head is the sole authority, so the restarted node is
+    // Uninitialized again and a retry overwrites the orphan coin archive.
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> anyhow::Result<()> {
+        let pinned = regtest_pin()?;
+        let dir = tempfile::tempdir()?;
+        let (state, core_path, _) = snapshot_inputs(dir.path())?;
+        let archive = dir
+            .path()
+            .join("node/assumeutxo")
+            .join(pinned.block_hash.to_string());
+        let obstruction = archive.join("headers.dat");
+        std::fs::create_dir_all(&obstruction)?;
+        let before_tip = tip_identity(&state);
+        assert!(before_tip.is_some());
+        assert!(matches!(
+            state.snapshots.import(&core_path),
+            Err(SnapshotImportError::Activation(AssumeUtxoError::Archive(_)))
+        ));
+        assert!(state.chainstate().is_closed_for_recovery());
+        assert!(matches!(
+            state.snapshots.manager.status()?,
+            AssumeUtxoDiskStatus::Uninitialized
+        ));
+        assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+        assert_eq!(tip_identity(&state), before_tip);
+        assert!(archive.join("coins.dat").is_file(), "orphan coin archive");
+        drop(state);
+
+        std::fs::remove_dir(&obstruction)?;
+        let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
+        assert!(!resumed.chainstate().is_closed_for_recovery());
+        assert!(matches!(
+            resumed.snapshots.manager.status()?,
+            AssumeUtxoDiskStatus::Uninitialized
+        ));
+        assert_eq!(resumed.chainstate().role(), ChainstateRole::Ordinary);
+        assert_eq!(tip_identity(&resumed), before_tip);
+        resumed.chainstate().admit_headers(&core_headers()?)?;
+        resumed.snapshots.import(&core_path)?;
+        assert_eq!(tip_identity(&resumed), Some((200, pinned.block_hash)));
+        assert!(archive.join("headers.dat").is_file());
+        let mut coins = BufReader::new(File::open(archive.join("coins.dat"))?);
+        let archived = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut coins)?;
+        assert_eq!(
+            (archived.height, archived.tip_hash, archived.set.len()),
+            (pinned.height, pinned.block_hash, 200)
+        );
         Ok(())
     }
 }

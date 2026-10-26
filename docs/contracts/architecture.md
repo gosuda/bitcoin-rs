@@ -487,16 +487,40 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 - **Snapshot activation and pinned metadata**:
   Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
   Snapshot height and block hash must match pinned network metadata (`AssumeUtxoData`).
-  The manager consumes the imported set and computes its `hash_serialized_3` commitment;
-  caller-supplied digests and snapshot trailers do not establish trust. This is Core's
+  Trust is carried by `bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState`: one
+  owned `UtxoSet` sealed with the base hash, height, `hash_serialized_3` and
+  `CoinStats` derived from exactly those coins. Its fields are private, no accessor
+  lends the set (`UtxoSet::replace_from` mutates through `&self`), and only
+  `into_parts` releases the set, consuming the proof. Neither constructor accepts a
+  digest. `core_snapshot::read_verified` seals portable Core input after the
+  commitment of the staged record stream matched the compiled anchor, folding the
+  statistics from those authenticated records while they move into the hash table;
+  no statistics are computed for a mismatching file. The fold uses
+  `CoinStatsAccumulator::with_parallel_muhash`: the sealed stats equal an
+  independent scan under `to_bytes`, not necessarily under `PartialEq` on
+  `MuHash3072`. `VerifiedSnapshotState::verify`
+  recomputes the commitment from an owned set and scans statistics only after it
+  matched. `AssumeUtxoManager::activate_verified_snapshot` (portable `loadtxoutset`)
+  accepts only the state and does no second commitment pass or statistics scan.
+  `activate_snapshot_state` (native v4 embedding input, which arrives without a
+  proof) runs `verify` exactly once under the lifecycle lock, after the
+  untrusted-height, already-active, full-revalidation and base-hash refusals. Both
+  entries then compare the state's height, base hash and commitment with the
+  compiled `assume_utxo_for_height` anchor in one install step. Caller-supplied
+  digests and snapshot trailers do not establish trust. This is Core's
   `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
   active tip; it is independently checked during historical finalization. The base
   header must already exist at the pinned height, be valid, and be an ancestor
   of the current best-work header tip. The installer rechecks these facts under
   transition exclusion before the lifecycle commit. The snapshot base must carry
   strictly more cumulative work than the settled active tip; height alone does
-  not order competing branches. Coin statistics are rebuilt from
-  the imported coins, and the resolved header supplies chainwork. Installation and
+  not order competing branches. The installed coin statistics are the sealed
+  state's, derived once from the imported coins; archiving the set as native v4
+  for activation (`write_coins_sealed`) still walks the table to serialize it
+  but emits the sealed `stats.muhash.finalize()` trailer instead of refolding
+  MuHash. The recomputing `write_coins` remains as the test-only oracle for
+  proof-less crash fixtures. The
+  resolved header supplies chainwork. Installation and
   role changes serialize with chain transitions; failed validation publishes nothing.
 - **Compiled mainnet anchors and provenance**:
   `Network::Mainnet.assume_utxo_data()` supports heights 840,000, 880,000, 910,000,
@@ -514,6 +538,20 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   coverage uses a genuine Core-produced regtest-200 artifact. Compiled mainnet
   anchors alone do not establish hosted artifact availability, mainnet
   interoperability, or memory/throughput qualifications.
+  Portable input must keep Core's dump layout: one group per txid in strictly
+  increasing byte order with unique output indices, and the commitment is computed
+  over that staged stream. A file that repeats txid groups is refused before
+  activation (`SnapshotError::TransactionOrder`, RPC `-22`). Core 31.1 accepts
+  such a file built from the regtest-200 artifact: it reports `coins_loaded`
+  400 while `gettxoutsetinfo` shows 200 txouts with `hash_serialized_3`
+  `17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a`,
+  identical to the valid case. This is a recorded compatibility divergence, not
+  a stricter-safety claim. Matching Core would require the commitment and the
+  statistics fold to be taken over the de-duplicated coins view instead of the
+  stream; the trust rule itself is unchanged. No Core insert-path mechanism is
+  claimed here, only these recorded values.
+  The verified-state cutover is a single-verification ownership contract, not a
+  performance qualification: no performance gain is claimed.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target

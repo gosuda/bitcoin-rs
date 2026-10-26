@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{ApplyError, DisconnectError};
@@ -221,6 +222,20 @@ pub enum AssumeUtxoError {
     /// UTXO error.
     #[error("utxo error: {0}")]
     Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+}
+
+impl From<StateVerifyError> for AssumeUtxoError {
+    fn from(error: StateVerifyError) -> Self {
+        match error {
+            StateVerifyError::Utxo(error) => Self::Utxo(error),
+            StateVerifyError::CommitmentMismatch { expected, actual } => {
+                Self::SnapshotCommitmentMismatch {
+                    expected,
+                    found: actual,
+                }
+            }
+        }
+    }
 }
 
 /// Summary of active and background chainstates for operator reporting (e.g. `getchainstates`).
@@ -524,8 +539,11 @@ impl AssumeUtxoManager {
         )
     }
 
-    /// Activates decoded coins without coupling portable input to native recovery metadata.
-    /// Both format entry points retain the same compiled-anchor and durable checks.
+    /// Activates decoded coins that arrived without a proof (native v4 input).
+    /// The commitment and statistics are recomputed exactly once, under the
+    /// lifecycle lock; portable input uses [`Self::activate_verified_snapshot`]
+    /// and is not traversed again. Both entry points retain the same
+    /// compiled-anchor and durable checks.
     ///
     /// # Errors
     ///
@@ -544,44 +562,87 @@ impl AssumeUtxoManager {
         self.activate_pinned_snapshot(set, base_hash, pinned)
     }
 
-    // Only network-pinned metadata reaches this boundary in production. Tests
-    // use a small consensus-valid chain to exercise lifecycle transitions.
-    fn activate_pinned_snapshot(
+    /// Activates a state whose commitment and statistics were derived from its
+    /// own coins by the reader. The proof carries the base identity, so no
+    /// digest, hash or statistics are accepted beside it, and nothing is
+    /// recomputed over the set: the state was moved in and cannot have changed
+    /// since it was sealed. Only the compiled anchor for the proven height
+    /// decides trust.
+    ///
+    /// # Errors
+    ///
+    /// Rejects untrusted heights, mismatched block hashes, or mismatched
+    /// serialized UTXO commitments, then the same durable checks as
+    /// [`Self::activate_snapshot_state`].
+    pub fn activate_verified_snapshot(
         &self,
-        set: UtxoSet,
-        base_hash: Hash256,
-        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        state: VerifiedSnapshotState,
     ) -> Result<(), AssumeUtxoError> {
+        let pinned = self
+            .network
+            .assume_utxo_for_height(state.height())
+            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(state.height()))?;
         let _lifecycle = self.lifecycle.lock();
+        self.require_unactivated()?;
+        self.install_verified(state, pinned)
+    }
+
+    fn require_unactivated(&self) -> Result<(), AssumeUtxoError> {
         if !matches!(self.status()?, AssumeUtxoDiskStatus::Uninitialized) {
             return Err(AssumeUtxoError::AlreadyActive);
         }
         if crate::recovery::requires_full_revalidation(&self.data_dir) {
             return Err(AssumeUtxoError::FullRevalidationRequired);
         }
+        Ok(())
+    }
+
+    // Only network-pinned metadata reaches this boundary in production. Tests
+    // use a small consensus-valid chain to exercise lifecycle transitions.
+    fn activate_pinned_snapshot(
+        &self,
+        set: UtxoSet,
+        base_hash: Hash256,
+        pinned: &AssumeUtxoData,
+    ) -> Result<(), AssumeUtxoError> {
+        let _lifecycle = self.lifecycle.lock();
+        self.require_unactivated()?;
         if pinned.block_hash != base_hash {
             return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
                 expected: pinned.block_hash,
                 found: base_hash,
             });
         }
-
         // Core's AssumeutxoHash is HASH_SERIALIZED, not MuHash. Derive it
         // from the owned imported coins; neither a caller nor a trailer can
         // assert the commitment on behalf of the verifier.
-        let (commitment, stats) = set.with_stable_view(|view| {
-            Ok::<_, bitcoin_rs_utxo::UtxoError>((
-                view.hash_serialized_3_at_height(pinned.height)?,
-                bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
-            ))
-        })?;
-        if commitment != pinned.hash_serialized {
-            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
-                expected: pinned.hash_serialized,
-                found: commitment,
+        let state = VerifiedSnapshotState::verify(set, pinned)?;
+        self.install_verified(state, pinned)
+    }
+
+    // The lifecycle lock is held by the caller. A state is a proof about one
+    // owned set; this compares its identity with the compiled anchor, then
+    // consumes it so no later holder can mutate what was proven.
+    fn install_verified(
+        &self,
+        state: VerifiedSnapshotState,
+        pinned: &AssumeUtxoData,
+    ) -> Result<(), AssumeUtxoError> {
+        if state.height() != pinned.height {
+            return Err(AssumeUtxoError::UntrustedSnapshotHeight(state.height()));
+        }
+        if state.base_hash() != pinned.block_hash {
+            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
+                expected: pinned.block_hash,
+                found: state.base_hash(),
             });
         }
-
+        if state.hash_serialized() != pinned.hash_serialized {
+            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                expected: pinned.hash_serialized,
+                found: state.hash_serialized(),
+            });
+        }
         let genesis_hash = self.network.genesis_block_hash();
         let new_status = AssumeUtxoDiskStatus::Validating {
             base_height: pinned.height,
@@ -594,16 +655,8 @@ impl AssumeUtxoManager {
             checkpoint: None,
         };
 
-        // C4 staging: witnessed staging encode mints the witness; only the
-        // durable `Validating` commit below stages it into
-        // `pending_activation_mint`. Any earlier failure leaves it empty.
-        // Linearizability: lifecycle lock orders activation; idempotent:
-        // a failed activation never stages a witness for a later call.
-        // Dependency: `write_coins` witnessed return owned by the
-        // checkpoint-mint lane; this call site consumes its
-        // `Option<V4Witness>` staging witness once that lane lands.
-        let staging_witness: Option<bitcoin_rs_utxo::V4Witness> =
-            crate::assumeutxo_snapshot::write_coins(&self.data_dir, &set, pinned)?;
+        let (set, stats, staging_witness) =
+            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)?;
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 // Recheck under transition exclusion: disconnect/recovery may
