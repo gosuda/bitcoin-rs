@@ -792,6 +792,51 @@ impl BlockTree {
         Ok(out)
     }
 
+    /// Returns the valid nodes off the ancestry of `tip` that replay after
+    /// that ancestry without displacing `tip` as the best tip.
+    ///
+    /// A node qualifies when it is not `Invalid`, its chainwork does not exceed
+    /// `tip`'s, and its parent is on the ancestry or itself qualifies. Invalid
+    /// subtrees and branches heavier than `tip` are therefore excluded whole.
+    /// Nodes are never removed, so slab order is insertion order: the result
+    /// lists every parent before its children, and replaying the ancestry then
+    /// this list keeps every retained leaf's relative learn order. Equal-work
+    /// nodes replay after `tip` and cannot displace it, because publication
+    /// requires strictly more work.
+    pub fn replayable_side_nodes(&self, tip: NodeId) -> Result<Vec<NodeId>, ChainError> {
+        let tip_work = self.node(tip)?.chainwork;
+        let mut kept = vec![false; self.nodes.capacity()];
+        let mut cursor = Some(tip);
+        while let Some(id) = cursor {
+            let index = id.index().ok_or(ChainError::UnknownNode { id })?;
+            *kept.get_mut(index).ok_or(ChainError::UnknownNode { id })? = true;
+            cursor = self.node(id)?.parent;
+        }
+        let mut side = Vec::new();
+        for (index, node) in &self.nodes {
+            let Some(parent) = node.parent else {
+                continue;
+            };
+            let parent_index = parent
+                .index()
+                .ok_or(ChainError::UnknownNode { id: parent })?;
+            if kept[index]
+                || node.status == NodeStatus::Invalid
+                || node.chainwork > tip_work
+                || !kept.get(parent_index).copied().unwrap_or(false)
+            {
+                continue;
+            }
+            kept[index] = true;
+            side.push(
+                u32::try_from(index)
+                    .map(NodeId::new)
+                    .map_err(|_| ChainError::NodeIdOverflow { index })?,
+            );
+        }
+        Ok(side)
+    }
+
     /// Returns the parent id for a node.
     pub fn parent_id(&self, id: NodeId) -> Result<Option<NodeId>, ChainError> {
         Ok(self.node(id)?.parent)

@@ -84,6 +84,19 @@ The marker covers the authoritative surfaces:
 
 Current readers still validate magic values, versions, filenames, lengths, hashes, checksums, ancestry, tips, and semantic invariants. Those checks detect corruption in the current format. They are not compatibility or migration machinery.
 
+## Approved checkpoint header compatibility
+
+Checkpoint header artifacts have one explicit compatibility exception.
+The current writer MUST emit version 2. The current reader MAY read version 1
+or version 2 within the current datadir epoch. Version 1 contains active
+ancestry only. Version 2 also contains replayable side-branch headers.
+Both versions MUST pass the manifest, digest, ancestry, commitment, and
+historical-header validation checks. Side-header replay MUST NOT change the
+restored best tip. Unknown versions and corrupt artifacts MUST fail closed.
+The reader MUST NOT reset or convert an old artifact to make it readable.
+This exception does not authorize another legacy reader or an operator-data
+migration. All other format changes follow the schema rules below.
+
 ## Schema changes
 
 A change is breaking when a current binary cannot parse or safely interpret bytes written by another version. This includes column-family names or discriminants, key/value layouts, block-file records, undo records, and every authoritative surface that `CURRENT_SCHEMA` covers.

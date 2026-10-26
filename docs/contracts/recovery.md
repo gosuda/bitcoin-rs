@@ -399,7 +399,9 @@ tests.
 
 - The changed durable format requires an increment of `CURRENT_SCHEMA` for
   the authoritative chainstate bytes. Keep no translator, no legacy reader,
-  and no in-place converter.
+  and no in-place converter. The one approved exception is the version-1
+  checkpoint header artifact, still read as described in "Checkpoint header
+  artifact and side branches" below.
 - An incompatible datadir returns `incompatible_schema` at open. Existing
   operator datadirs stay untouched. A fresh replay uses a separately named
   directory with explicit resync instructions.
@@ -521,6 +523,37 @@ durable.
   (`bitcoin-core/src/validation.cpp:4792-4880`). An interrupted disconnect
   is replayed, not deleted.
 
+### Checkpoint header artifact and side branches
+
+The checkpoint header artifact restores the block tree, not only the active
+chain. `crates/chainstate/src/checkpoint/headers.rs` owns its layout; the
+manifest-bound artifact SHA-256 authenticates every byte, and no other file
+persists branch state.
+
+- Version 2 is written: the active ancestry of the selected best tip, then
+  every tree node off that ancestry that is not `Invalid`, whose chainwork
+  does not exceed the selected best tip, and whose parent is retained
+  (`BlockTree::replayable_side_nodes`), in insertion order. Invalid subtrees
+  and branches heavier than the selected tip are excluded whole, so the
+  restored tree selects the same best and applied tips as an active-only
+  restore. Manifest `header_count` and both chain commitments still cover
+  only the active ancestry.
+- Restore replays the side section after the authenticated active section
+  through the same historical contextual header validation. Each side header
+  must add one new node under a restored valid parent and must not displace
+  the best tip; a wrong length, duplicate or orphan header, failed
+  validation, displaced tip, or manifest/artifact version mismatch is a
+  corrupt checkpoint. Side nodes restore as header-valid with unknown chain
+  transaction counts. Replay keeps their relative insertion order, which the
+  stale-tip retainer uses as learn order.
+- Version 1 (active ancestry only) remains readable and restores no side
+  branches; the next publication writes version 2. No datadir epoch changes
+  and no existing checkpoint is rewritten or deleted on load. A binary that
+  predates version 2 refuses a version-2 checkpoint as corrupt, so downgrade
+  needs a fresh resync into a separate datadir.
+- Journal replay reuses a restored node with the record's hash and parent
+  instead of inserting a duplicate, as block connection does.
+
 ## Proven by
 
 - `crates/chainstate/src/durable.rs`: owns the durable-head
@@ -627,9 +660,14 @@ durable.
   `legacy_datadir_with_no_rows_falls_back_to_the_requested_line`).
 - Checkpoint publication and recovery:
   `crates/chainstate/src/checkpoint/tests/` covers consensus-valid active-chain
-  replay, applied-ancestry selection, competing-fork rejection, and
+  replay, applied-ancestry selection, heavier-fork exclusion, and
   immutable-generation resume, including
-  `failed_publication_preserves_current`;
+  `failed_publication_preserves_current`; `side_branches.rs` covers
+  side-branch restart retention in learn order, invalid-subtree exclusion,
+  version-1 loading, and side-section corruption, and
+  `crates/chainstate/tests/unit/chainstate_journal_replay.rs`
+  `replay_reuses_a_header_the_checkpoint_tree_already_holds` covers journal
+  replay over a restored node;
   `crates/chainstate/tests/unit/checkpoint_debt_tests.rs`
   `checkpoint_refuses_inflight_disconnect_and_preserves_state` proves an
   `InFlight` marker refuses publication with marker, `CURRENT`, and

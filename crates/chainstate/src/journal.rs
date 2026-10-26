@@ -227,11 +227,35 @@ fn insert_replayed_header(
                 bitcoin_rs_primitives::encode::hex_encode(&record.prev_hash)
             ))
         })?;
-    let node_id = tree
-        .insert_node(Some(parent), header, NodeStatus::HeaderValid)
-        .map_err(|error| {
-            JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
-        })?;
+    // The checkpoint tree may already hold this header: on the best-header
+    // ancestry above the applied tip, or on a retained side branch a later
+    // reorg activated. The hash binds the header and its parent, so the
+    // existing node is the same block; reuse it as block connection does.
+    let node_id = match tree.lookup(Hash256::from_le_bytes(&record.block_hash)) {
+        Some(existing) => {
+            let node = tree.node(existing).map_err(|error| {
+                JournalReplayError::HeaderRebuildRejected(format!(
+                    "height {}: {error}",
+                    record.height
+                ))
+            })?;
+            if node.parent != Some(parent) || node.status == NodeStatus::Invalid {
+                return Err(JournalReplayError::HeaderRebuildRejected(format!(
+                    "height {}: restored node is invalid or has another parent",
+                    record.height
+                )));
+            }
+            existing
+        }
+        None => tree
+            .insert_node(Some(parent), header, NodeStatus::HeaderValid)
+            .map_err(|error| {
+                JournalReplayError::HeaderRebuildRejected(format!(
+                    "height {}: {error}",
+                    record.height
+                ))
+            })?,
+    };
     tree.restore_chain_tx_count(node_id, ChainTxCount::from_wire(chain_tx_count))
         .map_err(|error| {
             JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))

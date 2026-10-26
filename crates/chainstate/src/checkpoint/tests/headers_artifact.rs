@@ -66,11 +66,11 @@ fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Regression coverage for the headers-v1 wire contract in
+/// Regression coverage for the header-artifact wire contract in
 /// `crates/chainstate/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
-/// magic at bytes 0..8, version at 8..12, and count at 48..56; `checkpoint_size`
-/// and `read_headers` require the encoded length to contain exactly the prefix
-/// plus 80-byte headers. Keep these offsets tied to that authoritative codec
+/// magic at bytes 0..8, version at 8..12, and count at 48..56; `read_headers`
+/// requires the encoded length to contain exactly the prefix, the 80-byte active
+/// headers, and the side section. Keep these offsets tied to that authoritative codec
 /// contract rather than treating them as incidental test fixture details.
 #[test]
 fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
@@ -280,7 +280,7 @@ fn authenticated_inner_header_version_is_fatal() -> Result<(), Box<dyn std::erro
         Some(&applied_tip),
     )?;
     mutate_authenticated_artifact(dir.path(), HEADERS_FILE, |bytes| {
-        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(headers::HEADER_VERSION + 1).to_le_bytes());
     })?;
 
     assert!(matches!(

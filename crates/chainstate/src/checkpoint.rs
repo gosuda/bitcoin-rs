@@ -187,9 +187,9 @@ fn load_opened_checkpoint(
         },
     )
     .map_err(|error| classify_checkpoint_error(error.into()))?;
-    if manifest.headers.version != headers::HEADER_VERSION {
+    if !headers::is_readable_version(manifest.headers.version) {
         return Err(corrupt_checkpoint(format!(
-            "headers checkpoint version {} is not current",
+            "headers checkpoint version {} is not supported",
             manifest.headers.version
         )));
     }
@@ -206,7 +206,7 @@ fn load_opened_checkpoint(
             actual,
         })) => {
             return Err(corrupt_checkpoint(format!(
-                "headers checkpoint version {actual} is not current"
+                "headers checkpoint version {actual} is not supported"
             )));
         }
         // Header loading failed for a non-version corruption or I/O reason.
@@ -287,6 +287,7 @@ fn load_headers(
     )
     .map_err(CheckpointError::Store)?;
     let expected = headers::HeaderCheckpointMetadata {
+        version: manifest.headers.version,
         header_count: manifest.headers.header_count,
         best: parse_tip(&manifest.best_header_tip)?,
         applied: parse_tip(&manifest.applied_tip)?,
@@ -660,7 +661,7 @@ pub(crate) fn write_checkpoint_from_dir_at(
         headers: HeadersArtifactV1 {
             file: HEADERS_FILE.to_owned(),
             codec: HEADER_CODEC.to_owned(),
-            version: headers::HEADER_VERSION,
+            version: headers_meta.metadata.version,
             bytes: headers_digest.bytes,
             sha256: hex_encode(&headers_digest.sha256),
             header_count: headers_meta.metadata.header_count,

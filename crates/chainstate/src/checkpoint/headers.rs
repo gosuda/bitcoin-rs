@@ -1,4 +1,19 @@
 //! Canonical header-checkpoint representation and validation.
+//!
+//! Version 2 (written) layout, all integers little-endian:
+//!
+//! - 56-byte prefix: magic, version, network magic, genesis hash, and the
+//!   active header count.
+//! - The active ancestry of the selected best tip, genesis first, as
+//!   80-byte headers. The manifest commitments cover only this section.
+//! - `u64` side-header count, then that many 80-byte headers: every valid
+//!   tree node off the active ancestry whose chainwork does not exceed the
+//!   selected best tip, in tree insertion order, so each parent precedes its
+//!   children and the restored slab keeps the original learn order.
+//!
+//! Version 1 (read only) is the same prefix and active section with no side
+//! section; it restores the active ancestry alone. The artifact SHA-256 in
+//! the manifest authenticates every byte of either version.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -8,9 +23,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const HEADER_MAGIC: [u8; 8] = *b"BRSHEAD\0";
-pub(super) const HEADER_VERSION: u32 = 1;
+/// Version written by this node: active ancestry plus retained side branches.
+pub(super) const HEADER_VERSION: u32 = 2;
+/// Earlier active-ancestry-only version, still read without side branches.
+pub(super) const ACTIVE_ONLY_HEADER_VERSION: u32 = 1;
 pub(super) const HEADER_PREFIX_LEN: usize = 56;
 const HEADER_LEN: usize = Header::LEN;
+const SIDE_COUNT_LEN: u64 = 8;
 const BEST_CHAIN_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/best\0";
 const APPLIED_PREFIX_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/applied\0";
 
@@ -35,6 +54,9 @@ pub(crate) struct HeaderCheckpointTip {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HeaderCheckpointMetadata {
+    /// Artifact version the manifest binds.
+    pub(crate) version: u32,
+    /// Active-ancestry header count; side headers are not counted.
     pub(crate) header_count: u64,
     pub(crate) best: HeaderCheckpointTip,
     pub(crate) applied: HeaderCheckpointTip,
@@ -75,6 +97,14 @@ pub enum HeaderCheckpointError {
     BadMagic,
     #[error("header checkpoint version {actual} is unsupported")]
     UnsupportedVersion { actual: u32 },
+    #[error("header checkpoint version {artifact} does not match manifest version {manifest}")]
+    VersionMismatch { manifest: u32, artifact: u32 },
+    #[error("header checkpoint side header {index} does not add a new tree node")]
+    MalformedSideBranch { index: u64 },
+    #[error("header checkpoint side branches displaced the checkpoint best tip")]
+    SideBranchDisplacedBestTip,
+    #[error("header checkpoint side count {count} exceeds the tree node-id domain")]
+    SideCountExceedsNodeDomain { count: u64 },
     #[error("header checkpoint network magic does not match configured network")]
     NetworkMismatch,
     #[error("header checkpoint genesis does not match configured genesis")]
@@ -137,7 +167,6 @@ fn write_headers_inner<W: Write + ?Sized>(
     ancestry.reverse();
     let count = u64::try_from(ancestry.len())
         .map_err(|_| HeaderCheckpointError::SizeOverflow { count: u64::MAX })?;
-    let bytes_written = checkpoint_size(count)?;
 
     let root = tree.node(
         *ancestry
@@ -164,6 +193,10 @@ fn write_headers_inner<W: Write + ?Sized>(
         return Err(HeaderCheckpointError::AppliedTipNotBestPrefix);
     }
     let applied = tip_from_node(tree, applied_id)?;
+    let side = tree.replayable_side_nodes(best_tip_id)?;
+    let side_count = u64::try_from(side.len())
+        .map_err(|_| HeaderCheckpointError::SizeOverflow { count: u64::MAX })?;
+    let bytes_written = side_section_end(count, side_count)?;
 
     writer.write_all(&prefix(config, count))?;
     let mut best_hasher = Sha256::new();
@@ -185,9 +218,14 @@ fn write_headers_inner<W: Write + ?Sized>(
             applied_hasher.update(encoded);
         }
     }
+    writer.write_all(&side_count.to_le_bytes())?;
+    for node_id in side {
+        writer.write_all(&encode_header(&tree.node(node_id)?.header)?)?;
+    }
 
     Ok(HeaderCheckpointWrite {
         metadata: HeaderCheckpointMetadata {
+            version: HEADER_VERSION,
             header_count: count,
             best,
             applied,
@@ -204,34 +242,140 @@ pub(crate) fn read_headers<R: Read + Seek>(
     expected: HeaderCheckpointMetadata,
 ) -> Result<RestoredHeaders, HeaderCheckpointError> {
     validate_config(config)?;
-    let expected_size = checkpoint_size(expected.header_count)?;
+    if !is_readable_version(expected.version) {
+        return Err(HeaderCheckpointError::UnsupportedVersion {
+            actual: expected.version,
+        });
+    }
+    let sizes = resolve_artifact_sizes(reader, &expected)?;
+    let count = verify_artifact_prefix(reader, config, &expected)?;
+    let mut active = replay_active_headers(reader, config, &expected, count)?;
+    let applied_tip_id = verify_active_against_manifest(
+        &active.tree,
+        active.best_tip_id,
+        &expected,
+        active.best_chain_commitment,
+        active.applied_prefix_commitment,
+    )?;
+    restore_side_branches(
+        reader,
+        &mut active.tree,
+        config,
+        sizes.active_end,
+        sizes.side_count,
+        active.best_tip_id,
+    )?;
+    Ok(RestoredHeaders {
+        tree: active.tree,
+        applied_tip_id,
+    })
+}
+
+/// Byte bounds resolved before any header is replayed.
+struct ResolvedArtifactSizes {
+    active_end: u64,
+    side_count: u64,
+}
+
+/// Checks the total length first, reading the side count only when the file
+/// is long enough to hold it, so truncation is a length error.
+fn resolve_artifact_sizes<R: Read + Seek>(
+    reader: &mut R,
+    expected: &HeaderCheckpointMetadata,
+) -> Result<ResolvedArtifactSizes, HeaderCheckpointError> {
+    let active_end = checkpoint_size(expected.header_count)?;
     reader.seek(SeekFrom::Start(0))?;
     let actual_size = reader.seek(SeekFrom::End(0))?;
+    let side_count = if expected.version == ACTIVE_ONLY_HEADER_VERSION {
+        0
+    } else {
+        let side_count_end =
+            active_end
+                .checked_add(SIDE_COUNT_LEN)
+                .ok_or(HeaderCheckpointError::SizeOverflow {
+                    count: expected.header_count,
+                })?;
+        if actual_size < side_count_end {
+            return Err(HeaderCheckpointError::InvalidFileLength {
+                actual: actual_size,
+                expected: side_count_end,
+            });
+        }
+        reader.seek(SeekFrom::Start(active_end))?;
+        let mut encoded = [0_u8; 8];
+        reader.read_exact(&mut encoded)?;
+        u64::from_le_bytes(encoded)
+    };
+    let expected_size = if expected.version == ACTIVE_ONLY_HEADER_VERSION {
+        active_end
+    } else {
+        side_section_end(expected.header_count, side_count)?
+    };
     if actual_size != expected_size {
         return Err(HeaderCheckpointError::InvalidFileLength {
             actual: actual_size,
             expected: expected_size,
         });
     }
-    reader.seek(SeekFrom::Start(0))?;
+    Ok(ResolvedArtifactSizes {
+        active_end,
+        side_count,
+    })
+}
 
+/// Binds the artifact bytes to the manifest after the length check: the
+/// artifact version must equal the manifest version, then the count.
+fn verify_artifact_prefix<R: Read + Seek>(
+    reader: &mut R,
+    config: HeaderCheckpointConfig,
+    expected: &HeaderCheckpointMetadata,
+) -> Result<u64, HeaderCheckpointError> {
+    reader.seek(SeekFrom::Start(0))?;
     let mut encoded_prefix = [0_u8; HEADER_PREFIX_LEN];
     reader.read_exact(&mut encoded_prefix)?;
-    let count = parse_prefix(encoded_prefix, config)?;
+    let (version, count) = parse_prefix(encoded_prefix, config)?;
+    if version != expected.version {
+        return Err(HeaderCheckpointError::VersionMismatch {
+            manifest: expected.version,
+            artifact: version,
+        });
+    }
     if count != expected.header_count {
         return Err(HeaderCheckpointError::CountMismatch {
             actual: count,
             expected: expected.header_count,
         });
     }
+    Ok(count)
+}
 
+/// The replayed active ancestry with its recomputed commitments.
+struct ActiveReplay {
+    tree: BlockTree,
+    best_tip_id: NodeId,
+    best_chain_commitment: [u8; 32],
+    applied_prefix_commitment: [u8; 32],
+}
+
+/// Replays exactly `count` headers from after the prefix with the same
+/// historical contextual validation, in height order without gaps.
+fn replay_active_headers<R: Read + Seek>(
+    reader: &mut R,
+    config: HeaderCheckpointConfig,
+    expected: &HeaderCheckpointMetadata,
+    count: u64,
+) -> Result<ActiveReplay, HeaderCheckpointError> {
+    reader.seek(SeekFrom::Start(u64::try_from(HEADER_PREFIX_LEN).map_err(
+        |_| HeaderCheckpointError::SizeOverflow {
+            count: expected.header_count,
+        },
+    )?))?;
     let mut tree = BlockTree::new();
     let mut best_hasher = Sha256::new();
     best_hasher.update(BEST_CHAIN_DOMAIN);
     let mut applied_hasher = Sha256::new();
     applied_hasher.update(APPLIED_PREFIX_DOMAIN);
     let mut last_id = None;
-
     for index in 0..usize::try_from(count)
         .map_err(|_| HeaderCheckpointError::CountDoesNotFitUsize { count })?
     {
@@ -263,33 +407,121 @@ pub(crate) fn read_headers<R: Read + Seek>(
         }
         last_id = Some(id);
     }
-
     let best_tip_id = last_id.ok_or(HeaderCheckpointError::ZeroHeaderCount)?;
-    let best = tip_from_node(&tree, best_tip_id)?;
+    Ok(ActiveReplay {
+        tree,
+        best_tip_id,
+        best_chain_commitment: best_hasher.finalize().into(),
+        applied_prefix_commitment: applied_hasher.finalize().into(),
+    })
+}
+
+/// Checks the replayed active chain against the manifest: best tip identity,
+/// applied-tip prefix, then both commitments.
+fn verify_active_against_manifest(
+    tree: &BlockTree,
+    best_tip_id: NodeId,
+    expected: &HeaderCheckpointMetadata,
+    best_chain_commitment: [u8; 32],
+    applied_prefix_commitment: [u8; 32],
+) -> Result<NodeId, HeaderCheckpointError> {
+    let best = tip_from_node(tree, best_tip_id)?;
     if tree.tip_id() != Some(best_tip_id) || best != expected.best {
         return Err(HeaderCheckpointError::MetadataMismatch);
     }
     let applied_tip_id = tree
         .lookup(expected.applied.hash)
         .ok_or(HeaderCheckpointError::AppliedTipNotBestPrefix)?;
-    let applied_tip = tip_from_node(&tree, applied_tip_id)?;
+    let applied_tip = tip_from_node(tree, applied_tip_id)?;
     if applied_tip != expected.applied
         || tree.node_at_height_from(best_tip_id, expected.applied.height) != Some(applied_tip_id)
     {
         return Err(HeaderCheckpointError::AppliedTipNotBestPrefix);
     }
-    let best_chain_commitment: [u8; 32] = best_hasher.finalize().into();
-    let applied_prefix_commitment: [u8; 32] = applied_hasher.finalize().into();
     if best_chain_commitment != expected.best_chain_commitment
         || applied_prefix_commitment != expected.applied_prefix_commitment
     {
         return Err(HeaderCheckpointError::CommitmentMismatch);
     }
+    Ok(applied_tip_id)
+}
 
-    Ok(RestoredHeaders {
-        tree,
-        applied_tip_id,
-    })
+/// Replays the side section after the authenticated active chain and confirms
+/// the best tip did not move.
+fn restore_side_branches<R: Read + Seek>(
+    reader: &mut R,
+    tree: &mut BlockTree,
+    config: HeaderCheckpointConfig,
+    active_end: u64,
+    side_count: u64,
+    best_tip_id: NodeId,
+) -> Result<(), HeaderCheckpointError> {
+    if side_count == 0 {
+        return Ok(());
+    }
+    reader.seek(SeekFrom::Start(active_end + SIDE_COUNT_LEN))?;
+    replay_side_headers(reader, tree, config, side_count)?;
+    if tree.tip_id() != Some(best_tip_id) {
+        return Err(HeaderCheckpointError::SideBranchDisplacedBestTip);
+    }
+    Ok(())
+}
+
+/// Whether this node reads header artifacts of `version`.
+pub(super) const fn is_readable_version(version: u32) -> bool {
+    version == HEADER_VERSION || version == ACTIVE_ONLY_HEADER_VERSION
+}
+
+/// Replays side headers after the authenticated active ancestry. Each must
+/// pass the same historical contextual validation and add exactly one new
+/// node under an already restored, valid parent.
+fn replay_side_headers<R: Read>(
+    reader: &mut R,
+    tree: &mut BlockTree,
+    config: HeaderCheckpointConfig,
+    side_count: u64,
+) -> Result<(), HeaderCheckpointError> {
+    for index in 0..side_count {
+        let mut encoded = [0_u8; HEADER_LEN];
+        reader.read_exact(&mut encoded)?;
+        let header: Header = deserialize(&encoded)
+            .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
+        let before = tree.len();
+        accept_headers(
+            tree,
+            core::slice::from_ref(&header),
+            config.network,
+            0,
+            bitcoin_rs_chain::HeaderValidationMode::HistoricalReplay,
+        )?;
+        if tree.len() != before + 1 {
+            return Err(HeaderCheckpointError::MalformedSideBranch { index });
+        }
+    }
+    Ok(())
+}
+
+/// Byte length of a version-2 artifact: the active section, the side count,
+/// and `side_count` headers. Active and side nodes share the `u32` node-id
+/// domain of the tree they restore.
+fn side_section_end(count: u64, side_count: u64) -> Result<u64, HeaderCheckpointError> {
+    let active_end = checkpoint_size(count)?;
+    if count
+        .checked_add(side_count)
+        .is_none_or(|total| total > u64::from(u32::MAX) + 1)
+    {
+        return Err(HeaderCheckpointError::SideCountExceedsNodeDomain { count: side_count });
+    }
+    let header_len = u64::try_from(HEADER_LEN)
+        .map_err(|_| HeaderCheckpointError::SizeOverflow { count: side_count })?;
+    side_count
+        .checked_mul(header_len)
+        .and_then(|side_len| {
+            active_end
+                .checked_add(SIDE_COUNT_LEN)?
+                .checked_add(side_len)
+        })
+        .ok_or(HeaderCheckpointError::SizeOverflow { count: side_count })
 }
 
 fn validate_config(config: HeaderCheckpointConfig) -> Result<(), HeaderCheckpointError> {
@@ -340,12 +572,12 @@ pub(super) fn prefix(config: HeaderCheckpointConfig, count: u64) -> [u8; HEADER_
 fn parse_prefix(
     encoded: [u8; HEADER_PREFIX_LEN],
     config: HeaderCheckpointConfig,
-) -> Result<u64, HeaderCheckpointError> {
+) -> Result<(u32, u64), HeaderCheckpointError> {
     if encoded[..8] != HEADER_MAGIC {
         return Err(HeaderCheckpointError::BadMagic);
     }
     let version = u32::from_le_bytes([encoded[8], encoded[9], encoded[10], encoded[11]]);
-    if version != HEADER_VERSION {
+    if !is_readable_version(version) {
         return Err(HeaderCheckpointError::UnsupportedVersion { actual: version });
     }
     if encoded[12..16] != config.network.magic() {
@@ -365,7 +597,7 @@ fn parse_prefix(
         encoded[55],
     ]);
     checkpoint_size(count)?;
-    Ok(count)
+    Ok((version, count))
 }
 
 fn tip_from_node(
