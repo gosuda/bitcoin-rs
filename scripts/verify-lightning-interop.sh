@@ -88,18 +88,23 @@ check_binary_version() {
 kill_bounded() {
   local pid
   pid="$1"
-  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+  if [[ -z "${pid}" ]]; then
     return 0
   fi
-  kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
-  local deadline
-  deadline=$((SECONDS + 5))
-  while (( SECONDS < deadline )) && kill -0 "${pid}" 2>/dev/null; do
-    sleep 0.1
-  done
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
-    sleep 0.1
+  # Signal the whole process group: the leader may already have exited (e.g. a refused
+  # lightningd) while its plugins/subdaemons still run. `kill -0` on the group succeeds while
+  # any member exists, so an exited leader no longer skips the group kill.
+  if kill -0 "${pid}" 2>/dev/null || kill -0 -- "-${pid}" 2>/dev/null; then
+    kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    local deadline
+    deadline=$((SECONDS + 5))
+    while (( SECONDS < deadline )) && { kill -0 "${pid}" 2>/dev/null || kill -0 -- "-${pid}" 2>/dev/null; }; do
+      sleep 0.1
+    done
+    if kill -0 "${pid}" 2>/dev/null || kill -0 -- "-${pid}" 2>/dev/null; then
+      kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+      sleep 0.1
+    fi
   fi
   wait "${pid}" 2>/dev/null || true
 }
@@ -170,6 +175,18 @@ declare -A CLN_RELEASE_ARCHIVE_SHA256=(
 
 BUILD_PROVENANCE_SCHEMA="bitcoin-rs-lightning-build-provenance-v1"
 
+# Minimum getnetworkinfo.version the unmodified bcli plugin of the pinned v26.06.9 release accepts:
+# the digest-verified Ubuntu 26.04 amd64 libexec/c-lightning/plugins/bcli loads 0x35b60 (220000)
+# as the second argument of plugin_err("Unsupported bitcoind version %u, at least %u required.").
+# Recorded for classification only; the runner never alters what bitcoin-rs reports.
+CLN_BCLI_MIN_VERSION=220000
+# Exact first line `bitcoind --version` must print before Core is used as the differential comparator
+# (observed for /home/alpha/bitcoin-core-31.1/bin/bitcoind in lightning-live-lnd/parent-live-4/preflight.json).
+CORE_COMPARATOR_VERSION_LINE="Bitcoin Core daemon version v31.1.0 bitcoind"
+# Single regtest mining payout address shared by the bitcoin-rs bootstrap, the Core comparator
+# bootstrap, and the CLN block-detection mine (one literal, no drift).
+MINING_PAYOUT_ADDR="bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+
 # Target classification constants
 VALID_TARGETS=("all" "ldk-server" "lampo" "lnd" "cln" "alby-hub" "fedimint" "ldk-node" "lexe" "lightning-kmp" "eclair")
 
@@ -194,9 +211,21 @@ LND_BIN=""
 LNCLI_BIN=""
 CLN_BIN=""
 CLN_RELEASE_ARCHIVE=""
+# Colon-separated private runtime library directories prepended to LD_LIBRARY_PATH for CLN commands only.
+CLN_LIBRARY_PATH=""
 ALBY_HUB_BIN=""
 FEDIMINTD_BIN=""
 ECLAIR_BIN=""
+
+# bitcoin-rs source identity: the checkout whose tracked and untracked build inputs the node binary
+# must not be older than (default: the checkout holding this script).
+BITCOIN_RS_SOURCE=""
+ALLOW_STALE_BITCOIN_RS=0
+SOURCE_IDENTITY_JSON=""
+# Core comparator identity: set to 1 only after `bitcoind --version` (scratch datadir) printed
+# CORE_COMPARATOR_VERSION_LINE; start_core_comparator refuses otherwise.
+CORE_COMPARATOR_VERIFIED=0
+CORE_IDENTITY_JSON=""
 
 # Track child PIDs for safe cleanup
 RS_PID=""
@@ -250,6 +279,14 @@ Options:
                                (default: mktemp -d /tmp/lightning-interop.XXXXXX)
   --keep                       Compatibility flag (workdir and logs are preserved unconditionally)
   --timeout-seconds <n>        Operation timeout in seconds (default: 120)
+  --bitcoin-rs-source <dir>    Checkout the --bitcoin-rs-bin was built from (default: the checkout
+                               holding this script). Before a live run the runner hashes every tracked
+                               and untracked (not ignored) build input (Cargo.toml, Cargo.lock,
+                               rust-toolchain.toml, .cargo/, bin/, crates/) into
+                               bitcoin-rs-source-identity.json and refuses (exit 1) when any input is
+                               newer than the binary, a tracked input is missing, or git cannot list them
+  --allow-stale-bitcoin-rs     Run anyway when that guard fails; the evidence JSON records
+                               stale_allowed=true and the binary is not tied to the recorded sources
 
 Target binary overrides:
   --ldk-server-bin <path>      Path to ldk-server executable (pinned commit c17dc11)
@@ -266,6 +303,10 @@ Target binary overrides:
   --lncli-bin <path>           Path to lncli executable (for lnd RPC qualification); used only
                                when its sha256 equals the upstream manifest value
   --cln-bin <path>             Path to lightningd executable (pinned v26.06.9)
+  --cln-library-path <dirs>    Colon-separated private runtime library directories (for example an
+                               extracted, not installed, libpq5) prepended to LD_LIBRARY_PATH only for
+                               ldd, --version, lightningd and lightning-cli; an inherited
+                               LD_LIBRARY_PATH is kept after them
   --alby-hub-bin <path>        Path to albyhub executable
   --fedimintd-bin <path>       Path to fedimintd executable
   --eclair-bin <path>          Path to eclair-node executable
@@ -277,7 +318,8 @@ Exit status:
        selected ldk-server/lampo/lnd/cln target is PIN-ACCEPTED
   1    usage or prerequisite error before any target ran: unknown option or target, an option
        without its value, missing or non-executable --bitcoin-rs-bin, invalid --timeout-seconds,
-       or setsid/timeout missing
+       a missing --cln-library-path directory, setsid/timeout missing, or the bitcoin-rs source
+       identity guard failed (see --bitcoin-rs-source)
   2    --verify-pins-only only: a selected ldk-server/lampo/lnd/cln target is PIN-REJECTED,
        PIN-HOST-BLOCKED or PIN-UNPROVISIONED
   130  interrupted (INT); 143 terminated (TERM)
@@ -451,6 +493,251 @@ accept_pin() {
 
 resolve_executable() {
   command -v -- "$1" || true
+}
+
+# Runs only the supplied foreground CLN helper/process/read probe with CLN_LIBRARY_PATH prepended
+# to LD_LIBRARY_PATH. The `env` prefix scopes the loader path to this single command without a
+# subshell and without touching the shell's own environment, so bitcoin-rs, Core, and target
+# RPC/ZMQ probes in the parent shell never see the private library path. Foreground only: never
+# wrap a background (`&`) spawn, whose $! must stay lightningd itself (use
+# cln_export_library_path/cln_unexport_library_path around a bare spawn).
+run_cln_command() {
+  if [[ -z "${CLN_LIBRARY_PATH}" ]]; then
+    "$@"
+    return
+  fi
+  # Prefix assignment, not env(1): bash also applies it to shell-function calls, so the
+  # loader path reaches the ldd/version probes and external commands alike for this call.
+  LD_LIBRARY_PATH="${CLN_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" "$@"
+}
+
+# Brackets a bare background spawn of lightningd: prepends CLN_LIBRARY_PATH to LD_LIBRARY_PATH in
+# the current shell (so $! stays lightningd itself and the setsid session/group bookkeeping in
+# kill_bounded and cln_record_identity is exact), then restores the previous value immediately
+# after $! is captured. The background child inherits its environment at fork time, so the restore
+# cannot race it. Must be called directly, never inside $().
+cln_export_library_path() {
+  CLN_SAVED_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-__unset__}"
+  if [[ -n "${CLN_LIBRARY_PATH}" ]]; then
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+      LD_LIBRARY_PATH="${CLN_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
+    else
+      LD_LIBRARY_PATH="${CLN_LIBRARY_PATH}"
+    fi
+    export LD_LIBRARY_PATH
+  fi
+}
+cln_unexport_library_path() {
+  if [[ "${CLN_SAVED_LD_LIBRARY_PATH}" == "__unset__" ]]; then
+    unset LD_LIBRARY_PATH
+  else
+    LD_LIBRARY_PATH="${CLN_SAVED_LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
+  fi
+}
+
+# True only while the pid exists and is not a zombie (an exited-but-unreaped child still answers
+# kill -0; its /proc/<pid>/stat state is Z, so waiting on it would fake a live daemon).
+pid_alive() {
+  local pid
+  pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  local stat
+  stat=$(cat "/proc/${pid}/stat" 2>/dev/null || true)
+  [[ -n "${stat}" ]] || return 1
+  stat="${stat##*) }"
+  local state
+  state=$(printf '%s' "${stat}" | awk '{print $1}')
+  [[ "${state}" != "Z" ]]
+}
+
+# Records which checkout the bitcoin-rs binary was built from: exact identity of every tracked and
+# untracked-but-not-ignored build input under Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/,
+# build.rs files, bin/ and crates/. Writes SOURCE_IDENTITY_JSON. With --allow-stale-bitcoin-rs a
+# failing guard records the failure (stale_allowed=true) instead of exiting 1. Called after WORKDIR
+# exists and before any live run; after the run, record_bitcoin_rs_source_identity "after" adds the
+# sources_after block (path build_inputs_changed_during_run) without changing the refusal verdict.
+record_bitcoin_rs_source_identity() {
+  local stamp
+  stamp="$1"
+  local source
+  source="${BITCOIN_RS_SOURCE}"
+  if [[ -z "${source}" ]]; then
+    source="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/.."
+  fi
+  source="$(readlink -f -- "${source}" 2>/dev/null || printf '%s' "${source}")"
+  BITCOIN_RS_SOURCE="${source}"
+  SOURCE_IDENTITY_JSON="${WORKDIR}/bitcoin-rs-source-identity.json"
+  local exe
+  exe=$(resolve_executable "${BITCOIN_RS_BIN}")
+
+  local rc
+  rc=0
+  python3 - "${source}" "${exe}" "${SOURCE_IDENTITY_JSON}" "${stamp}" "${ALLOW_STALE_BITCOIN_RS}" <<'PYEOF' || rc=$?
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+source, exe, out_path, stamp, allow = sys.argv[1:6]
+allow = allow == "1"
+identity = {
+    "source_root": source,
+    "bitcoin_rs_bin": exe,
+    "stale_allowed": allow,
+    "refused": False,
+}
+
+tracked, untracked = [], []
+PATHSPECS = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs", ".cargo", "bin", "crates"]
+# Read-only git access: GIT_OPTIONAL_LOCKS=0 keeps status from refreshing the index stat cache
+# (which would take index.lock and mutate the shared git state under the parent's ownership fence).
+GIT_READ_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+try:
+    tracked = subprocess.run(
+        ["git", "-C", source, "ls-files", "-z", "--cached", "--"] + PATHSPECS,
+        capture_output=True, check=True, timeout=60, env=GIT_READ_ENV).stdout.decode("utf-8", "replace").split("\0")
+    untracked = subprocess.run(
+        ["git", "-C", source, "ls-files", "-z", "--others", "--exclude-standard", "--"] + PATHSPECS,
+        capture_output=True, check=True, timeout=60, env=GIT_READ_ENV).stdout.decode("utf-8", "replace").split("\0")
+except (subprocess.SubprocessError, OSError) as err:
+    identity.update({"listed": False, "list_error": "git ls-files failed: %s" % str(err)[:160],
+                     "stale": None, "refused": not allow})
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(identity, f, indent=2)
+    sys.exit(0 if allow else 1)
+
+paths = sorted({p for p in tracked + untracked if p})
+missing, files, unreadable = [], [], []
+newest, newest_name, newest_mtime = "", "", 0.0
+pair_digest = hashlib.sha256()
+for rel in paths:
+    if rel.endswith("/"):
+        continue
+    full = os.path.join(source, rel)
+    if not os.path.lexists(full) or os.path.isdir(full):
+        if not os.path.isdir(full):
+            missing.append(rel)
+        continue
+    try:
+        mtime = os.stat(full, follow_symlinks=False).st_mtime
+        with open(full, "rb") as f:
+            content = f.read() if not os.path.islink(full) else os.readlink(full).encode("utf-8")
+    except OSError:
+        unreadable.append(rel)
+        continue
+    files.append(rel)
+    pair_digest.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(content).digest())
+    if mtime > newest_mtime:
+        newest, newest_name, newest_mtime = full, rel, mtime
+
+entry = {
+    "git_head": None, "git_dirty_entries": None, "build_input_sha256": pair_digest.hexdigest(),
+    "build_input_files": len(files), "unreadable_build_inputs": sorted(unreadable)[:20],
+    "missing_tracked_build_inputs": sorted(missing)[:20],
+    "newest_build_input": newest_name, "newest_build_input_mtime": newest_mtime,
+}
+try:
+    head = subprocess.run(["git", "-C", source, "rev-parse", "HEAD"],
+                          capture_output=True, check=True, timeout=30, env=GIT_READ_ENV).stdout.decode().strip()
+    dirty = subprocess.run(["git", "-C", source, "status", "--porcelain"],
+                           capture_output=True, check=True, timeout=60, env=GIT_READ_ENV).stdout.decode()
+    entry["git_head"] = head
+    entry["git_dirty_entries"] = len(dirty.splitlines()) if dirty else 0
+except (subprocess.SubprocessError, OSError):
+    pass
+
+try:
+    exe_sha = hashlib.sha256()
+    with open(exe, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            exe_sha.update(chunk)
+    entry["binary_sha256"] = exe_sha.hexdigest()
+    entry["binary_mtime"] = os.stat(exe).st_mtime
+except OSError as err:
+    entry["binary_unreadable"] = str(err)[:160]
+
+if "binary_mtime" in entry and newest_mtime:
+    entry["stale"] = newest_mtime > entry["binary_mtime"]
+else:
+    entry["stale"] = None
+problems = []
+if not files and not (entry.get("binary_mtime") or entry.get("binary_unreadable")):
+    problems.append("no build inputs listed and the binary is unreadable")
+if missing:
+    problems.append("tracked build inputs missing from disk: %s" % ", ".join(sorted(missing)[:5]))
+if unreadable:
+    problems.append("build inputs unreadable: %s" % ", ".join(sorted(unreadable)[:5]))
+if entry.get("stale"):
+    problems.append("newest build input %s is newer than the bitcoin-rs binary" % newest_name)
+entry["problems"] = problems
+entry["refused"] = bool(problems) and not allow
+
+try:
+    with open(out_path, "r", encoding="utf-8") as f:
+        identity = json.load(f)
+except (OSError, ValueError):
+    pass
+identity["source_root"] = source
+identity["bitcoin_rs_bin"] = exe
+identity["stale_allowed"] = allow
+if stamp == "after":
+    identity["sources_after"] = entry
+    identity["build_inputs_changed_during_run"] = (
+        identity.get("sources_before", {}).get("build_input_sha256") != entry.get("build_input_sha256")
+        if identity.get("sources_before") else None)
+else:
+    identity["sources_before"] = entry
+    identity["refused"] = entry["refused"]
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(identity, f, indent=2)
+# The "after" record only observes whether sources moved during the run; it never refuses.
+sys.exit(0 if (stamp == "after" or allow or not entry["refused"]) else 1)
+PYEOF
+  if (( rc != 0 )); then
+    echo "ERROR: bitcoin-rs source identity guard failed (source '${source}'): see ${SOURCE_IDENTITY_JSON}. Rerun with --allow-stale-bitcoin-rs to record-but-continue." >&2
+    exit 1
+  fi
+  echo "==> bitcoin-rs source identity: ${SOURCE_IDENTITY_JSON}" >&2
+}
+
+# Runs `bitcoind --version` inside an owned scratch datadir (never the default ~/.bitcoin: Core
+# writes its settings file during startup even for --version). Sets CORE_COMPARATOR_VERIFIED=1 and
+# writes CORE_IDENTITY_JSON only when the first line is exactly CORE_COMPARATOR_VERSION_LINE; the
+# comparator binary sha256 is recorded either way. start_core_comparator refuses otherwise, so the
+# differential comparator is never a wrong-version binary.
+record_core_comparator_identity() {
+  CORE_IDENTITY_JSON="${WORKDIR}/core-comparator-identity.json"
+  local first=""
+  local sha=""
+  local verified=0
+  CORE_COMPARATOR_VERIFIED=0
+  if [[ -n "${BITCOIND_BIN}" && -x "${BITCOIND_BIN}" ]]; then
+    local probe_dir
+    probe_dir=$(mktemp -d "${WORKDIR}/core-version-probe.XXXXXX")
+    local out
+    out=$(timeout 20 "${BITCOIND_BIN}" -datadir="${probe_dir}" --version 2>&1 || true)
+    first="${out%%$'\n'*}"
+    first="${first%$'\r'}"
+    sha=$(sha256sum -- "${BITCOIND_BIN}" 2>/dev/null | awk '{print $1}')
+    if [[ "${first}" == "${CORE_COMPARATOR_VERSION_LINE}" ]]; then
+      verified=1
+      CORE_COMPARATOR_VERIFIED=1
+    fi
+  fi
+  python3 -c '
+import json, sys
+json.dump({"comparator_bin": sys.argv[1], "version_first_line": sys.argv[2] or None,
+           "expected_first_line": sys.argv[3], "verified": sys.argv[4] == "1",
+           "binary_sha256": sys.argv[5] or None}, open(sys.argv[6], "w"), indent=2)
+' "${BITCOIND_BIN}" "${first}" "${CORE_COMPARATOR_VERSION_LINE}" "${verified}" "${sha}" "${CORE_IDENTITY_JSON}"
+  if (( verified == 0 )); then
+    echo "WARNING: Core comparator unavailable: bitcoind --version (scratch datadir) first line '${first}' is not '${CORE_COMPARATOR_VERSION_LINE}'; the comparator lane stays unused." >&2
+  else
+    echo "==> Core comparator identity verified: ${first} (${sha})" >&2
+  fi
 }
 
 # Lists the shared objects the host cannot resolve for the given executables, one
@@ -696,7 +983,7 @@ rpc_password = "${RS_RPC_PASS}"
 rest = true
 txindex = true
 script_index = "full"
-mining_payout_address = "bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+mining_payout_address = "${MINING_PAYOUT_ADDR}"
 p2p_listen = ["127.0.0.1:${RS_P2P_PORT}"]
 dns_seeds_enabled = false
 
@@ -755,7 +1042,7 @@ EOF
   fi
 
   local mine_addr
-  mine_addr="bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+  mine_addr="${MINING_PAYOUT_ADDR}"
   rs_rpc "generatetoaddress" "[101, \"${mine_addr}\"]" >/dev/null || {
     echo "ERROR: generatetoaddress failed during initial regtest mining." >&2
     return 1
@@ -824,6 +1111,13 @@ start_core_comparator() {
     echo "WARNING: Core comparator binary '${BITCOIND_BIN}' not found or not executable." >&2
     return 1
   fi
+  # Isolated --version fix: the comparator is usable only after record_core_comparator_identity
+  # verified CORE_COMPARATOR_VERSION_LINE in an owned scratch datadir. Never fall back to a
+  # wrong-version binary (or to the default ~/.bitcoin) as the differential comparator.
+  if [[ "${CORE_COMPARATOR_VERIFIED}" != "1" ]]; then
+    echo "WARNING: Core comparator unavailable: bitcoind --version did not print '${CORE_COMPARATOR_VERSION_LINE}' in a scratch datadir (see ${CORE_IDENTITY_JSON:-<identity not recorded>}); no differential classification." >&2
+    return 1
+  fi
 
   CORE_RPC_PORT=$(free_port)
   CORE_P2P_PORT=$(free_port)
@@ -879,7 +1173,7 @@ start_core_comparator() {
   fi
 
   local mine_addr
-  mine_addr="bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+  mine_addr="${MINING_PAYOUT_ADDR}"
   core_rpc "generatetoaddress" "[101, \"${mine_addr}\"]" >/dev/null || {
     echo "ERROR: generatetoaddress failed on Core comparator." >&2
     return 1
@@ -1423,6 +1717,249 @@ except Exception:
   fi
 }
 
+# Probes getnetworkinfo (the bcli >= CLN_BCLI_MIN_VERSION gate input) and getblockfrompeer (bcli's
+# independent fallback when getblock cannot serve a block) against the node on RPC port $1, writing
+# the raw public-RPC responses plus a local classification to $2. Never synthesizes responses:
+# empty/unparseable replies are recorded as transport errors.
+cln_probe_backend() {
+  local port="$1"
+  local out="$2"
+  local netinfo_res
+  netinfo_res=$(curl -s --connect-timeout 5 --max-time 15 -u "${RS_RPC_USER}:${RS_RPC_PASS}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":"probe_cln_net","method":"getnetworkinfo","params":[]}' \
+    "http://127.0.0.1:${port}/" || true)
+  local blockfrompeer_res
+  blockfrompeer_res=$(curl -s --connect-timeout 5 --max-time 15 -u "${RS_RPC_USER}:${RS_RPC_PASS}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":"probe_cln_peer","method":"getblockfrompeer","params":["0000000000000000000000000000000000000000000000000000000000000000",0]}' \
+    "http://127.0.0.1:${port}/" || true)
+  python3 -c '
+import json, sys
+
+def load(raw):
+    if not raw:
+        return None, "transport_error: empty reply"
+    try:
+        return json.loads(raw), None
+    except ValueError as err:
+        return None, "transport_error: unparseable reply: %s" % str(err)[:80]
+
+net_raw, peer_raw, path = sys.argv[1], sys.argv[2], sys.argv[3]
+net, net_err = load(net_raw)
+peer, peer_err = load(peer_raw)
+
+def version_of(doc):
+    try:
+        return doc["result"]["version"]
+    except (TypeError, KeyError, AttributeError):
+        return None
+
+def peer_class(doc, err):
+    if err is not None:
+        return {"class": "transport_error", "detail": err}
+    if not isinstance(doc, dict):
+        return {"class": "transport_error", "detail": "non-object reply"}
+    if "error" not in doc:
+        return {"class": "returned_result", "detail": "node answered getblockfrompeer"}
+    error = doc.get("error") or {}
+    if error.get("code") == -32601:
+        return {"class": "method_not_found", "detail": str(error.get("message", ""))[:120]}
+    return {"class": "rpc_error",
+            "detail": "code=%s message=%s" % (error.get("code"), str(error.get("message"))[:120])}
+
+data = {
+    "getnetworkinfo": net,
+    "getblockfrompeer": peer,
+    "getnetworkinfo_transport_error": net_err,
+    "getblockfrompeer_transport_error": peer_err,
+    "getnetworkinfo_version": version_of(net),
+    "getblockfrompeer_class": peer_class(peer, peer_err),
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+' "${netinfo_res}" "${blockfrompeer_res}" "${out}" 2>/dev/null || \
+    python3 -c 'import json,sys; json.dump({"probe_write_failed": True}, open(sys.argv[1], "w"))' "${out}"
+  echo "==> backend probe on RPC port ${port}: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("getnetworkinfo.version=%s getblockfrompeer=%s" % (d.get("getnetworkinfo_version"), d.get("getblockfrompeer_class", {}).get("class")))' "${out}" 2>/dev/null || echo "probe artifact unreadable")"
+}
+
+# Appends one row to cln-spawn-identity.tsv: the supervised pid's /proc executable must resolve to
+# the digest-verified lightningd ($1), and (after setsid) it must lead its own process group so the
+# group kill in kill_bounded reaches lightningd and the subdaemons bcli shells out to.
+cln_record_identity() {
+  local exe="$1"
+  local tag="$2"
+  local pid="$3"
+  local want
+  want=$(readlink -f -- "${exe}" 2>/dev/null || true)
+  local got=""
+  local verdict="exited-or-unreadable"
+  local pgrp="?" sid="?" starttime="?"
+  local tries=0
+  while (( tries < 30 )); do
+    local stat
+    stat=$(cat "/proc/${pid}/stat" 2>/dev/null || true)
+    got=$(readlink -f -- "/proc/${pid}/exe" 2>/dev/null || true)
+    if [[ -n "${stat}" ]]; then
+      local rest="${stat##*) }"
+      local -a fields=()
+      read -r -a fields <<<"${rest}"
+      pgrp="${fields[2]:-?}"; sid="${fields[3]:-?}"; starttime="${fields[19]:-?}"
+      if [[ -n "${want}" && "${got}" == "${want}" ]]; then
+        if [[ "${pgrp}" == "${pid}" ]]; then
+          verdict="ok"
+        else
+          verdict="exe-ok-pgrp-${pgrp}-not-leader"
+        fi
+        break
+      fi
+      verdict="exe-mismatch"
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  printf '%s\t%s\tpgrp=%s\tsid=%s\tstarttime=%s\twant=%s\tgot=%s\t%s\n' \
+    "${tag}" "${pid}" "${pgrp}" "${sid}" "${starttime}" "${want}" "${got}" "${verdict}" \
+    >>"${WORKDIR}/cln-spawn-identity.tsv"
+}
+
+# Spawns lightningd ($1) in its own session against the node on RPC port $3, lightning-dir $2,
+# logging to $4; sets CLN_SPAWN_PID and CLN_SPAWN_ARGV_NAMES (option names only, so the rs and Core
+# comparator invocations can be shown to differ in values alone). Stdout/stderr are appended to the
+# same log file: an early fatal before file logging initializes must not be lost. lightning-cli
+# finds the RPC socket under --lightning-dir/--network without extra flags.
+cln_spawn() {
+  local exe="$1"
+  local datadir="$2"
+  local rpcport="$3"
+  local log="$4"
+  shift 4
+  mkdir -p "${datadir}"
+  {
+    printf 'exe=%s\n' "${exe}"
+    printf 'lightning-dir=%s\n' "${datadir}"
+    printf 'log-file=%s\n' "${log}"
+    printf 'rpcport=%s\n' "${rpcport}"
+    printf '%s\n' "$@"
+  } >"${datadir}/spawn-argv.txt"
+  cln_export_library_path
+  run_in_new_session "${exe}" "$@" \
+    --network=regtest \
+    --lightning-dir="${datadir}" \
+    --bitcoin-rpcuser="${RS_RPC_USER}" \
+    --bitcoin-rpcpassword="${RS_RPC_PASS}" \
+    --bitcoin-rpcport="${rpcport}" \
+    --bitcoin-rpcconnect=127.0.0.1 \
+    --bitcoin-retry-timeout="${TIMEOUT_SECONDS}" \
+    --log-level=debug \
+    --log-file="${log}" >>"${log}" 2>&1 &
+  CLN_SPAWN_PID=$!
+  cln_unexport_library_path
+  CLN_SPAWN_ARGV_NAMES=$(printf '%s\n' "$@" --network=x --lightning-dir=x --bitcoin-rpcuser=x --bitcoin-rpcpassword=x --bitcoin-rpcport=x --bitcoin-rpcconnect=x --bitcoin-retry-timeout=x --log-level=x --log-file=x | sed 's/=.*//' | tr '\n' ' ')
+}
+
+# Polls `lightning-cli --network=regtest --lightning-dir=$2 getinfo` until it returns an "id"
+# (unmodified lightningd answered on its JSON-RPC socket) or $4 seconds pass. Sets CLN_READY=1 and
+# CLN_GETINFO_JSON on success. A second getinfo 2s later guards against racing bcli's startup
+# refusal: a daemon that is about to exit on the version gate must not count as ready. On daemon
+# exit sets CLN_END=exited and reaps the exit code into CLN_EXIT_CODE; on deadline CLN_END=timeout.
+cln_wait_ready() {
+  local cli="$1"
+  local datadir="$2"
+  local pid="$3"
+  local secs="$4"
+  CLN_READY=0
+  CLN_END="timeout"
+  CLN_EXIT_CODE=""
+  CLN_GETINFO_JSON=""
+  local deadline
+  deadline=$((SECONDS + secs))
+  while (( SECONDS < deadline )); do
+    if ! pid_alive "${pid}"; then
+      CLN_END="exited"
+      CLN_EXIT_CODE=0
+      wait "${pid}" 2>/dev/null || CLN_EXIT_CODE=$?
+      return 0
+    fi
+    local out
+    out=$(run_cln_command timeout 10 "${cli}" --network=regtest --lightning-dir="${datadir}" getinfo 2>/dev/null || true)
+    if [[ -n "${out}" ]] && python3 -c 'import json,sys; sys.exit(0 if "id" in json.loads(sys.stdin.read()) else 1)' <<<"${out}" 2>/dev/null; then
+      sleep 2
+      if pid_alive "${pid}" && out=$(run_cln_command timeout 10 "${cli}" --network=regtest --lightning-dir="${datadir}" getinfo 2>/dev/null) && python3 -c 'import json,sys; sys.exit(0 if "id" in json.loads(sys.stdin.read()) else 1)' <<<"${out}" 2>/dev/null; then
+        CLN_READY=1
+        CLN_END="ready"
+        CLN_GETINFO_JSON="${out}"
+        return 0
+      fi
+      if ! pid_alive "${pid}"; then
+        CLN_END="exited"
+        CLN_EXIT_CODE=0
+        wait "${pid}" 2>/dev/null || CLN_EXIT_CODE=$?
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+}
+
+# Polls lightning-cli getinfo until blockheight equals $3 (or $4 seconds pass). Prints the last seen
+# height; returns 0 only on match.
+cln_wait_height() {
+  local cli="$1"
+  local datadir="$2"
+  local want="$3"
+  local secs="$4"
+  local deadline=$((SECONDS + secs))
+  local seen=""
+  while (( SECONDS < deadline )); do
+    local out
+    out=$(run_cln_command timeout 10 "${cli}" --network=regtest --lightning-dir="${datadir}" getinfo 2>/dev/null || true)
+    seen=$(python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("blockheight", ""))
+except Exception:
+    print("")' <<<"${out}" 2>/dev/null || true)
+    if [[ -n "${seen}" && "${seen}" == "${want}" ]]; then
+      printf '%s' "${seen}"
+      return 0
+    fi
+    sleep 2
+  done
+  printf '%s' "${seen}"
+  return 1
+}
+
+# Prints "<kind>\t<refused>\t<detail>" classifying a lightningd log: bcli_version_gate when
+# lightningd refused the backend on its getnetworkinfo.version gate (the required minimum must
+# equal $2; <refused> is the version bcli observed, so the classifier can demand it equal the
+# independently probed backend version), relay gate for blocksonly/no-relay refusal,
+# backend_unreachable for connection failures, unclassified otherwise (last non-empty log lines,
+# so the cause is never invented).
+cln_log_kind() {
+  python3 - "$@" <<'PYEOF'
+import re, sys
+path, minver = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+except OSError as err:
+    print("unreadable\t\tlog unreadable: %s" % str(err)[:120])
+    sys.exit(0)
+m = re.search(r"Unsupported bitcoind version (\d+), at least (\d+) required\.", text)
+if m and m.group(2) == minver:
+    print("bcli_version_gate\t%s\tlightningd refused the backend: Unsupported bitcoind version %s, at least %s required" % (m.group(1), m.group(1), m.group(2)))
+    sys.exit(0)
+if "blocksonly" in text and "transaction relay is not supported" in text:
+    print("bcli_relay_gate\t\tlightningd refused a blocksonly/no-relay backend")
+    sys.exit(0)
+if re.search(r"(Connection refused|Failed to connect|Could not connect|bitcoin-cli .* exited|error: .{0,40}connect)", text):
+    print("backend_unreachable\t\tlog shows a connection failure to the backend")
+    sys.exit(0)
+tail = [line.strip()[:200] for line in text.splitlines() if line.strip()][-3:]
+print("unclassified\t\t%s" % (" | ".join(tail) if tail else "empty log"))
+PYEOF
+}
+
 evaluate_cln() {
   echo "--- Evaluating target: cln (v26.06.9: single scenario with independent version and getblockfrompeer prerequisites) ---"
   local decision
@@ -1481,14 +2018,14 @@ evaluate_cln() {
       cln_elfs+=("${cln_elf}")
     done < <(find "${cln_prefix}/libexec/c-lightning" -type f -perm -u+x -print0 2>/dev/null)
     local cln_missing
-    cln_missing=$(missing_shared_objects "${cln_elfs[@]}")
+    cln_missing=$(run_cln_command missing_shared_objects "${cln_elfs[@]}")
     if [[ -n "${cln_missing}" ]]; then
       append_blocked_target "cln" "bcli / bitcoin-cli" "${PIN_CLN}" "${pin_status}" "${CLN_BIN}" "${decision}" \
         "not exercised: blocked on host: ${cln_host} needs shared libraries this host lacks (${cln_missing//$'\n'/; }); ${cln_host_tail}"
       return 0
     fi
     local cln_probe
-    cln_probe=$(check_binary_version "${cln_exe}" exact "${CLN_VERSION_TAG}")
+    cln_probe=$(run_cln_command check_binary_version "${cln_exe}" exact "${CLN_VERSION_TAG}")
     case "${cln_probe}" in
       verified) ;;
       mismatch:*)
@@ -1510,7 +2047,21 @@ evaluate_cln() {
         "not exercised: blocked on host: the bcli plugin of ${cln_host} needs a bitcoin-cli executable and none was found beside --bitcoind-bin (${BITCOIND_BIN:-not set}) or on PATH; ${cln_host_tail}"
       return 0
     fi
-    local -a cln_cli_args=("--bitcoin-cli=${cln_bitcoin_cli}")
+    # lightning-cli is the readiness probe; it must be the sibling binary inside the verified tree.
+    local cln_cli
+    cln_cli="$(dirname -- "${cln_exe}")/lightning-cli"
+    local cln_cli_missing
+    cln_cli_missing=$(run_cln_command missing_shared_objects "${cln_cli}" 2>/dev/null || true)
+    if [[ ! -x "${cln_cli}" ]]; then
+      append_blocked_target "cln" "bcli / bitcoin-cli" "${PIN_CLN}" "${pin_status}" "${CLN_BIN}" "${decision}" \
+        "not exercised: blocked on host: lightning-cli is missing beside the verified ${cln_host}; readiness is unobservable without it; ${cln_host_tail}"
+      return 0
+    fi
+    if [[ -n "${cln_cli_missing}" ]]; then
+      append_blocked_target "cln" "bcli / bitcoin-cli" "${PIN_CLN}" "${pin_status}" "${CLN_BIN}" "${decision}" \
+        "not exercised: blocked on host: ${cln_host} lightning-cli needs shared libraries this host lacks (${cln_cli_missing//$'\n'/; }); ${cln_host_tail}"
+      return 0
+    fi
     if accept_pin "cln" "bcli / bitcoin-cli" "${PIN_CLN}" "${pin_status}" "${CLN_BIN}" "${decision}"; then
       return 0
     fi
@@ -1522,97 +2073,321 @@ evaluate_cln() {
     cln_log="${WORKDIR}/cln.log"
     mkdir -p "${cln_datadir}"
 
+    # bitcoin-cli must never read a real ~/.bitcoin config: it runs with an owned empty --datadir.
+    local cln_cli_datadir
+    cln_cli_datadir="${WORKDIR}/cln-cli-datadir"
+    mkdir -p "${cln_cli_datadir}"
+    local grpc_port
+    grpc_port=$(free_port)
+    local p2p_addr_port
+    p2p_addr_port=$(free_port)
+    local -a cln_common_args
+    cln_common_args=(
+      "--bitcoin-cli=${cln_bitcoin_cli}"
+      "--bitcoin-datadir=${cln_cli_datadir}"
+      "--addr=127.0.0.1:${p2p_addr_port}"
+      "--grpc-port=${grpc_port}"
+    )
+
+    # Independent prerequisites, probed against the live bitcoin-rs node before lightningd spawns:
+    # getnetworkinfo.version (the bcli >= CLN_BCLI_MIN_VERSION gate input) and getblockfrompeer
+    # (bcli's fallback when getblock cannot serve a block; independently missing in bitcoin-rs).
     local cln_probe_artifact
     cln_probe_artifact="${WORKDIR}/cln-bcli-probes.json"
-    local netinfo_res
-    netinfo_res=$(curl -s --connect-timeout 5 --max-time 15 -u "${RS_RPC_USER}:${RS_RPC_PASS}" \
-      -H "Content-Type: application/json" \
-      -d '{"jsonrpc":"2.0","id":"probe_cln_net","method":"getnetworkinfo","params":[]}' \
-      "http://127.0.0.1:${RS_RPC_PORT}/" || true)
-    local blockfrompeer_res
-    blockfrompeer_res=$(curl -s --connect-timeout 5 --max-time 15 -u "${RS_RPC_USER}:${RS_RPC_PASS}" \
-      -H "Content-Type: application/json" \
-      -d '{"jsonrpc":"2.0","id":"probe_cln_peer","method":"getblockfrompeer","params":["0000000000000000000000000000000000000000000000000000000000000000",0]}' \
-      "http://127.0.0.1:${RS_RPC_PORT}/" || true)
+    cln_probe_backend "${RS_RPC_PORT}" "${cln_probe_artifact}"
 
-    python3 -c '
-import json, sys
-data = {
-    "getnetworkinfo": json.loads(sys.argv[1]) if sys.argv[1] else None,
-    "getblockfrompeer": json.loads(sys.argv[2]) if sys.argv[2] else None
-}
-with open(sys.argv[3], "w") as f:
-    json.dump(data, f, indent=2)
-' "${netinfo_res}" "${blockfrompeer_res}" "${cln_probe_artifact}" 2>/dev/null || true
-
-    echo "==> Spawning lightningd daemon..."
-    run_in_new_session "${cln_exe}" \
-      "${cln_cli_args[@]}" \
-      --network=regtest \
-      --lightning-dir="${cln_datadir}" \
-      --addr="127.0.0.1:$(free_port)" \
-      --bitcoin-rpcuser="${RS_RPC_USER}" \
-      --bitcoin-rpcpassword="${RS_RPC_PASS}" \
-      --bitcoin-rpcport="${RS_RPC_PORT}" \
-      --bitcoin-rpcconnect=127.0.0.1 \
-      --log-file="${cln_log}" >/dev/null 2>&1 &
-    TARGET_PID=$!
-
-    sleep 2
-    local b_startup="not exercised"
-    local b_startup_reason="lightningd spawned against bitcoin-rs; startup outcome not yet observed"
-    local b_cln_artifact="${cln_probe_artifact}"
-
-    if ! kill -0 "${TARGET_PID}" 2>/dev/null; then
-      if start_core_comparator; then
-        echo "==> Repeating lightningd scenario against Core 31.1 differential comparator..."
-        local core_cln_datadir
-        core_cln_datadir="${WORKDIR}/cln-core-data"
-        local core_cln_log
-        core_cln_log="${WORKDIR}/cln-core.log"
-        mkdir -p "${core_cln_datadir}"
-        run_in_new_session "${cln_exe}" \
-          "${cln_cli_args[@]}" \
-          --network=regtest \
-          --lightning-dir="${core_cln_datadir}" \
-          --addr="127.0.0.1:$(free_port)" \
-          --bitcoin-rpcuser="${RS_RPC_USER}" \
-          --bitcoin-rpcpassword="${RS_RPC_PASS}" \
-          --bitcoin-rpcport="${CORE_RPC_PORT}" \
-          --bitcoin-rpcconnect=127.0.0.1 \
-          --log-file="${core_cln_log}" >/dev/null 2>&1 &
-        CORE_TARGET_PID=$!
-        sleep 2
-        if kill -0 "${CORE_TARGET_PID}" 2>/dev/null; then
-          b_startup="not exercised"
-          b_startup_reason="lightningd exited on startup against bitcoin-rs while the process survived against the Core 31.1 comparator; the exit cause is not classified by the runner (read ${cln_log}; the bcli getnetworkinfo.version >= 220000 gate is a documented code fact, not an observed cause); lightning-cli readiness unverified"
-          b_cln_artifact="${core_cln_log}"
-        else
-          b_startup="not exercised"
-          b_startup_reason="lightningd also exited on startup against the Core 31.1 comparator in the same scenario; no bitcoin-rs defect is attributed (exit causes not classified by the runner; read ${cln_log} and ${core_cln_log})"
-        fi
-        kill_bounded "${CORE_TARGET_PID}"
-        CORE_TARGET_PID=""
-        stop_core_comparator
-      else
-        b_startup="not exercised"
-        b_startup_reason="lightningd exited on startup against bitcoin-rs; Core 31.1 comparator unavailable for differential verification; exit cause not classified (read ${cln_log})"
-      fi
-    else
-      b_startup="not exercised"
-      b_startup_reason="lightningd process spawned; full qualification requires active lightning-rpc socket communication"
+    echo "==> Spawning lightningd daemon against bitcoin-rs..."
+    cln_spawn "${cln_exe}" "${cln_datadir}" "${RS_RPC_PORT}" "${cln_log}" "${cln_common_args[@]}"
+    TARGET_PID=${CLN_SPAWN_PID}
+    local rs_argv_names
+    rs_argv_names="${CLN_SPAWN_ARGV_NAMES}"
+    cln_record_identity "${cln_exe}" "cln-rs" "${TARGET_PID}"
+    cln_wait_ready "${cln_cli}" "${cln_datadir}" "${TARGET_PID}" "${TIMEOUT_SECONDS}"
+    local rs_end
+    rs_end="${CLN_END}"
+    local rs_exit
+    rs_exit="${CLN_EXIT_CODE}"
+    local rs_getinfo
+    rs_getinfo="${CLN_GETINFO_JSON}"
+    # A daemon that never became ready is reaped now so its ports are free for the identical Core
+    # comparator scenario below; a ready daemon stays alive for the downstream cells and is reaped
+    # at the end of the passed path. The log is preserved either way.
+    if [[ "${CLN_READY}" != "1" && -n "${TARGET_PID}" ]]; then
       kill_bounded "${TARGET_PID}"
       TARGET_PID=""
+    fi
+
+    local b_startup
+    b_startup="not exercised"
+    local b_startup_reason
+    b_startup_reason="lightningd spawned against bitcoin-rs; startup outcome not yet observed"
+    local b_startup_artifact
+    b_startup_artifact="${cln_probe_artifact}"
+    local b_sync
+    b_sync="not exercised"
+    local b_sync_reason
+    b_sync_reason=""
+    local b_sync_artifact
+    b_sync_artifact="None"
+    local b_detect
+    b_detect="not exercised"
+    local b_detect_reason
+    b_detect_reason=""
+    local b_detect_artifact
+    b_detect_artifact="None"
+    local b_broadcast
+    b_broadcast="not exercised"
+    local b_broadcast_reason
+    b_broadcast_reason=""
+    local b_restart
+    b_restart="not exercised"
+    local b_restart_reason
+    b_restart_reason=""
+    local cln_classify
+    cln_classify="${WORKDIR}/cln-startup-classification.json"
+
+    if [[ "${CLN_READY}" == "1" ]]; then
+      local rs_tip
+      rs_tip=$(rs_rpc "getblockcount" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])' 2>/dev/null || true)
+      local cln_h0
+      cln_h0=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("blockheight", ""))' <<<"${rs_getinfo}" 2>/dev/null || true)
+      b_startup="passed"
+      b_startup_reason="Unmodified lightningd answered lightning-cli getinfo against bitcoin-rs (id present, blockheight=${cln_h0}, process still alive after settle); Core comparator not needed for a pass"
+      b_startup_artifact="${WORKDIR}/cln-rs-getinfo.json"
+      printf '%s' "${rs_getinfo}" >"${b_startup_artifact}"
+      local seen_h
+      seen_h=""
+      if [[ "${rs_tip}" =~ ^[0-9]+$ ]]; then
+        seen_h=$(cln_wait_height "${cln_cli}" "${cln_datadir}" "${rs_tip}" 30 2>/dev/null || true)
+      fi
+      if [[ "${rs_tip}" =~ ^[0-9]+$ && -n "${seen_h}" && "${seen_h}" == "${rs_tip}" ]]; then
+        b_sync="passed"
+        b_sync_reason="lightning-cli getinfo blockheight=${seen_h} equals the bitcoin-rs tip ${rs_tip}"
+        b_sync_artifact="${b_startup_artifact}"
+        local mine_addr
+        mine_addr="${MINING_PAYOUT_ADDR}"
+        if rs_rpc "generatetoaddress" "[1, \"${mine_addr}\"]" >/dev/null; then
+          local tip_plus_one
+          tip_plus_one=$((rs_tip + 1))
+          local seen_h2
+          seen_h2=$(cln_wait_height "${cln_cli}" "${cln_datadir}" "${tip_plus_one}" 60 2>/dev/null || true)
+          if [[ -n "${seen_h2}" && "${seen_h2}" == "${tip_plus_one}" ]]; then
+            b_detect_reason="Not exercised: new-block polling was observed (CLN height ${rs_tip}->${seen_h2} after one bitcoin-rs block) but mempool-tx polling is unwitnessed and this runner provisions no funded CLN wallet, so the full block/tx-detection cell cannot pass here"
+            b_detect_artifact="${b_startup_artifact}"
+          else
+            b_detect_reason="Not exercised: CLN height did not advance to ${tip_plus_one} within 60s (last seen ${seen_h2:-none}); mempool-tx polling additionally requires a funded CLN wallet, which this runner does not provision"
+          fi
+        else
+          b_detect_reason="Not exercised: bitcoin-rs generatetoaddress failed while mining the detection block, so block/tx detection was not attempted"
+        fi
+      else
+        b_sync_reason="Not exercised: CLN blockheight did not reach the bitcoin-rs tip ${rs_tip} within 30s (last seen ${seen_h:-none}); no Core comparison was run for a stall with the daemon still alive"
+      fi
+      if [[ -z "${b_broadcast_reason}" ]]; then
+        b_broadcast_reason="Not exercised: no funded CLN wallet or channel exists in this runner, so no broadcast is observable (causal prerequisite: startup=${b_startup})"
+      fi
+      if [[ -z "${b_restart_reason}" ]]; then
+        b_restart_reason="Not exercised: no restart/reorg scenario ran in this runner (causal prerequisite: startup=${b_startup})"
+      fi
+      if [[ -z "${b_detect_reason}" ]]; then
+        b_detect_reason="Not exercised: chain sync did not pass, so block/tx detection was not attempted (causal prerequisite: startup=${b_startup})"
+      fi
+      if [[ -n "${TARGET_PID}" ]]; then
+        kill_bounded "${TARGET_PID}"
+      fi
+      TARGET_PID=""
+    else
+      local rs_kind
+      rs_kind=""
+      local rs_refused
+      rs_refused=""
+      local rs_detail
+      rs_detail=""
+      IFS=$'\t' read -r rs_kind rs_refused rs_detail < <(cln_log_kind "${cln_log}" "${CLN_BCLI_MIN_VERSION}") || true
+      if [[ -z "${rs_kind}" ]]; then
+        rs_kind="unclassified"
+        rs_refused=""
+        rs_detail="log classifier produced no output for ${cln_log}"
+      fi
+      # Independent getblockfrompeer classes for the sync reason and the classification record.
+      local rs_peer_class
+      rs_peer_class=$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("getblockfrompeer_class", {}).get("class", "unprobed"))
+except Exception:
+    print("unprobed")' "${cln_probe_artifact}" 2>/dev/null || true)
+      if [[ -z "${rs_peer_class}" ]]; then
+        rs_peer_class="unprobed"
+      fi
+      local core_end
+      core_end="unavailable"
+      local core_exit
+      core_exit=""
+      local core_kind
+      core_kind="comparator-unavailable"
+      local core_detail
+      core_detail="Core 31.1 comparator unavailable (see ${CORE_IDENTITY_JSON}); no differential classification exists"
+      local core_argv
+      core_argv=""
+      local core_log
+      core_log="${WORKDIR}/cln-core.log"
+      local core_probe_artifact
+      core_probe_artifact="${WORKDIR}/cln-core-bcli-probes.json"
+      local core_peer_class
+      core_peer_class="unprobed"
+      if start_core_comparator; then
+        echo "==> Repeating identical lightningd scenario against Core 31.1 differential comparator..."
+        local core_cln_datadir
+        core_cln_datadir="${WORKDIR}/cln-core-data"
+        cln_probe_backend "${CORE_RPC_PORT}" "${core_probe_artifact}"
+        core_peer_class=$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("getblockfrompeer_class", {}).get("class", "unprobed"))
+except Exception:
+    print("unprobed")' "${core_probe_artifact}" 2>/dev/null || true)
+        if [[ -z "${core_peer_class}" ]]; then
+          core_peer_class="unprobed"
+        fi
+        local core_grpc_port
+        core_grpc_port=$(free_port)
+        local core_addr_port
+        core_addr_port=$(free_port)
+        local -a core_common_args
+        core_common_args=(
+          "--bitcoin-cli=${cln_bitcoin_cli}"
+          "--bitcoin-datadir=${cln_cli_datadir}"
+          "--addr=127.0.0.1:${core_addr_port}"
+          "--grpc-port=${core_grpc_port}"
+        )
+        cln_spawn "${cln_exe}" "${core_cln_datadir}" "${CORE_RPC_PORT}" "${core_log}" "${core_common_args[@]}"
+        CORE_TARGET_PID=${CLN_SPAWN_PID}
+        core_argv="${CLN_SPAWN_ARGV_NAMES}"
+        cln_record_identity "${cln_exe}" "cln-core" "${CORE_TARGET_PID}"
+        cln_wait_ready "${cln_cli}" "${core_cln_datadir}" "${CORE_TARGET_PID}" "${TIMEOUT_SECONDS}"
+        core_end="${CLN_END}"
+        core_exit="${CLN_EXIT_CODE}"
+        if [[ "${CLN_END}" != "ready" ]]; then
+          IFS=$'\t' read -r core_kind _ core_detail < <(cln_log_kind "${core_log}" "${CLN_BCLI_MIN_VERSION}") || true
+          if [[ -z "${core_kind}" ]]; then
+            core_kind="unclassified"
+            core_detail="log classifier produced no output for ${core_log}"
+          fi
+        else
+          core_kind="ready"
+          core_detail="lightningd answered getinfo against Core 31.1"
+        fi
+        if [[ -n "${CORE_TARGET_PID}" ]]; then
+          kill_bounded "${CORE_TARGET_PID}"
+        fi
+        CORE_TARGET_PID=""
+        stop_core_comparator
+      fi
+      local verdict
+      verdict=$(python3 - "${rs_end}" "${rs_exit}" "${rs_kind}" "${rs_refused}" "${rs_detail}" "${cln_probe_artifact}" "${core_end}" "${core_exit}" "${core_kind}" "${core_detail}" "${core_probe_artifact}" "${rs_argv_names}" "${core_argv}" "${cln_log}" <<'PYEOF'
+import json, sys
+(rs_end, rs_exit, rs_kind, rs_refused, rs_detail, rs_probe,
+ core_end, core_exit, core_kind, core_detail, core_probe,
+ rs_argv, core_argv, rs_log) = sys.argv[1:15]
+MIN = 220000
+
+def probe_info(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as err:
+        return None, {"class": "unprobed",
+                      "detail": "probe artifact unreadable: %s (%s)" % (path, str(err)[:80])}
+    peer = doc.get("getblockfrompeer_class") or {}
+    return doc.get("getnetworkinfo_version"), {
+        "class": peer.get("class", "unknown"),
+        "detail": str(peer.get("detail", ""))[:160]}
+
+rs_version, rs_peer = probe_info(rs_probe)
+core_version, core_peer = probe_info(core_probe)
+
+same = bool(rs_argv) and rs_argv == core_argv
+scenario = ("rs and Core scenarios used identical lightningd options (differ only in ports/dirs)"
+            if same else
+            "WARNING: rs and Core scenarios did not use identical options (rs=[%s] core=[%s]); no failed verdict is possible" % (rs_argv, core_argv))
+rs_line = ("bitcoin-rs: end=%s exit=%s kind=%s (%s); probed getnetworkinfo.version=%s getblockfrompeer=%s"
+           % (rs_end, rs_exit or "n/a", rs_kind, rs_detail,
+              rs_version if rs_version is not None else "unprobed", rs_peer["class"]))
+if core_end == "ready":
+    gate = None
+    if rs_kind == "bcli_version_gate":
+        gate = "version >= %d gate" % MIN
+    elif rs_kind == "bcli_relay_gate":
+        gate = "blocksonly/no-relay gate"
+    proved = False
+    if gate is not None and same:
+        try:
+            # The log refusal must name exactly the version the independent probe observed:
+            # a mismatch means the backend moved mid-run, not a reproducible gate refusal.
+            proved = rs_kind == "bcli_relay_gate" or (
+                rs_version is not None and rs_refused != "" and str(rs_refused) == str(rs_version)
+                and int(rs_version) < MIN)
+        except (ValueError, TypeError):
+            proved = False
+    if proved:
+        print("failed\tReproducibly failed: unmodified lightningd refused bitcoin-rs on its %s (log refused version %s, probed %s) while the identical scenario against Core 31.1 reached getinfo-ready; %s. %s. No version spoofing, no wallet or method changes." % (gate, rs_refused, rs_version, rs_line, scenario))
+        sys.exit(0)
+    print("not exercised\tNo bitcoin-rs defect is attributed: %s; the Core 31.1 scenario reached getinfo-ready (%s) but the rs-side cause is not a proved gate refusal (identical options: %s), so the run cannot tell a backend defect from a scenario fact (read %s). %s." % (rs_line, core_end, same, rs_log, scenario))
+elif core_end in ("exited", "timeout"):
+    print("not exercised\tNo bitcoin-rs defect is attributed: lightningd also %s against Core 31.1 in the identical scenario (core kind=%s: %s), so the cause is a scenario/host fact, not a bitcoin-rs incompatibility; %s. %s." % (core_end, core_kind, core_detail, rs_line, scenario))
+else:
+    print("not exercised\tNo bitcoin-rs defect is attributed: %s; %s. %s." % (rs_line, core_detail, scenario))
+PYEOF
+)
+      b_startup="${verdict%%$'\t'*}"
+      b_startup_reason="${verdict#*$'\t'}"
+      python3 -c '
+import json, sys
+(status, reason, path, rs_end, rs_exit, rs_kind, rs_refused, rs_detail, rs_probe,
+ core_end, core_exit, core_kind, core_detail, core_probe, rs_argv, core_argv) = sys.argv[1:17]
+
+def probe_summary(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as err:
+        return None, {"class": "unprobed",
+                      "detail": "probe artifact unreadable: %s" % str(err)[:80]}
+    peer = doc.get("getblockfrompeer_class") or {}
+    return doc.get("getnetworkinfo_version"), {
+        "class": peer.get("class", "unknown"), "detail": str(peer.get("detail", ""))[:160]}
+
+rs_version, rs_peer = probe_summary(rs_probe)
+core_version, core_peer = probe_summary(core_probe)
+json.dump({"schema": "bitcoin-rs-lightning-cln-classification-v1",
+           "bcli_min_version": 220000,
+           "bitcoin_rs": {"end": rs_end, "exit": rs_exit or None,
+                          "log_kind": rs_kind, "refused_version": rs_refused or None,
+                          "log_detail": rs_detail,
+                          "probed_getnetworkinfo_version": rs_version,
+                          "probed_getblockfrompeer": rs_peer},
+           "core_31_1": {"end": core_end, "exit": core_exit or None,
+                         "log_kind": core_kind, "log_detail": core_detail,
+                         "probed_getnetworkinfo_version": core_version,
+                         "probed_getblockfrompeer": core_peer},
+           "argv_option_names_identical": rs_argv == core_argv and bool(rs_argv),
+           "startup": {"status": status, "reason": reason}},
+          open(path, "w"), indent=2)
+' "${b_startup}" "${b_startup_reason}" "${cln_classify}" "${rs_end}" "${rs_exit}" "${rs_kind}" "${rs_refused}" "${rs_detail}" "${cln_probe_artifact}" "${core_end}" "${core_exit}" "${core_kind}" "${core_detail}" "${core_probe_artifact}" "${rs_argv_names}" "${core_argv}"
+      b_startup_artifact="${cln_classify}"
+      b_sync_reason="Not exercised: startup did not pass, so chain sync was never reached (causal prerequisite: startup=${b_startup}); probed getblockfrompeer: rs=${rs_peer_class}, core=${core_peer_class} (independent fallback probes in ${cln_probe_artifact} / ${core_probe_artifact}); getblockfrompeer is bcli's fallback only when getblock cannot serve a block, not a sync prerequisite on this unpruned node"
+      b_detect_reason="Not exercised: startup did not pass, so block/tx detection was never attempted (causal prerequisite: startup=${b_startup})"
+      b_broadcast_reason="Not exercised: startup did not pass, so no funded CLN wallet or channel broadcast exists to observe (causal prerequisite: startup=${b_startup})"
+      b_restart_reason="Not exercised: startup did not pass, so no restart/reorg scenario ran (causal prerequisite: startup=${b_startup})"
     fi
 
     local target_data
     target_data=$(make_behavior_json \
       "cln" "bcli / bitcoin-cli" "${PIN_CLN}" "${pin_status}" "true" "${CLN_BIN}" "${decision}" \
-      "${b_startup}" "${b_startup_reason}" "${b_cln_artifact}" \
-      "not exercised" "Requires getblockfrompeer RPC (unimplemented in bitcoin-rs)" "None" \
-      "not exercised" "Blocked by startup failure" "None" \
-      "not exercised" "Blocked by startup failure" "None" \
-      "not exercised" "Blocked by startup failure" "None")
+      "${b_startup}" "${b_startup_reason}" "${b_startup_artifact}" \
+      "${b_sync}" "${b_sync_reason}" "${b_sync_artifact}" \
+      "${b_detect}" "${b_detect_reason}" "${b_detect_artifact}" \
+      "${b_broadcast}" "${b_broadcast_reason}" "None" \
+      "${b_restart}" "${b_restart_reason}" "None")
     append_target_result "${target_data}"
   fi
 }
@@ -1773,6 +2548,20 @@ main() {
       --timeout-seconds)
         require_arg "$1" "$#"
         TIMEOUT_SECONDS="$2"
+        shift 2
+        ;;
+      --bitcoin-rs-source)
+        require_arg "$1" "$#"
+        BITCOIN_RS_SOURCE="$2"
+        shift 2
+        ;;
+      --allow-stale-bitcoin-rs)
+        ALLOW_STALE_BITCOIN_RS=1
+        shift
+        ;;
+      --cln-library-path)
+        require_arg "$1" "$#"
+        CLN_LIBRARY_PATH="$2"
         shift 2
         ;;
       --ldk-server-bin)
@@ -1954,6 +2743,21 @@ main() {
     echo "WARNING: --cln-bin path '${CLN_BIN}' not found or not executable; treating as unprovisioned." >&2
     CLN_BIN=""
   fi
+  if [[ -n "${CLN_LIBRARY_PATH}" ]]; then
+    local cln_rest
+    cln_rest="${CLN_LIBRARY_PATH}:"
+    while [[ -n "${cln_rest}" ]]; do
+      local cln_library_dir
+      cln_library_dir="${cln_rest%%:*}"
+      cln_rest="${cln_rest#*:}"
+      # Absolute only: a relative LD_LIBRARY_PATH entry would resolve against each child's
+      # working directory, so it cannot name a pinned private library.
+      if [[ -z "${cln_library_dir}" || "${cln_library_dir}" != /* || ! -d "${cln_library_dir}" ]]; then
+        echo "ERROR: --cln-library-path must be colon-separated absolute directories: '${cln_library_dir}'." >&2
+        exit 1
+      fi
+    done
+  fi
   if [[ -n "${ALBY_HUB_BIN}" ]] && ! validate_binary_override "${ALBY_HUB_BIN}"; then
     echo "WARNING: --alby-hub-bin path '${ALBY_HUB_BIN}' not found or not executable; treating as unprovisioned." >&2
     ALBY_HUB_BIN=""
@@ -1995,6 +2799,23 @@ elif cmd == "render":
     btc_rs_bin = sys.argv[5] or None
     core_bin = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] and sys.argv[6] != "None" else None
     pins_only = len(sys.argv) > 7 and sys.argv[7] == "1"
+    def load_optional(path):
+        # Missing and corrupt records stay visible as such: a live run that cannot read its
+        # identity files must not render the same as --verify-pins-only, where no guard runs.
+        if not path:
+            return None
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {"missing": path}
+        except (OSError, ValueError) as err:
+            return {"unreadable": path, "error": str(err)[:160]}
+    source_identity = load_optional(sys.argv[8] if len(sys.argv) > 8 else "")
+    core_identity = load_optional(sys.argv[9] if len(sys.argv) > 9 else "")
+    changed_during_run = None
+    if isinstance(source_identity, dict):
+        changed_during_run = source_identity.get("build_inputs_changed_during_run")
     
     total_cells = 0
     passed_cells = 0
@@ -2019,6 +2840,9 @@ elif cmd == "render":
             "bitcoin_rs_bin": btc_rs_bin,
             "core_comparator_bin": core_bin,
             "verify_pins_only": pins_only,
+            "bitcoin_rs_source_identity": source_identity,
+            "core_comparator_identity": core_identity,
+            "bitcoin_rs_build_inputs_changed_during_run": changed_during_run,
         },
         "summary": {
             "total_target_scenarios": len(state["results"]),
@@ -2049,6 +2873,14 @@ PYEOF
   echo "Workdir: ${WORKDIR}"
   echo "Output JSON: ${OUTPUT_JSON}"
   echo ""
+  # Source identity guard (required): before any live run, record exactly which tracked and
+  # untracked build inputs the bitcoin-rs binary was built from and refuse when they are newer
+  # than the binary (see --bitcoin-rs-source). The Core comparator is version-pinned in an
+  # isolated scratch datadir before it may be used. Both records land in the evidence JSON.
+  if (( PINS_ONLY == 0 )); then
+    record_bitcoin_rs_source_identity "before"
+    record_core_comparator_identity
+  fi
 
   if should_run "ldk-server"; then
     evaluate_ldk_server
@@ -2085,7 +2917,11 @@ PYEOF
   stop_bitcoin_rs
   stop_core_comparator
 
-  python3 "${REPORT_PY}" render "${STATE_JSON}" "${OUTPUT_JSON}" "${EVIDENCE_SCHEMA}" "${BITCOIN_RS_BIN}" "${BITCOIND_BIN}" "${PINS_ONLY}"
+  if (( PINS_ONLY == 0 )); then
+    record_bitcoin_rs_source_identity "after"
+  fi
+
+  python3 "${REPORT_PY}" render "${STATE_JSON}" "${OUTPUT_JSON}" "${EVIDENCE_SCHEMA}" "${BITCOIN_RS_BIN}" "${BITCOIND_BIN}" "${PINS_ONLY}" "${SOURCE_IDENTITY_JSON}" "${CORE_IDENTITY_JSON}"
 
   echo ""
   echo "==> Lightning Interoperability Verification: COMPLETED"

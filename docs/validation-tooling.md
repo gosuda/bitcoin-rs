@@ -333,11 +333,21 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     outside the workspace (not a compatibility commitment, no production pool
     qualification; see [`tools/stratum-sv2/README.md`](../tools/stratum-sv2/README.md)); and the standalone in-process LDK L1 adapter ([`tools/ldk/README.md`](../tools/ldk/README.md)).
   - **Intentionally unsupported**: Core IPC adapters.
+  - **Lightning interop (evidence-gated, not a lane verdict)**: LND `v0.21.4-beta` five cells passed in the retained `parent-live-4` run with stated provenance limits (dirty source, `.outline` runner copy, no fresh Core comparison; `docs/lightning-interop-matrix.md` §2–§3.1). CLN `v26.06.9` startup `failed` in retained qualified `run-2` (`.outline/evidence/lightning-live-cln/run-2/evidence.json`): version gate refusal `1400` below `220000` with Core 31.1 reaching `getinfo` ready, other 4 cells `not exercised` on causal startup, `getblockfrompeer` probed as `rs=method_not_found` and `core=rpc_error` (fallback only), source HEAD `aab50bd64` with 7 dirty entries and 758 inputs (`stale_allowed:false`), node `48129ac5…`, runner frozen `86eba76…` with parent job `bg_543` checksum before plus `bash -n` plus private `ShellCheck` plus real campaign plus checksum after in one chain with exit `0` in `.outline/evidence/lightning-live-cln/run-2/verification.json`, `run-1` raw only with no claim (same matrix section).
 - **Reproduction & audit**:
   - Audit status strings against the canonical matrix:
     ```sh
     # Inspect rows and status vocabulary
     cat docs/api/ecosystem-compat.toml
+    ```
+  - Reproduce the Lightning evidence record (wall-clock bounded; parent runs builds/gates once):
+    ```sh
+    # CLN live cell with pinned artifacts; see docs/lightning-interop-matrix.md §4 for the exact command
+    timeout --signal=TERM --kill-after=30 900 bash scripts/verify-lightning-interop.sh --target cln \
+      --bitcoin-rs-bin <path-to-built-bitcoin-rs> \
+      --cln-bin <extract-dir>/usr/bin/lightningd \
+      --cln-release-archive <dir>/clightning-v26.06.9-Ubuntu-26.04-amd64.tar.xz \
+      --cln-library-path <dir>/libpq-probe/root/usr/lib/x86_64-linux-gnu
     ```
 
 ---
