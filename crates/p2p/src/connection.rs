@@ -543,17 +543,6 @@ impl OutboundBudget {
         Ok(self.commit_locked(self.block_reserve))
     }
 
-    /// Reserves `bound` bytes for a reply that is built only afterwards.
-    ///
-    /// PRE: `bound` is at least the reply's wire length. POST: as
-    /// [`Self::try_charge`].
-    pub(crate) fn try_reserve_reply(
-        self: &Arc<Self>,
-        bound: usize,
-    ) -> Result<OutboundCredit, Refusal> {
-        self.try_charge(bound)
-    }
-
     /// Adds the local half of a charge whose aggregate half is already taken.
     ///
     /// PRE: the caller holds `drained_lock`.
@@ -1170,7 +1159,7 @@ impl PeerLease {
     /// PRE: `bound` is at least the reply's full wire length. POST: as
     /// [`Self::try_reserve_production`].
     pub(crate) fn try_reserve_reply(&self, bound: usize) -> Result<OutboundCredit, Refusal> {
-        self.budget.try_reserve_reply(bound)
+        self.budget.try_charge(bound)
     }
 
     /// Returns whether `source` was stamped by this lease.
