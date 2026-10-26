@@ -4060,10 +4060,15 @@ mod tests {
         let result = worker.join().expect("outbound worker");
         disabled.expect("disable does not wait for socket I/O or metadata query");
         assert_eq!(received.expect("closed without handshake"), 0);
-        assert!(matches!(
-            result,
-            Err(crate::PeerError::Protocol("network inactive"))
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(crate::PeerError::Protocol(
+                    "transport or network unavailable"
+                ))
+            ),
+            "unexpected outbound result: {result:?}"
+        );
         assert_eq!(service.peer_table.sessions().len(), 0);
         assert_eq!(ready.load(Ordering::Relaxed), 0);
         service.address_book.save();
