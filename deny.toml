@@ -82,12 +82,13 @@ deny = [
 ]
 # Duplicate-version guard (DEP-02 / issue #174).
 #
-# Duplicates are denied graph-wide. `bitcoin`, `bitcoin_hashes`, `secp256k1`,
-# and `secp256k1-sys` carry NO skip entry on purpose: the workspace pins one
-# copy of each (secp256k1 0.29 aligned with bitcoin 0.32's embedded line), so
-# any future duplicate in the consensus stack hard-fails this check. The
-# cargo-deny bans check above is the sole uniqueness owner for these four
-# crates.
+# Duplicates are denied graph-wide. `bitcoin` carries no skip entry on purpose.
+# The workspace pins one copy of it, so any future duplicate in the consensus
+# stack hard-fails this check. `secp256k1`, `secp256k1-sys`, `bitcoin_hashes`,
+# and the RustCrypto transport crates have one narrowly-scoped exception below
+# for the audited upstream `noise_sv2 2.0.0` SV2 chain; every other duplicate
+# remains denied. The cargo-deny bans check above is the uniqueness owner for
+# these crypto crates.
 #
 # Everything below is an audited, third-party-only split with the driver of
 # each skipped copy named. One current version remains unskipped as the
@@ -103,6 +104,23 @@ skip = [
     { crate = "rand@0.8.8", reason = "secp256k1 0.29 rand-std" },
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8 chain" },
     { crate = "rand_core@0.6.4", reason = "rand 0.8 chain" },
+    # SV2's audited upstream Noise_NX chain (noise_sv2 2.0.0) carries the
+    # older RustCrypto/secp256k1 line. These skips are intentionally scoped to
+    # exact versions and this dependency family; duplicate-version denial
+    # remains active for every other graph path.
+    { crate = "aead@0.5.2", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "bitcoin_hashes@0.13.1", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "hex-conservative@0.1.2", reason = "bitcoin_hashes 0.13.1 via noise_sv2 2.0.0" },
+    { crate = "chacha20@0.9.1", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "chacha20poly1305@0.10.1", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "cipher@0.4.4", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "cpufeatures@0.2.17", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "crypto-common@0.1.7", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "inout@0.1.4", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "poly1305@0.8.0", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
+    { crate = "secp256k1@0.28.2", reason = "noise_sv2 2.0.0 upstream SV2 authority-key chain" },
+    { crate = "secp256k1-sys@0.9.2", reason = "noise_sv2 2.0.0 upstream SV2 authority-key chain" },
+    { crate = "universal-hash@0.5.1", reason = "noise_sv2 2.0.0 upstream SV2 transport chain" },
     { crate = "r-efi@5.3.0", reason = "getrandom 0.3 UEFI backend" },
     # dashmap 6.2 pins 0.14; metrics-util/quick_cache pin 0.16; the workspace uses 0.17.
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2 pin" },

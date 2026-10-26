@@ -7,6 +7,197 @@ use crate::options::{
     ValidationOverrides,
 };
 
+fn pool_layer() -> UserConfig {
+    UserConfig {
+        pool: crate::options::PoolOverrides {
+            enabled: Some(true),
+            datadir: Some(PathBuf::from("/nonexistent/operator-pool-ledger")),
+            v1_bind: Some(SocketAddr::from(([127, 0, 0, 1], 3333))),
+            share_difficulty: Some("1".to_owned()),
+            window_work: Some(1000),
+            reward_script: Some("51".to_owned()),
+            ..Default::default()
+        },
+        mining: crate::options::MiningOverrides {
+            payout_address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_owned()),
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn pool_defaults_off_and_suboptions_require_enablement() {
+    assert!(resolved(&[]).pool.is_none());
+    let mut layer = pool_layer();
+    layer.pool.enabled = Some(false);
+    assert!(super::resolve(&[&layer]).is_err());
+    layer.pool = crate::options::PoolOverrides::default();
+    assert!(super::resolve(&[&layer]).is_ok());
+}
+
+#[cfg(not(feature = "pool"))]
+#[test]
+fn pool_requires_compiled_feature() {
+    match super::resolve(&[&pool_layer()]) {
+        Ok(config) => {
+            panic!("pool configuration must be refused without the pool build feature: {config:?}")
+        }
+        Err(error) => assert!(error.to_string().contains("pool build feature"), "{error}"),
+    }
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_requires_explicit_policy_and_listener() {
+    for missing in 0..7 {
+        let mut layer = pool_layer();
+        match missing {
+            0 => layer.pool.datadir = None,
+            1 => layer.pool.v1_bind = None,
+            2 => layer.pool.share_difficulty = None,
+            3 => layer.pool.window_work = None,
+            4 => layer.pool.reward_script = None,
+            5 => layer.mining.payout_address = None,
+            6 => layer.pool.datadir = Some(PathBuf::new()),
+            _ => unreachable!(),
+        }
+        assert!(
+            super::resolve(&[&layer]).is_err(),
+            "missing explicit input {missing}"
+        );
+    }
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<()> {
+    let base = pool_layer();
+    let later = UserConfig {
+        pool: crate::options::PoolOverrides {
+            fee_bps: Some(125),
+            share_difficulty: Some("2.5".to_owned()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = super::resolve(&[&base, &later])?;
+    let pool = config
+        .pool
+        .ok_or_else(|| anyhow::anyhow!("enabled pool must resolve"))?;
+    let expected_datadir = base
+        .pool
+        .datadir
+        .ok_or_else(|| anyhow::anyhow!("fixture must specify a pool directory"))?;
+    assert_eq!(pool.datadir, expected_datadir);
+    assert_eq!(pool.v1_bind, base.pool.v1_bind);
+    assert!(pool.sv2_bind.is_none());
+    assert_eq!(pool.fee_bps, 125);
+    assert_eq!(pool.share_difficulty, "2.5");
+    assert_eq!(
+        pool.share_target,
+        bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal("2.5")?
+    );
+    assert_eq!(pool.ledger_config().window_work, 1000);
+    assert_eq!(pool.ledger_config().pool_fee_bps, 125);
+    Ok(())
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_non_loopback_requires_explicit_opt_in() {
+    let mut layer = pool_layer();
+    layer.pool.v1_bind = Some(SocketAddr::from(([0, 0, 0, 0], 3333)));
+    assert!(super::resolve(&[&layer]).is_err());
+    layer.pool.allow_non_loopback = Some(true);
+    assert!(super::resolve(&[&layer]).is_ok());
+    layer.pool.v1_bind = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
+    assert!(super::resolve(&[&layer]).is_err());
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_money_depth_and_capacity_bounds_are_validated() {
+    for invalid in 0..15 {
+        let mut layer = pool_layer();
+        match invalid {
+            0 => layer.pool.window_work = Some(0),
+            1 => layer.pool.fee_bps = Some(10_001),
+            2 => layer.pool.maturity = Some(99),
+            3 => layer.pool.payout_confirmations = Some(0),
+            4 => layer.pool.reorg_watch_depth = Some(99),
+            5 => layer.pool.payout_confirmations = Some(1001),
+            6 => layer.pool.min_payout_sat = Some(545),
+            7 => layer.pool.min_payout_sat = Some(u64::MAX),
+            8 => layer.pool.max_payout_outputs = Some(0),
+            9 => layer.pool.max_payout_outputs = Some(2501),
+            10 => layer.pool.max_connections = Some(0),
+            11 => layer.pool.max_connections_per_ip = Some(0),
+            12 => layer.pool.max_connections_per_ip = Some(129),
+            13 => layer.pool.reward_script = Some("6a".to_owned()),
+            14 => layer.pool.reward_script = Some("4c0151".to_owned()),
+            _ => unreachable!(),
+        }
+        assert!(
+            super::resolve(&[&layer]).is_err(),
+            "invalid policy {invalid}"
+        );
+    }
+    let mut boundary = pool_layer();
+    boundary.pool.fee_bps = Some(10_000);
+    boundary.pool.max_payout_outputs = Some(2500);
+    assert!(super::resolve(&[&boundary]).is_ok());
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_exact_difficulty_and_script_parsing_reject_invalid_inputs() {
+    for value in [
+        "",
+        "0",
+        "-1",
+        "NaN",
+        "1e3",
+        "18446744073709551616",
+        "1.00000000000000000000",
+    ] {
+        let mut layer = pool_layer();
+        layer.pool.share_difficulty = Some(value.to_owned());
+        assert!(super::resolve(&[&layer]).is_err(), "difficulty {value}");
+    }
+    for script in ["", "0", "zz", "4c"] {
+        let mut layer = pool_layer();
+        layer.pool.reward_script = Some(script.to_owned());
+        assert!(super::resolve(&[&layer]).is_err(), "script {script}");
+    }
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn pool_sv2_requires_feature_and_paired_authority_path_without_opening_it() {
+    let mut layer = pool_layer();
+    layer.pool.sv2_bind = Some(SocketAddr::from(([127, 0, 0, 1], 3334)));
+    assert!(super::resolve(&[&layer]).is_err());
+    layer.pool.sv2_authority_key = Some(PathBuf::from("/nonexistent/pool-authority-key"));
+    #[cfg(feature = "pool-sv2")]
+    {
+        assert!(
+            super::resolve(&[&layer]).is_ok(),
+            "key IO belongs to service startup"
+        );
+        layer.pool.sv2_bind = layer.pool.v1_bind;
+        assert!(super::resolve(&[&layer]).is_err());
+    }
+    #[cfg(not(feature = "pool-sv2"))]
+    assert!(
+        super::resolve(&[&layer])
+            .unwrap_err()
+            .to_string()
+            .contains("pool-sv2")
+    );
+    layer.pool.sv2_bind = None;
+    assert!(super::resolve(&[&layer]).is_err());
+}
+
 #[test]
 fn auth_debug_redacts_secrets() {
     let auth = Auth::basic("operator", "s3cret");

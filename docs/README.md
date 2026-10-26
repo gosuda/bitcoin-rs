@@ -20,6 +20,7 @@
 | Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 | Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
 | Mine regtest blocks and inspect templates | [Solo-mining generate path](contracts/external-api.md#api-05-solo-mining-generate-path) and [template extras](contracts/external-api.md#api-11-bip22bip23-template-extras) |
+| Configure the default-off experimental native pool with an external payout signer | [Native pool operation](pool.md) and [pool contract](contracts/pool.md) |
 | Inspect a Core snapshot file without starting a node | [Snapshot inspector](../tools/snapshot/README.md) |
 | Watch a running node for stalls | [Runtime stall watchdog](operations/runtime-stall.md) |
 | Review unselected index-design options (historical) | [Index ideation record](ideation/better-tasting-and-efficient-index-design-and-abstractions.md): brainstorm only, not a plan |

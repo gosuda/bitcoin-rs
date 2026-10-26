@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::options::{
-    parse_connect_endpoint, parse_network, parse_p2p_magic, parse_script_index,
+    PoolOverrides, parse_connect_endpoint, parse_network, parse_p2p_magic, parse_script_index,
     parse_storage_backend, parse_validation_engine, parse_validation_mode,
 };
 use bitcoin_rs_node::{

@@ -13,6 +13,8 @@ pub(crate) mod deployment;
 pub(crate) mod mempool;
 pub(crate) mod mining;
 pub(crate) mod network;
+#[cfg(feature = "pool")]
+pub(crate) mod pool;
 #[cfg(feature = "silent-payments")]
 pub(crate) mod silent_payments;
 pub(crate) mod tx;
@@ -473,6 +475,28 @@ mod registry_tests {
             handler.dispatch("getzmqnotifications", &json!([])),
             Err(RpcError::MethodNotFound(_))
         ));
+    }
+
+    #[test]
+    fn pool_extensions_follow_compile_and_runtime_gates() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        for method in [
+            "registerpoolaccount",
+            "preparepayoutbatch",
+            "getpayoutrequest",
+            "recordpayoutreceipt",
+            "getpayoutbatch",
+            "cancelpayoutbatch",
+            "getpoolinfo",
+            "getpoolrounds",
+            "getpoolbalances",
+        ] {
+            let result = handler.dispatch(method, &json!([]));
+            #[cfg(feature = "pool")]
+            assert!(matches!(result, Err(RpcError::MethodDisabled(_))));
+            #[cfg(not(feature = "pool"))]
+            assert!(matches!(result, Err(RpcError::MethodNotFound(_))));
+        }
     }
 
     // Bitcoin Core 31.1 parameter-error classification, probed against the

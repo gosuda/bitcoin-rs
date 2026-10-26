@@ -876,6 +876,111 @@ macro_rules! option_rows {
                         toml native("mining_payout_address")
                     }
                 }
+                /// Native pool overrides. Listener addresses, data and difficulty are explicit.
+                group pool: PoolOverrides {
+                    /// Enable the noncustodial native pool service with external payout signing.
+                    enabled as pool: Option<bool> {
+                        cli[#[arg(long = "pool", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_POOL", parse_bool]
+                        toml native("pool")
+                    }
+                    /// Dedicated pool ledger directory.
+                    datadir as pool_datadir: Option<PathBuf> {
+                        cli[#[arg(long = "pool-datadir")]]
+                        env["BITCOIN_RS_POOL_DATADIR", parse_path]
+                        toml native("pool_datadir")
+                    }
+                    /// Explicit SV1 listener address.
+                    v1_bind as pool_v1_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "pool-v1-bind")]]
+                        env["BITCOIN_RS_POOL_V1_BIND", str::parse]
+                        toml native("pool_v1_bind")
+                    }
+                    /// Explicit SV2 listener address.
+                    sv2_bind as pool_sv2_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "pool-sv2-bind")]]
+                        env["BITCOIN_RS_POOL_SV2_BIND", str::parse]
+                        toml native("pool_sv2_bind")
+                    }
+                    /// Authority key file; the service validates permissions and contents.
+                    sv2_authority_key as pool_sv2_authority_key: Option<PathBuf> {
+                        cli[#[arg(long = "pool-sv2-authority-key")]]
+                        env["BITCOIN_RS_POOL_SV2_AUTHORITY_KEY", parse_path]
+                        toml native("pool_sv2_authority_key")
+                    }
+                    /// Explicitly permit non-loopback mining listeners.
+                    allow_non_loopback as pool_allow_non_loopback: Option<bool> {
+                        cli[#[arg(long = "pool-allow-non-loopback", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_POOL_ALLOW_NON_LOOPBACK", parse_bool]
+                        toml native("pool_allow_non_loopback")
+                    }
+                    /// Total pool connection limit.
+                    max_connections as pool_max_connections: Option<u32> {
+                        cli[#[arg(long = "pool-max-connections")]]
+                        env["BITCOIN_RS_POOL_MAX_CONNECTIONS", str::parse]
+                        toml native("pool_max_connections")
+                    }
+                    /// Per-IP pool connection limit.
+                    max_connections_per_ip as pool_max_connections_per_ip: Option<u32> {
+                        cli[#[arg(long = "pool-max-connections-per-ip")]]
+                        env["BITCOIN_RS_POOL_MAX_CONNECTIONS_PER_IP", str::parse]
+                        toml native("pool_max_connections_per_ip")
+                    }
+                    /// Fixed share difficulty as an exact plain decimal.
+                    share_difficulty as pool_share_difficulty: Option<String> {
+                        cli[#[arg(long = "pool-share-difficulty")]]
+                        env["BITCOIN_RS_POOL_SHARE_DIFFICULTY", parse_text]
+                        toml native("pool_share_difficulty")
+                    }
+                    /// Immutable PPLNS window in exact work units.
+                    window_work as pool_window_work: Option<u64> {
+                        cli[#[arg(long = "pool-window-work")]]
+                        env["BITCOIN_RS_POOL_WINDOW_WORK", str::parse]
+                        toml native("pool_window_work")
+                    }
+                    /// Immutable pool fee in basis points (0..=10000).
+                    fee_bps as pool_fee_bps: Option<u16> {
+                        cli[#[arg(long = "pool-fee-bps")]]
+                        env["BITCOIN_RS_POOL_FEE_BPS", str::parse]
+                        toml native("pool_fee_bps")
+                    }
+                    /// Hex scriptPubKey paying the externally controlled pool reward.
+                    reward_script as pool_reward_script: Option<String> {
+                        cli[#[arg(long = "pool-reward-script")]]
+                        env["BITCOIN_RS_POOL_REWARD_SCRIPT", parse_text]
+                        toml native("pool_reward_script")
+                    }
+                    /// Coinbase maturity, at least the consensus minimum of 100.
+                    maturity as pool_maturity: Option<u32> {
+                        cli[#[arg(long = "pool-maturity")]]
+                        env["BITCOIN_RS_POOL_MATURITY", str::parse]
+                        toml native("pool_maturity")
+                    }
+                    /// Required payout transaction confirmation depth.
+                    payout_confirmations as pool_payout_confirmations: Option<u32> {
+                        cli[#[arg(long = "pool-payout-confirmations")]]
+                        env["BITCOIN_RS_POOL_PAYOUT_CONFIRMATIONS", str::parse]
+                        toml native("pool_payout_confirmations")
+                    }
+                    /// Reorg monitoring depth, covering all confirmation depths.
+                    reorg_watch_depth as pool_reorg_watch_depth: Option<u32> {
+                        cli[#[arg(long = "pool-reorg-watch-depth")]]
+                        env["BITCOIN_RS_POOL_REORG_WATCH_DEPTH", str::parse]
+                        toml native("pool_reorg_watch_depth")
+                    }
+                    /// Minimum external payout amount in satoshis.
+                    min_payout_sat as pool_min_payout_sat: Option<u64> {
+                        cli[#[arg(long = "pool-min-payout-sat")]]
+                        env["BITCOIN_RS_POOL_MIN_PAYOUT_SAT", str::parse]
+                        toml native("pool_min_payout_sat")
+                    }
+                    /// Maximum external payout outputs (1..=2500).
+                    max_payout_outputs as pool_max_payout_outputs: Option<u32> {
+                        cli[#[arg(long = "pool-max-payout-outputs")]]
+                        env["BITCOIN_RS_POOL_MAX_PAYOUT_OUTPUTS", str::parse]
+                        toml native("pool_max_payout_outputs")
+                    }
+                }
                 /// User-supplied chainstate journal overrides.
                 group chainstate_journal: ChainstateJournalOverrides
                 table("chainstate_journal")

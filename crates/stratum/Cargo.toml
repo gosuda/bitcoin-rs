@@ -1,0 +1,32 @@
+[package]
+name = "bitcoin-rs-stratum"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: Stratum V1 pool protocol and native job/share owner"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-script.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-mining.workspace = true
+compact_str.workspace = true
+ruint.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+
+[dev-dependencies]
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
+parking_lot.workspace = true
+sha2.workspace = true

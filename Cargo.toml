@@ -13,6 +13,9 @@ members = [
     "crates/mempool",
     "crates/p2p",
     "crates/mining",
+    "crates/stratum",
+    "crates/pool-ledger",
+    "crates/stratum-v2",
     "crates/rpc",
     "crates/node",
     "bin/bitcoin-rs",
@@ -51,12 +54,29 @@ bitcoin-rs-index      = { path = "crates/index",      version = "0.14.0" }
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.14.0" }
 bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.14.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.14.0" }
+bitcoin-rs-stratum    = { path = "crates/stratum",    version = "0.14.0" }
+bitcoin-rs-pool-ledger = { path = "crates/pool-ledger", version = "0.14.0" }
+bitcoin-rs-stratum-v2 = { path = "crates/stratum-v2", version = "0.14.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.14.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.14.0", default-features = false }
 bitcoin-rs-e2e        = { path = "e2e",               version = "0.14.0" }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
+
+# --- Stratum V2 transport ------------------------------------------------------
+# Pinned SRI release family (v1.12.0): these crates are semver-major-coupled
+# and their wire layouts MUST move together. noise_sv2 2.0.0 is admitted with
+# the narrow duplicate-crypto exception documented in deny.toml.
+binary_sv2          = "=7.0.0"
+framing_sv2         = "=8.0.0"
+codec_sv2           = { version = "=7.0.0" }
+noise_sv2           = "=2.0.0"
+mining_sv2          = "=12.0.0"
+common_messages_sv2 = "=9.0.0"
+
+# Authority-key zeroization used by the SV2 Noise boundary.
+zeroize = { version = ">=1.8.2, <2", default-features = false, features = ["alloc"] }
 
 # --- Bitcoin ecosystem --------------------------------------------------------
 # bitcoin 0.32 line; 0.33 is still beta. `default = [std, secp-recovery]`.

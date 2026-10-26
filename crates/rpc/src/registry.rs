@@ -169,8 +169,31 @@ macro_rules! declare_rows {
     };
 }
 
+// Keep extension rows visible in the manifest without binding absent features.
+#[cfg(feature = "pool")]
+macro_rules! pool_handler {
+    ($name:ident) => {
+        Some(crate::handlers::pool::$name)
+    };
+}
+#[cfg(not(feature = "pool"))]
+macro_rules! pool_handler {
+    ($name:ident) => {
+        None
+    };
+}
+
 declare_rows! {
     "getblocktweaks", SurfaceKind::Rpc, Status::Extension, "silent-payments", "", "Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md.", "0.14.0", BLOCK_TWEAKS_HANDLER;
+    "registerpoolaccount", SurfaceKind::Rpc, Status::Extension, "pool", "", "Authenticated management-only payout-script registration: [account_u64, script_hex]. Changes future batches only and enables public credit-routing login '<decimal account>[.rig]'; miner password is unused. Knowing a login permits contributing credit, not withdrawals or payout-script changes. No mining credential authentication or wallet custody. Requires enabled pool service.", "0.14.0", pool_handler!(registerpoolaccount);
+    "preparepayoutbatch", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [idempotency_key_hex32, min_payout_sat, max_outputs]. Caller minimum must meet configured payout minimum; output count must not exceed configured ceiling. Durably reserves eligible balances in immutable batch; returns batch status and canonical BRPR request hex, or null when none qualify. Never signs or broadcasts.", "0.14.0", pool_handler!(preparepayoutbatch);
+    "getpayoutrequest", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [batch_id_hex32]. Exports ledger BRPR v1 hex for external signing; terminal batches refuse export.", "0.14.0", pool_handler!(getpayoutrequest);
+    "recordpayoutreceipt", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [BRPT_hex]. Strict ledger BRPT v1 decoder and record_signed verify recomputed txid, exact payout outputs, allowed change and replacement conflicts. Records receipt only, never broadcasts; no signature-validity or chain-acceptance claim.", "0.14.0", pool_handler!(recordpayoutreceipt);
+    "getpayoutbatch", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [batch_id_hex32]. Returns real ledger batch state, recorded transaction ids and observed status; null for unknown batch. No signing, broadcasting or chain-success inference.", "0.14.0", pool_handler!(getpayoutbatch);
+    "cancelpayoutbatch", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [batch_id_hex32, never_handed_to_signer or signer_revoked]. Operator attests cancellation basis; ledger refuses cancellation after signing. No external signer revocation is performed.", "0.14.0", pool_handler!(cancelpayoutbatch);
+    "getpoolinfo", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: []. PPLNS configuration, durable share count and last twenty audit records read in one bounded snapshot. Inspect individual batches with getpayoutbatch; no unbounded batch enumeration. Does not verify the full audit chain. Disabled pool returns MethodDisabled, not synthetic status.", "0.14.0", pool_handler!(getpoolinfo);
+    "getpoolrounds", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [first_round_id, count=100]. Reads monotonic ledger rounds, up to 1000 per call. States reflect hash-keyed chain reconciliation, not submission acknowledgements.", "0.14.0", pool_handler!(getpoolrounds);
+    "getpoolbalances", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [account_u64]. Reads one account's available, reserved, paid and deficit satoshis plus payout script. No wallet balance or custody.", "0.14.0", pool_handler!(getpoolbalances);
     // -- JSON-RPC: shipped methods (registration order) --------------
     "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);

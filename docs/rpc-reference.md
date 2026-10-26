@@ -108,6 +108,15 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `getblocktweaks` | 0.14.0 | Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md. |
+| `registerpoolaccount` | 0.14.0 | Authenticated management-only payout-script registration: [account_u64, script_hex]. Changes future batches only and enables public credit-routing login '<decimal account>[.rig]'; miner password is unused. Knowing a login permits contributing credit, not withdrawals or payout-script changes. No mining credential authentication or wallet custody. Requires enabled pool service. |
+| `preparepayoutbatch` | 0.14.0 | Management-only: [idempotency_key_hex32, min_payout_sat, max_outputs]. Caller minimum must meet configured payout minimum; output count must not exceed configured ceiling. Durably reserves eligible balances in immutable batch; returns batch status and canonical BRPR request hex, or null when none qualify. Never signs or broadcasts. |
+| `getpayoutrequest` | 0.14.0 | Management-only: [batch_id_hex32]. Exports ledger BRPR v1 hex for external signing; terminal batches refuse export. |
+| `recordpayoutreceipt` | 0.14.0 | Management-only: [BRPT_hex]. Strict ledger BRPT v1 decoder and record_signed verify recomputed txid, exact payout outputs, allowed change and replacement conflicts. Records receipt only, never broadcasts; no signature-validity or chain-acceptance claim. |
+| `getpayoutbatch` | 0.14.0 | Management-only: [batch_id_hex32]. Returns real ledger batch state, recorded transaction ids and observed status; null for unknown batch. No signing, broadcasting or chain-success inference. |
+| `cancelpayoutbatch` | 0.14.0 | Management-only: [batch_id_hex32, never_handed_to_signer or signer_revoked]. Operator attests cancellation basis; ledger refuses cancellation after signing. No external signer revocation is performed. |
+| `getpoolinfo` | 0.14.0 | Management-only: []. PPLNS configuration, durable share count and last twenty audit records read in one bounded snapshot. Inspect individual batches with getpayoutbatch; no unbounded batch enumeration. Does not verify the full audit chain. Disabled pool returns MethodDisabled, not synthetic status. |
+| `getpoolrounds` | 0.14.0 | Management-only: [first_round_id, count=100]. Reads monotonic ledger rounds, up to 1000 per call. States reflect hash-keyed chain reconciliation, not submission acknowledgements. |
+| `getpoolbalances` | 0.14.0 | Management-only: [account_u64]. Reads one account's available, reserved, paid and deficit satoshis plus payout script. No wallet balance or custody. |
 | `compressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
 | `decompressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
 | `getcapabilities` | 0.4.0 | bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs). |
@@ -242,4 +251,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 34, Implemented (unverified) 56, Extension 5, Disabled 0, Unimplemented 83 - total 178.
+Row counts: Supported 0, Deviation 34, Implemented (unverified) 56, Extension 14, Disabled 0, Unimplemented 83 - total 187.

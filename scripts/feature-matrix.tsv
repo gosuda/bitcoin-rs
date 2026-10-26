@@ -11,6 +11,8 @@ portable	bitcoin-rs	pure	--no-default-features --features fjall,zmq
 no-zmq	bitcoin-rs	pure	--no-default-features --features fjall,redb
 fjall-only	bitcoin-rs	pure	--no-default-features --features fjall
 silent-payments	bitcoin-rs	pure	--no-default-features --features fjall,silent-payments
+pool	bitcoin-rs	pure	--no-default-features --features fjall,pool
+pool-sv2	bitcoin-rs	pure	--no-default-features --features fjall,pool-sv2
 redb-only	bitcoin-rs	pure	--no-default-features --features redb
 portable-kernel	bitcoin-rs	native	--no-default-features --features fjall,zmq,kernel
 full-node	bitcoin-rs	native	--no-default-features --features rocksdb,fjall,redb,kernel

@@ -125,6 +125,250 @@ const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::Fjall;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 
+/// Resolved noncustodial pool policy. No path is opened during resolution.
+#[derive(Clone, Debug)]
+pub struct PoolConfig {
+    /// Dedicated ledger directory.
+    pub datadir: PathBuf,
+    /// Explicit SV1 listener, if enabled.
+    pub v1_bind: Option<SocketAddr>,
+    /// Explicit SV2 listener, if enabled.
+    pub sv2_bind: Option<SocketAddr>,
+    /// Authority key path, validated only by the service.
+    pub sv2_authority_key: Option<PathBuf>,
+    /// Operator consent to non-loopback listeners.
+    pub allow_non_loopback: bool,
+    /// Shared connection limit.
+    pub max_connections: u32,
+    /// Shared per-IP connection limit.
+    pub max_connections_per_ip: u32,
+    /// Fixed exact decimal share difficulty.
+    pub share_difficulty: String,
+    /// Target resolved by the authoritative share arithmetic owner.
+    #[cfg(feature = "pool")]
+    pub share_target: bitcoin_rs_stratum::ShareTarget,
+    /// Immutable PPLNS work window.
+    pub window_work: u64,
+    /// Immutable fee basis points.
+    pub fee_bps: u16,
+    /// Externally controlled reward scriptPubKey.
+    pub reward_script: Vec<u8>,
+    /// Coinbase confirmation requirement.
+    pub maturity: u32,
+    /// Payout confirmation requirement.
+    pub payout_confirmations: u32,
+    /// Depth of reorg monitoring.
+    pub reorg_watch_depth: u32,
+    /// Minimum payout in satoshis.
+    pub min_payout_sat: u64,
+    /// Maximum outputs per payout batch.
+    pub max_payout_outputs: u32,
+}
+
+impl PoolConfig {
+    /// Immutable ledger policy, shared by ledger creation and reopen validation.
+    /// Abandon depth stays fixed at the ledger's six-confirmation default;
+    /// dust stays at 546 satoshis and no signer change scripts are authorized.
+    #[cfg(feature = "pool")]
+    #[must_use]
+    pub fn ledger_config(&self) -> pool_ledger::PoolConfig {
+        let mut config =
+            pool_ledger::PoolConfig::new(u128::from(self.window_work), self.reward_script.clone());
+        config.pool_fee_bps = self.fee_bps;
+        config.coinbase_maturity = self.maturity;
+        config.payout_confirmations = self.payout_confirmations;
+        config.reorg_watch_depth = self.reorg_watch_depth;
+        config
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            cfg!(feature = "pool"),
+            "--pool requires the pool build feature"
+        );
+        anyhow::ensure!(
+            !self.datadir.as_os_str().is_empty(),
+            "--pool-datadir must not be empty"
+        );
+        anyhow::ensure!(
+            self.v1_bind.is_some() || self.sv2_bind.is_some(),
+            "--pool requires an explicit --pool-v1-bind or --pool-sv2-bind"
+        );
+        anyhow::ensure!(
+            self.v1_bind.is_none() || self.v1_bind != self.sv2_bind,
+            "pool listener addresses must differ"
+        );
+        for bind in [self.v1_bind, self.sv2_bind].into_iter().flatten() {
+            anyhow::ensure!(
+                bind.port() != 0,
+                "pool listener ports must be explicit and nonzero"
+            );
+            anyhow::ensure!(
+                bind.ip().is_loopback() || self.allow_non_loopback,
+                "non-loopback pool bind requires --pool-allow-non-loopback"
+            );
+        }
+        anyhow::ensure!(
+            self.sv2_bind.is_none() || cfg!(feature = "pool-sv2"),
+            "SV2 requires the pool-sv2 build feature"
+        );
+        anyhow::ensure!(
+            self.sv2_bind.is_some() == self.sv2_authority_key.is_some(),
+            "--pool-sv2-bind and --pool-sv2-authority-key must be configured together"
+        );
+        anyhow::ensure!(
+            self.sv2_authority_key
+                .as_ref()
+                .is_none_or(|path| !path.as_os_str().is_empty()),
+            "pool SV2 authority key path must not be empty"
+        );
+        anyhow::ensure!(
+            self.max_connections > 0
+                && self.max_connections_per_ip > 0
+                && self.max_connections_per_ip <= self.max_connections,
+            "pool connection limits must be positive and per-IP must not exceed total"
+        );
+        anyhow::ensure!(
+            usize::try_from(self.max_connections).is_ok()
+                && usize::try_from(self.max_connections_per_ip).is_ok(),
+            "pool connection limits exceed platform bounds"
+        );
+        anyhow::ensure!(self.window_work > 0, "--pool-window-work must be positive");
+        anyhow::ensure!(
+            self.fee_bps <= 10_000,
+            "--pool-fee-bps must be at most 10000"
+        );
+        anyhow::ensure!(
+            self.maturity >= 100 && self.payout_confirmations > 0,
+            "pool maturity must be at least 100 and payout confirmations must be positive"
+        );
+        anyhow::ensure!(
+            self.reorg_watch_depth >= self.maturity.max(self.payout_confirmations).max(6),
+            "pool reorg watch depth must cover maturity, payout and abandon confirmations"
+        );
+        anyhow::ensure!(
+            self.min_payout_sat >= 546 && self.min_payout_sat <= 2_100_000_000_000_000,
+            "pool minimum payout must be between 546 and MAX_MONEY satoshis"
+        );
+        anyhow::ensure!(
+            (1..=2500).contains(&self.max_payout_outputs),
+            "pool maximum payout outputs must be in 1..=2500"
+        );
+        anyhow::ensure!(
+            !self.reward_script.is_empty()
+                && self.reward_script.len() <= 10_000
+                && self.reward_script[0] != 0x6a,
+            "pool reward script must be spendable and bounded"
+        );
+        anyhow::ensure!(
+            bitcoin::Script::from_bytes(&self.reward_script)
+                .instructions_minimal()
+                .all(|instruction| instruction.is_ok()),
+            "pool reward script must have canonical script encoding"
+        );
+        #[cfg(feature = "pool")]
+        {
+            self.ledger_config().validate()?;
+            let target = bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal(
+                &self.share_difficulty,
+            )
+            .map_err(|error| anyhow::anyhow!("invalid pool share difficulty: {error}"))?;
+            anyhow::ensure!(
+                target == self.share_target,
+                "pool share target must match configured difficulty"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
+    let pool = &settings.pool;
+    if !pool.enabled.unwrap_or(false) {
+        anyhow::ensure!(
+            pool.datadir.is_none()
+                && pool.v1_bind.is_none()
+                && pool.sv2_bind.is_none()
+                && pool.sv2_authority_key.is_none()
+                && pool.allow_non_loopback.is_none()
+                && pool.max_connections.is_none()
+                && pool.max_connections_per_ip.is_none()
+                && pool.share_difficulty.is_none()
+                && pool.window_work.is_none()
+                && pool.fee_bps.is_none()
+                && pool.reward_script.is_none()
+                && pool.maturity.is_none()
+                && pool.payout_confirmations.is_none()
+                && pool.reorg_watch_depth.is_none()
+                && pool.min_payout_sat.is_none()
+                && pool.max_payout_outputs.is_none(),
+            "pool sub-options require --pool"
+        );
+        return Ok(None);
+    }
+    let reward = pool
+        .reward_script
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-reward-script"))?;
+    anyhow::ensure!(
+        reward.len() <= 20_000 && reward.len().is_multiple_of(2),
+        "pool reward script must be bounded even-length hex"
+    );
+    let (pairs, remainder) = reward.as_bytes().as_chunks::<2>();
+    anyhow::ensure!(
+        remainder.is_empty(),
+        "pool reward script must be even-length hex"
+    );
+    let reward_script = pairs
+        .iter()
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            match (digit(pair[0]), digit(pair[1])) {
+                (Some(high), Some(low)) => Ok(high * 16 + low),
+                _ => Err(anyhow::anyhow!("pool reward script must be hex")),
+            }
+        })
+        .collect::<Result<Vec<u8>>>()?;
+    Ok(Some(PoolConfig {
+        datadir: pool
+            .datadir
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-datadir"))?,
+        v1_bind: pool.v1_bind,
+        sv2_bind: pool.sv2_bind,
+        sv2_authority_key: pool.sv2_authority_key.clone(),
+        allow_non_loopback: pool.allow_non_loopback.unwrap_or(false),
+        max_connections: pool.max_connections.unwrap_or(128),
+        max_connections_per_ip: pool.max_connections_per_ip.unwrap_or(8),
+        share_difficulty: pool
+            .share_difficulty
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,
+        #[cfg(feature = "pool")]
+        share_target: bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal(
+            pool.share_difficulty
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,
+        )
+        .map_err(|error| anyhow::anyhow!("invalid pool share difficulty: {error}"))?,
+        window_work: pool
+            .window_work
+            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-window-work"))?,
+        fee_bps: pool.fee_bps.unwrap_or(0),
+        reward_script,
+        maturity: pool.maturity.unwrap_or(100),
+        payout_confirmations: pool.payout_confirmations.unwrap_or(6),
+        reorg_watch_depth: pool.reorg_watch_depth.unwrap_or(1000),
+        min_payout_sat: pool.min_payout_sat.unwrap_or(546),
+        max_payout_outputs: pool.max_payout_outputs.unwrap_or(2500),
+    }))
+}
+
 /// Resolved storage configuration.
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
@@ -252,6 +496,8 @@ pub struct NodeConfig {
     pub validation: ValidationConfig,
     /// Mining settings.
     pub mining: MiningConfig,
+    /// Native keyless pool, disabled unless explicitly configured.
+    pub pool: Option<PoolConfig>,
 }
 
 impl NodeConfig {
@@ -378,6 +624,7 @@ impl NodeConfig {
                     .unwrap_or(ValidationEngine::Native),
             },
             mining: MiningConfig::default(),
+            pool: None,
         }
     }
 
@@ -387,6 +634,13 @@ impl NodeConfig {
     /// cannot execute is rejected here — before the data directory opens,
     /// chainstate exists, or any worker starts.
     pub fn validate(&self) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            pool.validate()?;
+            anyhow::ensure!(
+                !self.mining.payout_script.is_empty(),
+                "--pool requires --mining-payout-address"
+            );
+        }
         anyhow::ensure!(
             self.mempool_snapshot_max_bytes >= 1024 * 1024
                 && self.mempool_snapshot_max_bytes < u64::try_from(usize::MAX).unwrap_or(u64::MAX),
@@ -458,6 +712,11 @@ impl NodeConfig {
             );
         }
         bitcoin_rs_rpc::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
+        self.validate_journal()
+    }
+
+    /// Validates journal durability and lag bounds without opening storage.
+    fn validate_journal(&self) -> Result<()> {
         let journal = &self.chainstate_journal;
         anyhow::ensure!(
             journal.blocks > 0,
@@ -579,6 +838,11 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     }
     let selection = settings.network.unwrap_or(NetworkSelection::Mainnet);
     let mut config = NodeConfig::materialize(&settings, selection);
+    config.pool = resolve_pool(&settings)?;
+    anyhow::ensure!(
+        config.pool.is_none() || settings.mining.payout_address.is_some(),
+        "--pool requires --mining-payout-address"
+    );
     if let Some(address) = settings.mining.payout_address {
         config.mining.payout_script = decode_payout_script(config.network, &address)?;
     }

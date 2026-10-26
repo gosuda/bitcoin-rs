@@ -1,0 +1,51 @@
+[package]
+name = "bitcoin-rs-stratum-v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Sans-IO Stratum V2 mining-pool server adapter for bitcoin-rs"
+
+[lints]
+workspace = true
+
+[lib]
+name = "bitcoin_rs_stratum_v2"
+path = "src/lib.rs"
+
+[dependencies]
+# One job / share / stale / duplicate owner. This crate never assembles a
+# template and never validates a share or a block itself.
+bitcoin-rs-stratum = { workspace = true }
+# The typed host boundary for submitting a found block before ledger record
+# and SV2 acknowledgement.
+bitcoin-rs-mining = { workspace = true }
+
+# Stratum Reference Implementation crates. These are semver-major-coupled;
+# the wire layouts MUST remain pinned as a release family.
+binary_sv2 = { workspace = true }
+framing_sv2 = { workspace = true }
+codec_sv2 = { workspace = true, features = ["noise_sv2"] }
+noise_sv2 = { workspace = true }
+mining_sv2 = { workspace = true }
+common_messages_sv2 = { workspace = true }
+
+ruint = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+bitcoin-rs-primitives = { workspace = true }
+bitcoin-rs-consensus = { workspace = true, default-features = false }
+bitcoin-rs-script = { workspace = true, default-features = false }
+bitcoin-rs-chain = { workspace = true, default-features = false }
+bitcoin-rs-mempool = { workspace = true }
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+# noise_sv2 2.0.0 resolves secp256k1 0.28.2; this test-only key generator
+# rides the same narrow, parent-approved duplicate-crypto exception.
+secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }

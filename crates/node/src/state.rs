@@ -41,6 +41,14 @@ use storage::NodeStorage;
 use storage::StoredBlockBodySource;
 
 mod data_dir_lock;
+
+/// Locks an explicitly configured pool directory for the lifetime of its store.
+#[cfg(feature = "pool")]
+pub(crate) fn lock_pool_directory(
+    path: &std::path::Path,
+) -> Result<bitcoin_rs_storage::StoreGuard> {
+    Ok(Arc::new(data_dir_lock::DataDirLock::acquire(path)?))
+}
 mod index;
 mod open;
 mod storage;

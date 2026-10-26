@@ -356,6 +356,8 @@ pub struct ContextHandles {
     pub network: NetworkHandles,
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
+    /// Optional node-owned pool accounting service.
+    pub pool: PoolHandles,
     /// Live ZMQ notification publisher backing the notifier surface.
     pub zmq_publisher: Arc<dyn crate::zmq::ZmqPublisher>,
     /// Configured node debug-log path for `getrpcinfo`.
@@ -557,6 +559,23 @@ pub struct NetworkHandles {
     pub overlay: bitcoin_rs_p2p::OverlayConfig,
 }
 
+/// Key-free access to the node-owned durable pool ledger.
+#[cfg(feature = "pool")]
+pub trait PoolOperator: Send + Sync {
+    /// Returns the single ledger shared with the pool runtime.
+    fn ledger(&self) -> &pool_ledger::Ledger;
+    /// Returns the explicitly configured payout minimum and output ceiling.
+    fn payout_policy(&self) -> pool_ledger::PayoutPolicy;
+}
+
+/// Optional pool capability; absent in builds without pool support.
+#[derive(Default)]
+pub struct PoolHandles {
+    /// Node-owned operator, absent when the pool is disabled at runtime.
+    #[cfg(feature = "pool")]
+    pub operator: Option<Arc<dyn PoolOperator>>,
+}
+
 /// Mining capability handles.
 #[derive(Default)]
 pub struct MiningHandles {
@@ -588,6 +607,8 @@ pub struct Context {
     pub network: NetworkHandles,
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
+    /// Optional node-owned pool accounting service.
+    pub pool: PoolHandles,
     /// Live ZMQ publisher, also the source of active notifier metadata.
     pub zmq_publisher: Arc<dyn crate::zmq::ZmqPublisher>,
     /// Configured node debug-log path for `getrpcinfo`.
@@ -783,6 +804,7 @@ impl Default for ContextHandles {
             indexes: IndexHandles::default(),
             network: NetworkHandles::default(),
             mining: MiningHandles::default(),
+            pool: PoolHandles::default(),
             zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
         }
@@ -847,6 +869,7 @@ impl Context {
             indexes,
             network,
             mining,
+            pool,
             zmq_publisher,
             debug_log_path,
         } = handles;
@@ -861,6 +884,7 @@ impl Context {
             indexes,
             network,
             mining,
+            pool,
             zmq_publisher,
             debug_log_path,
             server_bound_at: Mutex::new(None),

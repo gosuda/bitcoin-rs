@@ -48,6 +48,8 @@ redb = ["bitcoin-rs-node/redb"]
 kernel = ["bitcoin-rs-node/kernel"]
 zmq = ["bitcoin-rs-node/zmq"]
 silent-payments = ["bitcoin-rs-node/silent-payments"]
+pool = ["bitcoin-rs-node/pool"]
+pool-sv2 = ["bitcoin-rs-node/pool-sv2"]
 
 [[test]]
 name = "g17_dependency_direction"

@@ -315,6 +315,90 @@ fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
     Ok(())
 }
 
+/// Reopening a store must carry every pre-existing row across unchanged and
+/// serve the newest column family without any reset or migration.
+fn run_reopen_pool_ledger_suite<S: KvStore>(
+    open: impl Fn(&std::path::Path) -> Result<S, StorageError>,
+) -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    {
+        let store = open(temp.path())?;
+        let mut batch = store.new_batch();
+        batch.put(ColumnFamily::BlockHeaders, b"reopen-anchor", b"anchor-v1");
+        batch.put(ColumnFamily::PoolLedger, b"ledger-pre", b"pre-v1");
+        store.write(batch)?;
+        store.flush()?;
+    }
+
+    let reopened = open(temp.path())?;
+    assert_eq!(
+        reopened.get(ColumnFamily::BlockHeaders, b"reopen-anchor")?,
+        Some(b"anchor-v1".to_vec())
+    );
+    assert_eq!(
+        reopened.get(ColumnFamily::PoolLedger, b"ledger-pre")?,
+        Some(b"pre-v1".to_vec())
+    );
+    let mut batch = reopened.new_batch();
+    batch.put(ColumnFamily::PoolLedger, b"ledger-post", b"post-v1");
+    reopened.write(batch)?;
+    assert_eq!(
+        reopened.get(ColumnFamily::PoolLedger, b"ledger-post")?,
+        Some(b"post-v1".to_vec())
+    );
+    Ok(())
+}
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn rocksdb_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
+    run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::RocksDbStore::open(path))
+}
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
+    run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::FjallStore::open(path))
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn redb_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
+    run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::RedbStore::open(path))
+}
+
+/// Builds a raw redb database whose schema predates `PoolLedger` (only the
+/// `block_headers` table exists) and proves opening it creates the missing
+/// table while legacy rows survive untouched.
+#[cfg(feature = "redb")]
+#[test]
+fn redb_open_creates_missing_pool_ledger_table_without_reset() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let path = temp.path().join("redb.db");
+    let legacy: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("block_headers");
+    {
+        let db = redb::Database::create(&path)?;
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(legacy)?;
+            table.insert(b"legacy-header".as_slice(), b"legacy-value".as_slice())?;
+        }
+        txn.commit()?;
+    }
+
+    let store = bitcoin_rs_storage::RedbStore::open(&path)?;
+    assert_eq!(
+        store.get(ColumnFamily::BlockHeaders, b"legacy-header")?,
+        Some(b"legacy-value".to_vec())
+    );
+    store.put(ColumnFamily::PoolLedger, b"ledger-first", b"row-v1")?;
+    assert_eq!(
+        store.get(ColumnFamily::PoolLedger, b"ledger-first")?,
+        Some(b"row-v1".to_vec())
+    );
+    Ok(())
+}
+
 #[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 #[test]
 fn portable_backends_have_identical_aggregate_hashes() -> TestResult<()> {

@@ -59,6 +59,8 @@ redb = [
 kernel = ["bitcoin-rs-chainstate/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]
 silent-payments = ["bitcoin-rs-rpc/silent-payments"]
+pool = ["bitcoin-rs-rpc/pool", "dep:bitcoin-rs-stratum", "dep:bitcoin-rs-pool-ledger"]
+pool-sv2 = ["pool", "dep:bitcoin-rs-stratum-v2", "dep:zeroize"]
 
 [dependencies]
 hashbrown.workspace = true
@@ -74,6 +76,10 @@ bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin-rs-rpc.workspace = true
+bitcoin-rs-stratum = { workspace = true, optional = true }
+bitcoin-rs-stratum-v2 = { workspace = true, optional = true }
+bitcoin-rs-pool-ledger = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 bitcoin.workspace = true
 bytes.workspace = true

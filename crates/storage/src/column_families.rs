@@ -29,6 +29,9 @@ pub enum ColumnFamily {
     /// transaction with live outputs, keyed by the full 256-bit txid and
     /// valued by the lossless canonical v5 record payload.
     CoinRecords = 11,
+    /// Durable pool-ledger rows: one byte-keyed keyspace holding the
+    /// ledger revision sentinel and its tagged logical tables.
+    PoolLedger = 12,
 }
 
 impl ColumnFamily {
@@ -46,6 +49,7 @@ impl ColumnFamily {
         Self::UndoData,
         Self::ScriptLive,
         Self::CoinRecords,
+        Self::PoolLedger,
     ];
     /// Stable backend column-family/table name.
     pub const fn name(self) -> &'static str {
@@ -62,6 +66,7 @@ impl ColumnFamily {
             Self::UndoData => "undo_data",
             Self::ScriptLive => "script_live",
             Self::CoinRecords => "coin_records",
+            Self::PoolLedger => "pool_ledger",
         }
     }
 
@@ -80,6 +85,7 @@ impl ColumnFamily {
             Self::UndoData => 9,
             Self::ScriptLive => 10,
             Self::CoinRecords => 11,
+            Self::PoolLedger => 12,
         }
     }
 }

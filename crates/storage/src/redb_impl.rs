@@ -913,6 +913,7 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::UndoData => TableDefinition::new("undo_data"),
         ColumnFamily::ScriptLive => TableDefinition::new("script_live"),
         ColumnFamily::CoinRecords => TableDefinition::new("coin_records"),
+        ColumnFamily::PoolLedger => TableDefinition::new("pool_ledger"),
     }
 }
 
