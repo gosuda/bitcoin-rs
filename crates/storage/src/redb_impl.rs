@@ -648,13 +648,7 @@ fn redb_condition_matches(
         .open_table(table_for(cf))
         .map_err(StorageError::backend)?;
     let guard = table.get(key).map_err(StorageError::backend)?;
-    Ok(match condition {
-        WriteCondition::Absent { .. } => guard.is_none(),
-        WriteCondition::Equals { expected, .. } => match &guard {
-            Some(g) => g.value() == *expected,
-            None => false,
-        },
-    })
+    Ok(condition.matches(guard.as_ref().map(redb::AccessGuard::value)))
 }
 
 fn apply_redb_batch_op(
@@ -1439,13 +1433,7 @@ fn txindex_condition_matches(
                 .open_table(TXINDEX_META)
                 .map_err(StorageError::backend)?;
             let guard = table.get(key).map_err(StorageError::backend)?;
-            Ok(match condition {
-                WriteCondition::Absent { .. } => guard.is_none(),
-                WriteCondition::Equals { expected, .. } => match &guard {
-                    Some(g) => g.value() == *expected,
-                    None => false,
-                },
-            })
+            Ok(condition.matches(guard.as_ref().map(redb::AccessGuard::value)))
         }
         _ => Err(invalid_txindex_cf()),
     }
