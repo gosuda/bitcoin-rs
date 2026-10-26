@@ -231,9 +231,7 @@ impl ConnectionShared {
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
-            overlay: Arc::new(crate::overlay::OverlayTransport::new(
-                crate::OverlayConfig::default(),
-            )),
+            overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
         }
     }

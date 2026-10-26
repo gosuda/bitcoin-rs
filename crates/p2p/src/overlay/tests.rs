@@ -167,7 +167,7 @@ fn overlay_only_resolution_and_admission_never_fall_back_to_ip_or_dns() {
         ..OverlayConfig::default()
     };
     config.validate().expect("config");
-    let transport = OverlayTransport::new(config);
+    let transport = OverlayTransport::new(config.into());
     for text in [
         "127.0.0.1:8333",
         "localhost:8333",
@@ -248,11 +248,11 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
     let listener = TcpListener::bind("127.0.0.1:0").expect("SAM fixture");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("address");
-    let owner = Arc::new(OverlayTransport::new(OverlayConfig {
+    let owner = Arc::new(OverlayTransport::new(Arc::new(OverlayConfig {
         i2p_sam: Some(address),
         onlynet: vec![PeerNetwork::I2p],
         ..OverlayConfig::default()
-    }));
+    })));
     let shared = shared(&owner);
     let shutdown = Arc::new(AtomicBool::new(false));
     let controls = Arc::new(AtomicUsize::new(0));

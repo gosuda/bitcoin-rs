@@ -69,7 +69,7 @@ pub struct P2pServiceConfig {
     /// Addresses on which inbound P2P connections are accepted.
     pub listen_addrs: Vec<std::net::SocketAddr>,
     /// Opt-in overlay routing and service configuration.
-    pub overlay: crate::OverlayConfig,
+    pub overlay: Arc<crate::OverlayConfig>,
     /// Network message-start bytes.
     pub magic: Magic,
     /// Auxiliary peer-book base/legacy path. The owner adds the P2P magic to
@@ -118,7 +118,7 @@ impl Default for P2pServiceConfig {
     fn default() -> Self {
         Self {
             listen_addrs: Vec::new(),
-            overlay: crate::OverlayConfig::default(),
+            overlay: Arc::default(),
             magic: Magic::from_bytes([0; 4]),
             address_book_path: None,
             asmap_path: None,
@@ -436,9 +436,9 @@ impl P2pService {
             config.allow_local_addresses,
             config.asmap_path.as_deref(),
         );
-        let overlay = Arc::new(crate::overlay::OverlayTransport::new(
-            config.overlay.clone(),
-        ));
+        let overlay = Arc::new(crate::overlay::OverlayTransport::new(Arc::clone(
+            &config.overlay,
+        )));
         let mut banned = BannedReader::with_protection(
             Arc::new(RwLock::new(Vec::new())),
             config.noban_subnets.clone(),

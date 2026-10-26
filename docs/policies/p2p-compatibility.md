@@ -684,6 +684,9 @@ handshake, leases, counters, admission and message processing for all streams.
 
 `p2p::overlay` owns opt-in route selection and SOCKS5/SAM setup; its private
 Tor control and IVNP SAM workers participate in `P2pService` startup/shutdown.
+The service, transport and admission policy share one immutable routing
+configuration. The SAM session owns its local destination; RPC advertises it
+only while that session is live and inbound acceptance is enabled.
 Allowed-network policy is checked both during selection and final admission.
 The [configuration reference](../getting-started.md#tor-and-ivnp-i2p-networking)
 owns option spellings and defaults. Setup uses absolute deadlines and bounded
@@ -717,7 +720,11 @@ deviation from Core's shared inbound clock policy.
 Schema v9 adds overlay endpoints and source identities using the existing
 backup-before-migration path. Upgrading v8 IP records preserves the secret,
 all membership references, services and restart anchors; IP hash bytes and
-grouping remain unchanged. Application keys have a separate versioned,
+grouping remain unchanged.
+Overlay source tags admit only Tor v3 and I2P identities; IP sources retain
+their existing IP tag. Invalid source representations keep the original file
+untouched with persistence disabled.
+Application keys have a separate versioned,
 checksummed create-once format. A bad existing identity fails startup and is
 never replaced. IVNP router data and application identities have separate
 owners and directories.

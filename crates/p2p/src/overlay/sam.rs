@@ -7,7 +7,8 @@ use super::{
 use sha2::{Digest, Sha256};
 pub(super) struct Session {
     id: String,
-    alive: Arc<AtomicBool>,
+    pub(super) alive: Arc<AtomicBool>,
+    pub(super) local_address: PeerEndpoint,
 }
 fn hello(setup: &mut Setup<'_>) -> io::Result<()> {
     setup.write(b"HELLO VERSION MIN=3.1 MAX=3.3\n")?;
@@ -193,10 +194,8 @@ impl OverlayTransport {
                 *self.sam.write() = Some(Session {
                     id: id.clone(),
                     alive: Arc::clone(&alive),
+                    local_address: local,
                 });
-                if self.config.i2p_accept {
-                    *self.local_i2p.write() = Some(local);
-                }
                 let healthy_since = Instant::now();
 
                 std::thread::scope(|scope| {
@@ -229,7 +228,6 @@ impl OverlayTransport {
             if let Some(session) = retired {
                 session.alive.store(false, Ordering::Release);
             }
-            *self.local_i2p.write() = None;
             retire(&shared.peer_table, PeerNetwork::I2p);
             if let Err(error) = result {
                 if !cancelled() {
@@ -295,6 +293,41 @@ mod tests {
     use super::*;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::TcpListener;
+
+    #[test]
+    fn advertised_i2p_address_belongs_to_a_live_accepting_session() {
+        let local = PeerEndpoint::new(PeerAddress::I2p([7; 32]), 8333);
+        for accept in [false, true] {
+            let transport = OverlayTransport::new(Arc::new(crate::OverlayConfig {
+                i2p_accept: accept,
+                i2p_sam: Some("127.0.0.1:7656".parse().expect("SAM socket")),
+                ..crate::OverlayConfig::default()
+            }));
+            let table = crate::PeerTable::new();
+            let state = || {
+                transport
+                    .states(&table)
+                    .into_iter()
+                    .find(|state| state.network == PeerNetwork::I2p)
+                    .expect("I2P state")
+            };
+            let alive = Arc::new(AtomicBool::new(true));
+            assert!(state().local_address.is_none());
+            *transport.sam.write() = Some(Session {
+                id: "fixture".to_owned(),
+                alive: Arc::clone(&alive),
+                local_address: local,
+            });
+            assert_eq!(state().local_address, accept.then_some(local));
+            assert_eq!(state().operational, accept);
+            alive.store(false, Ordering::Release);
+            assert!(state().local_address.is_none());
+            assert!(!state().operational);
+            assert!(transport.sam_session().is_err());
+            transport.sam.write().take();
+            assert!(state().local_address.is_none());
+        }
+    }
 
     #[test]
     fn only_explicit_stream_destination_failures_are_remote_attempts() {

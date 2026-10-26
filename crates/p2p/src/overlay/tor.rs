@@ -26,6 +26,10 @@ fn reply(setup: &mut Setup<'_>) -> io::Result<Vec<String>> {
     Err(invalid("oversized Tor control reply"))
 }
 impl OverlayTransport {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One service owner keeps key publication, control lifetime and inbound teardown ordered"
+    )]
     pub(super) fn run_tor(
         &self,
         address: SocketAddr,

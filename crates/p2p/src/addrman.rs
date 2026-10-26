@@ -1726,6 +1726,8 @@ fn validate_current(
     for entry in &stored.records {
         if !routable(entry.addr, allow_local)
             || canonical(entry.addr) != entry.addr
+            || matches!(&entry.source, Source::Overlay(address)
+                if !matches!(address, crate::PeerAddress::Onion(_) | crate::PeerAddress::I2p(_)))
             || !endpoints.insert(entry.addr)
             || entry.services.is_none() && !entry.allows_unknown_services()
             || entry.new_buckets.len() > MAX_NEW_REFS

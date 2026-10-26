@@ -141,15 +141,13 @@ pub(crate) struct OverlayTransport {
     pub(crate) config: Arc<OverlayConfig>,
     sam: RwLock<Option<sam::Session>>,
     local_onion: RwLock<Option<PeerEndpoint>>,
-    local_i2p: RwLock<Option<PeerEndpoint>>,
 }
 impl OverlayTransport {
-    pub(crate) fn new(config: OverlayConfig) -> Self {
+    pub(crate) fn new(config: Arc<OverlayConfig>) -> Self {
         Self {
-            config: Arc::new(config),
+            config,
             sam: RwLock::new(None),
             local_onion: RwLock::new(None),
-            local_i2p: RwLock::new(None),
         }
     }
 
@@ -164,7 +162,14 @@ impl OverlayTransport {
         .map(|network| {
             let local_address = match network {
                 PeerNetwork::Onion => *self.local_onion.read(),
-                PeerNetwork::I2p => *self.local_i2p.read(),
+                PeerNetwork::I2p => self
+                    .sam
+                    .read()
+                    .as_ref()
+                    .filter(|session| {
+                        self.config.i2p_accept && session.alive.load(Ordering::Acquire)
+                    })
+                    .map(|session| session.local_address),
                 _ => None,
             };
             OverlayNetworkState {
@@ -366,9 +371,7 @@ fn remote_failure(message: impl Into<String>) -> io::Error {
 }
 
 pub(crate) fn remote_connect_failed(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|inner| inner.is::<RemoteConnectFailure>())
+    matches!(error.get_ref(), Some(inner) if inner.is::<RemoteConnectFailure>())
 }
 fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "overlay operation cancelled")

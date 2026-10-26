@@ -615,7 +615,8 @@ mod tests {
                     ),
                     onlynet: vec![bitcoin_rs_p2p::PeerNetwork::Onion],
                     ..bitcoin_rs_p2p::OverlayConfig::default()
-                },
+                }
+                .into(),
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
             bitcoin_rs_chain::LatchReader::fixture_never(),
