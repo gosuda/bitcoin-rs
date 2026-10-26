@@ -202,7 +202,7 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     for row in &network.networks[2..] {
         assert!(row.limited);
         assert!(!row.reachable);
-        assert!(row.proxy.is_empty());
+        assert_eq!(row.proxy, "");
     }
     assert_eq!(network.warnings, Vec::<String>::new());
 

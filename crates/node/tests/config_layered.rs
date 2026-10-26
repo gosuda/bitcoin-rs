@@ -66,12 +66,9 @@ fn blank_onlynet_environment_clears_an_inherited_network_list() -> Result<()> {
     let file: UserConfig = toml::from_str("onlynet = ['ipv4']")?;
     let mut environment = UserConfig::default();
     environment.apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("  "))?;
-    assert!(
-        resolve(&[&file, &environment])?
-            .p2p
-            .overlay
-            .onlynet
-            .is_empty()
+    assert_eq!(
+        resolve(&[&file, &environment])?.p2p.overlay.onlynet,
+        Vec::<bitcoin_rs_primitives::PeerNetwork>::new()
     );
     assert!(
         environment
