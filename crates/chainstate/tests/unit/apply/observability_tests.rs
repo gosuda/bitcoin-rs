@@ -192,6 +192,54 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
     Ok(())
 }
 
+/// Step-24 execution smoke: a real window commit emits the transition-hold
+/// and group-flush diagnostics on the caller thread.
+///
+/// Drives the production `begin_transition` + `connect_window` path on real
+/// regtest fixtures under the `ProfileFields` dispatch and asserts both
+/// `transition_held_us` and `flush_wait_us` arrive. The transition guard is
+/// dropped inside the capture closure so its `Drop` event reaches the same
+/// dispatch. This measures nothing, writes no ledger, and never touches
+/// `/proc/self/clear_refs`: the `VmHWM` performance gate is neither used nor
+/// bypassed, and no timing ratio or promotion is claimed.
+#[test]
+fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn std::error::Error>>
+{
+    let genesis = Network::Regtest.genesis_block();
+    let fields = ProfileFields::default();
+    capture_profile(&fields, || -> Result<(), Box<dyn std::error::Error>> {
+        let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let first = mined_child(genesis.block_hash(), 1)?;
+        let second = mined_child(first.block_hash(), 2)?;
+        seed_genesis(&handles)?;
+        {
+            let mut tree = handles.block_tree.write();
+            bitcoin_rs_chain::accept_headers(
+                &mut tree,
+                &[first.header, second.header],
+                Network::Regtest,
+                bitcoin_rs_chain::current_unix_seconds(),
+                bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            )?;
+        }
+        let blocks = [&first, &second];
+        let serialized: Vec<bytes::Bytes> = blocks
+            .iter()
+            .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
+            .collect();
+        let transition = handles.begin_transition()?;
+        transition.connect_window(&blocks, &serialized)?;
+        Ok(())
+    })?;
+    for field in ["transition_held_us", "flush_wait_us"] {
+        assert!(
+            fields.0.lock().contains(field),
+            "missing window diagnostic: {field}"
+        );
+    }
+    Ok(())
+}
+
 /// Records fields delivered by real tracing events on the apply caller thread.
 #[derive(Clone, Default)]
 struct ProfileFields(Arc<Mutex<HashSet<String>>>);
