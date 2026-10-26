@@ -402,9 +402,12 @@ Proof: these tests establish the memo-retention rule:
     (`BodyUnavailable` for an absent body, `SourceRow` for any other mismatch).
 - Export fsyncs the artifact, fsyncs the directory, then publishes the manifest
   with create-new, fsync, and a directory fsync. Directory sync is a no-op off
-  Unix. An export that returns an error attempts to remove the artifact it
-  created, and a manifest that fails to write or fsync is removed. A failure of
-  the final directory sync is a known gap (see Live gaps).
+  Unix. A failed, stale, or cancelled export removes what it created newest
+  first (manifest before artifact) through `portable/export.rs` `Publication`:
+  each removal is followed by a directory sync, so the artifact is removed only
+  after the manifest removal is durable. When that durability cannot be
+  established the artifact is left in place rather than risk a surviving
+  manifest that names a missing artifact.
 - **Restore validation** completes before any write. Faults are reported in this
   order: manifest fields, artifact length, SHA-256, artifact header, record
   framing and order, chain identity, a fresh `TxLookup`, locator mismatch.
@@ -458,20 +461,21 @@ Proof: these tests establish the memo-retention rule:
 - **Non-claims**:
   - No bundle carries `ScriptHistory`, `ScriptLive`, or `CompactFilters` rows.
     An operator who needs those indexes builds them through `IDX-01`.
-  - The bundle carries no signature. The SHA-256 binds the artifact to the
-    manifest that sits beside it. Restore binds each record to the receiver's
-    chain by the locator check, not to the exporter's identity.
+  - The bundle carries no signature. The SHA-256 detects changes between the
+    artifact and the manifest that sits beside it; it is not authentication.
+    Restore binds each record to the receiver's chain by the locator check,
+    not to the exporter's identity.
   - Restore proves that every record present resolves in the receiver's chain.
     It does not prove that no record is missing: no check compares the record
     count with the chain's transaction count.
-  - No test compares restored rows with rows an ordinary derivation writes.
   - The clause makes no performance, interoperability with other
     implementations, or cross-version claim.
-- Executable proof covers only the manifest and artifact codec and the
-  configuration surface. The export, restore, apply, cleanup, and
-  failure-handling rules above are stated from the code and have no executable
-  proof (see Live gaps).
-- Proof (codec and configuration only): the `crates/index/src/portable/manifest.rs`
+- Executable proof covers the manifest and artifact codec, the configuration
+  surface, the publication cleanup, and the Fjall lifecycle paths (export,
+  restore, withhold, cancellation, damage refusal, interrupted-import reset).
+  It does not cover a live mid-stream `Stale` export race, power loss, or the
+  remaining cross-process cases listed in Live gaps.
+- Proof: the `crates/index/src/portable/manifest.rs`
   tests `manifest_round_trips_through_json_and_validates`,
   `unknown_fields_are_denied_at_every_level`,
   `script_live_is_never_a_capability_and_script_history_is_refused`, and
@@ -480,15 +484,27 @@ Proof: these tests establish the memo-retention rule:
   `prefix_collisions_order_by_full_txid_and_fold_into_one_sorted_row`,
   `framing_refuses_each_violation`, and
   `hashing_reader_digest_equals_the_one_shot_digest`; the
+  `crates/index/src/portable/export.rs` publication unit tests (tempdir scope)
+  `failed_final_directory_sync_removes_the_manifest_and_its_artifact`,
+  `undurable_manifest_removal_keeps_the_artifact_it_names`, and
+  `committed_publication_keeps_both_files_and_never_replaces_an_entry`; the
   `crates/node/tests/config_layered.rs` tests
   `index_bundle_is_an_explicit_one_shot_request`,
   `index_bundle_import_and_export_never_resolve_by_precedence`,
   `index_bundle_requires_the_transaction_index_it_moves`, and
-  `index_bundle_rejects_empty_and_unusable_directories_on_every_surface`; and the
+  `index_bundle_rejects_empty_and_unusable_directories_on_every_surface`; the
   `bin/bitcoin-rs/src/config.rs` tests
   `index_bundle_directories_resolve_from_the_command_line_and_stay_exclusive`,
   `empty_index_bundle_directories_are_refused_by_clap_and_the_environment`, and
-  `bitcoin_conf_cannot_request_a_bundle_or_relay_feature`.
+  `bitcoin_conf_cannot_request_a_bundle_or_relay_feature`; and the
+  `crates/index/tests/portable_bundle.rs` lifecycle tests
+  `export_then_restore_serves_the_same_queries_as_backfill`,
+  `damaged_bundles_are_refused_before_any_write_or_reset`,
+  `export_preserves_a_preexisting_destination`,
+  `cancelled_export_removes_only_its_own_staging`,
+  `cancelled_restore_writes_nothing_and_restart_completes`,
+  `missing_bodies_withhold_readiness_until_ordinary_backfill`, and
+  `interrupted_import_is_cleared_on_restart_and_restore_retries`.
 
 ### `IDX-12`: Historical prefix queries (one-shot, server-selected)
 
@@ -684,19 +700,17 @@ Core/Kyoto runner are described in
   checkpoints, block bodies, and derived indexes is normative in
   [recovery.md](recovery.md) (`RCV-01`–`RCV-04`); a `kill -9` gate that
   re-applies real block bodies through it is not yet exercised.
-- **Portable bundle end to end**: No test runs an export, a restore, a
-  withheld restore, or an interrupted import against a store (`IDX-11`). The
-  export, restore, and cleanup rules in that clause rest on the code paths
-  `portable/export.rs`, `portable/restore.rs`, `index/write.rs`
-  `import_tx_lookup_stream`, and `runtime/startup.rs` `open_and_run`, plus the
-  codec and configuration tests it lists.
-- **Orphan manifest after a failed export**: `publish_manifest` ends with a
-  directory sync (`portable/export.rs`). If that sync fails after
-  `manifest.json` exists, the export returns an error, the artifact is removed,
-  and the manifest stays. Restore of that directory then fails reading the
-  artifact, and a new export into it is refused as `ExistingBundle` until the
-  operator clears the directory. The code does not remove the manifest on this
-  path.
+- **Portable bundle cross-process scope**: `crates/index/tests/portable_bundle.rs`
+  proves export/restore equality, damage refusal, existing-destination
+  preservation, export/restore cancellation, missing-body withhold with ordinary
+  backfill, and interrupted-import reset over real Fjall stores (`IDX-11`). The
+  live Core200/C150/withheld receipts are private external runs, not a repository
+  portable process suite. No power-loss campaign exists; SIGKILL bounds stop at
+  process kill. A live mid-stream `Stale` export race is unobserved. Receiver tip
+  ahead with forward reconciliation, divergent-base refusal with reorg after
+  restore, foreign format-version refusal, full-txid collision under a shared
+  8-byte prefix, and a mainnet-scale cost record are not yet passed, so full
+  Stage 2 is not claimed. Stage 3 remains blocked.
 
 ## Proven by
 
@@ -735,6 +749,18 @@ Core/Kyoto runner are described in
 - `crates/index/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
   `attached_source_is_the_worker_row`: `getcapabilities` advertises one
   txindex row from `derived_index_status` (`IDX-02`).
+- `crates/index/tests/portable_bundle.rs` (`IDX-11` lifecycle over real Fjall stores):
+  `export_then_restore_serves_the_same_queries_as_backfill`,
+  `damaged_bundles_are_refused_before_any_write_or_reset`,
+  `export_preserves_a_preexisting_destination`,
+  `cancelled_export_removes_only_its_own_staging`,
+  `cancelled_restore_writes_nothing_and_restart_completes`,
+  `missing_bodies_withhold_readiness_until_ordinary_backfill`, and
+  `interrupted_import_is_cleared_on_restart_and_restore_retries`; and
+  `crates/index/src/portable/export.rs` publication unit tests (tempdir scope):
+  `failed_final_directory_sync_removes_the_manifest_and_its_artifact`,
+  `undurable_manifest_removal_keeps_the_artifact_it_names`, and
+  `committed_publication_keeps_both_files_and_never_replaces_an_entry`.
 
 ### Query-budget regression evidence
 
