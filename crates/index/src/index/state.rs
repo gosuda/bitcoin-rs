@@ -260,17 +260,21 @@ fn reset_condition(state: &IndexWriteFenceState) -> WriteCondition<'_> {
     }
 }
 
+fn reset_claim_live(state: &IndexWriteFenceState, current: Option<&[u8]>) -> bool {
+    match (state, current) {
+        (IndexWriteFenceState::Absent, None) => true,
+        (IndexWriteFenceState::Idle(expected), Some(bytes)) => bytes == expected.as_slice(),
+        _ => false,
+    }
+}
+
 fn ensure_reset_live<S: KvStore>(
     store: &S,
     generation: u64,
     state: &IndexWriteFenceState,
 ) -> Result<(), IndexError> {
     let current = store.get(ColumnFamily::UtxoMeta, RESET_CAPABILITIES_KEY)?;
-    let live = match (state, current.as_deref()) {
-        (IndexWriteFenceState::Absent, None) => true,
-        (IndexWriteFenceState::Idle(expected), Some(bytes)) => bytes == expected.as_slice(),
-        _ => false,
-    };
+    let live = reset_claim_live(state, current.as_deref());
     if live {
         return Ok(());
     }
@@ -465,11 +469,7 @@ pub(super) fn ensure_fence_live<S: KvStore>(
     let current_revision = snapshot.get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?;
     drop(snapshot);
 
-    let reset_live = match (&fence.state, current_reset.as_deref()) {
-        (IndexWriteFenceState::Absent, None) => true,
-        (IndexWriteFenceState::Idle(expected), Some(bytes)) => bytes == expected.as_slice(),
-        _ => false,
-    };
+    let reset_live = reset_claim_live(&fence.state, current_reset.as_deref());
     if !reset_live {
         resume_capability_reset(store, generation, 0)?;
         return Err(IndexError::ResetInProgress);
