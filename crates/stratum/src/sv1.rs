@@ -1117,35 +1117,33 @@ impl ClientRequest {
 // Encoders
 // ---------------------------------------------------------------------------
 
+#[must_use]
+fn encode_envelope(id: &RequestId, result_fragment: &str, error_fragment: &str) -> String {
+    format!(
+        "{{\"id\":{},\"result\":{},\"error\":{}}}\n",
+        id.as_json(),
+        result_fragment,
+        error_fragment
+    )
+}
+
 /// `{"id":ID,"result":RESULT,"error":null}\n`
 #[must_use]
 pub fn encode_result(id: &RequestId, result_json: &str) -> String {
-    format!(
-        "{{\"id\":{},\"result\":{},\"error\":null}}\n",
-        id.as_json(),
-        result_json
-    )
+    encode_envelope(id, result_json, "null")
 }
 
 /// `{"id":ID,"result":null,"error":[code,"message",null]}\n`
 #[must_use]
 pub fn encode_error(id: &RequestId, error: &WireError) -> String {
-    format!(
-        "{{\"id\":{},\"result\":null,\"error\":{}}}\n",
-        id.as_json(),
-        error.to_json()
-    )
+    encode_envelope(id, "null", &error.to_json())
 }
 
 /// `{"id":ID,"result":false,"error":[code,"message",null]}\n`: a refused
 /// authorize or share.
 #[must_use]
 pub fn encode_reject(id: &RequestId, error: &WireError) -> String {
-    format!(
-        "{{\"id\":{},\"result\":false,\"error\":{}}}\n",
-        id.as_json(),
-        error.to_json()
-    )
+    encode_envelope(id, "false", &error.to_json())
 }
 
 /// `mining.set_difficulty` notification.
