@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Live Tor/I2P overlay interop for bitcoin-rs (#1601).
 #
-# Starts a pinned Tor (loopback ControlPort + SOCKS) and a pinned IVNP
-# (SAM bridge at 127.0.0.1:7656), then two regtest bitcoin-rs nodes: one
+# Starts a private Tor net (loopback ControlPort plus SOCKS) and a private
+# i2pd mesh (seven routers, netid 77, distinct 127.0.77.x), then two regtest bitcoin-rs nodes: one
 # publishing an onion service (--onion, --torcontrol) and accepting I2P
 # (--i2psam, --i2pacceptincoming), one dialing over the proxies
 # (--proxy, --i2psam). Proves handshake, headers/blocks in both
@@ -14,41 +14,50 @@
 # network prerequisite fails the run (the caller reports BLOCKED).
 #
 # usage: run-p2p-overlay-interop.sh --tor-command <command>
-#            --ivnp-command <command>
+#            --tor-gencert-command <command> --i2pd-command <path>
 #            [--bitcoin-rs-command <command>] [--workdir <dir>]
 #            [--evidence <path>] [--timeout-seconds <n>] [--keep]
 #
-# Pinned externals: Tor 0.4.9.14 release; IVNP v0.4.1 at commit
-# 0a1b746ba98b58510eb5dcde679ca43184f4b60e, upstream built with Go
-# 1.27.0 compiler header. Any prerequisite mismatch or missing metadata
+# Pinned externals: Tor 0.4.9.14 release; official i2pd 3.0.0 release.
+# Any prerequisite mismatch or missing metadata
 # fails closed (non-zero exit).
 #
-# Host: Linux with python3 >= 3.9 (os.pidfd_open, signal.pidfd_send_signal).
-# Every listener binds loopback, but Tor and I2P bootstrap over external
-# networks, so the overlay daemons need outbound internet access. Children are
+# Host: Linux with python3 >= 3.11 (os.pidfd_open, signal.pidfd_send_signal, asyncio.timeout).
+# Every listener binds loopback and no overlay daemon uses public bootstrap.
+# Children are
 # only ever signaled through validated pidfds (see "Child ownership" below).
+#
+# Fresh outputs: an explicit --workdir must not exist or must be an empty
+# directory owned by the caller, and --evidence must not exist. Both are
+# decided before anything is created or launched; nothing is cleared or
+# overwritten. Every child starts under a minimal environment (PATH,
+# LD_LIBRARY_PATH, a task-owned HOME and TMPDIR), so no operator
+# BITCOIN_RS_*, proxy, or other setting reaches a fixture or node.
 
 set -euo pipefail
+umask 077
 
 usage() {
   printf '%s\n' \
-    "usage: run-p2p-overlay-interop.sh --tor-command <command> --ivnp-command <command> [--bitcoin-rs-command <command>] [--workdir <dir>] [--evidence <path>] [--timeout-seconds <n>] [--keep]" \
+    "usage: run-p2p-overlay-interop.sh --tor-command <command> --tor-gencert-command <command> --i2pd-command <path> [--bitcoin-rs-command <command>] [--workdir <dir>] [--evidence <path>] [--timeout-seconds <n>] [--keep]" \
     "" \
     "Required:" \
     "  --tor-command <cmd>       Tor binary (pinned to release 0.4.9.14)" \
-    "  --ivnp-command <cmd>      IVNP binary (pinned to commit 0a1b746ba98b58510eb5dcde679ca43184f4b60e built with Go 1.27.0)" \
+    "  --tor-gencert-command <cmd> tor-gencert binary (same 0.4.9.14 release as --tor-command)" \
+    "  --i2pd-command <path>      Path to i2pd binary (pinned to official release 3.0.0; supply the binary path, additional arguments are not parsed)" \
     "" \
     "Optional:" \
     "  --bitcoin-rs-command <cmd> Path to bitcoin-rs binary (default: target/debug/bitcoin-rs)" \
-    "  --workdir <dir>           Preserve run directory at <dir> (default: temporary dir)" \
-    "  --evidence <path>         Path to emit evidence JSON (default: <workdir>/evidence.json)" \
+    "  --workdir <dir>           Run directory: must not exist, or must be an empty directory you own (created or tightened to 0700, never cleared; default: fresh temporary dir)" \
+    "  --evidence <path>         Path to emit evidence JSON; must not exist (default: <workdir>/evidence.json)" \
     "  --timeout-seconds <n>     Operation timeout deadline in seconds (default: 240)" \
     "  --keep                    Keep temporary workdir on exit" \
     "  -h, --help                Show this help message"
 }
 
 TOR_COMMAND=""
-IVNP_COMMAND=""
+I2PD_COMMAND=""
+TOR_GENCERT_COMMAND=""
 BITCOIN_RS_COMMAND="target/debug/bitcoin-rs"
 WORKDIR=""
 AUTO_WORKDIR=0
@@ -63,9 +72,14 @@ while (($# > 0)); do
       TOR_COMMAND=$2
       shift 2
       ;;
-    --ivnp-command)
-      [[ $# -ge 2 ]] || { echo "error: --ivnp-command requires an argument" >&2; usage >&2; exit 2; }
-      IVNP_COMMAND=$2
+    --tor-gencert-command)
+      [[ $# -ge 2 ]] || { echo "error: --tor-gencert-command requires an argument" >&2; usage >&2; exit 2; }
+      TOR_GENCERT_COMMAND=$2
+      shift 2
+      ;;
+    --i2pd-command)
+      [[ $# -ge 2 ]] || { echo "error: --i2pd-command requires an argument" >&2; usage >&2; exit 2; }
+      I2PD_COMMAND=$2
       shift 2
       ;;
     --bitcoin-rs-command)
@@ -104,10 +118,59 @@ while (($# > 0)); do
   esac
 done
 
-if [[ -z "${TOR_COMMAND}" || -z "${IVNP_COMMAND}" ]]; then
-  echo "error: --tor-command and --ivnp-command are required" >&2
+if [[ -z "${TOR_COMMAND}" || -z "${TOR_GENCERT_COMMAND}" || -z "${I2PD_COMMAND}" ]]; then
+  echo "error: --tor-command, --tor-gencert-command, and --i2pd-command are required" >&2
   usage >&2
   exit 2
+fi
+
+# -----------------------------------------------------------------------------
+# Fresh output paths (refused before anything is created or launched)
+# -----------------------------------------------------------------------------
+# No operator data may reach the fixtures and no operator file may be replaced.
+# An explicit --workdir must not exist, or must be an empty directory owned by
+# this user (never a symbolic link); --evidence must not exist at all. Both are
+# decided here, before any mkdir, port allocation, write, or child launch, and
+# nothing is deleted or overwritten to make room.
+require_empty_dir() { # <path> <flag> -- <path> is a real, empty directory owned by this user
+  local path=$1
+  local flag=$2
+  local listing
+  if [[ -L "${path}" || ! -d "${path}" || ! -O "${path}" ]]; then
+    echo "error: ${flag} ${path} exists but is not a directory owned by this user (symbolic links are refused)" >&2
+    exit 2
+  fi
+  if [[ "${path}" == -* ]]; then
+    path=./${path}
+  fi
+  listing=$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit) || {
+    echo "error: ${flag} ${path} could not be listed; refusing to use it" >&2
+    exit 2
+  }
+  if [[ -n "${listing}" ]]; then
+    echo "error: ${flag} ${path} is not empty; refusing to use a directory that already holds files" >&2
+    exit 2
+  fi
+}
+
+WORKDIR_EXISTS=0
+if [[ -n "${WORKDIR}" && ( -e "${WORKDIR}" || -L "${WORKDIR}" ) ]]; then
+  require_empty_dir "${WORKDIR}" "--workdir"
+  WORKDIR_EXISTS=1
+fi
+if [[ -n "${EVIDENCE}" ]]; then
+  if [[ -e "${EVIDENCE}" || -L "${EVIDENCE}" ]]; then
+    echo "error: --evidence ${EVIDENCE} already exists; refusing to overwrite it" >&2
+    exit 2
+  fi
+  EVIDENCE_DIR=$(dirname -- "${EVIDENCE}")
+  # The parent must exist, unless it is the new --workdir itself.
+  if [[ ! -d "${EVIDENCE_DIR}" ]]; then
+    if [[ -z "${WORKDIR}" || "$(realpath -m -- "${EVIDENCE_DIR}")" != "$(realpath -m -- "${WORKDIR}")" ]]; then
+      echo "error: --evidence parent directory does not exist: ${EVIDENCE_DIR}" >&2
+      exit 2
+    fi
+  fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -253,6 +316,13 @@ def stop(parent, term, kill, targets):
     return 1 if "stuck" in outcome.values() else 0
 
 def selftest():
+    if sys.version_info < (3, 11):
+        sys.exit(f"python3 >= 3.11 required, found {sys.version.split()[0]}")
+    try:
+        import asyncio
+        asyncio.timeout
+    except (ImportError, AttributeError):
+        sys.exit("asyncio.timeout unavailable (needs python3 >= 3.11)")
     # The production path against a process this helper does not own and must
     # not disturb: the launching shell. Signal 0 only checks that it exists.
     me = os.getppid()
@@ -286,7 +356,7 @@ except (AttributeError, OSError) as error:
 PY
 
 if ! python3 -c "${OWNER_PY}" selftest; then
-  echo "error: Linux pidfd process ownership is unavailable on this host (needs Linux >= 5.3, python3 >= 3.9 with os.pidfd_open and signal.pidfd_send_signal, and a /proc of this pid namespace); not launching children that could not be owned" >&2
+  echo "error: Linux pidfd process ownership is unavailable on this host (needs Linux >= 5.3, python3 >= 3.11 with os.pidfd_open, signal.pidfd_send_signal and asyncio.timeout, and a /proc of this pid namespace); not launching children that could not be owned" >&2
   exit 1
 fi
 
@@ -364,7 +434,8 @@ if [[ ! -x "${TOR_BIN}" ]]; then
   exit 1
 fi
 
-TOR_VER_RAW=$("${TOR_COMMAND}" --version 2>/dev/null || true)
+read -r -a TOR_CMD <<<"${TOR_COMMAND}"
+TOR_VER_RAW=$("${TOR_CMD[@]}" --version 2>/dev/null || true)
 TOR_FIRST_LINE=$(printf '%s\n' "${TOR_VER_RAW}" | head -n1 | tr -d '\r')
 TOR_RELEASE_OK=$(python3 -c '
 import sys, re
@@ -384,87 +455,42 @@ m = re.search(r"Tor version ([0-9a-zA-Z.-]+)", line)
 print(m.group(1).rstrip(".") if m else line)
 ' "${TOR_FIRST_LINE}")
 
-# 2. IVNP binary & Go compiler / VCS revision check
-IVNP_BIN="${IVNP_COMMAND%% *}"
-if [[ ! -x "${IVNP_BIN}" ]]; then
-  echo "error: IVNP binary not found or not executable: ${IVNP_BIN}" >&2
+# 2. i2pd binary and official 3.0.0 release check (caller provides binary path;
+# the full value is used verbatim as the executable path, quoted, with no shell
+# evaluation; additional arguments are not parsed. Private fixture arguments
+# (datadirs, configs, netid, loopback ports) are appended by the script and
+# fixtures only and can never be overridden by caller arguments.)
+I2PD_BIN="${I2PD_COMMAND}"
+if [[ ! -x "${I2PD_BIN}" || ! -f "${I2PD_BIN}" ]]; then
+  echo "error: i2pd binary not found or not executable: ${I2PD_BIN} (supply the binary path, additional arguments are not parsed)" >&2
   exit 1
 fi
-
-IVNP_METADATA=$(python3 -c '
-import sys, subprocess, json
-
-binary = sys.argv[1]
-try:
-    out = subprocess.check_output(["go", "version", "-m", binary]).decode("utf-8", "replace")
-except Exception as e:
-    sys.exit(f"failed to read go version -m: {e}")
-
-lines = out.splitlines()
-if not lines:
-    sys.exit("empty go version -m output")
-
-first = lines[0].split()
-go_header = first[1] if len(first) > 1 else ""
-
-rev = None
-mod = None
-for l in lines:
-    parts = l.strip().split()
-    if len(parts) >= 2 and parts[0] == "build":
-        for p in parts[1:]:
-            if p.startswith("vcs.revision="):
-                rev = p.split("=", 1)[1]
-            elif p.startswith("vcs.modified="):
-                mod = p.split("=", 1)[1]
-
-res = {
-    "go_header": go_header,
-    "revision": rev,
-    "modified": mod,
+I2PD_VERSION_RAW=$("${I2PD_BIN}" --version 2>/dev/null || true)
+# Exact version tokens, not substrings: one whole output line must equal the
+# pinned version, so 3.0.0.1 or 3x0x0 never match. The official release prints
+# `i2pd version 3.0.0 (<protocol>)`; that parenthesized numeric protocol
+# annotation is accepted and not otherwise enforced.
+i2pd_version_line_ok() { # <whole-line regex> -- stdin is the --version output; exit 0 when one full line matches
+  python3 -c '
+import re, sys
+pattern = re.compile(sys.argv[1])
+lines = [line.rstrip("\r") for line in sys.stdin.read().split("\n")]
+sys.exit(0 if any(pattern.fullmatch(line) for line in lines) else 1)
+' "$1"
 }
-print(json.dumps(res))
-' "${IVNP_BIN}" 2>/dev/null || true)
-
-if [[ -z "${IVNP_METADATA}" ]]; then
-  echo "error: failed to read Go buildinfo metadata from ${IVNP_BIN}; fails closed" >&2
+printf '%s\n' "${I2PD_VERSION_RAW}" | i2pd_version_line_ok 'i2pd version 3\.0\.0(?: \([0-9]+(?:\.[0-9]+)*\))?[ \t]*' || { echo "error: i2pd pin mismatch (want official 3.0.0)" >&2; exit 1; }
+printf '%s\n' "${I2PD_VERSION_RAW}" | i2pd_version_line_ok 'Boost version 1\.90\.0[ \t]*' || { echo "error: i2pd Boost pin mismatch (want 1.90.0)" >&2; exit 1; }
+I2PD_BIN_SHA=$(sha256sum "${I2PD_BIN}" | awk '{print $1}')
+if command -v ldd >/dev/null 2>&1; then
+  if ! ldd "${I2PD_BIN}" >/dev/null 2>&1; then echo "error: ldd failed for ${I2PD_BIN}" >&2; exit 1; fi
+  if ldd "${I2PD_BIN}" 2>/dev/null | grep -q "not found"; then ldd "${I2PD_BIN}" >&2; echo "error: unresolved i2pd libraries" >&2; exit 1; fi
+fi
+TOR_GENCERT_BIN="${TOR_GENCERT_COMMAND%% *}"
+if [[ ! -x "${TOR_GENCERT_BIN}" ]]; then
+  echo "error: tor-gencert binary not found or not executable: ${TOR_GENCERT_BIN}" >&2
   exit 1
 fi
-
-IVNP_GO_HEADER=$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("go_header") or "")' "${IVNP_METADATA}")
-IVNP_REVISION=$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("revision") or "")' "${IVNP_METADATA}")
-IVNP_MODIFIED=$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("modified") or "")' "${IVNP_METADATA}")
-
-# Strict Go compiler header check: must be go1.27.0
-if [[ "${IVNP_GO_HEADER}" != "go1.27.0" ]]; then
-  echo "error: IVNP Go compiler mismatch: binary go-version header must be go1.27.0, got: '${IVNP_GO_HEADER}'" >&2
-  exit 1
-fi
-
-# Strict commit revision check: must be exact 0a1b746ba98b58510eb5dcde679ca43184f4b60e
-if [[ -z "${IVNP_REVISION}" ]]; then
-  echo "error: IVNP binary missing vcs.revision metadata; fails closed" >&2
-  exit 1
-fi
-if [[ "${IVNP_REVISION}" != "0a1b746ba98b58510eb5dcde679ca43184f4b60e" ]]; then
-  echo "error: IVNP revision mismatch: expected commit 0a1b746ba98b58510eb5dcde679ca43184f4b60e, got: '${IVNP_REVISION}'" >&2
-  exit 1
-fi
-if [[ "${IVNP_MODIFIED}" != "false" ]]; then
-  echo "error: IVNP binary build metadata must have vcs.modified=false, got: '${IVNP_MODIFIED:-missing}'; fails closed" >&2
-  exit 1
-fi
-
-# Observed -version output (strictly verified as "dev" for the pinned source build)
-IVNP_VERSION=$("${IVNP_BIN}" -version 2>/dev/null | head -n1 | tr -d '\r')
-if [[ -z "${IVNP_VERSION}" ]]; then
-  echo "error: failed to execute ${IVNP_BIN} -version; fails closed" >&2
-  exit 1
-fi
-if [[ "${IVNP_VERSION}" != "dev" ]]; then
-  echo "error: IVNP binary -version output mismatch: expected 'dev' (pinned source build), got: '${IVNP_VERSION}'" >&2
-  exit 1
-fi
+TOR_GENCERT_SHA=$(sha256sum "${TOR_GENCERT_BIN}" | awk '{print $1}')
 
 # 3. bitcoin-rs binary check
 RS_BIN="${BITCOIN_RS_COMMAND%% *}"
@@ -483,9 +509,12 @@ free_port() {
 
 TOR_SOCKS_REAL_PORT=$(free_port)
 TOR_SOCKS_PORT=$(free_port)
+TOR_SOCKS_PORT_B=$(free_port)
 TOR_CONTROL_PORT=$(free_port)
-SAM_PORT=7656
-REC_SAM_PORT=$(free_port)
+R0_SAM_PORT=$(free_port)
+R1_SAM_PORT=$(free_port)
+REC_SAM_PORT_A=$(free_port)
+REC_SAM_PORT_B=$(free_port)
 A_P2P_PORT=$(free_port)
 A_RPC_PORT=$(free_port)
 B_P2P_PORT=$(free_port)
@@ -493,24 +522,29 @@ B_RPC_PORT=$(free_port)
 VPORT=18444
 MINING_ADDRESS="bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
 
-# Verify pinned SAM port 7656 is free
-if ! python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 7656)); s.close()' 2>/dev/null; then
-  echo "error: port 7656 is already in use; cannot start IVNP SAM bridge on pinned port" >&2
-  exit 1
-fi
-
+# First write of the run: a task-owned 0700 directory that held nothing before.
 if [[ -z "${WORKDIR}" ]]; then
-  WORKDIR=$(mktemp -d /tmp/p2p-overlay-interop.XXXXXX)
+  WORKDIR=$(mktemp -d ./p2p-overlay-interop.XXXXXX)
   AUTO_WORKDIR=1
+elif ((WORKDIR_EXISTS)); then
+  require_empty_dir "${WORKDIR}" "--workdir"
+  chmod 0700 -- "${WORKDIR}"
+else
+  mkdir -m 0700 -- "${WORKDIR}" || {
+    echo "error: cannot create a fresh --workdir ${WORKDIR} (its parent directory must exist)" >&2
+    exit 1
+  }
 fi
+# Absolute from here on: every child gets a task-owned HOME under it.
+WORKDIR=$(cd -- "${WORKDIR}" && pwd -P)
 if [[ -z "${EVIDENCE}" ]]; then
   EVIDENCE="${WORKDIR}/evidence.json"
 fi
 
 TOR_DATADIR="${WORKDIR}/tor-data"
 TOR_LOG="${WORKDIR}/tor.log"
-IVNP_DIR="${WORKDIR}/ivnp"
-IVNP_LOG="${WORKDIR}/ivnp.log"
+I2PD_MESH_DIR="${WORKDIR}/i2pd-mesh"
+I2PD_LOG_DIR="${WORKDIR}/i2pd-logs"
 RECORDER_LOG="${WORKDIR}/recorder.log"
 OBSERVATIONS_FILE="${WORKDIR}/protocol_observations.json"
 OBSERVATIONS_DONE="${WORKDIR}/protocol_observations.done"
@@ -522,7 +556,23 @@ A_LOG2="${WORKDIR}/node-a-restart.log"
 RPC_USER="interop"
 RPC_PASSWORD="interop"
 
-mkdir -p "${TOR_DATADIR}" "${IVNP_DIR}" "${A_DATADIR}" "${B_DATADIR}"
+mkdir -p "${TOR_DATADIR}" "${I2PD_MESH_DIR}" "${I2PD_LOG_DIR}" "${A_DATADIR}" "${B_DATADIR}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRACKED_RECORDER="${SCRIPT_DIR}/overlay_recorder.py"
+TOR_TEMPLATE_DIR="${SCRIPT_DIR}/overlay-tor-templates"
+if [[ ! -f "${TRACKED_RECORDER}" ]]; then echo "error: tracked recorder missing: ${TRACKED_RECORDER}" >&2; exit 1; fi
+if [[ ! -f "${TOR_TEMPLATE_DIR}/torrc.common.template" ]]; then echo "error: tor templates missing" >&2; exit 1; fi
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/overlay_tor_fixture.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/overlay_i2pd_fixture.sh"
+TORNET_DIR="${WORKDIR}/tornet"
+RESEED_ZIP="${WORKDIR}/private-reseed.zip"
+overlay_tor_fixture_launch "${TOR_TEMPLATE_DIR}" "${TORNET_DIR}"
+FIXTURE_I2PD_PORTS="$(overlay_i2pd_fixture_launch "${I2PD_MESH_DIR}" "${RESEED_ZIP}" "${I2PD_BIN}")"
+R0_SAM_PORT="$(printf '%s' "${FIXTURE_I2PD_PORTS}" | python3 -c 'import sys; print([p.split("=")[1] for p in sys.stdin.read().split() if p.startswith("r0_sam=")][0])')"
+R1_SAM_PORT="$(printf '%s' "${FIXTURE_I2PD_PORTS}" | python3 -c 'import sys; print([p.split("=")[1] for p in sys.stdin.read().split() if p.startswith("r1_sam=")][0])')"
 
 cleanup() {
   local status=$?
@@ -537,8 +587,9 @@ cleanup() {
       ((status != 0)) || status=1
     fi
   fi
-  # Clean up workdir only if automatically created and --keep not set
-  if [[ "${AUTO_WORKDIR}" -eq 1 && "${KEEP}" -eq 0 && -z "${!OWNED[*]}" ]]; then
+  # Clean up workdir only on success, only if automatically created and
+  # --keep not set. Failed runs always retain the workdir for diagnosis.
+  if ((status == 0)) && [[ "${AUTO_WORKDIR}" -eq 1 && "${KEEP}" -eq 0 && -z "${!OWNED[*]}" ]]; then
     rm -rf -- "${WORKDIR:?workdir unset}"
   elif [[ -n "${WORKDIR:-}" ]]; then
     echo "workdir kept: ${WORKDIR}"
@@ -551,7 +602,7 @@ trap 'exit 143' TERM
 
 echo "==> workdir: ${WORKDIR}"
 echo "==> tor: release ${TOR_OBSERVED_VERSION} (socks backend ${TOR_SOCKS_REAL_PORT}, recorder socks ${TOR_SOCKS_PORT}, control ${TOR_CONTROL_PORT})"
-echo "==> ivnp: revision=${IVNP_REVISION} (go ${IVNP_GO_HEADER}, -version '${IVNP_VERSION}') sam backend 127.0.0.1:${SAM_PORT}, recorder sam ${REC_SAM_PORT}"
+echo "==> i2pd: 3.0.0 binary ${I2PD_BIN_SHA} (r0 SAM ${R0_SAM_PORT}, r1 SAM ${R1_SAM_PORT}, recorder A ${REC_SAM_PORT_A}, recorder B ${REC_SAM_PORT_B})"
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -656,7 +707,9 @@ rs_rpc() { # <rpc port> <method> [params-json]
   port=$1
   method=$2
   params=${3:-[]}
-  curl -s --max-time 15 --connect-timeout 5 \
+  # -q skips any ~/.curlrc and --noproxy '*' ignores every inherited proxy
+  # variable, so the RPC credentials only ever travel to the loopback listener.
+  curl -q -s --noproxy '*' --max-time 15 --connect-timeout 5 \
     -u "${RPC_USER}:${RPC_PASSWORD}" \
     -H 'content-type: application/json' \
     --data "{\"jsonrpc\":\"1.0\",\"id\":\"interop\",\"method\":\"${method}\",\"params\":${params}}" \
@@ -681,18 +734,37 @@ if doc.get("error"):
 print(json.dumps(doc.get("result")))'
 }
 
+spawn_clean() { # <home> <command> [args...] -- run in a background subshell; it execs <command> under a minimal environment
+  # Only PATH, LD_LIBRARY_PATH (when set), and a task-owned HOME and TMPDIR
+  # reach the child: no BITCOIN_RS_* setting (RPC_PUBLIC_BIND, CONNECT, ...), no
+  # proxy variable, no other operator configuration. `exec` keeps the pid the
+  # shell records right after launch, and `env` execs the command in turn.
+  local home=$1
+  local -a keep
+  shift
+  keep=("PATH=${PATH}" "HOME=${home}" "TMPDIR=${home}")
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    keep+=("LD_LIBRARY_PATH=${LD_LIBRARY_PATH}")
+  fi
+  exec env -i "${keep[@]}" "$@"
+}
+
 start_node() { # <datadir> <rpc> <p2p> <log> [extra...]
   local datadir
   local rpc
   local p2p
   local log
+  local home
+  local -a node_cmd
   datadir=$1
   rpc=$2
   p2p=$3
   log=$4
   shift 4
-  # shellcheck disable=SC2086
-  ${BITCOIN_RS_COMMAND} \
+  home="${WORKDIR}/home/${datadir##*/}"
+  mkdir -p "${WORKDIR}/home" "${home}"
+  read -r -a node_cmd <<<"${BITCOIN_RS_COMMAND}"
+  spawn_clean "${home}" "${node_cmd[@]}" \
     --network regtest \
     --data-dir "${datadir}" \
     --rpc-bind "127.0.0.1:${rpc}" \
@@ -757,12 +829,55 @@ except Exception:
     print(" ")'
 }
 
+recorder_exit_clean() { # <label> <status> <log> -- the handle observed a clean exit (an empty status means the child was already gone)
+  if [[ -z "$2" ]]; then
+    echo "error: $1 was already gone before finalization, so its exit status is unavailable; refusing to trust observations (see $3)" >&2
+    return 1
+  fi
+  if [[ "$2" -ne 0 ]]; then
+    echo "error: $1 failed to finalize (status $2); observation persistence failed (see $3)" >&2
+    return 1
+  fi
+}
+
+verify_recorder_snapshot() { # <label> <snapshot> <marker> -- the marker records a complete finalization of exactly these snapshot bytes
+  python3 - "$1" "$2" "$3" <<'PY'
+import hashlib, json, sys
+
+label, obs_path, marker_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(marker_path, "rb") as fh:
+        marker = json.loads(fh.read())
+except Exception as error:
+    sys.exit(f"error: {label} completion marker unreadable: {error}")
+if not isinstance(marker, dict):
+    sys.exit(f"error: {label} completion marker is not a JSON object")
+if marker.get("schema") != "bitcoin-rs-overlay-observations-v1" or marker.get("complete") is not True:
+    sys.exit(f"error: {label} completion marker does not record a complete finalization")
+try:
+    with open(obs_path, "rb") as fh:
+        snapshot = fh.read()
+except Exception as error:
+    sys.exit(f"error: {label} snapshot unreadable: {error}")
+if len(snapshot) != marker.get("observations_bytes"):
+    sys.exit(f"error: {label} snapshot length does not match its completion marker")
+if hashlib.sha256(snapshot).hexdigest() != marker.get("observations_sha256"):
+    sys.exit(f"error: {label} snapshot digest does not match its completion marker")
+print(f"==> {label} observations finalized and verified")
+PY
+}
+
 finalize_recorder() { # stop, reap, and verify the recorder's final snapshot
   local pid
-  local status
+  local status_a
+  local status_b
   pid=${RECORDER_PID:-}
   if [[ -z "${pid}" ]]; then
     echo "error: recorder pid unknown; refusing to trust observations" >&2
+    return 1
+  fi
+  if [[ -z "${RECORDER_B_PID:-}" ]]; then
+    echo "error: recorder B pid unknown; refusing to trust observations" >&2
     return 1
   fi
   # SIGTERM starts the recorder's own wind-down: it stops accepting, cancels
@@ -774,634 +889,125 @@ finalize_recorder() { # stop, reap, and verify the recorder's final snapshot
   # through its handle, which fails finalization. The exit status, read by
   # `wait` only after the handle observed the exit, alone decides whether the
   # observations may be read; a recorder already gone has no status and fails.
+  # REAP_STATUS holds only the latest reap, so each recorder's status is copied
+  # out before the next recorder is stopped, and BOTH must have exited 0 with a
+  # verified completion marker before anything is read.
   reap_owned 20 5 "${pid}" || {
     echo "error: recorder could not be stopped; refusing to trust observations (see ${RECORDER_LOG})" >&2
     return 1
   }
+  status_a=${REAP_STATUS}
   RECORDER_PID=""
-  status=${REAP_STATUS}
-  if [[ -z "${status}" ]]; then
-    echo "error: recorder was already gone before finalization, so its exit status is unavailable; refusing to trust observations (see ${RECORDER_LOG})" >&2
+  reap_owned 20 5 "${RECORDER_B_PID}" || {
+    echo "error: recorder B could not be stopped; refusing to trust observations (see ${RECORDER_LOG}.b)" >&2
     return 1
-  fi
-  if [[ "${status}" -ne 0 ]]; then
-    echo "error: recorder failed to finalize (status ${status}); observation persistence failed (see ${RECORDER_LOG})" >&2
-    return 1
-  fi
-  python3 - "${OBSERVATIONS_FILE}" "${OBSERVATIONS_DONE}" <<'PY'
-import hashlib, json, sys
-
-obs_path, marker_path = sys.argv[1], sys.argv[2]
-try:
-    with open(marker_path, "rb") as fh:
-        marker = json.loads(fh.read())
-except Exception as error:
-    sys.exit(f"error: recorder completion marker unreadable: {error}")
-if marker.get("schema") != "bitcoin-rs-overlay-observations-v1" or marker.get("complete") is not True:
-    sys.exit("error: recorder completion marker does not record a complete finalization")
-try:
-    with open(obs_path, "rb") as fh:
-        snapshot = fh.read()
-except Exception as error:
-    sys.exit(f"error: recorder snapshot unreadable: {error}")
-if len(snapshot) != marker.get("observations_bytes"):
-    sys.exit("error: recorder snapshot length does not match its completion marker")
-if hashlib.sha256(snapshot).hexdigest() != marker.get("observations_sha256"):
-    sys.exit("error: recorder snapshot digest does not match its completion marker")
-print("==> recorder observations finalized and verified")
-PY
+  }
+  status_b=${REAP_STATUS}
+  RECORDER_B_PID=""
+  recorder_exit_clean "recorder" "${status_a}" "${RECORDER_LOG}" || return 1
+  recorder_exit_clean "recorder B" "${status_b}" "${RECORDER_LOG}.b" || return 1
+  verify_recorder_snapshot "recorder" "${OBSERVATIONS_FILE}" "${OBSERVATIONS_DONE}" || return 1
+  verify_recorder_snapshot "recorder B" "${OBSERVATIONS_FILE}.b" "${OBSERVATIONS_DONE}.b" || return 1
 }
 
 # -----------------------------------------------------------------------------
-# Launch Tor, IVNP, and Protocol Recorder Relay
+# Launch private Tor net, private i2pd mesh, and Protocol Recorder Relays
 # -----------------------------------------------------------------------------
 
-echo "==> starting tor"
-rm -f -- "${TOR_LOG}" "${WORKDIR}/tor-stdout.log"
-cat > "${WORKDIR}/torrc" <<EOF
-DataDirectory ${TOR_DATADIR}
-SocksPort 127.0.0.1:${TOR_SOCKS_REAL_PORT}
-ControlPort 127.0.0.1:${TOR_CONTROL_PORT}
-CookieAuthentication 1
-Log notice file ${TOR_LOG}
-EOF
-# shellcheck disable=SC2086
-${TOR_COMMAND} -f "${WORKDIR}/torrc" >"${WORKDIR}/tor-stdout.log" 2>&1 &
-# TOR_PID only names the owned child for wait_tor_bootstrap's read-only watch;
-# it is never signaled, and OWNED stays the only lifecycle.
-TOR_PID=$!
-own_child "${TOR_PID}" "tor" || exit 1
-
-echo "==> starting ivnpd (SAM 127.0.0.1:${SAM_PORT})"
-# exec makes the owned pid the daemon itself; a bare `cd && cmd` list leaves a
-# disposable subshell as the owned process and the real daemon unowned.
-# shellcheck disable=SC2086
-(cd "${IVNP_DIR}" && exec ${IVNP_COMMAND} -config "${IVNP_DIR}/ivnp.conf" -webui=false -http-proxy=false -data-dir "${IVNP_DIR}/data" >"${IVNP_LOG}" 2>&1) &
-own_child "$!" "ivnpd" || exit 1
-
-echo "==> starting bounded loopback recorder/relay"
-cat > "${WORKDIR}/overlay_recorder.py" <<'PY'
-import asyncio
-import argparse
-import hashlib
-import json
-import os
-import re
-import signal
+echo "==> starting private Tor net (3 authorities, 3 relays, 1 client)"
+TOR_AUTH_PORTS="$(cat "${TORNET_DIR}/auth-ports.inc")"
+render_torrc() {
+  local nick="$1"
+  local ddir="$2"
+  local extra="$3"
+  mkdir -p "$ddir" || return 1
+  python3 - "${TOR_TEMPLATE_DIR}" "${TORNET_DIR}/dir-authorities.inc" "$nick" "$ddir" "$extra" <<'PY' > "${ddir}/torrc" || return 1
+from pathlib import Path
 import sys
-import threading
 
-# IO_TIMEOUT bounds handshake reads and every write drain, except the reply to
-# SESSION CREATE (SESSION_CREATE_TIMEOUT). It is never a lifetime: an
-# established SAM root or relayed stream may sit idle for as long as the run
-# lasts and ends only on EOF from either side, a failed bounded write, or
-# cancellation of its handler.
-IO_TIMEOUT = 30.0
-
-# SESSION_CREATE_TIMEOUT is the one wait for the whole reply to an exact
-# SESSION CREATE. The pinned bridge answers it only once its destination is
-# ready, which can take the node's whole 120 s readiness wait, and the node's
-# root budget (TCP connect + HELLO + that wait + NAMING LOOKUP) is 135 s, fixed
-# before it connects. Cutting the reply at IO_TIMEOUT would end a root the node
-# is still entitled to wait for; this bound never ends it before the node gives
-# up. No other command's reply and no write drain uses it, and it is not an
-# idle timer for the established root.
-SESSION_CREATE_TIMEOUT = 135.0
-
-# FINALIZE_GRACE bounds the whole finalization: cancel handlers, close sockets,
-# publish the snapshot and marker. The guard is a plain thread timer, armed the
-# moment a stop is requested, so it also fires when the event loop is blocked in
-# a synchronous fsync. Expiry exits non-zero without publishing, and every
-# publication step is a temp file plus atomic rename, so nothing half-written can
-# ever appear as evidence. The owning shell's reap is therefore bounded too.
-FINALIZE_GRACE = 15.0
-GUARD = None
-PUBLISHED = False
-LOOP = None
-
-observations = {
-    "socks": [],
-    "sam": {
-        "hello": None,
-        "negotiated_version": None,
-        "session_create": None,
-        "naming_lookup": False,
-        "stream_connect": False,
-        "stream_accept": False,
-    }
-}
-
-# Observation persistence is the recorder's one failure path. Any failed write
-# records FAILURE, which is never cleared, and sets STOP so the run winds down;
-# FAILURE also suppresses publication. Everything before finalization writes
-# only <output>.partial, and finalization publishes exactly twice: the snapshot,
-# then a completion marker carrying its digest. The runner trusts evidence only
-# from a zero exit plus a marker whose digest matches the snapshot.
-FAILURE = None
-STOP = None
-
-def hard_exit():
-    # The timer may fire just as publication completes; a fully written marker
-    # is a success, and anything else is a failure that published nothing.
-    if PUBLISHED:
-        os._exit(0)
-    try:
-        sys.stderr.write(
-            f"recorder failure: finalization exceeded {FINALIZE_GRACE}s; no evidence published\n"
-        )
-        sys.stderr.flush()
-    except Exception:
-        pass
-    os._exit(1)
-
-def abort(reason):
-    if GUARD is not None:
-        GUARD.cancel()
-    print(f"recorder failure: {reason}", file=sys.stderr, flush=True)
-    return 1
-
-def begin_finalization():
-    global GUARD
-    if GUARD is None:
-        GUARD = threading.Timer(FINALIZE_GRACE, hard_exit)
-        GUARD.daemon = True
-        GUARD.start()
-
-def request_stop():
-    begin_finalization()
-    if STOP is not None:
-        STOP.set()
-
-def on_stop_signal(_signum, _frame):
-    # A real signal handler runs in the main thread even while that thread is
-    # blocked in a synchronous write, so the guard is armed before anything can
-    # stall. Handing the wake-up to the loop keeps the event thread-safe.
-    begin_finalization()
-    try:
-        LOOP.call_soon_threadsafe(STOP.set)
-    except Exception:
-        pass
-
-def fail(reason):
-    global FAILURE
-    if FAILURE is None:
-        FAILURE = reason
-    request_stop()
-
-def write_atomic(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def save_obs(path):
-    try:
-        write_atomic(path, json.dumps(observations, indent=2).encode())
-    except Exception as error:
-        fail(f"observation snapshot {path} failed: {type(error).__name__}: {error}")
-        raise
-
-def clear_stale(paths):
-    for path in paths:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        except Exception as error:
-            fail(f"cannot clear stale {path}: {type(error).__name__}: {error}")
-            return False
-    return True
-
-def publish(output, done):
-    global PUBLISHED
-    try:
-        snapshot = json.dumps(observations, indent=2).encode()
-        write_atomic(output, snapshot)
-    except Exception as error:
-        fail(f"observation snapshot {output} failed: {type(error).__name__}: {error}")
-        return False
-    marker = {
-        "schema": "bitcoin-rs-overlay-observations-v1",
-        "complete": True,
-        "observations_bytes": len(snapshot),
-        "observations_sha256": hashlib.sha256(snapshot).hexdigest(),
-    }
-    try:
-        write_atomic(done, json.dumps(marker).encode())
-    except Exception as error:
-        fail(f"completion marker {done} failed: {type(error).__name__}: {error}")
-        return False
-    PUBLISHED = True
-    return True
-
-def sanitize_sam(line: str) -> str:
-    line = re.sub(r"DESTINATION=[^\s]+", "DESTINATION=[REDACTED]", line)
-    line = re.sub(r"PASSWORD=[^\s]+", "PASSWORD=[REDACTED]", line)
-    return line
-
-async def read_exact(reader, n, timeout=IO_TIMEOUT):
-    return await asyncio.wait_for(reader.readexactly(n), timeout=timeout)
-
-async def read_line(reader, timeout=IO_TIMEOUT):
-    return await asyncio.wait_for(reader.readline(), timeout=timeout)
-
-async def write_drain(writer, data, timeout=IO_TIMEOUT):
-    writer.write(data)
-    await asyncio.wait_for(writer.drain(), timeout=timeout)
-
-def result_ok(response):
-    return "RESULT=OK" in response.split()
-
-def sam_command(line_str):
-    # The two leading words of a SAM command, split on the ASCII single space
-    # the node frames them with (crates/p2p/src/sam.rs). Whole tokens only:
-    # "SESSION CREATEEVIL" is not "SESSION CREATE", so neither the recorded
-    # evidence, the established-root decision, nor the reply deadline can be
-    # claimed by a line that merely starts with the same letters. Other
-    # spacing (repeated, tab, or Unicode whitespace the "replace" decode can
-    # produce) is not known to parse as the same command at the bridge, so it
-    # classifies as "" and is neither recorded nor given the long wait.
-    words = line_str.split(" ", 2)
-    return " ".join(words[:2]) if len(words) >= 2 else ""
-
-def observe_sam_command(line_str):
-    sam = observations["sam"]
-    sanitized = sanitize_sam(line_str)
-    command = sam_command(line_str)
-    if command == "HELLO VERSION":
-        sam["hello"] = sanitized
-    elif command == "SESSION CREATE":
-        sam["session_create"] = sanitized
-    elif command == "NAMING LOOKUP":
-        sam["naming_lookup"] = True
-    elif command == "STREAM CONNECT":
-        sam["stream_connect"] = True
-    elif command == "STREAM ACCEPT":
-        sam["stream_accept"] = True
-
-async def pipe(reader, writer):
-    # Raw relay of one direction: waiting for the next bytes has no deadline,
-    # writing them into the peer does.
-    while True:
-        data = await reader.read(65536)
-        if not data:
-            return
-        await write_drain(writer, data)
-
-async def forward_sam_commands(r_client, w_target, out_path):
-    # Established session root: the node sends its next command whenever it
-    # needs one, so the wait has no deadline. Each line is still observed
-    # (and redacted) before it is forwarded through a bounded write.
-    while True:
-        line = await r_client.readline()
-        if not line:
-            return
-        observe_sam_command(line.decode("utf-8", "replace").strip())
-        await write_drain(w_target, line)
-        save_obs(out_path)
-
-async def close_writers(*writers):
-    # Close every transport before awaiting any of them, so a further
-    # cancellation during the bounded waits cannot leave a peer socket open.
-    live = [w for w in writers if w is not None]
-    for w in live:
-        try:
-            w.close()
-        except Exception:
-            pass
-    for w in live:
-        try:
-            await asyncio.wait_for(w.wait_closed(), timeout=2.0)
-        except Exception:
-            pass
-
-async def relay_pair(forward, backward):
-    # One relay is two directions. It ends when either direction ends (EOF,
-    # failed bounded write, reset): the survivor is cancelled and reaped here
-    # and the owning handler then closes both writers, so neither direction
-    # outlives the other or the handler that owns the pair.
-    tasks = [asyncio.create_task(forward), asyncio.create_task(backward)]
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            if not task.cancelled() and task.exception() is not None:
-                print(f"relay ended: {type(task.exception()).__name__}", file=sys.stderr, flush=True)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-async def handle_socks(r_client, w_client, target_port, out_path):
-    w_target = None
-    try:
-        r_target, w_target = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", target_port), timeout=10.0
-        )
-    except Exception:
-        try:
-            w_client.close()
-            await asyncio.wait_for(w_client.wait_closed(), timeout=2.0)
-        except Exception:
-            pass
-        return
-
-    try:
-        ver = await read_exact(r_client, 1)
-        if ver != b"\x05":
-            return
-        nmethods = (await read_exact(r_client, 1))[0]
-        methods = await read_exact(r_client, nmethods)
-        await write_drain(w_target, b"\x05" + bytes([nmethods]) + methods)
-
-        s_ver = await read_exact(r_target, 1)
-        s_method = await read_exact(r_target, 1)
-        await write_drain(w_client, s_ver + s_method)
-
-        if s_method == b"\x02":
-            auth_ver = await read_exact(r_client, 1)
-            ulen = (await read_exact(r_client, 1))[0]
-            uname = await read_exact(r_client, ulen)
-            plen = (await read_exact(r_client, 1))[0]
-            passwd = await read_exact(r_client, plen)
-            await write_drain(w_target, auth_ver + bytes([ulen]) + uname + bytes([plen]) + passwd)
-            auth_resp = await read_exact(r_target, 2)
-            await write_drain(w_client, auth_resp)
-
-        req_head = await read_exact(r_client, 4)
-        atyp = req_head[3]
-        obs = {
-            "atyp": atyp,
-            "atyp_hex": f"0x{atyp:02x}",
-            "domain_length": None,
-            "domain_length_hex": None,
-            "target_domain": None,
-            "target_port": None,
-            "direction": "outbound",
-            "auth_sanitized": s_method == b"\x02",
-        }
-        if atyp == 0x03:
-            dlen_b = await read_exact(r_client, 1)
-            dlen = dlen_b[0]
-            domain_bytes = await read_exact(r_client, dlen)
-            port_bytes = await read_exact(r_client, 2)
-            port = int.from_bytes(port_bytes, "big")
-            obs["domain_length"] = dlen
-            obs["domain_length_hex"] = f"0x{dlen:02x}"
-            obs["target_domain"] = domain_bytes.decode("ascii", "replace")
-            obs["target_port"] = port
-            await write_drain(w_target, req_head + dlen_b + domain_bytes + port_bytes)
-        elif atyp == 0x01:
-            ip_bytes = await read_exact(r_client, 4)
-            port_bytes = await read_exact(r_client, 2)
-            await write_drain(w_target, req_head + ip_bytes + port_bytes)
-        elif atyp == 0x04:
-            ip_bytes = await read_exact(r_client, 16)
-            port_bytes = await read_exact(r_client, 2)
-            await write_drain(w_target, req_head + ip_bytes + port_bytes)
-        else:
-            return
-
-        observations["socks"].append(obs)
-        save_obs(out_path)
-
-        rep_head = await read_exact(r_target, 4)
-        rep_atyp = rep_head[3]
-        if rep_atyp == 0x01:
-            rep_addr = await read_exact(r_target, 4)
-        elif rep_atyp == 0x03:
-            rep_dlen = (await read_exact(r_target, 1))[0]
-            rep_addr = bytes([rep_dlen]) + (await read_exact(r_target, rep_dlen))
-        elif rep_atyp == 0x04:
-            rep_addr = await read_exact(r_target, 16)
-        else:
-            return
-        rep_port = await read_exact(r_target, 2)
-        await write_drain(w_client, rep_head + rep_addr + rep_port)
-
-        await relay_pair(pipe(r_client, w_target), pipe(r_target, w_client))
-    except Exception:
-        pass
-    finally:
-        await close_writers(w_client, w_target)
-
-async def handle_sam(r_client, w_client, target_port, out_path):
-    w_target = None
-    try:
-        r_target, w_target = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", target_port), timeout=10.0
-        )
-    except Exception:
-        try:
-            w_client.close()
-            await asyncio.wait_for(w_client.wait_closed(), timeout=2.0)
-        except Exception:
-            pass
-        return
-
-    try:
-        # Negotiation is lock-step and bounded: one command, one reply. Every
-        # wait is limited by IO_TIMEOUT except the reply to an exact SESSION
-        # CREATE, whose single wait is SESSION_CREATE_TIMEOUT. It ends when the
-        # bridge accepts a STREAM CONNECT/ACCEPT (raw bytes follow) or a
-        # SESSION CREATE (the connection becomes the session root and stays
-        # open, with no deadline on its idle time).
-        established = None
-        while established is None:
-            line = await read_line(r_client)
-            if not line:
-                break
-            line_str = line.decode("utf-8", "replace").strip()
-            command = sam_command(line_str)
-            observe_sam_command(line_str)
-
-            await write_drain(w_target, line)
-
-            reply_timeout = SESSION_CREATE_TIMEOUT if command == "SESSION CREATE" else IO_TIMEOUT
-            resp_line = await read_line(r_target, reply_timeout)
-            if not resp_line:
-                break
-            resp_str = resp_line.decode("utf-8", "replace").strip()
-
-            if command == "HELLO VERSION" and result_ok(resp_str):
-                m = re.search(r"VERSION=([0-9.]+)", resp_str)
-                if m:
-                    observations["sam"]["negotiated_version"] = m.group(1)
-
-            await write_drain(w_client, resp_line)
-            save_obs(out_path)
-
-            if result_ok(resp_str):
-                if command in ("STREAM CONNECT", "STREAM ACCEPT"):
-                    established = "stream"
-                elif command == "SESSION CREATE":
-                    established = "session"
-
-        if established == "stream":
-            await relay_pair(pipe(r_client, w_target), pipe(r_target, w_client))
-        elif established == "session":
-            # Later root commands (NAMING LOOKUP, ...) are still observed;
-            # replies and any bridge-initiated bytes pass through raw.
-            await relay_pair(forward_sam_commands(r_client, w_target, out_path), pipe(r_target, w_client))
-    except Exception:
-        pass
-    finally:
-        await close_writers(w_client, w_target)
-
-async def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--socks-listen", type=int, required=True)
-    parser.add_argument("--socks-target", type=int, required=True)
-    parser.add_argument("--sam-listen", type=int, required=True)
-    parser.add_argument("--sam-target", type=int, required=True)
-    parser.add_argument("--output", type=str, required=True)
-    # The runner always passes --done; standalone probes may omit it and get
-    # the conventional sibling marker instead. The protocol is identical.
-    parser.add_argument("--done", type=str, default=None)
-    args = parser.parse_args()
-    if not args.done:
-        args.done = args.output + ".done"
-
-    global STOP, LOOP
-    STOP = asyncio.Event()
-    LOOP = asyncio.get_running_loop()
-
-    working = args.output + ".partial"
-    if not clear_stale([
-        args.output,
-        args.output + ".tmp",
-        args.done,
-        args.done + ".tmp",
-        working,
-        working + ".tmp",
-    ]):
-        return abort(FAILURE)
-    try:
-        save_obs(working)
-    except Exception:
-        return abort(FAILURE)
-
-    try:
-        signal.signal(signal.SIGTERM, on_stop_signal)
-        signal.signal(signal.SIGINT, on_stop_signal)
-    except (ValueError, OSError) as error:
-        fail(f"cannot install stop handlers: {type(error).__name__}: {error}")
-        return abort(FAILURE)
-
-    # Every accepted connection runs as a task owned here. asyncio does not
-    # track them, and Server.wait_closed() waits for open connections, so
-    # cancelling main() must cancel the handlers before the servers close.
-    handlers = set()
-
-    def finished(task):
-        handlers.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            # Persistence failures already recorded FAILURE; anything else
-            # uncaught inside a handler reaches the same single verdict.
-            fail(f"connection handler failed: {type(error).__name__}: {error}")
-
-    def serve(handle, target_port):
-        def accept(reader, writer):
-            task = asyncio.create_task(handle(reader, writer, target_port, working))
-            handlers.add(task)
-            task.add_done_callback(finished)
-        return accept
-
-    socks_srv = await asyncio.start_server(
-        serve(handle_socks, args.socks_target), "127.0.0.1", args.socks_listen
-    )
-    sam_srv = await asyncio.start_server(
-        serve(handle_sam, args.sam_target), "127.0.0.1", args.sam_listen
-    )
-    # The run ends on SIGTERM from the owning shell, on a persistence failure
-    # (which sets STOP), or on an accept loop ending. All three converge below.
-    serving = [
-        asyncio.create_task(socks_srv.serve_forever()),
-        asyncio.create_task(sam_srv.serve_forever()),
-    ]
-    stop_task = asyncio.create_task(STOP.wait())
-    done = set()
-    try:
-        done, _ = await asyncio.wait([*serving, stop_task], return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        # The guard is armed before any cleanup step, so an unexpected listener
-        # exit (which never calls request_stop) is bounded exactly like SIGTERM.
-        begin_finalization()
-
-        async def wind_down():
-            stop_task.cancel()
-            socks_srv.close()
-            sam_srv.close()
-            for task in serving:
-                task.cancel()
-            await asyncio.gather(*serving, return_exceptions=True)
-            while handlers:
-                owned = list(handlers)
-                for task in owned:
-                    task.cancel()
-                await asyncio.gather(*owned, return_exceptions=True)
-
-        # The guard is already armed: request_stop() arms it before setting
-        # STOP, and STOP is set here. Awaiting the wind-down keeps its failures
-        # visible; the guard covers a stall the loop cannot observe.
-        try:
-            await wind_down()
-        except Exception as error:
-            fail(f"wind-down failed: {type(error).__name__}: {error}")
-
-    # A listener that died is not a normal end of run: only STOP (SIGTERM or a
-    # recorded failure) may end it, so an accept-loop crash must not publish.
-    for task in done:
-        if task is stop_task or task.cancelled():
-            continue
-        error = task.exception()
-        fail(
-            "listener loop ended unexpectedly"
-            if error is None
-            else f"listener loop failed: {type(error).__name__}: {error}"
-        )
-
-    if FAILURE is not None or not publish(args.output, args.done):
-        return abort(FAILURE)
-
-    try:
-        os.unlink(working)
-    except Exception:
-        pass
-    if GUARD is not None:
-        GUARD.cancel()
-    print(f"observations finalized: {args.output}", file=sys.stderr, flush=True)
-    return 0
-
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+templates = Path(sys.argv[1])
+authorities = Path(sys.argv[2]).read_text()
+text = (templates / "torrc.common.template").read_text()
+text += (templates / sys.argv[5]).read_text()
+text = text.replace("__NICK__", sys.argv[3])
+text = text.replace("__DATADIR__", sys.argv[4])
+text = text.replace("__DIRAUTHORITIES__", authorities.rstrip("\n"))
+sys.stdout.write(text)
 PY
+}
+for i in 0 1 2; do
+  adir="${TORNET_DIR}/auth$i"
+  orport="$(printf '%s' "${TOR_AUTH_PORTS}" | python3 -c 'import sys; print(sys.stdin.read().split()[int(sys.argv[1])*2])' "$i")"
+  dirport="$(printf '%s' "${TOR_AUTH_PORTS}" | python3 -c 'import sys; print(sys.stdin.read().split()[int(sys.argv[1])*2+1])' "$i")"
+  render_torrc "auth$i" "$adir" "torrc.auth.template"
+  sed -i -e "s|__ORPORT__|${orport}|g" -e "s|__DIRPORT__|${dirport}|g" "${adir}/torrc"
+done
+for i in 0 1 2; do
+  rdir="${TORNET_DIR}/relay$i"
+  rorport="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  render_torrc "relay$i" "$rdir" "torrc.relay.template"
+  sed -i -e "s|__ORPORT__|${rorport}|g" "${rdir}/torrc"
+  printf '%s' "$rorport" > "${rdir}/orport"
+done
+render_torrc "client" "${TORNET_DIR}/client" "torrc.client.template"
+sed -i -e "s|__SOCKSPORT__|${TOR_SOCKS_REAL_PORT}|g" -e "s|__CONTROLPORT__|${TOR_CONTROL_PORT}|g" -e "s|__DATADIR__|${TORNET_DIR}/client|g" "${TORNET_DIR}/client/torrc"
+for i in 0 1 2; do
+  spawn_clean "${TORNET_DIR}/auth$i" "${TOR_CMD[@]}" --defaults-torrc "${TORNET_DIR}/defaults.torrc" -f "${TORNET_DIR}/auth$i/torrc" >"${TORNET_DIR}/auth$i/stdout.log" 2>&1 &
+  own_child "$!" "tor-auth$i" || exit 1
+done
+for i in 0 1 2; do
+  spawn_clean "${TORNET_DIR}/relay$i" "${TOR_CMD[@]}" --defaults-torrc "${TORNET_DIR}/defaults.torrc" -f "${TORNET_DIR}/relay$i/torrc" >"${TORNET_DIR}/relay$i/stdout.log" 2>&1 &
+  own_child "$!" "tor-relay$i" || exit 1
+done
+spawn_clean "${TORNET_DIR}/client" "${TOR_CMD[@]}" --defaults-torrc "${TORNET_DIR}/defaults.torrc" -f "${TORNET_DIR}/client/torrc" >"${WORKDIR}/tor-stdout.log" 2>&1 &
+TOR_PID=$!
+own_child "${TOR_PID}" "tor-client" || exit 1
+TOR_LOG="${TORNET_DIR}/client/notice.log"
+export TOR_LOG
 
-# No earlier run's snapshot or marker may survive into this run. The recorder
-# clears them again itself; this removal also covers a recorder that dies
-# before its first write, so nothing stale can be mistaken for evidence.
-rm -f -- "${OBSERVATIONS_FILE}" "${OBSERVATIONS_DONE}" \
-  "${OBSERVATIONS_FILE}.partial" "${OBSERVATIONS_FILE}.tmp" "${OBSERVATIONS_DONE}.tmp"
+echo "==> starting private i2pd mesh (netid 77, r0 SAM ${R0_SAM_PORT}, r1 SAM ${R1_SAM_PORT})"
+for n in 0 1 2 3 4 5 6; do
+  spawn_clean "${I2PD_MESH_DIR}/r$n" "${I2PD_BIN}" --datadir="${I2PD_MESH_DIR}/r$n/data" --conf="${I2PD_MESH_DIR}/r$n/i2pd.conf" >"${I2PD_LOG_DIR}/r$n.log" 2>&1 &
+  own_child "$!" "i2pd-r$n" || exit 1
+done
 
-python3 "${WORKDIR}/overlay_recorder.py" \
+echo "==> starting bounded loopback recorder (tracked scripts/overlay_recorder.py)"
+cp -- "${TRACKED_RECORDER}" "${WORKDIR}/overlay_recorder.py"
+cp -- "${WORKDIR}/overlay_recorder.py" "${WORKDIR}/overlay_recorder_b.py"
+
+# The workdir was empty when the run began, so no earlier run's snapshot or
+# marker exists; nothing is deleted here.
+spawn_clean "${WORKDIR}" python3 "${WORKDIR}/overlay_recorder.py" \
   --socks-listen "${TOR_SOCKS_PORT}" \
-  --socks-target "${TOR_SOCKS_REAL_PORT}" \
-  --sam-listen "${REC_SAM_PORT}" \
-  --sam-target "${SAM_PORT}" \
+  --socks-target-host 127.0.0.1 \
+  --socks-target-port "${TOR_SOCKS_REAL_PORT}" \
+  --sam-listen "${REC_SAM_PORT_A}" \
+  --sam-target-host 127.0.0.1 \
+  --sam-target-port "${R0_SAM_PORT}" \
   --output "${OBSERVATIONS_FILE}" \
   --done "${OBSERVATIONS_DONE}" >"${RECORDER_LOG}" 2>&1 &
 RECORDER_PID=$!
 own_child "${RECORDER_PID}" "recorder" || exit 1
+spawn_clean "${WORKDIR}" python3 "${WORKDIR}/overlay_recorder_b.py" \
+  --socks-listen "${TOR_SOCKS_PORT_B}" \
+  --socks-target-host 127.0.0.1 \
+  --socks-target-port "${TOR_SOCKS_REAL_PORT}" \
+  --sam-listen "${REC_SAM_PORT_B}" \
+  --sam-target-host 127.0.0.1 \
+  --sam-target-port "${R1_SAM_PORT}" \
+  --output "${OBSERVATIONS_FILE}.b" \
+  --done "${OBSERVATIONS_DONE}.b" >"${RECORDER_LOG}.b" 2>&1 &
+RECORDER_B_PID=$!
+own_child "${RECORDER_B_PID}" "recorder-b" || exit 1
 
 wait_tcp "${TOR_CONTROL_PORT}" "tor control"
 wait_tcp "${TOR_SOCKS_REAL_PORT}" "tor socks real"
-wait_tcp "${SAM_PORT}" "ivnp SAM"
+wait_tcp "${R0_SAM_PORT}" "i2pd r0 SAM"
+wait_tcp "${R1_SAM_PORT}" "i2pd r1 SAM"
 wait_tcp "${TOR_SOCKS_PORT}" "recorder SOCKS proxy"
-wait_tcp "${REC_SAM_PORT}" "recorder SAM proxy"
+wait_tcp "${TOR_SOCKS_PORT_B}" "recorder SOCKS proxy B"
+wait_tcp "${REC_SAM_PORT_A}" "recorder SAM proxy A"
+wait_tcp "${REC_SAM_PORT_B}" "recorder SAM proxy B"
 
 echo "==> waiting for tor bootstrap (100%)"
 wait_tor_bootstrap
@@ -1414,7 +1020,7 @@ echo "==> starting node A (onion service + i2p accept)"
 start_node "${A_DATADIR}" "${A_RPC_PORT}" "${A_P2P_PORT}" "${A_LOG}" \
   --onion "127.0.0.1:${TOR_SOCKS_PORT}" \
   --torcontrol "127.0.0.1:${TOR_CONTROL_PORT}" \
-  --i2psam "127.0.0.1:${REC_SAM_PORT}" \
+  --i2psam "127.0.0.1:${REC_SAM_PORT_A}" \
   --i2pacceptincoming
 A_PID=$!
 
@@ -1459,8 +1065,8 @@ poll_height "${A_RPC_PORT}" 5 "node A mining"
 
 echo "==> starting node B (proxy dialer)"
 start_node "${B_DATADIR}" "${B_RPC_PORT}" "${B_P2P_PORT}" "${B_LOG}" \
-  --proxy "127.0.0.1:${TOR_SOCKS_PORT}" \
-  --i2psam "127.0.0.1:${REC_SAM_PORT}" \
+  --proxy "127.0.0.1:${TOR_SOCKS_PORT_B}" \
+  --i2psam "127.0.0.1:${REC_SAM_PORT_B}" \
   --v2transport=false
 poll_height "${B_RPC_PORT}" 0 "node B rpc"
 
@@ -1481,18 +1087,24 @@ B_PEERS=$(rs_result "${B_RPC_PORT}" getpeerinfo)
 python3 -c '
 import json, sys
 peers = json.load(sys.stdin)
-assert len(peers) == 1, f"expected exactly 1 peer on node B, got {len(peers)}"
-assert peers[0]["network"] == "onion", "expected onion peer on node B, got {}".format(peers[0]["network"])
-assert not peers[0]["inbound"], "expected outbound connection from node B"
+if len(peers) != 1:
+    sys.exit(f"error: expected exactly 1 peer on node B, got {len(peers)}")
+if peers[0].get("network") != "onion":
+    sys.exit("error: expected onion peer on node B, got {}".format(peers[0].get("network")))
+if peers[0].get("inbound") is not False:
+    sys.exit("error: expected outbound connection from node B")
 ' <<<"${B_PEERS}"
 
 A_PEERS=$(rs_result "${A_RPC_PORT}" getpeerinfo)
 python3 -c '
 import json, sys
 peers = json.load(sys.stdin)
-assert len(peers) == 1, f"expected exactly 1 peer on node A, got {len(peers)}"
-assert peers[0]["network"] == "onion", "expected onion peer on node A, got {}".format(peers[0]["network"])
-assert peers[0]["inbound"], "expected inbound connection on node A"
+if len(peers) != 1:
+    sys.exit(f"error: expected exactly 1 peer on node A, got {len(peers)}")
+if peers[0].get("network") != "onion":
+    sys.exit("error: expected onion peer on node A, got {}".format(peers[0].get("network")))
+if peers[0].get("inbound") is not True:
+    sys.exit("error: expected inbound connection on node A")
 ' <<<"${A_PEERS}"
 
 # Bidirectional block/header propagation over Onion
@@ -1526,8 +1138,10 @@ python3 -c '
 import json, sys
 b = json.loads(sys.argv[1])
 a = json.loads(sys.argv[2])
-assert len(b) == 0, f"node B has active peers before I2P leg: {b}"
-assert len(a) == 0, f"node A has active peers before I2P leg: {a}"
+if len(b) != 0:
+    sys.exit(f"error: node B has active peers before I2P leg: {b}")
+if len(a) != 0:
+    sys.exit(f"error: node A has active peers before I2P leg: {a}")
 ' "${B_PEERS_PRE}" "${A_PEERS_PRE}"
 
 rs_result "${B_RPC_PORT}" addnode "[\"${I2P_A}:${VPORT}\", \"add\"]" >/dev/null
@@ -1559,13 +1173,19 @@ python3 -c '
 import json, sys
 b_peers = json.loads(sys.argv[1])
 a_peers = json.loads(sys.argv[2])
-assert len(b_peers) == 1, f"expected exactly 1 peer on node B, got {len(b_peers)}"
-assert b_peers[0]["network"] == "i2p", "expected i2p peer on node B, got {}".format(b_peers[0]["network"])
-assert not b_peers[0]["inbound"], "expected outbound connection from node B"
+if len(b_peers) != 1:
+    sys.exit(f"error: expected exactly 1 peer on node B, got {len(b_peers)}")
+if b_peers[0].get("network") != "i2p":
+    sys.exit("error: expected i2p peer on node B, got {}".format(b_peers[0].get("network")))
+if b_peers[0].get("inbound") is not False:
+    sys.exit("error: expected outbound connection from node B")
 
-assert len(a_peers) == 1, f"expected exactly 1 peer on node A, got {len(a_peers)}"
-assert a_peers[0]["network"] == "i2p", "expected i2p peer on node A, got {}".format(a_peers[0]["network"])
-assert a_peers[0]["inbound"], "expected inbound connection on node A"
+if len(a_peers) != 1:
+    sys.exit(f"error: expected exactly 1 peer on node A, got {len(a_peers)}")
+if a_peers[0].get("network") != "i2p":
+    sys.exit("error: expected i2p peer on node A, got {}".format(a_peers[0].get("network")))
+if a_peers[0].get("inbound") is not True:
+    sys.exit("error: expected inbound connection on node A")
 ' "${B_PEERS}" "${A_PEERS}"
 
 # Bidirectional block/header propagation over I2P
@@ -1580,12 +1200,9 @@ TIP_A=$(rs_result "${A_RPC_PORT}" getbestblockhash | python3 -c 'import json, sy
 TIP_B=$(rs_result "${B_RPC_PORT}" getbestblockhash | python3 -c 'import json, sys; print(json.load(sys.stdin))')
 [[ "${TIP_A}" == "${TIP_B}" ]] || { echo "error: tip mismatch after bidirectional I2P sync" >&2; exit 1; }
 
-# Disconnect I2P leg
-echo "==> [Leg 2] Disconnecting I2P peer"
-rs_result "${B_RPC_PORT}" addnode "[\"${I2P_A}:${VPORT}\", \"remove\"]" >/dev/null 2>&1 || true
-rs_result "${B_RPC_PORT}" disconnectnode "[\"${I2P_A}:${VPORT}\"]" >/dev/null 2>&1 || true
-poll_peers_empty "${B_RPC_PORT}" "node B after I2P disconnect"
-poll_peers_empty "${A_RPC_PORT}" "node A after I2P disconnect"
+# Keep I2P leg up into restart: the stale session proves explicit disconnect
+echo "==> [Leg 2] Keeping I2P peer up into restart (explicit disconnect proves stale session)"
+printf '%s\n' "i2p_leg_kept_up_into_restart=1" >> "${WORKDIR}/restart-readmit.log"
 
 # -----------------------------------------------------------------------------
 # Restart Node A & Verify Identity Reuse
@@ -1598,11 +1215,42 @@ if [[ -z "${REAP_STATUS}" ]]; then
   exit 1
 fi
 
+echo "==> Capturing stale Node A session on Node B (still listed, I2P sends no remote FIN)"
+STALE_B_PEER_ID=$(rs_result "${B_RPC_PORT}" getpeerinfo | python3 -c 'import json,sys; peers=json.load(sys.stdin); print(peers[0].get("id","") if peers else "")')
+if [[ -z "${STALE_B_PEER_ID}" ]]; then
+  echo "error: no stale peer listed on Node B after stop" >&2
+  exit 1
+fi
+printf '%s\n' "stale_b_peer_id=${STALE_B_PEER_ID}" >> "${WORKDIR}/restart-readmit.log"
+echo "==> Explicit I2P disconnect of stale Node A session on Node B (manual, no automatic retry)"
+if ! rs_result "${B_RPC_PORT}" disconnectnode "[\"\", ${STALE_B_PEER_ID}]" >/dev/null; then
+  echo "error: explicit disconnectnode failed for stale session" >&2
+  exit 1
+fi
+poll_peers_empty "${B_RPC_PORT}" "node B after explicit stale disconnect" || exit 1
+printf '%s\n' "explicit_disconnect=ok peer_zero_observed=ok" >> "${WORKDIR}/restart-readmit.log"
+# Baseline the Node A recorder channel after Node A is reaped and before the
+# restart launch: the old process is gone so it cannot log between baseline and
+# launch, and b32 publication itself waits for the SAM root so sampling after
+# launch would already contain the fresh SESSION STATUS OK. Only a greater
+# ordinal afterwards proves a fresh post-restart Node A SESSION CREATE
+# received RESULT=OK through the owned recorder.
+SAM_CREATE_BASELINE=$(grep -E "^sam_session_create_ok ordinal=[0-9]+$" "${RECORDER_LOG}" 2>/dev/null | grep -oE "[0-9]+$" | sort -n | tail -n 1 || true)
+if ! [[ "${SAM_CREATE_BASELINE}" =~ ^[0-9]+$ ]]; then
+  echo "error: recorder-A baseline ordinal missing or unreadable; refusing to claim a fresh root" >&2
+  exit 1
+fi
+if ((SAM_CREATE_BASELINE < 1)); then
+  echo "error: recorder-A baseline ordinal is ${SAM_CREATE_BASELINE}, expected >= 1 (Node A root predates restart)" >&2
+  exit 1
+fi
+printf '%s\n' "sam_create_baseline=${SAM_CREATE_BASELINE} channel=recorder-A" >> "${WORKDIR}/restart-readmit.log"
+
 echo "==> Restarting Node A with preserved data directory"
 start_node "${A_DATADIR}" "${A_RPC_PORT}" "${A_P2P_PORT}" "${A_LOG2}" \
   --onion "127.0.0.1:${TOR_SOCKS_PORT}" \
   --torcontrol "127.0.0.1:${TOR_CONTROL_PORT}" \
-  --i2psam "127.0.0.1:${REC_SAM_PORT}" \
+  --i2psam "127.0.0.1:${REC_SAM_PORT_A}" \
   --i2pacceptincoming
 A_PID=$!
 
@@ -1630,12 +1278,218 @@ KEY_I2P_SHA_POST=$(sha256sum "${I2P_KEY_FILE}" | awk '{print $1}')
 [[ "${KEY_ONION_SHA_PRE}" == "${KEY_ONION_SHA_POST}" ]] || { echo "error: onion private key file content changed across restart" >&2; exit 1; }
 [[ "${KEY_I2P_SHA_PRE}" == "${KEY_I2P_SHA_POST}" ]] || { echo "error: i2p private key file content changed across restart" >&2; exit 1; }
 
+echo "==> Post-restart Node A SAM root readiness (fresh recorder-observed SESSION CREATE OK)"
+# The Node A root runs through REC_SAM_PORT_A, so only RECORDER_LOG (A) can
+# prove a fresh post-restart Node A SESSION CREATE received RESULT=OK. A
+# transient lookup session on the B-side router proves bridge liveness only
+# and never substitutes for the A root. Bounded by the existing per-operation
+# timeout; no new delay, no rotation, no weaker check.
+SAM_CREATE_FRESH=0
+SAM_READY_DEADLINE=$((SECONDS + TIMEOUT_SECONDS))
+while ((SECONDS < SAM_READY_DEADLINE)); do
+  SAM_CREATE_NOW=$(grep -E "^sam_session_create_ok ordinal=[0-9]+$" "${RECORDER_LOG}" 2>/dev/null | grep -oE "[0-9]+$" | sort -n | tail -n 1 || true)
+  if ! [[ "${SAM_CREATE_NOW}" =~ ^[0-9]+$ ]]; then SAM_CREATE_NOW=0; fi
+  if ((SAM_CREATE_NOW > SAM_CREATE_BASELINE)); then
+    SAM_CREATE_FRESH=1
+    printf '%s\n' "sam_root_ready=1 baseline=${SAM_CREATE_BASELINE} now=${SAM_CREATE_NOW} channel=recorder-A" >> "${WORKDIR}/restart-readmit.log"
+    break
+  fi
+  sleep 1
+done
+if ((SAM_CREATE_FRESH != 1)); then
+  echo "error: no fresh Node A SESSION CREATE OK observed on recorder-A after restart (baseline ${SAM_CREATE_BASELINE}); refusing to readmit" >&2
+  exit 1
+fi
+echo "==> Post-restart I2P readmit via verified redial watcher (manual, bounded)"
+echo "manual_readmit=watcher_before_onetry max_attempts=30 spacing_s=5 budget_s=300" >> "${WORKDIR}/restart-readmit.log"
+echo "==> Post-restart live SAM lookup gate (transient liveness plus hash-bound)"
+python3 - "${R1_SAM_PORT}" "${I2P_A}" >> "${WORKDIR}/restart-readmit.log" <<'PY'
+import base64, hashlib, socket, sys
+port = int(sys.argv[1])
+want_b32 = sys.argv[2].split(".")[0].lower()
+sock = None
+fh = None
+def sam_tokens(text):
+    tokens = []
+    current = []
+    quoted = escaped = False
+    for char in text.strip():
+        if escaped:
+            escaped = False
+        elif quoted and char == "\\":
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif char in " \t" and not quoted:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if quoted:
+        sys.exit("error: malformed reply: unbalanced quote")
+    if current:
+        tokens.append("".join(current))
+    return tokens
+def parse_fields(raw, verb, subverb):
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"error: malformed {verb} {subverb} reply: non-utf8")
+    parts = sam_tokens(text)
+    if len(parts) < 2 or parts[0] != verb or parts[1] != subverb:
+        sys.exit(f"error: malformed {verb} {subverb} reply")
+    fields = {}
+    for tok in parts[2:]:
+        key, sep, value = tok.partition("=")
+        if not sep or not key or key in fields:
+            sys.exit(f"error: malformed {verb} {subverb} reply")
+        fields[key] = value.strip('"')
+    return fields
+def result_of(fields):
+    result = fields.get("RESULT", "UNKNOWN")
+    if not result or len(result) > 32 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_" for c in result):
+        return "UNKNOWN"
+    return result
+def i2p_b64(text):
+    # SAM replies use the I2P alphabet ("-" and "~" stand for "+" and "/").
+    try:
+        return base64.b64decode(text.replace("-", "+").replace("~", "/"), validate=True)
+    except ValueError:
+        sys.exit("error: SAM destination is not canonical base64")
+try:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
+    sock.settimeout(30)
+    fh = sock.makefile("rwb")
+    def cmd(line):
+        fh.write(line.encode() + b"\n")
+        fh.flush()
+        raw = fh.readline()
+        if not raw:
+            sys.exit("error: SAM bridge closed before replying (EOF)")
+        return raw
+    hello = parse_fields(cmd("HELLO VERSION MIN=3.3 MAX=3.3"), "HELLO", "REPLY")
+    if hello.get("RESULT") != "OK" or hello.get("VERSION") != "3.3":
+        sys.exit(f"error: SAM hello failed: RESULT={result_of(hello)}")
+    gate_id = "readmit-gate"
+    created = parse_fields(cmd(f"SESSION CREATE STYLE=STREAM ID={gate_id} DESTINATION=TRANSIENT"), "SESSION", "STATUS")
+    if created.get("RESULT") != "OK":
+        sys.exit(f"error: SAM session create failed: RESULT={result_of(created)}")
+    # SESSION STATUS is a reply, never a request: no STATUS command is sent.
+    # This transient CREATE OK proves bridge liveness only, not Node A root
+    # freshness (proven separately via the recorder-A ordinal above).
+    lookup = parse_fields(cmd(f"NAMING LOOKUP NAME={want_b32}.b32.i2p"), "NAMING", "REPLY")
+    if lookup.get("RESULT") != "OK":
+        sys.exit(f"error: SAM lookup failed: RESULT={result_of(lookup)}")
+    if "VALUE" not in lookup:
+        sys.exit("error: SAM lookup reply carries 0 VALUE fields, expected 1")
+    raw = i2p_b64(lookup["VALUE"])
+    if len(raw) < 387:
+        sys.exit(f"error: SAM destination is {len(raw)} bytes, shorter than the 387-byte destination header")
+    size = 387 + int.from_bytes(raw[385:387], "big")
+    if len(raw) != size:
+        sys.exit(f"error: SAM destination is {len(raw)} bytes but its certificate declares {size}")
+    digest = hashlib.sha256(raw).digest()
+    got = base64.b32encode(digest).decode().lower().rstrip("=")
+    if got != want_b32:
+        sys.exit("error: hash-bound mismatch")
+    print(f"transient_create_ok=1 hash_bound=1 b32={want_b32}")
+finally:
+    try:
+        if fh is not None:
+            fh.close()
+    except Exception:
+        pass
+    try:
+        if sock is not None:
+            sock.close()
+    except Exception:
+        pass
+PY
+readmit_observed() { # Node B lists an outbound I2P peer (its table was empty after the explicit stale disconnect, so this is the restarted Node A); sets READMIT_OK
+  python3 -c '
+import json, sys
+peers = json.load(sys.stdin)
+sys.exit(0 if any(p.get("network") == "i2p" and p.get("inbound") is False for p in peers) else 1)' <<<"$(rs_result "${B_RPC_PORT}" getpeerinfo 2>/dev/null || echo '[]')" || return 1
+  READMIT_OK=1
+  printf '%s\n' "readmit_established attempts=${READMIT_ATTEMPTS}" >> "${WORKDIR}/restart-readmit.log"
+}
+READMIT_OK=0
+READMIT_ATTEMPTS=0
+READMIT_DEADLINE=$((SECONDS + 300))
+printf '%s\n' "watcher_started=1 watcher_before_first_onetry=1" >> "${WORKDIR}/restart-readmit.log"
+while ((SECONDS < READMIT_DEADLINE)); do
+  if ((READMIT_ATTEMPTS == 0)); then
+    rs_result "${B_RPC_PORT}" addnode "[\"${I2P_A}:${VPORT}\", \"onetry\"]" >/dev/null 2>&1 || true
+    READMIT_ATTEMPTS=$((READMIT_ATTEMPTS + 1))
+    printf '%s\n' "readmit_attempt=1 kind=initial_onetry watcher_started_before=1" >> "${WORKDIR}/restart-readmit.log"
+    sleep 5
+    continue
+  fi
+  if readmit_observed; then
+    break
+  fi
+  sleep 5
+  if ((READMIT_ATTEMPTS >= 30)); then
+    break
+  fi
+  if tail -n 50 "${B_LOG}" 2>/dev/null | grep -q "outbound connection exited with error"; then
+    rs_result "${B_RPC_PORT}" addnode "[\"${I2P_A}:${VPORT}\", \"onetry\"]" >/dev/null 2>&1 || true
+    READMIT_ATTEMPTS=$((READMIT_ATTEMPTS + 1))
+    printf '%s\n' "readmit_attempt=${READMIT_ATTEMPTS} kind=failure_retry" >> "${WORKDIR}/restart-readmit.log"
+  elif ((SECONDS >= READMIT_DEADLINE - 295 + READMIT_ATTEMPTS * 5)); then
+    rs_result "${B_RPC_PORT}" addnode "[\"${I2P_A}:${VPORT}\", \"onetry\"]" >/dev/null 2>&1 || true
+    READMIT_ATTEMPTS=$((READMIT_ATTEMPTS + 1))
+    printf '%s\n' "readmit_attempt=${READMIT_ATTEMPTS} kind=silent_stall_retry" >> "${WORKDIR}/restart-readmit.log"
+  fi
+done
+# The loop also ends on the 30-attempt cap or the 300 s deadline without a
+# peer. The last attempt, or one made just before the deadline, still gets one
+# observation; if the peer was never seen the run stops here, before the
+# recorder is finalized and before any evidence or PASS.
+if ((READMIT_OK != 1)) && ! readmit_observed; then
+  echo "error: post-restart I2P readmit was never observed (${READMIT_ATTEMPTS} attempts within 30 attempts / 300 s); refusing to finalize or report PASS" >&2
+  exit 1
+fi
+printf '%s\n' "manual_readmit_done=1 automatic_node_claim=0" >> "${WORKDIR}/restart-readmit.log"
+
 # -----------------------------------------------------------------------------
 # Finalize the Recorder Before Any Observation Is Read
 # -----------------------------------------------------------------------------
 
 echo "==> finalizing bounded recorder (stop, reap, verify completion marker)"
 finalize_recorder
+
+echo "==> merging dual recorder snapshots (A plus B) and republishing marker"
+python3 - "${OBSERVATIONS_FILE}" "${OBSERVATIONS_FILE}.b" "${OBSERVATIONS_DONE}" <<'PY'
+import hashlib, json, sys
+main_path, b_path, marker_path = sys.argv[1], sys.argv[2], sys.argv[3]
+main = json.load(open(main_path))
+b = json.load(open(b_path))
+main.setdefault("socks", []).extend(b.get("socks", []))
+sam = main.setdefault("sam", {})
+bsam = b.get("sam", {})
+for key in ("hello", "negotiated_version", "session_create", "naming_lookup", "stream_connect", "stream_accept"):
+    if not sam.get(key) and bsam.get(key):
+        sam[key] = bsam[key]
+raw = json.dumps(main, indent=2).encode()
+import os
+tmp_main = main_path + ".tmp"
+with open(tmp_main, "wb") as fh:
+    fh.write(raw)
+    fh.flush()
+    os.fsync(fh.fileno())
+os.replace(tmp_main, main_path)
+marker = {"schema": "bitcoin-rs-overlay-observations-v1", "complete": True, "observations_bytes": len(raw), "observations_sha256": hashlib.sha256(raw).hexdigest()}
+marker_raw = json.dumps(marker, indent=2).encode()
+tmp_marker = marker_path + ".tmp"
+with open(tmp_marker, "wb") as fh:
+    fh.write(marker_raw)
+    fh.flush()
+    os.fsync(fh.fileno())
+os.replace(tmp_marker, marker_path)
+print("merged B observations into main snapshot and republished marker")
+PY
 
 # -----------------------------------------------------------------------------
 # Verify Recorded Wire Protocol Observations (SOCKS5 & SAM 3.3)
@@ -1651,21 +1505,33 @@ with open(obs_file) as f:
 
 # 1. SOCKS5 verification
 socks = obs.get("socks", [])
-assert len(socks) > 0, "no SOCKS5 connections recorded"
+if not isinstance(socks, list) or len(socks) == 0:
+    sys.exit("error: no SOCKS5 connections recorded")
 matching_socks = [s for s in socks if s.get("atyp") == 3 and s.get("domain_length") == 62]
-assert len(matching_socks) > 0, f"no SOCKS5 connect request with ATYP=3 and length=62 observed (records: {socks})"
-assert matching_socks[0].get("direction") == "outbound", "expected outbound SOCKS stream"
-assert matching_socks[0].get("target_domain", "").endswith(".onion"), "expected .onion target domain"
+if len(matching_socks) == 0:
+    sys.exit(f"error: no SOCKS5 connect request with ATYP=3 and length=62 observed (records: {socks})")
+if matching_socks[0].get("direction") != "outbound":
+    sys.exit("error: expected outbound SOCKS stream")
+if not str(matching_socks[0].get("target_domain", "")).endswith(".onion"):
+    sys.exit("error: expected .onion target domain")
 
 # 2. SAM bridge verification
 sam = obs.get("sam", {})
-assert sam.get("hello") is not None and "HELLO VERSION" in sam.get("hello"), "SAM HELLO VERSION was not observed"
+hello = sam.get("hello")
+if not isinstance(hello, str) or "HELLO VERSION" not in hello:
+    sys.exit("error: SAM HELLO VERSION was not observed")
 negotiated_version = sam.get("negotiated_version")
-assert negotiated_version == "3.3", f"expected SAM 3.3, got {negotiated_version}"
-assert sam.get("stream_connect"), "SAM STREAM CONNECT was not observed"
-assert sam.get("stream_accept"), "SAM STREAM ACCEPT was not observed"
-assert sam.get("naming_lookup"), "SAM NAMING LOOKUP was not observed"
-assert "DESTINATION=[REDACTED]" in (sam.get("session_create") or ""), "session_create should be sanitized"
+if negotiated_version != "3.3":
+    sys.exit(f"error: expected SAM 3.3, got {negotiated_version}")
+if not sam.get("stream_connect"):
+    sys.exit("error: SAM STREAM CONNECT was not observed")
+if not sam.get("stream_accept"):
+    sys.exit("error: SAM STREAM ACCEPT was not observed")
+if not sam.get("naming_lookup"):
+    sys.exit("error: SAM NAMING LOOKUP was not observed")
+session_create = sam.get("session_create")
+if not isinstance(session_create, str) or "DESTINATION=[REDACTED]" not in session_create:
+    sys.exit("error: session_create was not observed sanitized")
 print("==> wire protocol observations verified successfully")
 ' "${OBSERVATIONS_FILE}"
 
@@ -1678,11 +1544,39 @@ B_INFO=$(rs_result "${B_RPC_PORT}" getnetworkinfo)
 HEIGHT_A=$(rs_result "${A_RPC_PORT}" getblockcount)
 HEIGHT_B=$(rs_result "${B_RPC_PORT}" getblockcount)
 
-python3 - "${EVIDENCE}" "${OBSERVATIONS_FILE}" <<PY
+I2P_FULL_SHA=$(python3 - "${I2P_KEY_FILE}" "${I2P_A}" <<'PY'
+import base64, hashlib, sys
+try:
+    with open(sys.argv[1]) as fh:
+        fields = fh.read().split()
+except OSError as error:
+    sys.exit(f"error: i2p key file unreadable: {type(error).__name__}")
+if not fields:
+    sys.exit("error: i2p key file is empty")
+try:
+    raw = base64.b64decode(fields[0].replace("-", "+").replace("~", "/"), validate=True)
+except ValueError:
+    sys.exit("error: i2p key file is not canonical base64")
+if len(raw) < 387:
+    sys.exit("error: i2p key file is shorter than a destination header")
+size = 387 + int.from_bytes(raw[385:387], "big")
+if len(raw) < size:
+    sys.exit("error: i2p key file is shorter than the destination its certificate declares")
+pub = raw[:size]
+digest = hashlib.sha256(pub).digest()
+b32 = base64.b32encode(digest).decode().lower().rstrip("=")
+want = sys.argv[2].split(".")[0].lower()
+if b32 != want:
+    sys.exit(f"error: destination hash {b32} != requested b32 {want}")
+print(hashlib.sha256(pub).hexdigest())
+PY
+)
+[[ -n "${I2P_FULL_SHA}" ]] || { echo "error: full destination decode failed" >&2; exit 1; }
+
+python3 - "${EVIDENCE}" "${OBSERVATIONS_FILE}" "${I2P_FULL_SHA}" <<PY
 import hashlib, json, sys
 
-evidence_path = sys.argv[1]
-obs_path = sys.argv[2]
+evidence_path, obs_path, i2p_full_sha = sys.argv[1], sys.argv[2], sys.argv[3]
 
 with open(obs_path) as f:
     obs = json.load(f)
@@ -1694,6 +1588,9 @@ matching_socks_list = [s for s in obs.get("socks", []) if s.get("atyp") == 3 and
 if not matching_socks_list:
     sys.exit("evidence error: no matching SOCKS observation recorded; refusing to emit fake proof")
 socks_entry = matching_socks_list[0]
+for socks_field in ("atyp", "domain_length", "direction"):
+    if socks_entry.get(socks_field) is None:
+        sys.exit(f"evidence error: SOCKS observation '{socks_field}' missing; refusing to emit fake proof")
 
 sam_obs = obs.get("sam", {})
 for req_field in ["hello", "negotiated_version", "session_create", "naming_lookup", "stream_connect", "stream_accept"]:
@@ -1706,28 +1603,30 @@ evidence = {
         "version": "${TOR_OBSERVED_VERSION}",
         "version_raw": "${TOR_FIRST_LINE}",
         "release_verified": ("${TOR_OBSERVED_VERSION}" == "0.4.9.14"),
+        "gencert_sha256": "${TOR_GENCERT_SHA}",
+        "private_fixture": {"authorities": 3, "relays": 3, "testing_network": True},
+        "public_bootstrap": False,
         "socks_atyp": socks_entry["atyp"],
-        "socks_atyp_hex": socks_entry["atyp_hex"],
         "socks_domain_length": socks_entry["domain_length"],
-        "socks_domain_length_hex": socks_entry["domain_length_hex"],
         "control_endpoint": "127.0.0.1:${TOR_CONTROL_PORT}",
         "onion_service": "${ONION_A}",
         "observed_stream_direction": socks_entry["direction"],
     },
     "sam": {
-        "bridge": "127.0.0.1:${SAM_PORT}",
+        "r0_bridge": "127.0.0.1:${R0_SAM_PORT}",
+        "r1_bridge": "127.0.0.1:${R1_SAM_PORT}",
+        "version": "3.0.0",
+        "binary_sha256": "${I2PD_BIN_SHA}",
+        "release_pin": "3.0.0 tag 137dde2f asset 75365744e1347a6f1ee1d29eca3a6ee41dcd0c7e14c2f015401b283220b2e993",
+        "netid": 77,
+        "private_mesh": {"routers": 7, "loopbacks": ["127.0.0.1", "127.0.77.1"]},
+        "public_reseed": False,
         "hello": sam_obs["hello"],
         "negotiated_version": sam_obs["negotiated_version"],
         "session_create": sam_obs["session_create"],
         "naming_lookup": sam_obs["naming_lookup"],
         "stream_connect": sam_obs["stream_connect"],
         "stream_accept": sam_obs["stream_accept"],
-        "ivnp_version": "${IVNP_VERSION}",
-        "ivnp_revision": "${IVNP_REVISION}",
-        "ivnp_go_header": "${IVNP_GO_HEADER}",
-        "ivnp_vcs_modified": ("${IVNP_MODIFIED}" == "true"),
-        "ivnp_pinned_commit_verified": ("${IVNP_REVISION}" == "0a1b746ba98b58510eb5dcde679ca43184f4b60e" and "${IVNP_MODIFIED}" == "false"),
-        "ivnp_source_qualified_pin": ("${IVNP_VERSION}" == "dev" and "${IVNP_GO_HEADER}" == "go1.27.0"),
     },
     "sync": {
         "height_a": int("${HEIGHT_A}"),
@@ -1747,10 +1646,14 @@ evidence = {
     },
     "restart": {
         "process_exit_confirmed": True,
+        "explicit_disconnect": True,
+        "peer_zero_observed": True,
+        "readmit_onetry": ("${READMIT_OK}" == "1"),
+        "automatic_retry_claimed": False,
         "onion_reused": True,
         "i2p_reused": True,
         "onion_service_id_sha256": h("${ONION_A}"),
-        "i2p_destination_sha256": h("${I2P_A}"),
+        "i2p_destination_sha256": i2p_full_sha,
         "onion_key_file_mode": "0600",
         "i2p_key_file_mode": "0600",
         "key_files_retained_byte_identical": True,
@@ -1761,7 +1664,7 @@ evidence = {
     },
     "logs": {
         "tor": "${TOR_LOG}",
-        "ivnp": "${IVNP_LOG}",
+        "i2pd_mesh": "${I2PD_LOG_DIR}",
         "recorder": "${RECORDER_LOG}",
         "node_a": "${A_LOG}",
         "node_a_restart": "${A_LOG2}",
@@ -1769,8 +1672,11 @@ evidence = {
     },
 }
 
-with open(evidence_path, "w") as fh:
-    json.dump(evidence, fh, indent=2)
+try:
+    with open(evidence_path, "x") as fh:
+        json.dump(evidence, fh, indent=2)
+except FileExistsError:
+    sys.exit(f"evidence error: {evidence_path} already exists; refusing to overwrite it")
 print(f"evidence written to {evidence_path}")
 PY
 
