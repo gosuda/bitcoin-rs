@@ -564,13 +564,7 @@ pub(crate) fn scan_script_at(
 
 /// Evaluates the explicitly supported, non-ranged scan descriptor forms.
 /// Existing checksum/network/derivation rules stay in this descriptor owner.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "descriptor scanner interface retained for callers and tests"
-    )
-)]
+#[cfg(test)]
 pub(crate) fn scan_descriptor(text: &str, network: Network) -> Result<ScanScript, RpcError> {
     let mut scripts = scan_descriptor_range(text, network, None, || Ok(false))?;
     scripts
@@ -579,13 +573,7 @@ pub(crate) fn scan_descriptor(text: &str, network: Network) -> Result<ScanScript
 }
 
 /// Expands a scan descriptor over an optional derivation range, bounded by script and byte budgets.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "descriptor scanner interface retained for callers and tests"
-    )
-)]
+#[cfg(test)]
 pub(crate) fn scan_descriptor_range(
     text: &str,
     network: Network,
