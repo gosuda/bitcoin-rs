@@ -511,7 +511,8 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
             *self
                 .submitted
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(payload.bytes().to_vec());
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(payload.bytes().to_vec());
             Ok(BlockValidationResult::Accepted)
         }
 
