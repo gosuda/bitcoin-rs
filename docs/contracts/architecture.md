@@ -662,13 +662,12 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 
 ## Current boundary and target design
 
-This section states what runs and what remains target. In the graph,
-solid arrows are implemented and dotted arrows are targets. Ownership
-for the implemented behaviors lives in `ARCH-07` / `ARCH-07a`,
-`ARCH-05`, `ARCH-02`, `IDX-12` in [indexing](indexing.md) with the
-historical-prefix reads in [embedding](embedding.md), and the retained
-rows below; ownership for the targets lives in the `T1` / `T3` clauses
-below.
+This section states what runs. In the graph, solid arrows are
+implemented. Ownership for the implemented behaviors lives in
+`ARCH-07` / `ARCH-07a`, `ARCH-05`, `ARCH-02`, `IDX-12` in
+[indexing](indexing.md) with the historical-prefix reads in
+[embedding](embedding.md), the retained rows below, and the `T1` /
+`T3` clauses below.
 
 ```mermaid
 flowchart TD
@@ -685,13 +684,12 @@ flowchart TD
     CS -->|"writes early undo and body-locator metadata"| ER["active-store early rows (P4 retained; consolidation gated)"]
     ROWS -->|"serves coverage rows"| HIST["typed historical-prefix query (P2 implemented)"]
 
-    WORKER -.->|"T1 reads seed artifact when usable"| SNAP["verified immutable snapshot artifact (T1 target)"]
-    BODY -.->|"T1 alternate source: replay complete retained history"| WORKER
-    WORKER -.->|"T1 seeds rows outside live UTXO lock (else reports unavailable); never from live set or fresh checkpoint"| ROWS
-    PAIR["independent decoded + raw input pair"] -.->|"T3 stager target: replaced by"| BP
+    WORKER -->|"T1 reads seed artifact when usable"| SNAP["verified immutable snapshot artifact (T1 implemented)"]
+    BODY -->|"T1 alternate source: replay complete retained history"| WORKER
+    WORKER -->|"T1 seeds rows outside live UTXO lock (else reports unavailable); never from live set or fresh checkpoint"| ROWS
 ```
 
-### T1: snapshot-seeded ScriptLive outside the live UTXO lock (target)
+### T1: snapshot-seeded ScriptLive outside the live UTXO lock (implemented)
 
 The seeder MUST run under the existing worker, retention, and
 reconciliation owners named in `ARCH-05` and `ARCH-07` / `ARCH-07b`,
@@ -737,7 +735,7 @@ stays possible: strict reads refuse the stale watermark, while
 historical reads may serve the proved common prefix while the worker
 rewinds asynchronously.
 
-### T3: one private immutable BlockPayload in place of independent pairs (target)
+### T3: one private immutable BlockPayload in place of independent pairs (implemented)
 
 Callers that today take an independent decoded input and a raw input
 MUST instead take one immutable `BlockPayload` bound to the exact wire
@@ -757,9 +755,9 @@ with no decoded field. `InboundBlock` owns the one payload while peer/source and
 until drain (`insert(payload)`); apply borrows that payload. Wire,
 storage, and RPC formats are unchanged.
 Ownership stays where it is
-today: the remaining paired call shape lives in the stager, while the
-apply path in `ARCH-07` / `ARCH-07a` already borrows the payload; the
-payload narrows that call shape and adds no new crate, layer, runtime,
+today: the stager owns one payload per entry until drain, while the
+apply path in `ARCH-07` / `ARCH-07a` borrows that payload; no paired
+call shape remains, and the payload adds no new crate, layer, runtime,
 or parser.
 
 ### P4: retain current early rows until staged readers and recovery proof permit consolidation (implemented retention; consolidation gated)
