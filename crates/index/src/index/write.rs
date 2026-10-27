@@ -350,7 +350,7 @@ impl<S: KvStore> IndexWriter<S> {
     /// cannot prove absence below it answer `Unavailable` rather than `None`.
     ///
     /// `capabilities` must name only history-derived indexes: `ScriptLive`
-    /// reseeds from the authoritative UTXO view, so anchoring it would
+    /// reseeds from an immutable artifact or retained history, so anchoring it would
     /// publish a live watermark with no rows behind it.
     pub(crate) fn anchor_watermark(
         &self,

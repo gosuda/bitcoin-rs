@@ -119,7 +119,10 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     // bypasses the checkpoint entirely rather than just skipping an absent one.
     let (tree, tip) = genesis_tip()?;
     let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
-    checkpoint::write_checkpoint_from_dir(
+    // Validation paths never mint: the witnessed writer's second return is
+    // dropped here. `let _` accepts the tuple once publication starts
+    // returning `(CheckpointWrite, Option<V4Witness>)`.
+    let _ = checkpoint::write_checkpoint_from_dir(
         &store,
         checkpoint_config(),
         &tree,

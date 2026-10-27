@@ -52,12 +52,8 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         source: None,
         wire_response: true,
     })?;
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        block_two.clone(),
-    ))?;
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        block_one.clone(),
-    ))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_two.clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))?;
 
     sync.tick();
 
@@ -142,7 +138,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
     // successor. Neither may advance authoritative or consumer state.
     for bodies in [vec![], vec![malformed, block_two.clone()]] {
         for block in bodies {
-            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))?;
+            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
         }
         sync.tick();
         let header = handles.header_tip().ok_or("missing header tip")?;
@@ -169,9 +165,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
 
     // Only resend the correct parent: success at height 2 also proves that
     // the earlier successor survived while its frontier was unavailable.
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        block_one.clone(),
-    ))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))?;
     // Give this finite fixture bounded scheduling opportunities without
     // requiring the parent and child to share one application batch or tick.
     for _ in 0..16 {
@@ -257,7 +251,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         wire_response: true,
     })?;
     for block in fixture.blocks.iter().skip(1) {
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
     }
 
     sync.tick();

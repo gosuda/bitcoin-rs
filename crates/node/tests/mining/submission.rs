@@ -10,8 +10,8 @@ use bitcoin_rs_mining::{
 };
 use bitcoin_rs_node::Network;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, OutPoint,
+    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 
 use super::support::{
@@ -194,7 +194,7 @@ fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> 
     );
 
     // The commit path checks the solution and reports the BIP22 reason.
-    match mining.submit_block(block)? {
+    match mining.submit_block(BlockPayload::from_local(block))? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "bad-signet-blksig");
         }
@@ -322,7 +322,7 @@ fn accepted_submission_is_visible_before_return() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
     let child_hash = child.block_hash();
-    let result = mining.submit_block(child)?;
+    let result = mining.submit_block(BlockPayload::from_local(child))?;
     assert_eq!(result, BlockValidationResult::Accepted);
     let tip = state
         .chainstate()
@@ -334,30 +334,67 @@ fn accepted_submission_is_visible_before_return() -> Result<()> {
 }
 
 #[test]
-fn submit_block_with_bytes_refuses_foreign_bytes() -> Result<()> {
-    use bitcoin_rs_primitives::consensus_bytes;
+fn truncated_payload_bytes_fail_construction_before_submit() -> Result<()> {
+    use bitcoin_rs_primitives::{BlockPayload, DecodeError, consensus_bytes};
+    use bytes::Bytes;
     let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let block = mined_child(genesis.block_hash())?;
     let raw = consensus_bytes(&block);
-    let mut foreign = raw.clone();
-    foreign[0] ^= 1;
-    let Err(error) = mining.submit_block_with_bytes(block.clone(), foreign) else {
-        panic!("foreign bytes must be refused");
-    };
-    let MiningControlError::Rejected(reason) = error else {
-        panic!("foreign bytes must fail at the bytes gate, got: {error:?}");
-    };
+    // Malformed images never reach submit: both constructors refuse truncated
+    // and empty images with the decode failure before any submit path runs.
+    // This constructor gate replaces the removed split-pair bytes-gate
+    // `Rejected` branch; consensus-failure `Rejected` mapping on the submit
+    // path itself is proved by the high-hash and bad-prevblk tests below.
+    let truncated = Bytes::from(raw[..raw.len() - 1].to_vec());
+    assert!(matches!(
+        BlockPayload::from_raw(truncated.clone()),
+        Err(DecodeError::EndOfData { .. })
+    ));
+    assert!(matches!(
+        BlockPayload::from_prefix(truncated),
+        Err(DecodeError::EndOfData { .. })
+    ));
+    assert!(matches!(
+        BlockPayload::from_raw(Bytes::new()),
+        Err(DecodeError::EndOfData { .. })
+    ));
+    // The exact image keeps its raw length and submits on its own merits.
+    let payload = BlockPayload::from_raw(Bytes::from(raw.clone()))?;
+    assert_eq!(payload.bytes().len(), raw.len());
+    assert_eq!(payload.block(), &block);
     assert_eq!(
-        reason.as_str(),
-        "submitted bytes are not the serialization of the submitted block",
-        "foreign bytes must fail at the bytes gate"
-    );
-    assert_eq!(
-        mining.submit_block_with_bytes(block, raw)?,
+        mining.submit_block(payload)?,
         BlockValidationResult::Accepted
     );
+    Ok(())
+}
+
+#[test]
+fn foreign_valid_bytes_apply_as_their_own_block() -> Result<()> {
+    use bitcoin_rs_primitives::{BlockPayload, consensus_bytes};
+    use bytes::Bytes;
+    let (state, mining) = regtest_mining()?;
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let other = mined_child_labeled(genesis.block_hash(), 2)?;
+    let other_hash = Hash256::from(other.block_hash());
+    // Foreign-but-valid bytes decode to their own exact payload — a different
+    // block — and apply on their own merits, never as a mismatch against a
+    // separately supplied block.
+    let foreign = BlockPayload::from_raw(Bytes::from(consensus_bytes(&other)))?;
+    assert_eq!(foreign.block(), &other);
+    assert_eq!(
+        mining.submit_block(foreign)?,
+        BlockValidationResult::Accepted
+    );
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .unwrap_or_else(|| panic!("applied tip missing after foreign submit"));
+    assert_eq!(tip.hash, other_hash);
+    assert_eq!(tip.height, 1);
     Ok(())
 }
 
@@ -383,7 +420,10 @@ fn submit_block_fills_omitted_coinbase_witness() -> Result<()> {
         "assembled candidate must carry a BIP141 commitment"
     );
     let block_hash = block.block_hash();
-    assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(BlockPayload::from_local(block))?,
+        BlockValidationResult::Accepted
+    );
     let tip = state
         .chainstate()
         .applied_tip_snapshot()
@@ -393,9 +433,10 @@ fn submit_block_fills_omitted_coinbase_witness() -> Result<()> {
 }
 
 #[test]
-fn submit_block_with_bytes_accepts_prefill_image_when_fill_applies() -> Result<()> {
-    use bitcoin_rs_primitives::consensus_bytes;
-    let (_state, mining) = regtest_mining()?;
+fn submit_block_accepts_prefill_image_when_fill_applies() -> Result<()> {
+    use bitcoin_rs_primitives::{BlockPayload, consensus_bytes};
+    use bytes::Bytes;
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
@@ -414,11 +455,24 @@ fn submit_block_with_bytes_accepts_prefill_image_when_fill_applies() -> Result<(
         has_commitment,
         "assembled candidate must carry a BIP141 commitment"
     );
-    let raw = consensus_bytes(&block);
+    // Prefill image: the exact encoding of the stripped block. The coordinator
+    // runs its own read-only predicate and fill on this image and accepts; the
+    // test never fills, so only the coordinator's fill can complete the block.
+    let image = Bytes::from(consensus_bytes(&block));
+    let payload = BlockPayload::from_raw(image.clone())?;
+    assert_eq!(payload.bytes(), &image);
+    // The fill restores only the witness nonce, so the applied tip carries the
+    // stripped block's own header hash.
+    let block_hash = Hash256::from(block.block_hash());
     assert_eq!(
-        mining.submit_block_with_bytes(block, raw)?,
+        mining.submit_block(payload)?,
         BlockValidationResult::Accepted
     );
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .unwrap_or_else(|| panic!("applied tip missing after prefill submit"));
+    assert_eq!(tip.hash, block_hash);
     Ok(())
 }
 
@@ -463,7 +517,9 @@ fn submit_header_accepts_genesis_before_and_after_bootstrap() -> Result<()> {
     );
     assert!(state.chainstate().applied_tip_snapshot().is_none());
 
-    let _ = state.apply_block(&Network::Regtest.genesis_block())?;
+    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        Network::Regtest.genesis_block(),
+    ))?;
     let before = state.chainstate().snapshot();
 
     mining.submit_header(genesis.header)?;
@@ -597,7 +653,7 @@ fn rejection_mapping_for_bad_prev_hash() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
     block.header.nonce = 0;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    let result = mining.submit_block(block)?;
+    let result = mining.submit_block(BlockPayload::from_local(block))?;
     match result {
         BlockValidationResult::Rejected(reason) => {
             assert!(
@@ -618,7 +674,7 @@ fn concurrent_duplicate_submissions_leave_admission_open() -> Result<()> {
     let outcomes = thread::scope(|scope| {
         let submit = || {
             start.wait();
-            mining.submit_block(child.clone())
+            mining.submit_block(BlockPayload::from_local(child.clone()))
         };
         let first = scope.spawn(submit);
         let second = scope.spawn(submit);
@@ -642,7 +698,7 @@ fn concurrent_duplicate_submissions_leave_admission_open() -> Result<()> {
     next.header.time = child.header.time + 1;
     regtest_fixture::mine_block_to_declared_target(&mut next)?;
     assert_eq!(
-        mining.submit_block(next)?,
+        mining.submit_block(BlockPayload::from_local(next))?,
         BlockValidationResult::Accepted,
         "a racing duplicate must not poison the next valid submission"
     );
@@ -673,7 +729,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> Result<()> {
         BlockTemplateResult::Proposal(BlockValidationResult::Accepted) => {}
         other => panic!("BIP22 proposal must omit unsolved PoW, got {other:?}"),
     }
-    match mining.submit_block(block)? {
+    match mining.submit_block(BlockPayload::from_local(block))? {
         BlockValidationResult::Rejected(reason) => {
             assert!(reason.contains("high-hash"), "submit reason: {reason}");
         }
@@ -694,7 +750,7 @@ fn duplicate_solved_submission_is_idempotent() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
     assert_eq!(
-        mining.submit_block(child.clone())?,
+        mining.submit_block(BlockPayload::from_local(child.clone()))?,
         BlockValidationResult::Accepted
     );
     let height = state
@@ -702,7 +758,7 @@ fn duplicate_solved_submission_is_idempotent() -> Result<()> {
         .applied_tip_snapshot()
         .map_or(0, |tip| tip.height);
     assert_eq!(
-        mining.submit_block(child)?,
+        mining.submit_block(BlockPayload::from_local(child))?,
         BlockValidationResult::Duplicate
     );
     assert_eq!(
@@ -786,7 +842,7 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     let child = mined_child(genesis.block_hash())?;
     let child_hash = Hash256::from(child.block_hash());
     assert_eq!(
-        mining.submit_block(child.clone())?,
+        mining.submit_block(BlockPayload::from_local(child.clone()))?,
         BlockValidationResult::Accepted
     );
     disconnect_applied(&state, &child)?;
@@ -823,12 +879,12 @@ fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     let genesis_hash = Hash256::from(genesis.block_hash());
     let child = mined_child(genesis.block_hash())?;
     assert_eq!(
-        mining.submit_block(child.clone())?,
+        mining.submit_block(BlockPayload::from_local(child.clone()))?,
         BlockValidationResult::Accepted
     );
     disconnect_applied(&state, &child)?;
     assert_eq!(
-        mining.submit_block(child)?,
+        mining.submit_block(BlockPayload::from_local(child))?,
         BlockValidationResult::Duplicate
     );
     let tip = state
@@ -847,7 +903,10 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
     let child = mined_child(genesis.block_hash())?;
-    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(BlockPayload::from_local(child))?,
+        BlockValidationResult::Accepted
+    );
     {
         let tree = state.chainstate().block_tree_reader();
         let mut tree = tree.write();
@@ -861,7 +920,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> Result<()> {
         BlockValidationResult::Duplicate
     );
     assert_eq!(
-        mining.submit_block(genesis)?,
+        mining.submit_block(BlockPayload::from_local(genesis))?,
         BlockValidationResult::Duplicate
     );
     Ok(())
@@ -875,7 +934,10 @@ fn submit_block_applies_a_header_already_in_the_tree() -> Result<()> {
     let child = mined_child(genesis.block_hash())?;
     let child_hash = Hash256::from(child.block_hash());
     mining.submit_header(child.header)?;
-    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(BlockPayload::from_local(child))?,
+        BlockValidationResult::Accepted
+    );
     let tip = state
         .chainstate()
         .applied_tip_snapshot()
@@ -890,9 +952,12 @@ fn active_ancestor_submit_is_duplicate() -> Result<()> {
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
-    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
     assert_eq!(
-        mining.submit_block(genesis)?,
+        mining.submit_block(BlockPayload::from_local(child))?,
+        BlockValidationResult::Accepted
+    );
+    assert_eq!(
+        mining.submit_block(BlockPayload::from_local(genesis))?,
         BlockValidationResult::Duplicate
     );
     Ok(())

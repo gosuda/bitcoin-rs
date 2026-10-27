@@ -3,7 +3,7 @@ use super::error::ApplyError;
 use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint};
+use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, OutPoint};
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoCoin;
 use bitcoin_rs_utxo::contract::{
@@ -565,27 +565,31 @@ fn replay_committed_gap(
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };
-    let load_body = |height: u32, hash: Hash256| -> Result<(Block, Vec<u8>), ApplyError> {
+    // Single construction via `from_raw`: malformed bytes map to the existing
+    // unrecoverable gap error here (never `BodyBytesMismatch`); hash mismatch
+    // keeps its existing mapping. Linearizability: replay holds one
+    // transition across the gap; idempotent: a failed replay stays the gap.
+    let load_body = |height: u32, hash: Hash256| -> Result<BlockPayload, ApplyError> {
         let bytes = store
             .load_block_body(height, hash)
             .map_err(ApplyError::BlockBodyPersistence)?
             .ok_or_else(|| unrecoverable("a committed gap body is missing from storage"))?;
-        let block: Block = bitcoin_rs_primitives::deserialize(&bytes)
+        let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes))
             .map_err(|_| unrecoverable("a committed gap body does not decode"))?;
-        if block.block_hash().0 != hash {
+        if payload.block().block_hash().0 != hash {
             return Err(unrecoverable(
                 "a stored body does not hash to its committed hash",
             ));
         }
-        Ok((block, bytes))
+        Ok(payload)
     };
 
     // Walk the head chain down to the base, keeping only hash descriptors.
     let mut chain = Vec::with_capacity(gap_width);
     let mut cursor = (head.height, head.tip);
     loop {
-        let (block, _) = load_body(cursor.0, cursor.1)?;
-        let parent = block.header.prev_blockhash.0;
+        let payload = load_body(cursor.0, cursor.1)?;
+        let parent = payload.block().header.prev_blockhash.0;
         chain.push(cursor);
         if cursor.0 == base_height {
             let expected_parent = restored.map_or_else(Hash256::default, |tip| tip.hash);
@@ -606,16 +610,14 @@ fn apply_replayed_gap_block(
     handles: &Chainstate,
     head: &DurableHead,
     restored: Option<&TipSnapshot>,
-    block: &Block,
-    bytes: &bytes::Bytes,
+    payload: &BlockPayload,
     height: u32,
     hash: Hash256,
 ) -> Result<super::ConnectOutcome, ApplyError> {
     let proven = match load_block_undo(handles.undo_store.as_ref(), height, hash) {
         Ok(undo) => Some(ProvenApply::AssumeValidSkipped(
             super::prepare::prepare_apply(
-                block,
-                Some(bytes.clone()),
+                payload,
                 &UndoRowSpends(&undo),
                 handles.validation_engine,
             )?,
@@ -633,8 +635,7 @@ fn apply_replayed_gap_block(
     };
     super::connect::apply_committed_block_admitted(
         handles,
-        block,
-        Some(bytes.clone()),
+        payload,
         proven,
         BlockProvenance::LocalReplay,
         PublishMode::Replay {
@@ -696,7 +697,7 @@ fn replay_gap_chain(
     head: &DurableHead,
     chain: Vec<(u32, Hash256)>,
     restored: Option<&TipSnapshot>,
-    load_body: impl Fn(u32, Hash256) -> Result<(Block, Vec<u8>), ApplyError>,
+    load_body: impl Fn(u32, Hash256) -> Result<BlockPayload, ApplyError>,
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     let mut transition = Some(handles.begin_transition()?);
@@ -705,13 +706,12 @@ fn replay_gap_chain(
     let replayed = (|| {
         let mut commit_id = 0_u64;
         for (height, hash) in chain {
-            let (block, bytes) = load_body(height, hash)?;
-            let bytes = bytes::Bytes::from(bytes);
+            let payload = load_body(height, hash)?;
             // The head receipt certifies the body and undo inputs. Rebuild the
             // proof for the retry because the first call consumes it even
             // when journal admission refuses before mutation.
             let outcome = match apply_replayed_gap_block(
-                handles, head, restored, &block, &bytes, height, hash,
+                handles, head, restored, &payload, height, hash,
             ) {
                 Err(ApplyError::JournalBackpressure(error))
                     if matches!(
@@ -726,7 +726,7 @@ fn replay_gap_chain(
                         height,
                         hash,
                     )?;
-                    apply_replayed_gap_block(handles, head, restored, &block, &bytes, height, hash)
+                    apply_replayed_gap_block(handles, head, restored, &payload, height, hash)
                 }
                 result => result,
             }?;

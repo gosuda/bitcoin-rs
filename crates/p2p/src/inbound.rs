@@ -1,14 +1,13 @@
 //! Inbound payloads received from peers.
 
-use bitcoin_rs_primitives::{Block, Header, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{Block, BlockPayload, Header, Tx};
 
 /// A block received from a peer with its wire payload preserved.
 ///
-/// `serialized` is the exact P2P message payload and matches the canonical
-/// consensus serialization of `block`.
+/// `payload` owns the decoded block plus the exact P2P message bytes, which
+/// match the canonical consensus serialization of the block it carries.
 pub struct InboundBlock {
-    pub block: Block,
-    pub serialized: bytes::Bytes,
+    payload: BlockPayload,
     /// Delivering connection, or `None` for local injection.
     pub source: Option<crate::PeerSource>,
     /// Releases the delivering connection's unsolicited forwarding slot when
@@ -50,17 +49,44 @@ impl InboundTx {
 }
 
 impl InboundBlock {
-    /// Wraps a decoded block with freshly computed canonical serialization.
+    /// Wraps a locally assembled block with its freshly computed canonical
+    /// serialization.
     ///
     /// Used by tests and local injection paths that do not preserve wire payloads.
     #[must_use]
-    pub fn from_decoded(block: Block) -> Self {
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+    pub fn from_local(block: Block) -> Self {
         Self {
-            block,
-            serialized,
+            payload: BlockPayload::from_local(block),
             source: None,
             forward_credit: None,
         }
+    }
+
+    /// Assembles a channeled body from its payload and outer delivery state.
+    ///
+    /// Crate-visible so the ingress handoff can attach `source` and
+    /// `forward_credit` without exposing the payload field itself.
+    pub(crate) fn new(
+        payload: BlockPayload,
+        source: Option<crate::PeerSource>,
+        forward_credit: Option<crate::connection::BlockForwardCredit>,
+    ) -> Self {
+        Self {
+            payload,
+            source,
+            forward_credit,
+        }
+    }
+
+    /// Borrows the owned payload.
+    #[must_use]
+    pub fn payload(&self) -> &BlockPayload {
+        &self.payload
+    }
+
+    /// Consumes the block body, returning the owned payload.
+    #[must_use]
+    pub fn into_payload(self) -> BlockPayload {
+        self.payload
     }
 }

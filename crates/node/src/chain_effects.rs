@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_primitives::{Block, BlockHash, BlockPayload, Hash256};
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
@@ -368,7 +368,7 @@ impl ChainFollowers {
     pub(crate) fn apply_connect(
         &self,
         handles: &bitcoin_rs_chainstate::Chainstate,
-        block: &Block,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         let transition = handles
             .begin_transition()
@@ -376,7 +376,7 @@ impl ChainFollowers {
         let mempool_change = self
             .begin_mempool_change()
             .map_err(ConnectMutationError::NotCommitted)?;
-        self.apply_connect_in_transition(handles, transition, mempool_change, block, None)
+        self.apply_connect_in_transition(handles, transition, mempool_change, payload)
     }
 
     pub(crate) fn apply_connect_in_transition(
@@ -384,12 +384,11 @@ impl ChainFollowers {
         handles: &bitcoin_rs_chainstate::Chainstate,
         transition: bitcoin_rs_chainstate::ChainTransition<'_>,
         mempool_change: Option<ChainChangeGuard>,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
-        match transition.connect(block, serialized) {
+        match transition.connect(payload) {
             Ok(outcome) => {
-                self.on_connect(block, &outcome);
+                self.on_connect(payload.block(), &outcome);
                 match Self::finish_transition(handles, transition, mempool_change) {
                     Ok(()) => Ok(outcome),
                     Err(source) => Err(ConnectMutationError::CommittedButSettlementFailed {
@@ -443,7 +442,8 @@ pub(crate) fn bootstrap_genesis(
         return Ok(());
     }
     let genesis = handles.network().genesis_block();
-    match followers.apply_connect(handles, &genesis) {
+    let payload = BlockPayload::from_local(genesis);
+    match followers.apply_connect(handles, &payload) {
         // The header-tip cell is the chainstate's to publish — including on
         // a committed-but-unsettled connect, which owns its outcome.
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
@@ -1014,8 +1014,8 @@ mod tests {
         config.p2p.listen.clear();
         let state = crate::state::NodeState::open(config, None)?;
         let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
-        let genesis = Network::Regtest.genesis_block();
-        let hash = Hash256::from(genesis.block_hash());
+        let genesis = BlockPayload::from_local(Network::Regtest.genesis_block());
+        let hash = Hash256::from(genesis.block().block_hash());
 
         let error = match followers.apply_connect(&state.chainstate(), &genesis) {
             Ok(outcome) => panic!("forced generation move settled connect {outcome:?}"),
@@ -1064,7 +1064,7 @@ mod tests {
         );
 
         assert_eq!(
-            mining.submit_block(Network::Regtest.genesis_block())?,
+            mining.submit_block(BlockPayload::from_local(Network::Regtest.genesis_block()))?,
             BlockValidationResult::Accepted,
             "submitblock must not invite retry after authoritative commit"
         );

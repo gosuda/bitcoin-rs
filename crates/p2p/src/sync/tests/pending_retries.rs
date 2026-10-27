@@ -92,7 +92,7 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> TestResult {
     } = SyncHarness::new(tree);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(genesis))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(genesis))?;
 
     sync.tick();
 
@@ -151,7 +151,7 @@ fn oversized_received_block_releases_pending_budget_for_retry() -> TestResult {
     let _headers = rx.try_recv()?;
     assert_eq!(sync.scheduler.lock().window.pending_len(), 1);
 
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block))?;
     sync.drain_inbound_blocks();
 
     {
@@ -234,7 +234,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
 
     // Deliver only the successor: it stages (waiting on block1) and
     // exactly exhausts the staging byte budget.
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2.clone()))?;
     sync.drain_inbound_blocks();
     assert_eq!(
         sync.scheduler.lock().stager.received_bytes(),
@@ -251,7 +251,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
     // The window-front block arrives: the stager admits it past the
     // exhausted budget (expected-block exemption), apply drains both, and
     // request capacity returns for block3.
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block1))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block1))?;
     sync.tick();
 
     let applied_height = applied_tip
@@ -369,7 +369,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets() -> TestResult {
         let _headers = outbound_rx.try_recv()?;
 
         for block in blocks[1..].iter().rev() {
-            inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
+            inbound_blocks_tx.send(crate::InboundBlock::from_local(block.clone()))?;
         }
         sync.drain_inbound_blocks();
         let (received_count, peak_staged_bytes) = {
@@ -382,7 +382,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets() -> TestResult {
         assert_gauge(&recorder, "node.sync.received_blocks", received_count);
         assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
 
-        inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+        inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
         let apply_started = Instant::now();
         sync.drain_inbound_blocks();
         let apply_elapsed = apply_started.elapsed();

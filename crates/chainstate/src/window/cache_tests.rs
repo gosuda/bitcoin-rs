@@ -8,8 +8,8 @@ use bitcoin_rs_chain::regtest_fixture::{
 };
 use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
 use bitcoin_rs_primitives::{
-    Amount, BlockHash, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
-    consensus_bytes,
+    Amount, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn,
+    TxOut, Witness,
 };
 use bitcoin_rs_utxo::UtxoSet;
 
@@ -42,7 +42,7 @@ fn matured_funding(
     for height in 1..=101 {
         let block = mined_child(parent, height).map_err(|error| error.to_string())?;
         handles
-            .apply_block(&block, None)
+            .apply_block(&BlockPayload::from_local(block.clone()))
             .map_err(|error| error.to_string())?;
         if height == 1 {
             funded = Some(block.txs[0].clone());
@@ -142,8 +142,9 @@ fn window_commit_consumes_verified_script_cache_entry() -> Result<(), Box<dyn st
     .map_err(|error| error.to_string())?;
     cache.insert(wtxid, flags);
 
+    let payload = BlockPayload::from_local(block);
     let outcomes = handles
-        .apply_window(&[&block], &[bytes::Bytes::from(consensus_bytes(&block))])
+        .apply_window(&[payload])
         .map_err(|error| error.to_string())?;
     assert_eq!(outcomes.len(), 1, "window must commit its one block");
     assert_eq!(outcomes[0].tip.height, next_height);
@@ -216,12 +217,12 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     .map_err(|error| error.to_string())?;
     cache.insert(good_wtxid, flags);
 
-    let serialised = [
-        bytes::Bytes::from(consensus_bytes(&first)),
-        bytes::Bytes::from(consensus_bytes(&second)),
+    let payloads = [
+        BlockPayload::from_local(first.clone()),
+        BlockPayload::from_local(second),
     ];
     // Rollback witness: bad script at 103 fails the pre-proof after the checks took the entry.
-    let proven = super::prove_window(&handles, &[&first, &second], &serialised).proven;
+    let proven = super::prove_window(&handles, &payloads).proven;
     assert!(
         proven.is_empty(),
         "bad script at 103 must fail the pre-proof"
@@ -234,7 +235,7 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     // Prefix commit: the valid prefix commits and reports how far it got.
     cache.insert(good_wtxid, flags);
     let err = handles
-        .apply_window(&[&first, &second], &serialised)
+        .apply_window(&payloads)
         .err()
         .ok_or("the invalid second block must fail the window apply")?;
     assert_eq!(err.applied, 1, "one block committed before the failure");
@@ -352,12 +353,12 @@ fn a_window_refused_after_proof_restores_only_uncommitted_takes()
     .map_err(|error| error.to_string())?;
     cache.insert(second_wtxid, flags_second);
 
-    let serialised = [
-        bytes::Bytes::from(consensus_bytes(&first)),
-        bytes::Bytes::from(consensus_bytes(&second)),
+    let payloads = [
+        BlockPayload::from_local(first),
+        BlockPayload::from_local(second),
     ];
     let err = handles
-        .apply_window(&[&first, &second], &serialised)
+        .apply_window(&payloads)
         .err()
         .ok_or("the inflated coinbase must fail the window apply")?;
     assert_eq!(err.applied, 1, "one block committed before the failure");

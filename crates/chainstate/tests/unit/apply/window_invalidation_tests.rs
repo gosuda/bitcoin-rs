@@ -9,8 +9,8 @@ use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network,
+    OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::Mutex;
@@ -103,7 +103,7 @@ fn deliver_coinbase_less_body(
     };
 
     let error = chainstate
-        .apply_window(&[&block], &[bytes::Bytes::from(consensus_bytes(&block))])
+        .apply_window(&[BlockPayload::from_local(block)])
         .err()
         .ok_or("a coinbase-less body must not commit")?;
     let tree = chainstate.block_tree.read();
@@ -195,7 +195,7 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
         "the anchor on the active header chain must start trusted"
     );
 
-    let outcome = handles.apply_window(&[&anchor], &[bytes::Bytes::from(consensus_bytes(&anchor))]);
+    let outcome = handles.apply_window(&[BlockPayload::from_local(anchor)]);
     let error = outcome.err().ok_or("an empty block must not commit")?;
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.invalidated.to_vec(), vec![anchor_hash]);
@@ -261,11 +261,11 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
         )?;
     }
-    let blocks = [&first, &second, &bad];
-    let serialized: Vec<bytes::Bytes> = blocks
-        .iter()
-        .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
-        .collect();
+    let payloads = [
+        BlockPayload::from_local(first),
+        BlockPayload::from_local(second),
+        BlockPayload::from_local(bad),
+    ];
 
     let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
     chainstate
@@ -273,7 +273,7 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
         .map_err(|_| "the staged-tip hook installs once")?;
 
     let error = chainstate
-        .apply_window(&blocks, &serialized)
+        .apply_window(&payloads)
         .err()
         .ok_or("an empty trailing body must not commit")?;
     assert!(

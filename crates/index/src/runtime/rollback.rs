@@ -1,11 +1,15 @@
 //! Capability rollback, selective rebuilding, live seeding, and recovery evidence.
 
 use super::DerivedIndexWorkerError;
+use super::PendingForward;
+use super::ReconcileAction;
+use super::SeedBundle;
 use super::UndoScripts;
 use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
+use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
 use crate::IndexWriteFence;
@@ -14,66 +18,322 @@ use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::pruning::HistoryUnavailable;
+use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
+use bitcoin_rs_utxo::snapshot::RawSeedError;
+use std::cell::Cell;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
     let names: Vec<&str> = capabilities.iter().map(IndexCapability::name).collect();
     (!names.is_empty()).then(|| names.join(","))
 }
 
-impl Worker {
-    pub(super) fn seed_live_from_utxo(&self) -> Result<(), DerivedIndexWorkerError> {
-        let Some(utxo) = self.utxo.as_ref() else {
-            return Err(DerivedIndexWorkerError::MissingUtxo);
-        };
-        let Some(chain_transition) = self.chain_transition.as_ref() else {
-            return Err(DerivedIndexWorkerError::MissingChainTransition);
-        };
-        // Hold chain-transition until the stable UTXO view is acquired so
-        // `target` names the exact state we traverse. Release the transition
-        // before persistence; the view guard keeps the scan consistent while
-        // rows stream in bounded batches. Lock order matches apply:
-        // chain_transition, then stable-view read.
-        let (target, view) = {
-            let _transition = chain_transition.lock();
-            let current = self.applied_tip.load_full();
-            let Some(current) = current.as_deref() else {
-                return Ok(());
-            };
-            let target = IndexWatermark {
-                height: current.height,
-                hash: current.hash.to_le_bytes(),
-            };
-            (target, utxo.lock_stable_view())
-        };
+/// How the artifact seed dispatch in `finish_reconcile_pass` continues.
+pub(super) enum SeedFlow {
+    /// Seed work finished this pass with this action; return it directly.
+    Return(ReconcileAction),
+    /// State changed (seed committed, poison cleaned, or a late watermark
+    /// appeared); re-observe from a fresh capture next pass.
+    Seeded,
+    /// No seed ran to completion; run the forward loop. The flag requests
+    /// `want()` if that loop stalls with no bundle and no watermark.
+    FallThrough { want_on_stall: bool },
+}
 
-        // `seed_script_live_stream` owns leftover-row reset: an interrupted
-        // seed is rows without a watermark, and the stream clears that
-        // family before any new locator is committed.
-        let written = self
-            .writer
-            .seed_script_live_stream(
-                &mut |emit| {
-                    let mut result = Ok(());
-                    view.for_each_all(|outpoint, script| {
-                        if result.is_err() {
-                            return;
-                        }
-                        if let Err(error) = emit(*outpoint, ScriptHash::from_script_bytes(script)) {
-                            result = Err(error);
-                        }
+impl Worker {
+    /// Artifact or retained-history seed dispatch for a missing `ScriptLive` watermark.
+    ///
+    /// The worker bundle is the only active holder besides at most one queued
+    /// cell artifact. Never takes while holding a bundle. No lock is held
+    /// across the seed traversal or any commit; the cell and bundle locks
+    /// cover pointer moves only.
+    pub(super) fn seed_dispatch(
+        &self,
+        pending: Option<&PendingForward>,
+    ) -> Result<SeedFlow, DerivedIndexWorkerError> {
+        let has_artifact = self
+            .seed_bundle
+            .lock()
+            .as_ref()
+            .is_some_and(|bundle| bundle.artifact.is_some());
+        if has_artifact {
+            // A seed is already in flight; continue it, never take.
+            return self.seed_from_bundle();
+        }
+        let has_bundle = self.seed_bundle.lock().is_some();
+        if has_bundle {
+            let Some(slot) = self.seed_slot.as_ref() else {
+                return Ok(SeedFlow::FallThrough {
+                    want_on_stall: false,
+                });
+            };
+            let Some(artifact) = slot.take() else {
+                return Ok(SeedFlow::FallThrough {
+                    want_on_stall: false,
+                });
+            };
+            self.runtime.clear_script_live();
+            let mut bundle = self.seed_bundle.lock().take().unwrap_or(SeedBundle {
+                artifact: None,
+                lease: None,
+            });
+            bundle.artifact = Some(artifact);
+            *self.seed_bundle.lock() = Some(bundle);
+            return self.seed_from_bundle();
+        }
+        if pending.is_some_and(|state| state.capabilities.contains(IndexCapability::ScriptLive)) {
+            // A pending batch holds `ScriptLive` rows; leave the queue alone
+            // and run the replay leg this pass so the fence does not churn.
+            // The token waits at most until replay completes or stalls.
+            return Ok(SeedFlow::FallThrough {
+                want_on_stall: false,
+            });
+        }
+        let Some(slot) = self.seed_slot.as_ref() else {
+            // No composition wiring (tests, `ScriptLive` without a snapshot
+            // source): genesis replay covers the cold start.
+            return Ok(SeedFlow::FallThrough {
+                want_on_stall: false,
+            });
+        };
+        match slot.take() {
+            Some(artifact) => {
+                // A usable artifact arrived: the scoped outage, if set, is
+                // over. Demand moves into the worker bundle with the artifact.
+                self.runtime.clear_script_live();
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: Some(artifact),
+                    lease: None,
+                });
+                self.seed_from_bundle()
+            }
+            // No token and no bundle. The forward loop runs the replay leg
+            // when grantable; `want()` if it stalls keeps demand set so a
+            // later token lands without a history spin.
+            None => Ok(SeedFlow::FallThrough {
+                want_on_stall: true,
+            }),
+        }
+    }
+
+    /// Continues the in-flight bundle: requests the history pin when missing,
+    /// streams the artifact, and classifies the outcome. The bundle is held
+    /// locally (never under the mutex) across I/O; it is stored back, kept
+    /// lease-only, or dropped exactly per the outcome matrix.
+    #[expect(clippy::too_many_lines, reason = "Seed outcomes share one owner")]
+    fn seed_from_bundle(&self) -> Result<SeedFlow, DerivedIndexWorkerError> {
+        if self.runtime.should_stop() {
+            // Stopped mid-seed keeps the bundle: the run loop exits on the
+            // flag and a retry reuses the same bundle without a second take
+            // or a second lease request while it covers `H`.
+            return Ok(SeedFlow::Return(ReconcileAction::Stalled));
+        }
+        let mut bundle = self.seed_bundle.lock().take().unwrap_or(SeedBundle {
+            artifact: None,
+            lease: None,
+        });
+        let Some(mut artifact) = bundle.artifact.take() else {
+            return Ok(SeedFlow::FallThrough {
+                want_on_stall: false,
+            });
+        };
+        let (height, tip_hash) = artifact.tip();
+        let lease_covers = bundle
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= height));
+        if !lease_covers {
+            // Fail fast before expensive work. A dead pin is superseded by
+            // the fresh grant; anything else is dropped with the bundle.
+            bundle.lease = None;
+            match self.history.request_history(height) {
+                Ok(lease) => bundle.lease = Some(lease),
+                Err(HistoryUnavailable::Pruned { .. }) => {
+                    // No pin was granted: drop the bundle and continue with
+                    // no token. The forward loop replays at 0 when grantable,
+                    // stalls with `want()` otherwise, or reports Unavailable
+                    // through the D1 terminal (which re-raises `Wanted`).
+                    drop(artifact);
+                    return Ok(SeedFlow::FallThrough {
+                        want_on_stall: true,
                     });
-                    result
-                },
-                target,
-            )
-            .map_err(DerivedIndexWorkerError::Index)?;
-        tracing::info!(
-            height = target.height,
-            rows = written,
-            "seeded ScriptLive after chainstate restoration"
+                }
+                Err(_) => {
+                    // `Reserved`, `Missing`, or `Shutdown`: keep the bundle
+                    // with no lease, stall, and retry the request next pass.
+                    // Never route a waitable answer to replay.
+                    *self.seed_bundle.lock() = Some(SeedBundle {
+                        artifact: Some(artifact),
+                        lease: None,
+                    });
+                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
+                }
+            }
+        }
+        let tip = IndexWatermark {
+            height,
+            hash: tip_hash.to_le_bytes(),
+        };
+        // Side channel: `produce` can only return `IndexError`, so a byte
+        // binding failure is stashed here and classified after the stream
+        // returns. The sentinel never escapes this function.
+        let poisoned: Cell<bool> = Cell::new(false);
+        let result = self.writer.seed_script_live_stream(
+            &mut |emit| match artifact.for_each_coin_raw::<IndexError, _>(
+                &mut |outpoint, script| emit(*outpoint, ScriptHash::from_script_bytes(script)),
+            ) {
+                Ok(()) => Ok(()),
+                Err(RawSeedError::Integrity) => {
+                    poisoned.set(true);
+                    Err(IndexError::InvalidWatermark)
+                }
+                Err(RawSeedError::Io(error)) => Err(IndexError::Storage(StorageError::Io(error))),
+                Err(RawSeedError::Emit(error)) => Err(error),
+            },
+            tip,
         );
-        Ok(())
+        match result {
+            Ok(written) => {
+                // Outer `Ok`: the final commit stamped the watermark. Drop the
+                // local descriptor, keep the lease in the bundle for the first
+                // catch-up leg, and clear the scoped flag. At most one lease
+                // is ever live: the leg consumes this one instead of
+                // requesting a second.
+                drop(artifact);
+                self.runtime.clear_script_live();
+                tracing::info!(
+                    height,
+                    rows = written,
+                    "seeded ScriptLive from snapshot artifact"
+                );
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: None,
+                    lease: bundle.lease,
+                });
+                Ok(SeedFlow::Seeded)
+            }
+            Err(_) if poisoned.take() => {
+                // Poison: the bytes are not the witnessed state. Drop the
+                // whole bundle (nothing durable to protect), reset the
+                // interrupted prefix rows the stream may have committed, and
+                // continue with no token; the next pass re-decides replay or
+                // `want()`. No new artifact is requested until demand does.
+                drop(artifact);
+                drop(bundle.lease);
+                if let Err(error) = self
+                    .writer
+                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                {
+                    tracing::debug!(%error, "seed poison cleanup reset deferred");
+                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
+                }
+                Ok(SeedFlow::Seeded)
+            }
+            Err(IndexError::LiveAlreadySeeded) => {
+                // A watermark appeared under the in-flight seed. Drop the
+                // taken artifact and keep the lease for the first-leg rule;
+                // the next pass observes the watermark and releases it exactly.
+                drop(artifact);
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: None,
+                    lease: bundle.lease,
+                });
+                Ok(SeedFlow::Seeded)
+            }
+            Err(
+                IndexError::StaleIndexState | IndexError::ResetInProgress | IndexError::Storage(_),
+            ) => {
+                // Transient: keep the bundle as is (artifact plus any lease)
+                // and retry. Never re-queues, never requests a new artifact.
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: Some(artifact),
+                    lease: bundle.lease,
+                });
+                Ok(SeedFlow::Return(ReconcileAction::Stalled))
+            }
+            Err(error) => {
+                drop(artifact);
+                drop(bundle.lease);
+                Err(DerivedIndexWorkerError::Index(error))
+            }
+        }
+    }
+
+    /// Drops any queued cell token and closes its descriptor. Runs when the
+    /// `ScriptLive` watermark exists: a token that arrived mid-replay is stale
+    /// because catch-up already covers newer tips.
+    pub(super) fn rest_seed_cell(&self) {
+        if let Some(slot) = self.seed_slot.as_ref() {
+            slot.rest();
+        }
+    }
+
+    /// Lease hygiene under an existing watermark: drops a mid-seed artifact
+    /// (the seed is moot) and releases the held lease exactly once the
+    /// watermark has advanced past its floor, or unconditionally on shutdown.
+    /// A watermark merely equal to the held floor keeps the lease for the
+    /// still-pending first catch-up leg.
+    pub(super) fn release_seed_lease_if_superseded(&self, watermark: Option<IndexWatermark>) {
+        let mut guard = self.seed_bundle.lock();
+        let Some(bundle) = guard.as_mut() else {
+            return;
+        };
+        if watermark.is_some() {
+            bundle.artifact = None;
+        }
+        let release = self.runtime.should_stop()
+            || bundle.lease.as_ref().is_none_or(|lease| {
+                lease
+                    .floor()
+                    .is_none_or(|floor| watermark.is_some_and(|watermark| watermark.height > floor))
+            });
+        if release {
+            bundle.lease = None;
+        }
+        if bundle.artifact.is_none() && bundle.lease.is_none() {
+            guard.take();
+        }
+    }
+
+    /// Moves a commit-free bundle lease out for first-leg use. Only a
+    /// lease-only bundle (seed committed, no pending artifact) lends its pin;
+    /// an in-flight artifact stays put for `seed_from_bundle`.
+    pub(super) fn take_seed_lease(&self) -> Option<HistoryLease> {
+        let mut guard = self.seed_bundle.lock();
+        let lease = if guard
+            .as_ref()
+            .is_some_and(|bundle| bundle.artifact.is_none())
+        {
+            guard.as_mut().and_then(|bundle| bundle.lease.take())
+        } else {
+            None
+        };
+        if guard
+            .as_ref()
+            .is_some_and(|bundle| bundle.artifact.is_none() && bundle.lease.is_none())
+        {
+            guard.take();
+        }
+        lease
+    }
+
+    /// Parks an unused first-leg lease back into the bundle instead of
+    /// dropping it. No-op when nothing was consumed.
+    pub(super) fn park_seed_lease(&self, lease: Option<HistoryLease>) {
+        let Some(lease) = lease else {
+            return;
+        };
+        let mut guard = self.seed_bundle.lock();
+        match guard.as_mut() {
+            Some(bundle) if bundle.lease.is_none() => bundle.lease = Some(lease),
+            Some(_) => {}
+            None => {
+                *guard = Some(SeedBundle {
+                    artifact: None,
+                    lease: Some(lease),
+                });
+            }
+        }
     }
 
     /// Resets `capabilities` for a rebuild from genesis and publishes the

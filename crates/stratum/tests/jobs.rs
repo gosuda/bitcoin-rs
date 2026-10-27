@@ -25,8 +25,8 @@ use bitcoin_rs_mining::{
     GeneratedBlock, MiningControl, MiningControlError, MiningError, MiningInfo, assemble_candidate,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
+    Amount, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
+    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
 };
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_stratum::{
@@ -386,23 +386,26 @@ fn block_candidate_passes_consensus_and_reproduces_the_share() -> TestResult {
         return Err("a network-target hash must classify as a block".into());
     };
     assert_eq!(found.share.class, ShareClass::Block);
-    verify_block_rules(&found.block)?;
-    assert_eq!(found.raw, consensus_bytes(&found.block));
-    assert_eq!(found.block.block_hash(), found.share.hash);
+    verify_block_rules(found.payload.block())?;
+    assert_eq!(
+        found.payload.bytes().to_vec(),
+        consensus_bytes(found.payload.block())
+    );
+    assert_eq!(found.payload.block().block_hash(), found.share.hash);
     assert!(compact_is_met_by(
         fx.candidate.bits,
         Hash256::from(found.share.hash)
     ));
-    assert_eq!(found.block.txs.len(), 4);
-    assert_eq!(found.coinbase_txid, found.block.txs[0].txid());
+    assert_eq!(found.payload.block().txs.len(), 4);
+    assert_eq!(found.coinbase_txid, found.payload.block().txs[0].txid());
     assert_eq!(found.coinbase_value, fx.candidate.coinbase_value);
-    let paid: u64 = found.block.txs[0]
+    let paid: u64 = found.payload.block().txs[0]
         .outputs
         .iter()
         .map(|output| output.value.to_sat())
         .sum();
     assert_eq!(paid, fx.candidate.coinbase_value);
-    assert!(found.block.weight() <= fx.candidate.max_weight);
+    assert!(found.payload.block().weight() <= fx.candidate.max_weight);
     assert_eq!(found.share.work, target.work());
     assert_eq!(found.share.height, 100);
     assert_eq!(found.share.job, fx.job.id());
@@ -410,7 +413,7 @@ fn block_candidate_passes_consensus_and_reproduces_the_share() -> TestResult {
     let mut extranonce = fx.session.extranonce_prefix().to_vec();
     extranonce.extend_from_slice(&ROLLED);
     assert_eq!(found.share.extranonce, extranonce);
-    let script_sig = found.block.txs[0].inputs[0].script_sig.as_bytes();
+    let script_sig = found.payload.block().txs[0].inputs[0].script_sig.as_bytes();
     assert_eq!(
         &script_sig[2..],
         [b"/pool/".as_slice(), extranonce.as_slice()]
@@ -464,8 +467,8 @@ fn scriptsig_may_grow_to_exactly_the_consensus_limit() -> TestResult {
     let ShareOutcome::Block(found) = book.validate(&submission, &easy()?)? else {
         return Err("expected a block".into());
     };
-    assert_eq!(found.block.txs[0].inputs[0].script_sig.len(), 100);
-    verify_block_rules(&found.block)?;
+    assert_eq!(found.payload.block().txs[0].inputs[0].script_sig.len(), 100);
+    verify_block_rules(found.payload.block())?;
 
     wide.extranonce = ExtranonceLayout::new(1, 96);
     let mut over = JobBook::new(wide)?;
@@ -726,8 +729,8 @@ fn extra_outputs_are_funded_from_the_payout_and_stay_valid() -> TestResult {
     else {
         return Err("expected a block".into());
     };
-    verify_block_rules(&found.block)?;
-    let outputs = &found.block.txs[0].outputs;
+    verify_block_rules(found.payload.block())?;
+    let outputs = &found.payload.block().txs[0].outputs;
     assert_eq!(outputs.len(), 3);
     assert_eq!(outputs[0].value.to_sat(), candidate.coinbase_value - 1_000);
     assert_eq!(
@@ -1065,7 +1068,7 @@ struct RecordingControl {
     template: Option<BlockTemplate>,
     verdict: Mutex<Result<BlockValidationResult, MiningControlError>>,
     requests: Mutex<Vec<BlockTemplateRequest>>,
-    submitted: Mutex<Vec<(Block, Vec<u8>)>>,
+    submitted: Mutex<Vec<BlockPayload>>,
 }
 
 impl RecordingControl {
@@ -1116,17 +1119,11 @@ impl MiningControl for RecordingControl {
         Err(unused())
     }
 
-    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
-        lock(&self.submitted).push((block, Vec::new()));
-        lock(&self.verdict).clone()
-    }
-
-    fn submit_block_with_bytes(
+    fn submit_block(
         &self,
-        block: Block,
-        raw: Vec<u8>,
+        payload: BlockPayload,
     ) -> Result<BlockValidationResult, MiningControlError> {
-        lock(&self.submitted).push((block, raw));
+        lock(&self.submitted).push(payload);
         lock(&self.verdict).clone()
     }
 
@@ -1180,10 +1177,7 @@ fn found_blocks_reach_the_authoritative_submit_path_and_receipts_map_verdicts() 
     assert_eq!(receipt.coinbase_value, fx.candidate.coinbase_value);
     assert_eq!(receipt.session, fx.session.id());
     assert_eq!(receipt.job, fx.job.id());
-    assert_eq!(
-        *lock(&control.submitted),
-        vec![(found.block.clone(), found.raw.clone())]
-    );
+    assert_eq!(*lock(&control.submitted), vec![found.payload.clone()]);
 
     let cases = [
         (BlockValidationResult::Duplicate, BlockStatus::Applied),

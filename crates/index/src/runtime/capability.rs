@@ -1,7 +1,7 @@
 use super::{
     Arc, ArcSwap, CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource,
     DerivedIndexLifecycle, DerivedIndexQueryEngine, DerivedIndexRuntime, IndexCapabilities,
-    IndexProgress, TxQueryError, derived_index_status,
+    IndexCapability, IndexProgress, TxQueryError, derived_index_status,
 };
 
 /// Progress reads that raced a tip or revision move before the status
@@ -55,10 +55,53 @@ impl DerivedIndexCapability {
             IndexCapabilities::COMPACT_FILTERS,
             super::ReconcileLeg::Forward,
         );
-        if let Some((from_height, to_height)) = phase.rolling_back() {
+        // Read once. While the outage is set the ScriptLive leg is observed as
+        // Forward, so a stale ScriptLive rollback can never block servable
+        // capabilities. In reachable states the leg is already Forward, making
+        // this mask a no-op; it only guards against setter-side drift.
+        let script_live_outage = runtime.script_live_failure.read().clone();
+        let observed = if script_live_outage.is_some() {
+            phase.with_leg(IndexCapabilities::SCRIPT_LIVE, super::ReconcileLeg::Forward)
+        } else {
+            phase
+        };
+        if let Some((from_height, to_height)) = observed.rolling_back() {
             return CapabilityState::RollingBack {
                 from_height,
                 to_height,
+            };
+        }
+        // Scoped ScriptLive outage: keep reporting TxLookup/ScriptHistory readiness
+        // over the servable set. Only when nothing servable remains is the row Failed.
+        // Global health, `publish_failed`, and the readiness latch are untouched.
+        if let Some(reason) = script_live_outage {
+            let servable = enabled.without(IndexCapability::ScriptLive);
+            if servable.is_empty() {
+                return CapabilityState::Failed {
+                    reason: reason.to_string(),
+                };
+            }
+            let rebuilding = phase.rebuilding().without(IndexCapability::ScriptLive);
+            if rebuilding != IndexCapabilities::NONE {
+                return match Self::progress(engine, rebuilding) {
+                    Ok(progress) => CapabilityState::Rebuilding {
+                        processed_height: progress.processed_height,
+                        target_height: progress.target_height,
+                    },
+                    Err(error) => CapabilityState::Failed {
+                        reason: error.to_string(),
+                    },
+                };
+            }
+            return match Self::progress(engine, servable) {
+                Ok(progress) if progress.synced => CapabilityState::Ready,
+                Ok(progress) => CapabilityState::CatchingUp {
+                    processed_height: progress.processed_height,
+                    target_height: progress.target_height,
+                },
+                Err(error) => CapabilityState::Failed {
+                    reason: error.to_string(),
+                },
             };
         }
         let rebuilding = phase.rebuilding();

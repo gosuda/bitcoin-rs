@@ -38,8 +38,13 @@ This page assigns ownership and cites proof under the
   `ActiveChainQuery::headers_after` resolves the locator order, stop hash,
   and height walk against the validated applied tip, never the header-best
   tip; the empty-locator single-header direct lookup stays on the header-best
-  chain. The decoder
-  still types inbound `block` as `Message::Block`.
+  chain. The wire decoder types inbound `block` as
+  `Message::Block(BlockPayload)`, constructed once via
+  `BlockPayload::from_raw` on the frame bytes with no second decode; the
+  serving `Message::BlockPayload(Bytes)` envelope stays raw-only with no
+  decoded field. `InboundBlock` owns the one payload while peer/source and
+  `forward_credit` stay outer; `check_body_binding` runs on the decoded
+  block and credit is released at the existing handoff.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
@@ -253,7 +258,8 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
   one release it earns is the recovery path above: a body-carried header that
   cannot attach frees its owner's gate, so the ancestry request that delivery
   motivates reaches the wire with it (P2P-05).
-- The staged retry carries the delivering connection
+- The stager MUST hold one `BlockPayload` per entry (`insert(payload)`). The
+  staged retry carries the delivering connection
   (`ReceivedBlock::source`): a retry that admits credits that peer exactly
   as the headers drain would (`note_announced_tip`), and a peer-fault
   rejection drops the staged body (`stager.discard`, never re-queued;

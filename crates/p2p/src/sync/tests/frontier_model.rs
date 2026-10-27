@@ -9,6 +9,8 @@ use super::super::frontier::{
     BodyState, ChainFrontier, HeaderAction, NoProgressReason, RequiredBody, SyncFrontier,
     UsablePeer,
 };
+use bitcoin_rs_primitives::BlockPayload;
+
 use crate::BlockStager;
 use crate::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
 use bitcoin_rs_chain::{ChainWork, NodeId};
@@ -493,16 +495,11 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
             vec![super::transaction(0xEE)],
         )
         .or_fail("regtest fixture block");
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+        let payload = BlockPayload::from_local(block);
         scheduler.window.seed_front_cadence_for_test(50, now);
-        scheduler.stager.insert(
-            tail,
-            None,
-            block,
-            serialized,
-            Some(conn1.source_ip(staller)),
-            now,
-        );
+        scheduler
+            .stager
+            .insert(tail, None, payload, Some(conn1.source_ip(staller)), now);
         scheduler
             .window
             .mark_received_from(tail, 80, Some(conn1.source_ip(staller)), now);

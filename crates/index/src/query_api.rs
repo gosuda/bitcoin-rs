@@ -89,6 +89,9 @@ pub enum TxUnavailableCause {
     WorkerStopped,
     /// The compact-filter worker reported a failure.
     CompactFilterFailed(CompactString),
+    /// The `ScriptLive` view is unavailable while its scoped seed/replay outage persists.
+    /// Carries the stored worker reason verbatim; no new wire text beyond that reason.
+    ScriptLiveUnavailable(CompactString),
     /// A required authority handle is absent (UTXO view, chain-transition lock,
     /// `ScriptLive` locator). `detail` is the existing static refusal text.
     MissingAuthority(&'static str),
@@ -121,6 +124,7 @@ impl core::fmt::Display for TxUnavailableCause {
             Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
+            | Self::ScriptLiveUnavailable(message)
             | Self::Other(message) => f.write_str(message),
             Self::WorkerStopped => f.write_str("txindex worker stopped"),
             Self::MissingAuthority(detail) => f.write_str(detail),
@@ -459,6 +463,65 @@ mod tests {
             (
                 TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
                 "txindex was abandoned at shutdown",
+            ),
+        ]);
+    }
+
+    /// Acceptance row 13 (type-level half): the scoped `ScriptLive` outage is a
+    /// typed `Unavailable` carrying the stored worker reason verbatim, never a
+    /// `Retry` and never new wire text. Engine-level proof (flag set with no
+    /// watermark gives `Unavailable(ScriptLiveUnavailable)` for `ScriptLive`
+    /// queries while TxLookup/history keep serving and global `failed` stays
+    /// unset) lives in the worker harness; this pins the contract the engine
+    /// observes: passthrough display, `Unavailable` error prefix, variant
+    /// distinctness, and untouched sibling refusals.
+    #[test]
+    fn script_live_unavailable_is_typed_passthrough_not_retry() {
+        // Passthrough: the cause renders exactly the stored reason.
+        for reason in [
+            "script live seed pruned at height 100",
+            "txindex worker: retained history unavailable: pruned at height 7",
+            "",
+        ] {
+            let cause = TxUnavailableCause::ScriptLiveUnavailable(reason.into());
+            assert_eq!(cause.to_string(), reason, "{cause:?}");
+            let error = TxQueryError::Unavailable(cause);
+            assert_eq!(
+                error.to_string(),
+                format!("transaction index unavailable: {reason}"),
+            );
+            assert!(!matches!(error, TxQueryError::Retry));
+        }
+        // Scoped: the outage variant never aliases another capability's refusal.
+        let outage = TxUnavailableCause::ScriptLiveUnavailable("pruned".into());
+        assert_ne!(outage, TxUnavailableCause::WorkerStopped);
+        assert_ne!(
+            outage,
+            TxUnavailableCause::CompactFilterFailed("pruned".into())
+        );
+        assert_ne!(
+            outage,
+            TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive)
+        );
+        assert_ne!(outage, TxUnavailableCause::Other("pruned".into()));
+        // The historical wrapper carries the scoped reason through unchanged,
+        // should a historical path ever need to share it.
+        let shared = HistoricalUnavailableCause::Shared(TxUnavailableCause::ScriptLiveUnavailable(
+            "pruned".into(),
+        ));
+        assert_eq!(shared.to_string(), "pruned");
+        // Sibling capabilities keep their exact wire text while the flag is set.
+        assert_renders(vec![
+            (
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: 100,
+                },
+                "transaction index coverage starts at height 100; the pruned prefix is unproven",
+            ),
+            (
+                TxUnavailableCause::HistoryUnproven { floor: 5 },
+                "script history coverage starts at height 5; history cannot be proven complete",
             ),
         ]);
     }

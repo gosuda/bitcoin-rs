@@ -25,7 +25,7 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestR
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks {
-        incoming.send(crate::InboundBlock::from_decoded(block))?;
+        incoming.send(crate::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -114,9 +114,9 @@ fn staged_successors_behind_a_rejected_frontier_still_probe() -> TestResult {
         blocks[0].block_hash(),
         "altering body transaction bytes must retain the header-derived hash"
     );
-    incoming.send(crate::InboundBlock::from_decoded(malformed_frontier))?;
-    incoming.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
-    incoming.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
+    incoming.send(crate::InboundBlock::from_local(malformed_frontier))?;
+    incoming.send(crate::InboundBlock::from_local(blocks[1].clone()))?;
+    incoming.send(crate::InboundBlock::from_local(blocks[2].clone()))?;
 
     sync.tick();
 
@@ -551,7 +551,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks.into_iter().take(3) {
-        incoming.send(crate::InboundBlock::from_decoded(block))?;
+        incoming.send(crate::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -569,7 +569,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     )
     .or_fail("regtest fixture block");
     let orphan_hash = Hash256::from(orphan.block_hash());
-    let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
+    let mut inbound = vec![crate::InboundBlock::from_local(orphan)];
     assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);
     assert!(sync.scheduler.lock().stager.contains(&orphan_hash));
 

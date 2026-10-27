@@ -442,7 +442,7 @@ impl Pending {
     fn bytes_cost(&self) -> usize {
         match self {
             Self::Share { .. } => 256,
-            Self::BlockRecord { block, .. } => 512 + block.raw.len(),
+            Self::BlockRecord { block, .. } => 512 + block.payload.bytes().len(),
         }
     }
 }

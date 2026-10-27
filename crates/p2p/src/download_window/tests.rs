@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Witness, consensus_bytes,
+    Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Witness,
 };
 
 use super::{
@@ -95,8 +95,7 @@ fn stage_body(
     now: Instant,
 ) {
     let block = padded_regtest_block(total_bytes);
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    match stager.insert(hash, None, block, serialized, source, now) {
+    match stager.insert(hash, None, BlockPayload::from_local(block), source, now) {
         crate::block_stager::StagedBlock::Memory { .. } => {}
         other => panic!("stage_body refused: {other:?}"),
     }

@@ -87,7 +87,7 @@ use bitcoin_rs_node::{
     sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
-use bitcoin_rs_primitives::{consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{BlockPayload, consensus_bytes, deserialize};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group};
@@ -137,14 +137,22 @@ const SIGNED_SPEND_OUTPUT_VALUE: u64 = 78_124_499;
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
     print_proxy_summary(&blocks);
+    // Locally assembled fixtures: one encode each retains the exact bytes.
+    // Built once outside every timer so the measured spans stay apply-only
+    // with no second parse and no re-encode.
+    let payloads: Vec<BlockPayload> = blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
 
     c.bench_function("sync_pipeline_apply_proxy", |b| {
         b.iter_batched(
             open_regtest_state,
             |(_dir, state)| {
-                for block in &blocks {
+                for payload in &payloads {
                     state
-                        .apply_block(black_box(block))
+                        .apply_block(black_box(payload))
                         .unwrap_or_else(|error| panic!("proxy apply failed: {error}"));
                 }
                 black_box(
@@ -164,9 +172,9 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
         b.iter_batched(
             open_pruned_regtest_state,
             |(_dir, state)| {
-                for block in &blocks {
+                for payload in &payloads {
                     state
-                        .apply_block(black_box(block))
+                        .apply_block(black_box(payload))
                         .unwrap_or_else(|error| panic!("pruned proxy apply failed: {error}"));
                 }
                 let tip = state
@@ -187,13 +195,18 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 
     let spend_blocks = spend_heavy_proxy_blocks();
     print_spend_proxy_summary(&spend_blocks);
+    let spend_payloads: Vec<BlockPayload> = spend_blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
     c.bench_function("sync_pipeline_apply_spend_heavy_proxy", |b| {
         b.iter_batched(
             open_regtest_state,
             |(_dir, state)| {
-                for block in &spend_blocks {
+                for payload in &spend_payloads {
                     state
-                        .apply_block(black_box(block))
+                        .apply_block(black_box(payload))
                         .unwrap_or_else(|error| panic!("spend-heavy proxy apply failed: {error}"));
                 }
                 black_box(
@@ -223,6 +236,11 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     let blocks = legacy_signed_spend_proxy_blocks();
     print_signed_spend_proxy_summary(&blocks);
+    let payloads: Vec<BlockPayload> = blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
     let origin = Instant::now();
@@ -235,9 +253,9 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
             for _ in 0..iters {
                 let (_dir, state) = open_regtest_state();
                 let sweep_start = Instant::now();
-                for block in &blocks {
+                for payload in &payloads {
                     state
-                        .apply_block(black_box(block))
+                        .apply_block(black_box(payload))
                         .unwrap_or_else(|error| panic!("signed-spend apply failed: {error}"));
                 }
                 samples
@@ -519,10 +537,15 @@ fn bench_production_state_sync(c: &mut Criterion) {
 
 fn print_proxy_summary(blocks: &[Block]) {
     let (_dir, state) = open_regtest_state();
+    let payloads: Vec<BlockPayload> = blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
     let started = Instant::now();
-    for block in blocks {
+    for payload in &payloads {
         state
-            .apply_block(block)
+            .apply_block(payload)
             .unwrap_or_else(|error| panic!("proxy summary apply failed: {error}"));
     }
     let elapsed = started.elapsed();
@@ -547,10 +570,15 @@ fn print_proxy_summary(blocks: &[Block]) {
 
 fn print_spend_proxy_summary(blocks: &[Block]) {
     let (_dir, state) = open_regtest_state();
+    let payloads: Vec<BlockPayload> = blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
     let started = Instant::now();
-    for block in blocks {
+    for payload in &payloads {
         state
-            .apply_block(block)
+            .apply_block(payload)
             .unwrap_or_else(|error| panic!("spend-heavy proxy summary apply failed: {error}"));
     }
     let elapsed = started.elapsed();
@@ -687,7 +715,7 @@ impl SyncFixture {
             .iter()
             .rev()
             .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .collect();
         self
     }
@@ -695,7 +723,7 @@ impl SyncFixture {
     /// Pre-builds the single unsolicited payload `request_after_unsolicited_received`
     /// stages (block height 2).
     fn prebuild_unsolicited(mut self) -> Self {
-        self.prebuilt_inbound = vec![bitcoin_rs_p2p::InboundBlock::from_decoded(
+        self.prebuilt_inbound = vec![bitcoin_rs_p2p::InboundBlock::from_local(
             self.blocks[1].clone(),
         )];
         self
@@ -707,7 +735,7 @@ impl SyncFixture {
         self.prebuilt_inbound = self
             .blocks
             .iter()
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .collect();
         self
     }
@@ -718,7 +746,7 @@ impl SyncFixture {
         self.prebuilt_inbound = self.blocks[1..]
             .iter()
             .rev()
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .collect();
         self
     }
@@ -745,7 +773,7 @@ impl SyncFixture {
         {
             fixture
                 .inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                 .unwrap_or_else(|error| panic!("send staged overflow block failed: {error}"));
         }
         fixture.sync.tick();
@@ -1048,7 +1076,7 @@ impl ProductionStateSyncFixture {
             .iter()
             .rev()
             .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .collect();
         self
     }
@@ -1114,12 +1142,12 @@ impl ProductionStateSyncFixture {
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         for block in self.blocks[1..].iter().rev() {
             inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                 .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(
                 self.blocks[0].clone(),
             ))
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
@@ -1135,12 +1163,12 @@ impl ProductionStateSyncFixture {
 
         for block in self.blocks[1..split].iter().rev() {
             inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                 .unwrap_or_else(|error| panic!("send first partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(
                 self.blocks[0].clone(),
             ))
             .unwrap_or_else(|error| panic!("send first partial contiguous block failed: {error}"));
@@ -1148,12 +1176,12 @@ impl ProductionStateSyncFixture {
 
         for block in self.blocks[split + 1..].iter().rev() {
             inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                 .unwrap_or_else(|error| panic!("send second partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(
                 self.blocks[split].clone(),
             ))
             .unwrap_or_else(|error| panic!("send second partial contiguous block failed: {error}"));
@@ -2036,10 +2064,15 @@ fn to_native_tx(tx: &OracleTx) -> Tx {
 
 fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     let (_dir, state) = open_regtest_state();
+    let payloads: Vec<BlockPayload> = blocks
+        .iter()
+        .cloned()
+        .map(BlockPayload::from_local)
+        .collect();
     let started = Instant::now();
-    for block in blocks {
+    for payload in &payloads {
         state
-            .apply_block(block)
+            .apply_block(payload)
             .unwrap_or_else(|e| panic!("signed-spend summary apply failed: {e}"));
     }
     let elapsed = started.elapsed();
@@ -2368,15 +2401,19 @@ fn connect_admitted_unit_once(
 ) -> Duration {
     let (_dir, state) = open_regtest_state();
     for block in &blocks[..last_index] {
+        let payload = BlockPayload::from_local(block.clone());
         state
-            .apply_block(block)
+            .apply_block(&payload)
             .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
     }
     admit_signed_spends(&state, admission_txs);
     assert_admission_residency(&state, admission_txs);
+    // Exact bytes retained once outside the timed span so the measurement
+    // stays apply-only with no second parse and no re-encode.
+    let last_payload = BlockPayload::from_local(last_block.clone());
     let timed = Instant::now();
     state
-        .apply_block(black_box(last_block))
+        .apply_block(black_box(&last_payload))
         .unwrap_or_else(|error| panic!("admitted connect failed: {error}"));
     timed.elapsed()
 }
@@ -2393,13 +2430,15 @@ fn connect_admitted_unit_once(
 fn connect_unseen_unit_once(blocks: &[Block], last_index: usize, last_block: &Block) -> Duration {
     let (_dir, state) = open_regtest_state();
     for block in &blocks[..last_index] {
+        let payload = BlockPayload::from_local(block.clone());
         state
-            .apply_block(block)
+            .apply_block(&payload)
             .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
     }
+    let last_payload = BlockPayload::from_local(last_block.clone());
     let timed = Instant::now();
     state
-        .apply_block(black_box(last_block))
+        .apply_block(black_box(&last_payload))
         .unwrap_or_else(|error| panic!("unseen connect failed: {error}"));
     timed.elapsed()
 }
@@ -2466,8 +2505,9 @@ fn connect_admission_unit_once(
 ) -> Duration {
     let (_dir, state) = open_regtest_state();
     for block in &blocks[..last_index] {
+        let payload = BlockPayload::from_local(block.clone());
         state
-            .apply_block(block)
+            .apply_block(&payload)
             .unwrap_or_else(|error| panic!("prefix apply failed: {error}"));
     }
     let timed = Instant::now();
@@ -2991,8 +3031,7 @@ fn take_tail_capture() -> TailCapture {
 /// Bench-local measured `MiningControl`: forwards every call to the real
 /// per-sample coordinator and records the wall time plus candidate facts of
 /// each `get_block_template` call. No fake service: every other trait method
-/// forwards unchanged, and the default `submit_block_with_bytes` fallback is
-/// left alone.
+/// forwards unchanged through the single `submit_block(BlockPayload)` entry.
 struct MeasuredMiningControl {
     inner: Arc<MiningCoordinator>,
     calls: ParkingMutex<Vec<MeasuredTemplateCall>>,
@@ -3046,8 +3085,11 @@ impl MiningControl for MeasuredMiningControl {
         self.inner.network_hash_ps(lookup, height)
     }
 
-    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
-        self.inner.submit_block(block)
+    fn submit_block(
+        &self,
+        payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        self.inner.submit_block(payload)
     }
 
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
@@ -3107,8 +3149,9 @@ fn setup_block_template_sample(
     let handler = Handler::new(Arc::new(rpc_context.with_mining_control(control)));
     let params = json!([{"rules": ["segwit"]}]);
     for block in &corpus.prefix {
+        let payload = BlockPayload::from_local(block.clone());
         state
-            .apply_block(block)
+            .apply_block(&payload)
             .unwrap_or_else(|error| panic!("template prefix apply failed: {error}"));
     }
     // Untimed: 98k background admissions at the current wall-clock time.
@@ -3179,13 +3222,16 @@ fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTem
     // Measured: connect tail through the first new-tip template reply.
     reset_tail_capture();
     let target = &corpus.target_blocks[run];
+    // Exact bytes retained once before the measured interval so the timed
+    // tail stays apply-plus-reply with no second parse and no re-encode.
+    let target_payload = BlockPayload::from_local(target.clone());
+    let target_hash = target.block_hash().0;
     let call_started = quanta::Instant::now();
     let tip = state
-        .apply_block(target)
+        .apply_block(&target_payload)
         .unwrap_or_else(|error| panic!("target connect failed: {error}"));
     assert_eq!(
-        tip.hash,
-        target.block_hash().0,
+        tip.hash, target_hash,
         "connect must publish the target block as the new tip"
     );
     // Protocol endpoint: the first real in-process RPC handler response,
@@ -3487,8 +3533,9 @@ fn setup_template_render_sample(
     ));
     let params = json!([{"rules": ["segwit"]}]);
     for block in &corpus.prefix {
+        let payload = BlockPayload::from_local(block.clone());
         state
-            .apply_block(block)
+            .apply_block(&payload)
             .unwrap_or_else(|error| panic!("render prefix apply failed: {error}"));
     }
     // Untimed: 98k background admissions at the current wall-clock time.
@@ -4283,14 +4330,16 @@ fn mrp_verify() {
     {
         let (_dir, state) = open_regtest_state();
         for block in &blocks[..last_index] {
+            let payload = BlockPayload::from_local(block.clone());
             state
-                .apply_block(block)
+                .apply_block(&payload)
                 .unwrap_or_else(|error| panic!("mrp-verify prefix apply failed: {error}"));
         }
         admit_signed_spends(&state, &admission_txs);
         assert_admission_residency(&state, &admission_txs);
+        let last_payload = BlockPayload::from_local(last_block.clone());
         let tip = state
-            .apply_block(last_block)
+            .apply_block(&last_payload)
             .unwrap_or_else(|error| panic!("mrp-verify admitted connect failed: {error}"));
         assert_eq!(
             tip.hash,
@@ -4302,12 +4351,14 @@ fn mrp_verify() {
     {
         let (_dir, state) = open_regtest_state();
         for block in &blocks[..last_index] {
+            let payload = BlockPayload::from_local(block.clone());
             state
-                .apply_block(block)
+                .apply_block(&payload)
                 .unwrap_or_else(|error| panic!("mrp-verify prefix apply failed: {error}"));
         }
+        let last_payload = BlockPayload::from_local(last_block.clone());
         let tip = state
-            .apply_block(last_block)
+            .apply_block(&last_payload)
             .unwrap_or_else(|error| panic!("mrp-verify unseen connect failed: {error}"));
         assert_eq!(
             tip.hash,
@@ -4319,8 +4370,9 @@ fn mrp_verify() {
     {
         let (_dir, state) = open_regtest_state();
         for block in &blocks[..last_index] {
+            let payload = BlockPayload::from_local(block.clone());
             state
-                .apply_block(block)
+                .apply_block(&payload)
                 .unwrap_or_else(|error| panic!("mrp-verify prefix apply failed: {error}"));
         }
         admit_signed_spends(&state, &admission_txs);

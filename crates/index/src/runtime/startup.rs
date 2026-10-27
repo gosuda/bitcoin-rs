@@ -312,8 +312,11 @@ pub(super) fn open_and_run(
         chain_events: Arc::clone(chain_events),
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
-        utxo: spec.utxo.clone(),
-        chain_transition: spec.chain_transition.clone(),
+        // The seed cell rides the spec into the worker; the bundle starts
+        // empty and the first take happens in `finish_reconcile_pass`.
+        // Bundle restore never consumes, clears, or replaces the cell.
+        seed_slot: spec.seed_slot.clone(),
+        seed_bundle: parking_lot::Mutex::new(None),
     };
 
     worker.run()
@@ -638,6 +641,7 @@ mod tests {
             utxo: None,
             chain_transition: None,
             bundle: crate::portable::IndexBundleDirective::None,
+            seed_slot: None,
         };
         let result =
             open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);

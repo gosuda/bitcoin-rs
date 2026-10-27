@@ -33,13 +33,17 @@ fn open_hook_chain(heights: u32) -> anyhow::Result<(tempfile::TempDir, NodeState
         }))
         .map_err(|_| anyhow::anyhow!("pow-valid hook installs once"))?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    state.apply_block(&genesis)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        genesis.clone(),
+    ))?;
     let mut previous = genesis.block_hash();
     let mut time = genesis.header.time;
     for height in 1..=heights {
         time += 1;
         let block = regtest_fixture::mined_regtest_child_at_time(previous, time, height)?;
-        state.apply_block(&block)?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            block.clone(),
+        ))?;
         previous = block.block_hash();
     }
     fires.lock().expect("hook recorder poisoned").clear();
@@ -60,7 +64,9 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> anyhow
         tip_before_time(&state)? + 1,
         tip_before.height + 1,
     )?;
-    state.apply_block(&valid)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        valid.clone(),
+    ))?;
     let fired = fires.lock().expect("hook recorder poisoned").clone();
     assert_eq!(fired.len(), 1, "one early fire per committed tip child");
     assert_eq!(fired[0].0, Hash256::from(valid.block_hash()));
@@ -97,7 +103,11 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> anyhow
     regtest_fixture::mine_block_to_declared_target(&mut falling)
         .map_err(|error| anyhow::anyhow!("regrind overspend block: {error:?}"))?;
     assert!(
-        state.apply_block(&falling).is_err(),
+        state
+            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                falling.clone(),
+            ))
+            .is_err(),
         "an overspent coinbase must fail connect after rules"
     );
     let fired = fires.lock().expect("hook recorder poisoned").clone();

@@ -8,7 +8,13 @@ use bitcoin_rs_primitives::Hash256;
 
 use bitcoin_rs_storage::DisconnectPhase;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::checkpoint::{
+    CHECKPOINT_ROOT, CheckpointOpen, UTXO_FILE, open_checkpoint_generation_at,
+};
 
+use bitcoin_rs_utxo::snapshot::{
+    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
+};
 use bitcoin_rs_utxo::{UtxoSet, stats::CoinStatsListener};
 
 use bitcoin_rs_storage::recovery_evidence::{AppliedTipWitness, write_witness};
@@ -57,6 +63,9 @@ enum DisconnectRetirement {
 
 /// All the shared handles needed to publish a checkpoint from a background
 /// thread without retaining the full [`crate::Chainstate`].
+/// Seed offer cell shared with the index worker of this process open.
+/// `None` when `ScriptLive` seeding is disabled; the cell itself carries
+/// demand, so the publisher never invents it.
 pub(crate) struct CheckpointPublisher {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -72,6 +81,7 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) journal:
         Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
 
+    pub(crate) seed_offer: Option<SeedOfferCell>,
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
     pub(crate) durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
@@ -254,7 +264,7 @@ impl CheckpointPublisher {
         }
         self.block_body_store.sync()?;
         self.block_body_store.flush_index()?;
-        let written = checkpoint::write_checkpoint_from_dir(
+        let (written, stage_witness) = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
             checkpoint::headers::HeaderCheckpointConfig {
                 network: self.network,
@@ -296,11 +306,51 @@ impl CheckpointPublisher {
         {
             retire_full_revalidation_marker(&self.data_dir)?;
         }
+        // C5 offer: only a full gate pass mints a witness, and only after
+        // `commit_publication` inside the writer. Reopen the committed
+        // generation read-only (never by the staging path), refuse a fused
+        // overwrite on length mismatch, and offer only into demand. Any
+        // failure here leaves the cell untouched and never fails publication.
+        if let (CheckpointWrite::Published { reference }, Some(witness)) = (&written, stage_witness)
+            && let Some(cell) = &self.seed_offer
+            && cell.is_wanted()
+        {
+            Self::offer_committed_seed(&self.checkpoint_data_dir, cell, *reference, witness);
+        }
         // Everything up to this tip is now recoverable, so undo records below
         // it may be pruned.
         self.durable_tip_height
             .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)
+    }
+
+    /// Opens the committed generation's UTXO artifact read-only, checks the
+    /// staged length binding, and offers the sealed descriptor. Drops the
+    /// opened file without storing on any disagreement.
+    fn offer_committed_seed(
+        checkpoint_data_dir: &cap_std::fs::Dir,
+        cell: &SeedOfferCell,
+        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+        witness: V4Witness,
+    ) {
+        let opened = open_checkpoint_generation_at(checkpoint_data_dir, CHECKPOINT_ROOT, reference);
+        let Ok(CheckpointOpen::Selected { generation_dir, .. }) = opened else {
+            return;
+        };
+        let Ok(file) = generation_dir.open(UTXO_FILE) else {
+            return;
+        };
+        let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+            return;
+        };
+        if len != witness.byte_len() {
+            return;
+        }
+        let _ = cell.offer(VerifiedSnapshotArtifact::seal(
+            file.into_std(),
+            witness,
+            SeedProvenance::Checkpoint(reference),
+        ));
     }
 }
 

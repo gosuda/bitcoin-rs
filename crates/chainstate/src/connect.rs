@@ -19,7 +19,7 @@ use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
-use bitcoin_rs_primitives::{Block, ConsensusEncode, Hash256, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
 use hashbrown::HashMap;
@@ -28,16 +28,14 @@ use std::sync::Arc;
 /// Commit path. Callers reach this only through an admitted chain transition.
 pub(super) fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,
-    block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &'b BlockPayload,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
     match apply_block_admitted(
         handles,
-        block,
-        provided_serialized,
+        payload,
         proven,
         provenance,
         ApplyIntent::Commit,
@@ -52,13 +50,13 @@ pub(super) fn apply_committed_block_admitted<'b>(
 #[expect(clippy::too_many_lines)]
 pub(super) fn apply_block_admitted<'b>(
     handles: &Chainstate,
-    block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &'b BlockPayload,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     intent: ApplyIntent,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ApplyFinish, ApplyError> {
+    let block = payload.block();
     let total_started = quanta::Instant::now();
     let block_hash = block.block_hash().0;
     let prev_hash = block.header.prev_blockhash.0;
@@ -192,12 +190,7 @@ pub(super) fn apply_block_admitted<'b>(
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(
-                block,
-                provided_serialized.clone(),
-                handles.utxo.as_ref(),
-                handles.validation_engine,
-            )?,
+            prepare_apply(payload, handles.utxo.as_ref(), handles.validation_engine)?,
             false,
         ),
     };
@@ -421,26 +414,15 @@ pub(super) fn apply_block_admitted<'b>(
         .record(undo_persist_started.elapsed().as_secs_f64());
     let undo_record = undo_persist_result?;
 
-    // Serialize the block lazily: only when a consumer actually needs the
-    // full bytes. During IBD with pruning+txindex disabled this avoids a
-    // full-block serialize on every apply.
+    // Share the payload's retained bytes lazily: only when a consumer actually
+    // needs the full body. The constructor already proved these bytes ARE this
+    // block's exact serialization, so there is no length gate, no re-encode,
+    // and no debug-only compare here. During IBD with pruning+txindex
+    // disabled this avoids touching the bytes on every apply.
     let block_bytes: bytes::Bytes = {
         let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
         if needs_body {
-            // Preparation already bound these exact bytes to the decoded block,
-            // including its witness. Retain the release length guard without
-            // allocating and writing another full block merely to count bytes.
-            // The debug assertion remains an independent serialization check.
-            match provided_serialized {
-                Some(provided) if provided.len() == block.consensus_size() => {
-                    #[cfg(debug_assertions)]
-                    {
-                        debug_assert_eq!(provided.as_ref(), consensus_bytes(block).as_slice(),);
-                    }
-                    provided
-                }
-                _ => bytes::Bytes::from(consensus_bytes(block)),
-            }
+            payload.bytes().clone()
         } else {
             // Nothing downstream reads `block_bytes` unless one of the consumers
             // above needs the full body, so skip the serialize entirely.

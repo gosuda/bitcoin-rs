@@ -13,7 +13,6 @@ use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::Chainstate;
-use bitcoin_rs_chainstate::bytes_are_block;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mempool::MutationResult;
@@ -44,12 +43,14 @@ use bitcoin_rs_mining::MiningService;
 use bitcoin_rs_mining::PreparedTemplateBody;
 use bitcoin_rs_mining::SelectedBody;
 use bitcoin_rs_mining::header_reject_reason;
+use bitcoin_rs_mining::needs_witness_reserved_value;
 use bitcoin_rs_mining::select_template_body;
 use bitcoin_rs_mining::select_template_body_after;
 use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_mining::solve_block;
 use bitcoin_rs_mining::update_uncommitted_block_structures;
 use bitcoin_rs_primitives::Block;
+use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
@@ -185,12 +186,8 @@ impl MiningCoordinator {
                 .map(|input| input.witness.len())
     }
 
-    fn submit(
-        &self,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
-    ) -> Result<BlockValidationResult, MiningControlError> {
-        let block_hash: Hash256 = block.block_hash().into();
+    fn submit(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
+        let block_hash: Hash256 = payload.block().block_hash().into();
         // Duplicate classification and apply observe the same serialized chain state.
         // Reserve a generation only after ruling out an already accepted body.
         let lock = match self.chainstate.lock_transition() {
@@ -217,8 +214,7 @@ impl MiningCoordinator {
             &self.chainstate,
             transition,
             mempool_change,
-            block,
-            serialized,
+            payload,
         ) {
             Ok(_) => Ok(BlockValidationResult::Accepted),
             Err(ConnectMutationError::CommittedButSettlementFailed { outcome, source }) => {
@@ -476,28 +472,38 @@ impl MiningControl for MiningCoordinator {
         )
     }
 
-    fn submit_block(&self, mut block: Block) -> Result<BlockValidationResult, MiningControlError> {
-        self.fill_uncommitted_witness(&mut block);
-        self.submit(&block, None)
-    }
-
-    fn submit_block_with_bytes(
+    fn submit_block(
         &self,
-        mut block: Block,
-        raw: Vec<u8>,
+        payload: BlockPayload,
     ) -> Result<BlockValidationResult, MiningControlError> {
-        if !bytes_are_block(&raw, &block) {
-            return Err(MiningControlError::Rejected(CompactString::from(
-                "submitted bytes are not the serialization of the submitted block",
-            )));
-        }
-        let filled = self.fill_uncommitted_witness(&mut block);
-        let serialized = if filled {
-            bytes::Bytes::from(consensus_bytes(&block))
-        } else {
-            bytes::Bytes::from(raw)
+        // Pre-fill binding: derive SegWit activation at the child height from the
+        // parent header, exactly as `fill_uncommitted_witness` does. A missing
+        // parent means no fill is possible. The read-only predicate runs on the
+        // borrowed block before any clone or encode.
+        let segwit_active = {
+            let tree = self.block_tree.read();
+            tree.lookup(payload.block().header.prev_blockhash.into())
+                .and_then(|prev_id| tree.node(prev_id).ok())
+                .map(|prev| {
+                    self.chainstate
+                        .network()
+                        .is_segwit_active(prev.height.saturating_add(1))
+                })
         };
-        self.submit(&block, Some(serialized))
+        if segwit_active.is_some_and(|active| needs_witness_reserved_value(payload.block(), active))
+        {
+            // Fill-possible: trial-clone and run the existing fill on the clone.
+            // Rebuild only when the fill changed the block; otherwise resubmit
+            // the original payload with its exact retained bytes.
+            let mut trial = payload.block().clone();
+            if self.fill_uncommitted_witness(&mut trial) {
+                let filled = BlockPayload::from_local(trial);
+                return self.submit(&filled);
+            }
+        }
+        // No-fill (or trial no-change): submit the borrowed payload directly with
+        // zero `Block` clone and zero encode; retained bytes are exact.
+        self.submit(&payload)
     }
 
     /// Admits `header` through the same Chainstate boundary inbound P2P uses.
@@ -586,8 +592,9 @@ impl MiningControl for MiningCoordinator {
             solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
+            let hash = block.block_hash();
             if request.submit {
-                match self.submit(&block, None)? {
+                match self.submit(&BlockPayload::from_local(block.clone()))? {
                     BlockValidationResult::Accepted => {}
                     other => {
                         return Err(MiningControlError::Failed(CompactString::from(format!(
@@ -604,7 +611,7 @@ impl MiningControl for MiningCoordinator {
                 }
             }
             generated.push(GeneratedBlock {
-                hash: block.block_hash(),
+                hash,
                 hex: bitcoin_rs_primitives::encode::hex_encode(&consensus_bytes(&block)),
             });
         }

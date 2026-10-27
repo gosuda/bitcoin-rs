@@ -29,8 +29,8 @@ use bitcoin_rs_mining::{
     STALE_PARENT_REASON, assemble_candidate,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
+    Amount, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
 };
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_stratum::{
@@ -1574,9 +1574,15 @@ fn a_block_candidate_carries_the_owners_full_block_for_the_node_submit_path() {
         .unwrap_or_else(|| panic!("a block is surfaced as pending host work"));
     let found = pending.found_block();
     assert_eq!(found.share.class, ShareClass::Block);
-    assert_eq!(found.share.hash, found.block.header.compute_hash());
-    assert_eq!(found.block.header.nonce, nonce);
-    assert!(found.raw.len() > 80, "serialized block, not a bare header");
+    assert_eq!(
+        found.share.hash,
+        found.payload.block().header.compute_hash()
+    );
+    assert_eq!(found.payload.block().header.nonce, nonce);
+    assert!(
+        found.payload.bytes().len() > 80,
+        "serialized block, not a bare header"
+    );
     assert_eq!(found.coinbase_value, s.job.coinbase_value());
     assert!(matches!(
         s.wire.conn.confirm_share(pending.ticket()),
@@ -2493,14 +2499,9 @@ impl MiningControl for StaleParentControl {
         Err(unused_backend())
     }
 
-    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
-        Ok(BlockValidationResult::Rejected(STALE_PARENT_REASON.into()))
-    }
-
-    fn submit_block_with_bytes(
+    fn submit_block(
         &self,
-        _block: Block,
-        _raw: Vec<u8>,
+        _payload: BlockPayload,
     ) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Rejected(STALE_PARENT_REASON.into()))
     }

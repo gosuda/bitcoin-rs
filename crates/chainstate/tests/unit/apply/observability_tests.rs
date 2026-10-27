@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{Network, consensus_bytes};
+use bitcoin_rs_primitives::{BlockPayload, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::HashSet;
 use metrics::{
@@ -139,7 +139,7 @@ fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&handles)?;
         let first = mined_child(genesis.block_hash(), 1)?;
-        handles.apply_block(&first, None)?;
+        handles.apply_block(&BlockPayload::from_local(first))?;
         Ok(())
     })?;
     assert_names_absent(&recorder, RETIRED_APPLY_METRICS);
@@ -175,13 +175,12 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
                 bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
             )?;
         }
-        let blocks = [&first, &second];
-        let serialized: Vec<bytes::Bytes> = blocks
-            .iter()
-            .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
-            .collect();
+        let payloads = [
+            BlockPayload::from_local(first),
+            BlockPayload::from_local(second),
+        ];
         let transition = handles.begin_transition()?;
-        transition.connect_window(&blocks, &serialized)?;
+        transition.connect_window(&payloads)?;
         Ok(())
     })?;
     assert_names_absent(&recorder, RETIRED_WINDOW_METRICS);
@@ -222,13 +221,12 @@ fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn 
                 bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
             )?;
         }
-        let blocks = [&first, &second];
-        let serialized: Vec<bytes::Bytes> = blocks
-            .iter()
-            .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
-            .collect();
+        let payloads = [
+            BlockPayload::from_local(first),
+            BlockPayload::from_local(second),
+        ];
         let transition = handles.begin_transition()?;
-        transition.connect_window(&blocks, &serialized)?;
+        transition.connect_window(&payloads)?;
         Ok(())
     })?;
     for field in ["transition_held_us", "flush_wait_us"] {

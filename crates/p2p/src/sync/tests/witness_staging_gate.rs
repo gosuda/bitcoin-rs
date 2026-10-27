@@ -101,7 +101,7 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
 fn malformed_body_dropped_then_correct_body_staged() -> TestResult {
     let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
-    let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
+    let mut batch = vec![InboundBlock::from_local(stripped_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "malformed body should be processed (rejected)");
     assert!(
@@ -113,7 +113,7 @@ fn malformed_body_dropped_then_correct_body_staged() -> TestResult {
         "malformed body must not be staged"
     );
 
-    let mut batch = vec![InboundBlock::from_decoded(correct_block)];
+    let mut batch = vec![InboundBlock::from_local(correct_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "correct body should be processed (staged)");
     assert!(
@@ -136,7 +136,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash() -> Te
     let source_a = current_source(&sync.peer_table, peer_a);
     let rx_b = connect_peer(&sync.peer_table, synthetic_peer(peer_b, 1));
 
-    let mut malformed = InboundBlock::from_decoded(stripped_block);
+    let mut malformed = InboundBlock::from_local(stripped_block);
     malformed.source = Some(source_a);
     let mut batch = vec![malformed];
     assert_eq!(
@@ -169,14 +169,14 @@ fn altered_non_witness_body_dropped_then_correct_body_staged() -> TestResult {
         "altering body transaction bytes must retain the header-derived hash"
     );
 
-    let mut batch = vec![InboundBlock::from_decoded(altered_block)];
+    let mut batch = vec![InboundBlock::from_local(altered_block)];
     assert_eq!(
         sync.buffer_received_block_chunk(&mut batch, Some(block_hash)),
         1
     );
     assert!(!sync.scheduler.lock().stager.contains(&block_hash));
 
-    let mut batch = vec![InboundBlock::from_decoded(correct_block)];
+    let mut batch = vec![InboundBlock::from_local(correct_block)];
     assert_eq!(
         sync.buffer_received_block_chunk(&mut batch, Some(block_hash)),
         1
@@ -190,7 +190,7 @@ fn altered_non_witness_body_dropped_then_correct_body_staged() -> TestResult {
 fn correct_body_staged_then_malformed_duplicate_is_ignored() -> TestResult {
     let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
-    let mut batch = vec![InboundBlock::from_decoded(correct_block)];
+    let mut batch = vec![InboundBlock::from_local(correct_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "correct body should be staged");
     assert!(
@@ -199,7 +199,7 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored() -> TestResult {
     );
     let staged_bytes = sync.scheduler.lock().stager.received_bytes();
 
-    let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
+    let mut batch = vec![InboundBlock::from_local(stripped_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "duplicate should be processed (AlreadyStaged)");
 
@@ -233,7 +233,7 @@ fn idle_frontier_relearns_stale_peer_credit_after_rejected_body() -> TestResult 
         witness_block_inventory(next_getdata(&bad_rx)?)?,
         vec![BlockHash(hash)]
     );
-    let mut malformed = InboundBlock::from_decoded(stripped);
+    let mut malformed = InboundBlock::from_local(stripped);
     malformed.source = Some(current_source(&sync.peer_table, bad));
     sync.buffer_received_block_chunk(&mut vec![malformed], Some(hash));
     sync.tick();
@@ -263,7 +263,7 @@ fn idle_frontier_relearns_stale_peer_credit_after_rejected_body() -> TestResult 
         witness_block_inventory(next_getdata(&good_rx)?)?,
         vec![BlockHash(hash)]
     );
-    let mut delivered = InboundBlock::from_decoded(correct);
+    let mut delivered = InboundBlock::from_local(correct);
     delivered.source = Some(current_source(&sync.peer_table, good));
     sync.buffer_received_block_chunk(&mut vec![delivered], Some(hash));
     sync.tick();

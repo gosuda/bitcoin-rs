@@ -27,12 +27,8 @@ fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
             sync.tick();
             let inventory = next_getdata(&rx)?;
             assert_eq!(inventory.len(), 3);
-            blocks_tx.send(crate::InboundBlock::from_decoded(
-                blocks[offset + 1].clone(),
-            ))?;
-            blocks_tx.send(crate::InboundBlock::from_decoded(
-                blocks[offset + 2].clone(),
-            ))?;
+            blocks_tx.send(crate::InboundBlock::from_local(blocks[offset + 1].clone()))?;
+            blocks_tx.send(crate::InboundBlock::from_local(blocks[offset + 2].clone()))?;
             sync.tick();
             assert_eq!(
                 sync.scheduler
@@ -55,7 +51,7 @@ fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
                 }
                 value => panic!("stall_seconds gauge missing or wrong type: {value:?}"),
             }
-            blocks_tx.send(crate::InboundBlock::from_decoded(blocks[offset].clone()))?;
+            blocks_tx.send(crate::InboundBlock::from_local(blocks[offset].clone()))?;
             sync.tick();
             assert!(sync.scheduler.lock().window.stalling_peer().is_none());
             assert_eq!(
@@ -162,7 +158,7 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes() -> TestResu
                 let block = by_hash
                     .get(&stripe[round])
                     .ok_or_else(|| std::io::Error::other("unknown getdata hash"))?;
-                let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+                let mut inbound = crate::InboundBlock::from_local(block.clone());
                 inbound.source = Some(sources[idx]);
                 blocks_tx.send(inbound)?;
             }
@@ -180,7 +176,7 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes() -> TestResu
                 break;
             }
             if let Some(block) = tail.next() {
-                blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
+                blocks_tx.send(crate::InboundBlock::from_local(block.clone()))?;
             }
             sync.tick();
         }

@@ -5,7 +5,8 @@ use bitcoin_rs_mining::{
 };
 use bitcoin_rs_node::{MiningCoordinator, Network};
 use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
 };
 
 use super::support::{open_at_genesis, regtest_mining, solved_template_block};
@@ -130,7 +131,10 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
             sequence: Sequence::MAX,
             witness: Witness::new(),
         });
-        assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
+        assert_eq!(
+            mining.submit_block(BlockPayload::from_local(block))?,
+            BlockValidationResult::Accepted
+        );
     }
     mining.generate(GenerateRequest {
         payout: vec![0x51],

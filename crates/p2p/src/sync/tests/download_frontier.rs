@@ -233,7 +233,7 @@ fn apply_buffered_blocks_waits_for_pending_reorg() -> TestResult {
     let head_hash = Hash256::from(head.block_hash());
 
     sync.buffer_received_block_chunk(
-        &mut vec![crate::InboundBlock::from_decoded(head.clone())],
+        &mut vec![crate::InboundBlock::from_local(head.clone())],
         Some(head_hash),
     );
     assert!(sync.scheduler.lock().stager.contains(&head_hash));

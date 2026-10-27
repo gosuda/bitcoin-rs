@@ -21,11 +21,10 @@ fn fixture(count: u32) -> Result<HistoricalFixture, Box<dyn std::error::Error>> 
 
 fn deliver(sync: &BlockSync, block: &Block, source: PeerSource) {
     assert!(
-        sync.receive_historical(crate::InboundBlock {
-            block: block.clone(),
-            serialized: bytes::Bytes::from(consensus_bytes(block)),
-            source: Some(source),
-            forward_credit: None,
+        sync.receive_historical({
+            let mut inbound = crate::InboundBlock::from_local(block.clone());
+            inbound.source = Some(source);
+            inbound
         })
         .is_none()
     );
@@ -172,7 +171,13 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
     let (harness, chain, blocks) = fixture(6)?;
     chain.bootstrap_genesis();
     chain
-        .commit_window(&blocks.iter().collect::<Vec<_>>(), &[])
+        .commit_window(
+            &blocks
+                .iter()
+                .cloned()
+                .map(BlockPayload::from_local)
+                .collect::<Vec<_>>(),
+        )
         .map_err(|error| format!("fixture commit: {error:?}"))?;
     let addr = test_addr(28205, 0)?;
     let _rx = connect_peer(&harness.peers, synthetic_peer(addr, 7));
@@ -207,12 +212,8 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
                 blocks[5].block_hash().0
             );
         }
-        let inbound = crate::InboundBlock {
-            block: blocks[0].clone(),
-            serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
-            source: Some(source),
-            forward_credit: None,
-        };
+        let mut inbound = crate::InboundBlock::from_local(blocks[0].clone());
+        inbound.source = Some(source);
         let inbound = harness
             .sync
             .receive_historical(inbound)

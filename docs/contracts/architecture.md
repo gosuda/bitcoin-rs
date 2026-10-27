@@ -672,8 +672,8 @@ below.
 
 ```mermaid
 flowchart TD
-    BODY["raw block bodies + undo records"] -->|"apply input"| CS["chainstate: transition, durable write, publication (ARCH-07)"]
-    PAIR["independent decoded + raw input pair"] -->|"supplied to apply callers today"| CS
+    BODY["raw block bodies + undo records"] -->|"undo records"| CS["chainstate: transition, durable write, publication (ARCH-07)"]
+    BP["BlockPayload: one immutable input"] -->|"apply input"| CS
     CS -->|"mutates through one narrow contract (ARCH-07a)"| UTXO["canonical UTXO: authoritative spendability"]
     CS -->|"commits"| HB["durable head batch: receipt"]
     HB -->|"durable receipt precedes"| TIP["applied tip publication"]
@@ -688,8 +688,7 @@ flowchart TD
     WORKER -.->|"T1 reads seed artifact when usable"| SNAP["verified immutable snapshot artifact (T1 target)"]
     BODY -.->|"T1 alternate source: replay complete retained history"| WORKER
     WORKER -.->|"T1 seeds rows outside live UTXO lock (else reports unavailable); never from live set or fresh checkpoint"| ROWS
-    PAIR -.->|"T3 replaced by"| BP["BlockPayload: one immutable input (T3 target)"]
-    CS -.->|"T3 apply consumes"| BP
+    PAIR["independent decoded + raw input pair"] -.->|"T3 stager target: replaced by"| BP
 ```
 
 ### T1: snapshot-seeded ScriptLive outside the live UTXO lock (target)
@@ -742,10 +741,26 @@ rewinds asynchronously.
 
 Callers that today take an independent decoded input and a raw input
 MUST instead take one immutable `BlockPayload` bound to the exact wire
-serialization. The fields are private. Ownership stays where it is
-today: the apply path in `ARCH-07` / `ARCH-07a` is where the paired
-call shape lives; the payload narrows that call shape and adds no new
-crate, layer, runtime, or parser.
+serialization. The fields are private (`block: Block` plus retained
+`bytes: bytes::Bytes`); read-only access is `block()` / `bytes()` plus
+the consuming `into_block()` for the proposal path, with no public
+mutable accessor and no unchecked pair constructor. Construction is
+codec-owned with no new parser: `from_raw` decodes once and retains the
+input bytes only on success (rejecting trailing bytes) for wire and
+stored-body ingress, `from_local` encodes once for locally assembled
+blocks, and `from_prefix` retains only the consumed prefix for the
+Core-compatible RPC `submitblock` trailing-acceptance boundary. The
+wire `Message::Block` carries the payload (single decode); the serving
+`Message::BlockPayload(Bytes)` envelope stays raw-only and encode-only
+with no decoded field. `InboundBlock` owns the one payload while peer/source and
+`forward_credit` stay outer; the stager MUST own one payload per entry
+until drain (`insert(payload)`); apply borrows that payload. Wire,
+storage, and RPC formats are unchanged.
+Ownership stays where it is
+today: the remaining paired call shape lives in the stager, while the
+apply path in `ARCH-07` / `ARCH-07a` already borrows the payload; the
+payload narrows that call shape and adds no new crate, layer, runtime,
+or parser.
 
 ### P4: retain current early rows until staged readers and recovery proof permit consolidation (implemented retention; consolidation gated)
 

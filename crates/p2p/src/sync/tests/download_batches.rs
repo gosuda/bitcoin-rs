@@ -1,5 +1,7 @@
 use super::*;
 
+use bitcoin_rs_primitives::BlockPayload;
+
 #[test]
 fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch() -> TestResult {
     let mut tree = BlockTree::new();
@@ -144,12 +146,12 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals() -> T
     let received_at = Instant::now()
         .checked_sub(super::super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    let staged =
-        sync.scheduler
-            .lock()
-            .stager
-            .insert(hash, None, block, serialized, None, received_at);
+    let payload = BlockPayload::from_local(block);
+    let staged = sync
+        .scheduler
+        .lock()
+        .stager
+        .insert(hash, None, payload, None, received_at);
     let StagedBlock::Memory { bytes, .. } = staged else {
         return Err(std::io::Error::other("test block should stage in memory").into());
     };

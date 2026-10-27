@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.5** (2026-10-26)
+**Contract version: 1.6** (2026-10-27)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
@@ -320,19 +320,25 @@ Proof: these tests establish the memo-retention rule:
   affected capability watermark and initiates a fresh rebuild from the active
   chain.
 - A missing or unreadable undo record affects `ScriptLive` and `CompactFilters`.
-  The worker resets `ScriptLive` and reseeds from the authoritative UTXO view;
-  `TxLookup` and `ScriptHistory` use body-only rollback. `CompactFilters` instead
-  becomes unavailable for this run: a current UTXO snapshot cannot recreate spent
-  scripts for historical filters. Its durable rows and watermark are preserved,
-  its queries refuse and its status is unsynced; sibling indexes and validation
-  continue. Restore the required history and restart to retry filter reconciliation.
-  An undo read that fails with a storage error is not an absent record: it
-  fails the worker with its own error and resets nothing.
+  The worker resets `ScriptLive` and requests a verified immutable snapshot
+  artifact; if no accepted artifact is available, it replays the complete
+  retained history through the existing body and undo worker path. If that
+  history is unavailable, only `ScriptLive` becomes `Unavailable` while the
+  worker and sibling indexes continue. `TxLookup` and `ScriptHistory` use
+  body-only rollback. `CompactFilters` instead becomes unavailable for this
+  run: a current UTXO snapshot cannot recreate spent scripts for historical
+  filters. Its durable rows and watermark are preserved, its queries refuse
+  and its status is unsynced; sibling indexes and validation continue. Restore
+  the required history and restart to retry filter reconciliation. An undo
+  read that fails with a storage error is not an absent record: it fails the
+  worker with its own error and resets nothing.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
-  rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
-  and the watermark stamp are ordinary fenced writes (reset, revision, and
-  every capability watermark). The watermark is written only with the last
-  batch; without that watermark partial rows are never queryable.
+  first accepts an existing verified immutable snapshot artifact, then uses
+  complete retained-history replay, and otherwise reports `Unavailable`.
+  Each seed batch and the watermark stamp are ordinary fenced writes (reset,
+  revision, and every capability watermark). The watermark is written only
+  with the last batch; without that watermark partial rows are never
+  queryable. No live-UTXO fallback or on-demand checkpoint is permitted.
 - Index workers execute in supervised threads under `catch_unwind`. A fatal
   storage failure or panic marks the worker as failed (`publish_failed`) and
   stops the worker. Block validation, UTXO commits, and chainstate progress

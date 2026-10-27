@@ -22,7 +22,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> TestResult {
         blocks.iter().map(Block::block_hash).collect::<Vec<_>>()
     );
     for block in &blocks {
-        blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
+        blocks_tx.send(crate::InboundBlock::from_local(block.clone()))?;
     }
     sync.tick();
     assert_eq!(
@@ -38,7 +38,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> TestResult {
         "the replay must be unsolicited after its request was applied"
     );
 
-    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     assert!(!sync.scheduler.lock().stager.contains(&stale_hash));

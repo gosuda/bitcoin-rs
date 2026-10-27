@@ -12,7 +12,8 @@ use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::{AssumeUtxoData, Network, consensus_bytes, deserialize};
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet};
+use bitcoin_rs_utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
+use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed};
 
 use crate::AssumeUtxoDiskStatus;
 use crate::recovery::{InitialChainstate, ResumeSource};
@@ -41,11 +42,11 @@ fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> R
     Ok(child(&root, &base.to_string())?)
 }
 
-fn write_archive(
+fn write_archive<T>(
     directory: &Dir,
     name: &str,
-    write: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
-) -> Result<()> {
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<T>,
+) -> Result<T> {
     let mut reserved = None;
     for _ in 0..32 {
         let sequence = NEXT_ARCHIVE.fetch_add(1, Ordering::Relaxed);
@@ -75,7 +76,7 @@ fn write_archive(
     })?;
     let result = (|| {
         let mut writer = BufWriter::new(file);
-        write(&mut writer)?;
+        let write_result = write(&mut writer)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
         // Keep the reservation locked until it no longer has a temporary
@@ -83,7 +84,7 @@ fn write_archive(
         directory.rename(&temporary, directory, name)?;
         sync_dir(directory)?;
         drop(writer);
-        Ok(())
+        Ok(write_result)
     })();
     if result.is_err() {
         // Only the exclusively reserved temporary can be removed. If rename
@@ -232,17 +233,21 @@ fn reclaim_reservation(
 
 /// Stage durable coins before the root can name them. Uncommitted files never
 /// establish an anchor. One activation is admitted per datadir.
-pub(super) fn write_coins(data_dir: &Path, set: &UtxoSet, pinned: &AssumeUtxoData) -> Result<()> {
+pub(super) fn write_coins(
+    data_dir: &Path,
+    set: &UtxoSet,
+    pinned: &AssumeUtxoData,
+) -> Result<Option<bitcoin_rs_utxo::V4Witness>> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     write_archive(&directory, "coins.dat", |writer| {
-        bitcoin_rs_utxo::snapshot::write_snapshot_observed(
+        let (_, _, witness) = bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(
             set,
             &pinned.block_hash,
             pinned.height,
             writer,
             bitcoin_rs_utxo::stats::CoinStatsAccumulator::with_parallel_muhash(pinned.height),
         )?;
-        Ok(())
+        Ok(witness)
     })
 }
 
@@ -332,12 +337,16 @@ pub(super) fn load_verified(
     };
     tree.restore_chain_tx_count(id, tip.chain_tx_count)?;
     let mut coins = BufReader::new(File::open(path.join("coins.dat"))?);
-    let SnapshotLoad {
-        set,
-        height,
-        tip_hash,
-        ..
-    } = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut coins)?;
+    let (
+        SnapshotLoad {
+            set,
+            height,
+            tip_hash,
+            ..
+        },
+        (),
+        witness,
+    ) = read_snapshot_strict_v4_witnessed(&mut coins, ())?;
     if height != pinned.height || tip_hash != pinned.block_hash {
         bail!("snapshot coin archive identity mismatch");
     }
@@ -348,6 +357,15 @@ pub(super) fn load_verified(
         bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)
     })?;
     stats.tx_count = pinned.chain_tx_count;
+    // C3: seal the same descriptor the witnessed decode consumed; the pinned
+    // hash plus stats agreements above are the binding, so no new pass runs.
+    let seed = VerifiedSnapshotArtifact::seal(
+        coins.into_inner(),
+        witness,
+        SeedProvenance::AssumeUtxoArchive {
+            base: pinned.block_hash.to_le_bytes(),
+        },
+    );
     Ok(InitialChainstate {
         utxo: set,
         coin_stats: stats,
@@ -355,6 +373,7 @@ pub(super) fn load_verified(
         applied_tip: Some(tip),
         resume_source: ResumeSource::Snapshot,
         journal_bootstrap: None,
+        script_live_seed: Some(seed),
     })
 }
 

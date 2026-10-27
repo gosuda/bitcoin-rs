@@ -708,10 +708,14 @@ pinned source).
 
 
 - **Owner**: `decode_submitted_block` in `crates/rpc/src/handlers/mining.rs`.
-  Admission stays on `MiningControl::submit_block`.
-- Invalid hex or a payload that is not a complete block is Core `-22`
-  (`Block decode failed`), matching Core `DecodeHexBlk`. Extra bytes after a
-  complete block are ignored.
+  Admission stays on the single `MiningControl::submit_block(BlockPayload)`.
+- The decoder hex-decodes, runs one shared decode via the codec-owned
+  `BlockPayload::from_prefix`, retains only the consumed prefix as the
+  payload, and discards the remainder. Invalid hex or a payload that is not
+  a complete block is Core `-22` (`Block decode failed`), matching Core
+  `DecodeHexBlk`. Extra bytes after a complete block are ignored, byte for
+  byte as today; this decoder is the cooked external boundary and its bytes
+  are not the exact request payload.
 - A second dummy argument is accepted and ignored (BIP22). A third argument
   is JSON-RPC `-32602`.
 
@@ -726,14 +730,20 @@ pinned source).
   (`Missing data String key for proposal`) with no `invalid type:` prefix.
   Decode uses
   `decode_submitted_block` (`API-15`): `-22` `Block decode failed`, leftover
-  bytes ignored.
+  bytes ignored. Proposal consumes the same decoder output with
+  `payload.into_block()` into `BlockTemplateMode::Proposal`, discarding the
+  retained bytes; proposal dry-validates and never persists.
 
 ### `API-17`: `submitblock` uncommitted witness nonce
 
 
 - **Owner**: `update_uncommitted_block_structures` in
   `crates/mining/src/coinbase.rs`, called from
-  `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
+  `MiningCoordinator::submit_block(BlockPayload)` in `crates/node/src/mining.rs`.
+  The miner first applies the existing read-only fill-need signals on the
+  borrowed payload block and submits it directly when no fill applies (no
+  re-encode, no clone); only when fill may apply does it trial-clone and
+  submit `from_local` of the filled clone.
 - When the previous header is known, SegWit is active for the submitted
   height, the coinbase already has a BIP141 commitment output, and the
   coinbase witness is empty, `submitblock` inserts the 32-byte reserved

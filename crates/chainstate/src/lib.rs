@@ -10,7 +10,7 @@ use bitcoin_rs_chain::{
 };
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::{Block, Network, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{Block, BlockPayload, Network, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
 #[cfg(any(test, feature = "test-seam"))]
@@ -37,7 +37,6 @@ mod durable;
 mod prepare;
 mod tip_wait;
 mod window;
-pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
 pub mod assumeutxo;
@@ -603,16 +602,19 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    /// Connects `block` as the next applied tip.
+    /// Connects `payload` as the next applied tip.
+    ///
+    /// Exactness is owned by the [`BlockPayload`] constructor: raw ingress
+    /// claims decode once via `from_raw`, locally assembled blocks encode
+    /// once via `from_local`, and the Core-compatible RPC boundary uses the
+    /// codec-owned `from_prefix`. There is no re-encode fallback here.
     pub fn connect(
         &self,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
         self.settle_apply(apply_committed_block_admitted(
             self.chainstate,
-            block,
-            serialized,
+            payload,
             None,
             BlockProvenance::Network,
             PublishMode::Now,
@@ -634,14 +636,17 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    /// Applies consecutive blocks under this one transition.
+    /// Applies consecutive payloads under this one transition.
+    ///
+    /// A single slice has one length: the parallel-length mismatch is
+    /// unrepresentable. An empty window still proves nothing and falls
+    /// through to the existing per-block path.
     #[expect(clippy::result_large_err)]
     pub fn connect_window(
         &self,
-        blocks: &[&Block],
-        serialized: &[bytes::Bytes],
+        payloads: &[BlockPayload],
     ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
-        let mut result = apply_window_admitted(self.chainstate, blocks, serialized);
+        let mut result = apply_window_admitted(self.chainstate, payloads);
         if let Err(error) = &mut result
             && (error.disposition == WindowApplyDisposition::Fatal
                 || classify_apply_error(&error.source) == WindowApplyDisposition::Fatal)
@@ -1335,10 +1340,16 @@ impl Chainstate {
     }
 
     /// Installs the checkpoint publisher used by maintenance and disconnect settlement.
+    ///
+    /// `seed_offer` is the shared worker-owned `ScriptLive` seed cell (`None`
+    /// when `ScriptLive` is disabled at composition time). The cell itself is
+    /// worker-owned demand; this handle never mints, only the publisher
+    /// offers into it after a gated publication.
     pub fn configure_checkpointing(
         &mut self,
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
+        seed_offer: Option<bitcoin_rs_utxo::SeedOfferCell>,
     ) -> anyhow::Result<()> {
         let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
             .map_err(anyhow::Error::new)?;
@@ -1363,6 +1374,7 @@ impl Chainstate {
                 data_dir: data_dir.to_path_buf(),
                 chain_events: Arc::clone(&self.chain_events),
                 durable_tip_height,
+                seed_offer,
             },
         ));
         Ok(())
@@ -1429,15 +1441,14 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `block`, then releases the transition lock.
+    /// Admits a transition, connects `payload`, then releases the transition lock.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
         let transition = self.begin_transition()?;
-        let result = transition.connect(block, serialized);
+        let result = transition.connect(payload);
         drop(transition);
         result
     }
@@ -1458,30 +1469,19 @@ impl Chainstate {
         result
     }
 
-    /// Admits a transition, applies consecutive blocks, then releases the
+    /// Admits a transition, applies consecutive payloads, then releases the
     /// transition lock. Persistence matches [`ChainTransition::connect_window`].
+    ///
+    /// A single slice has one length: the parallel-length mismatch is
+    /// unrepresentable and its `Operational` source is gone with the second
+    /// slice. An empty window still falls through to the existing per-block
+    /// path.
     #[expect(clippy::result_large_err)]
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_window(
         &self,
-        blocks: &[&Block],
-        serialized: &[bytes::Bytes],
+        payloads: &[BlockPayload],
     ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
-        if blocks.len() != serialized.len() {
-            return Err(WindowApplyError {
-                applied: 0,
-                committed: Vec::new(),
-                source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
-                    format!(
-                        "window has {} blocks but {} serialized bodies",
-                        blocks.len(),
-                        serialized.len()
-                    ),
-                )),
-                disposition: WindowApplyDisposition::Operational,
-                invalidated: Box::default(),
-            });
-        }
         let transition = self.begin_transition().map_err(|source| WindowApplyError {
             applied: 0,
             committed: Vec::new(),
@@ -1489,7 +1489,7 @@ impl Chainstate {
             disposition: WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         })?;
-        let result = transition.connect_window(blocks, serialized);
+        let result = transition.connect_window(payloads);
         drop(transition);
         result
     }
@@ -1497,10 +1497,10 @@ impl Chainstate {
     /// See `ARCH-07` in `docs/contracts/architecture.md`.
     pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
+        let payload = BlockPayload::from_local(block.clone());
         match apply_block_admitted(
             self,
-            block,
-            None,
+            &payload,
             None,
             BlockProvenance::Network,
             ApplyIntent::Propose,
@@ -1660,28 +1660,6 @@ struct PreparedApply<'b> {
     view: bitcoin_rs_consensus::BlockView<'b>,
     tx_plan: BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
-}
-
-/// Parses a block and resolves the outputs it spends.
-struct ByteEquality<'a> {
-    expected: &'a [u8],
-    offset: usize,
-    equal: bool,
-}
-
-impl bitcoin_rs_primitives::Sink for ByteEquality<'_> {
-    fn write_all(&mut self, buf: &[u8]) {
-        if self.equal {
-            match self
-                .expected
-                .get(self.offset..self.offset.saturating_add(buf.len()))
-            {
-                Some(window) if window == buf => {}
-                _ => self.equal = false,
-            }
-        }
-        self.offset = self.offset.saturating_add(buf.len());
-    }
 }
 
 #[expect(clippy::struct_excessive_bools)]

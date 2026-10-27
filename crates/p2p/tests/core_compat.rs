@@ -33,8 +33,8 @@ use bitcoin_rs_p2p::{
     ListenerExtras, Message, NetworkActivity, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
-    deserialize,
+    Block, BlockHash as NativeBlockHash, BlockPayload, CompactTarget, Hash256, Header,
+    consensus_bytes, deserialize,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -828,11 +828,15 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     )?;
     wire.set_position(0);
     let (decoded, raw) = read_message(&mut wire, Magic::REGTEST)?;
-    let Message::Block(decoded_block) = decoded else {
+    let Message::Block(payload) = decoded else {
         return Err("expected block on the wire".into());
     };
-    assert_eq!(decoded_block.block_hash(), genesis.block_hash());
-    assert_eq!(raw.as_ref(), consensus_bytes(&genesis).as_slice());
+    assert_eq!(payload.block().block_hash(), genesis.block_hash());
+    assert_eq!(
+        payload.bytes().as_ref(),
+        consensus_bytes(&genesis).as_slice()
+    );
+    assert_eq!(raw.as_ref(), payload.bytes().as_ref());
     Ok(())
 }
 
@@ -862,7 +866,10 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
     let genesis = genesis_block()?;
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    let responses = dispatch_inbound(&mut peer, &Message::Block(genesis.clone()))?;
+    let responses = dispatch_inbound(
+        &mut peer,
+        &Message::Block(BlockPayload::from_local(genesis.clone())),
+    )?;
     assert_eq!(responses, []);
 
     let coinbase = genesis
@@ -943,7 +950,11 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
 
     let genesis = genesis_block()?;
     write_message(&mut server, magic, &Message::Addr(Vec::new()))?;
-    write_message(&mut server, magic, &Message::Block(genesis.clone()))?;
+    write_message(
+        &mut server,
+        magic,
+        &Message::Block(BlockPayload::from_local(genesis.clone())),
+    )?;
     let Ok(announced) = headers_rx.recv_timeout(Duration::from_secs(5)) else {
         return Err("a block must reach the scheduler on a block-relay connection".into());
     };

@@ -22,8 +22,6 @@ use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_primitives::Block;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -383,17 +381,18 @@ impl NodeState {
         self.followers.clone()
     }
 
-    /// Synthetically applies `block` as the next tip after consensus checks.
+    /// Synthetically applies `payload` as the next tip after consensus checks.
     ///
     /// Holds the chain transition through follower dispatch (`ARCH-07`).
     /// A post-commit settlement failure remains distinguishable in
     /// [`crate::ConnectMutationError`] and retains the authoritative outcome.
+    /// Exactness is owned by the [`BlockPayload`] constructor; no re-encode.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        block: &Block,
+        payload: &bitcoin_rs_primitives::BlockPayload,
     ) -> core::result::Result<TipSnapshot, crate::chain_effects::ConnectMutationError> {
-        let outcome = self.followers.apply_connect(&self.chainstate, block)?;
+        let outcome = self.followers.apply_connect(&self.chainstate, payload)?;
         Ok(outcome.tip)
     }
 
@@ -537,6 +536,7 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
+    seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
 ) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
@@ -574,6 +574,7 @@ fn build_derived_index_open_spec(
         utxo: None,
         chain_transition: None,
         bundle: index_bundle_directive(config)?,
+        seed_slot,
     }))
 }
 

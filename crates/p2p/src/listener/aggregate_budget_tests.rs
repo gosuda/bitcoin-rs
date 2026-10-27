@@ -549,7 +549,9 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
     drop(hold);
     assert_eq!(
         read_messages(&mut served.client, 1)?,
-        vec![Message::Block(block_a)],
+        vec![Message::Block(
+            bitcoin_rs_primitives::BlockPayload::from_local(block_a),
+        )],
         "the tail is served once the aggregate has room"
     );
 

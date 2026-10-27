@@ -3,7 +3,7 @@
 use std::{path::Path, sync::Arc};
 
 use bitcoin_rs_mining::{BlockValidationResult, MiningControlError};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Txid};
+use bitcoin_rs_primitives::{Block, BlockHash, BlockPayload, Hash256, Header, Txid};
 use bitcoin_rs_rpc::context::PoolOperator;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_stratum::{
@@ -85,11 +85,10 @@ fn found_block() -> Result<FoundBlock, Box<dyn std::error::Error>> {
     let mut share = share()?;
     share.class = ShareClass::Block;
     Ok(FoundBlock {
-        block: Block {
+        payload: BlockPayload::from_local(Block {
             header: share.header,
             txs: Vec::new(),
-        },
-        raw: Vec::new(),
+        }),
         coinbase_txid: Txid::from(Hash256::from_le_bytes(&[5; 32])),
         coinbase_value: 5_000_000_000,
         share,

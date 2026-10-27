@@ -481,9 +481,9 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     assert_eq!(
         received,
         vec![
-            Message::Block(block_a),
+            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_a)),
             Message::NotFound(vec![unknown_tx]),
-            Message::Block(block_b),
+            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_b)),
             Message::Pong(7),
         ],
         "request order, the miss before the tail, and the waiting ping last"

@@ -587,6 +587,7 @@ impl Node {
             utxo: None,
             chain_transition: None,
             bundle: start.bundle,
+            seed_slot: None,
         };
         let body_store: Arc<dyn BlockBodyStore> = Arc::new(StoreBodies {
             bodies: Arc::clone(&fixture.bodies),

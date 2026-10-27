@@ -613,7 +613,7 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
         let received: Vec<&Message> = delivered.iter().map(|(message, _)| message).collect();
         return Err(format!("the victim's body must precede its pong, got {received:?}").into());
     };
-    assert_eq!(block, &blocks[2]);
+    assert_eq!(block.block(), &blocks[2]);
     assert_eq!(&raw[..], victim_payload.as_slice());
     wait_until("the aggregate to drain once the victim was served", || {
         node.aggregate.pending() == 0

@@ -288,11 +288,13 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
 
     let state = NodeState::open(test_config(data_dir.clone()), None)?;
-    let mut tip = state.apply_block(&genesis)?;
+    let mut tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
     let mut blocks = Vec::new();
     for height in 1..=3_u32 {
         let block = regtest_fixture::mined_regtest_child_at(BlockHash(tip.hash), height)?;
-        tip = state.apply_block(&block)?;
+        tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            block.clone(),
+        ))?;
         blocks.push(block);
     }
     let _ = state.publish_checkpoint()?;
@@ -338,7 +340,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("restart must restore an applied tip"))?;
     assert_eq!(restored.hash, tip.hash);
     let block4 = regtest_fixture::mined_regtest_child_at(BlockHash(restored.hash), 4)?;
-    let new_tip = resumed.apply_block(&block4)?;
+    let new_tip = resumed.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block4))?;
     assert_eq!(new_tip.height, 4);
     drop(resumed);
 
@@ -359,7 +361,7 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         let data_dir = temp.path().join("corrupt-node");
         let genesis = Network::Regtest.genesis_block();
         let state = NodeState::open(test_config(data_dir.clone()), None)?;
-        state.apply_block(&genesis)?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
         drop(state);
 
         // Corrupt exactly the head row.

@@ -50,7 +50,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestRe
     for block in fixture.blocks[1..6].iter().rev() {
         fixture
             .inbound_blocks_tx
-            .send(crate::InboundBlock::from_decoded(block.clone()))?;
+            .send(crate::InboundBlock::from_local(block.clone()))?;
     }
 
     fixture.sync.drain_inbound_blocks();

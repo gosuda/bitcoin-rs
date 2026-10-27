@@ -238,7 +238,7 @@ pub fn switch_to_branch<F, G>(
     mut connected_body: G,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     G: FnMut(Hash256),
 {
     let mut mempool_change = followers

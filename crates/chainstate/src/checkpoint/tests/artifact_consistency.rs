@@ -196,9 +196,109 @@ fn authenticated_utxo_value_mutation_requires_resync() -> Result<(), Box<dyn std
     mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
         bytes[FIRST_VALUE_OFFSET] ^= 1;
     })?;
+
     let Err(error) = load_checkpoint(dir.path(), config()) else {
         return Err("corrupt UTXO checkpoint unexpectedly loaded".into());
     };
     assert!(error.to_string().contains("full resync"));
+    Ok(())
+}
+
+#[test]
+fn publish_gate_withholds_token_on_fused_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(2, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    // Fused traversal over live coins disagrees with a stale listener:
+    // publication proceeds exactly as before, but no witness is minted.
+    let (write, witness) = super::super::write_checkpoint_from_dir(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &populated_utxo()?,
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&applied_tip),
+    )?;
+    assert!(matches!(write, CheckpointWrite::Published { .. }));
+    assert!(
+        witness.is_none(),
+        "fused mismatch must withhold the seed witness"
+    );
+    // Control: an empty set with a matching empty listener passes the gate.
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    let (write, witness) = super::super::write_checkpoint_from_dir(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &UtxoSet::new(),
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&applied_tip),
+    )?;
+    assert!(matches!(write, CheckpointWrite::Published { .. }));
+    assert!(
+        witness.is_some(),
+        "matching empty state must mint the seed witness"
+    );
+    Ok(())
+}
+
+#[test]
+fn publish_swap_between_commit_and_open_yields_integrity() -> Result<(), Box<dyn std::error::Error>>
+{
+    use bitcoin_rs_utxo::snapshot::{RawSeedError, SeedProvenance, VerifiedSnapshotArtifact};
+
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    let (write, witness) = super::super::write_checkpoint_from_dir(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &UtxoSet::new(),
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&applied_tip),
+    )?;
+    let CheckpointWrite::Published { reference } = write else {
+        return Err("checkpoint did not publish".into());
+    };
+    let Some(witness) = witness else {
+        return Err("full gate unexpectedly withheld the seed witness".into());
+    };
+    // Swap the committed bytes between commit and the post-commit open,
+    // keeping the length so the byte_len pre-check still passes. The manifest
+    // is re-authenticated over the swapped bytes, mirroring a substitution
+    // the pre-pass hash cannot see.
+    mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+    })?;
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let current: CurrentV1 = serde_json::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let artifact_path = root.join(&current.directory).join(UTXO_FILE);
+    assert_eq!(fs::metadata(&artifact_path)?.len(), witness.byte_len());
+    // The load falls back exactly as it does for any post-commit corruption.
+    let Err(error) = load_checkpoint(dir.path(), config()) else {
+        return Err("swapped checkpoint bytes unexpectedly loaded".into());
+    };
+    assert!(error.to_string().contains("full resync"));
+    // The sealed descriptor over the swapped bytes gives Integrity, never coins.
+    let file = fs::File::open(&artifact_path)?;
+    let mut seed =
+        VerifiedSnapshotArtifact::seal(file, witness, SeedProvenance::Checkpoint(reference));
+    let mut coins = 0_u64;
+    let mut emit = |_: &OutPoint, _: &[u8]| -> Result<(), std::convert::Infallible> {
+        coins += 1;
+        Ok(())
+    };
+    assert!(matches!(
+        seed.for_each_coin_raw(&mut emit),
+        Err(RawSeedError::Integrity)
+    ));
+    assert_eq!(coins, 0);
     Ok(())
 }

@@ -1275,7 +1275,7 @@ fn assert_invalid_body_header_is_discarded(block: Block, port: u16) -> TestResul
     let (addr, _lease, _rx) = connect(&peers, port, 100_000);
     let source = current_source(&peers, addr);
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![crate::InboundBlock::from_decoded(block)];
+    let mut batch = vec![crate::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
     assert!(
@@ -1347,7 +1347,7 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
         vec![regtest_fixture::coinbase(3)],
     )?;
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![crate::InboundBlock::from_decoded(block)];
+    let mut batch = vec![crate::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
 

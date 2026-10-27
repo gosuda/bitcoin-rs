@@ -48,7 +48,8 @@ use bitcoin_rs_p2p::{
     PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
@@ -177,7 +178,10 @@ impl MiningControl for RecordingMining {
         ))
     }
 
-    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit_block(
+        &self,
+        _payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
         ))

@@ -84,6 +84,7 @@ impl Worker {
     /// `Buffered`: the rows commit at the deadline, and only the next pass,
     /// with `pending` empty and a fresh fence and watermark capture, may reach
     /// another group.
+    #[expect(clippy::too_many_lines, reason = "Leg scheduling stays in one owner")]
     pub(super) fn catch_up_to(
         &self,
         target: &TipSnapshot,
@@ -92,6 +93,7 @@ impl Worker {
         watermark: Option<IndexWatermark>,
         capabilities: IndexCapabilities,
         pending: &mut Option<PendingForward>,
+        seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ForwardLeg, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
             return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
@@ -112,21 +114,29 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
+        // The leg consumed the seed pin iff the seed covered this start and
+        // the grant took it (leaving the slot empty).
+        let seed_covering = seed_lease
+            .as_ref()
+            .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= start_height));
         let pass_history = match self.grant_leg_history(
             start_height,
             capabilities,
             target,
             &mut state,
             pending,
+            seed_lease,
         )? {
             ControlFlow::Continue(lease) => lease,
             ControlFlow::Break(leg) => return Ok(leg),
         };
+        let from_seed = seed_covering && seed_lease.is_none();
         if start_height > target.height {
             return Ok(ForwardLeg::Settled(
                 if self.commit_forward(state, &pass_history)?.is_some() {
                     ReconcileAction::CaughtUp
                 } else {
+                    Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                     ReconcileAction::Stalled
                 },
             ));
@@ -137,6 +147,7 @@ impl Worker {
             .min(target.height);
         let identities = self.collect_target_chain(target, start_height, chunk_end)?;
         if self.runtime.should_stop() {
+            Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
             return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
         }
         let Some(body_store) = self.body_store.as_ref() else {
@@ -148,6 +159,7 @@ impl Worker {
         let mut requests = Vec::with_capacity(POSITION_PREFETCH_BLOCKS);
         for identities in identities.chunks(POSITION_PREFETCH_BLOCKS) {
             if self.runtime.should_stop() {
+                Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                 return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
             }
             requests.clear();
@@ -177,26 +189,52 @@ impl Worker {
                 )? {
                     ChunkAction::Continue => {}
                     ChunkAction::Stalled => {
+                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                         return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
                     }
                     ChunkAction::Progressed => {
                         return Ok(ForwardLeg::Settled(ReconcileAction::Progressed));
                     }
                     ChunkAction::MissingBody if state.batch.is_empty() => {
+                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                         return Ok(ForwardLeg::BodyAbsent);
                     }
                     ChunkAction::MissingBody => {
                         // The prepared prefix keeps its fence and deadline and
                         // commits when the scheduler's deadline wait expires.
                         *pending = Some(state);
+                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                         return Ok(ForwardLeg::Settled(ReconcileAction::Buffered));
                     }
                 }
             }
         }
 
-        self.finish_catch_up(state, chunk_end, target, &pass_history, pending)
-            .map(ForwardLeg::Settled)
+        let action = self.finish_catch_up(state, chunk_end, target, &pass_history, pending)?;
+        // Only a commit-backed advance releases the pin: `chunk_end` short of
+        // the tip returns `Progressed` with rows retained and no durable
+        // commit, so the pin parks back like any other stall.
+        if !matches!(
+            action,
+            ReconcileAction::Progressed | ReconcileAction::CaughtUp
+        ) || chunk_end < target.height
+        {
+            Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
+        }
+        Ok(ForwardLeg::Settled(action))
+    }
+
+    /// Parks a consumed seed pin back when the leg made no durable progress.
+    /// Progress paths drop it (release is exact: advance-then-drop on durable
+    /// progress); a lapsed pin drops too instead of parking dead weight.
+    fn park_unused_seed_lease(
+        seed_lease: &mut Option<HistoryLease>,
+        from_seed: bool,
+        pass_history: HistoryLease,
+    ) {
+        if from_seed && pass_history.floor().is_some() {
+            *seed_lease = Some(pass_history);
+        }
     }
 
     /// Asks the authority to hold this leg's history from `start_height`.
@@ -219,7 +257,20 @@ impl Worker {
         target: &TipSnapshot,
         state: &mut PendingForward,
         pending: &mut Option<PendingForward>,
+        seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
+        // Single-holder rule: a live seed pin covering this start is consumed
+        // directly with no second `request_history`. A dead pin is superseded
+        // (dropped) before the fresh request; a live pin starting above this
+        // leg stays parked for a later leg.
+        if let Some(lease) = seed_lease.take() {
+            if lease.floor().is_some_and(|floor| floor <= start_height) {
+                return Ok(ControlFlow::Continue(lease));
+            }
+            if lease.floor().is_some() {
+                *seed_lease = Some(lease);
+            }
+        }
         let action = match self.history.request_history(start_height) {
             Ok(lease) => return Ok(ControlFlow::Continue(lease)),
             Err(HistoryUnavailable::Pruned { below }) => {
@@ -238,6 +289,20 @@ impl Worker {
                         }),
                     );
                     ReconcileAction::Progressed
+                } else if capabilities.contains(IndexCapability::ScriptLive) {
+                    // D1: scoped terminal for `ScriptLive`. No
+                    // `rebuild_from_pruned` (it would loop back into seeding)
+                    // and no global worker failure. Demand stays wanted so a
+                    // future token retries the seed without a history spin;
+                    // other families keep their rows and settle next passes
+                    // with selection skipping the failed capability. A fresh
+                    // `Pruned` sets the flag again after any clear.
+                    self.runtime
+                        .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
+                    if let Some(slot) = self.seed_slot.as_ref() {
+                        slot.want();
+                    }
+                    ReconcileAction::Stalled
                 } else {
                     self.rebuild_from_pruned(capabilities, below, target)?
                 }
@@ -298,14 +363,14 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        let Some(bodies) = self
+        let (bodies, missing_body) = self
             .load_body_prefix(body_reader.as_mut(), identities)
-            .map_err(DerivedIndexWorkerError::Storage)?
-        else {
-            return Ok(ChunkAction::MissingBody);
-        };
+            .map_err(DerivedIndexWorkerError::Storage)?;
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
+        }
+        if bodies.is_empty() && missing_body {
+            return Ok(ChunkAction::MissingBody);
         }
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
@@ -361,8 +426,13 @@ impl Worker {
                 self.writer
                     .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                     .map_err(DerivedIndexWorkerError::Index)?;
-                tracing::warn!(error = %error, "rebuilding ScriptLive after pruned undo");
-                return Ok(ChunkAction::Stalled);
+                state.batch = PreparedBatch::new(self.batch_limits);
+                self.runtime.fail_script_live(&error);
+                if let Some(slot) = self.seed_slot.as_ref() {
+                    slot.want();
+                }
+                tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
+                return Ok(ChunkAction::MissingBody);
             }
             Err(error) => return Err(error),
         };
@@ -402,6 +472,9 @@ impl Worker {
             }
         }
         *identities = &identities[loaded..];
+        if missing_body {
+            return Ok(ChunkAction::MissingBody);
+        }
         Ok(ChunkAction::Continue)
     }
 
@@ -452,9 +525,14 @@ impl Worker {
         state: PendingForward,
         history: &HistoryLease,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        let capabilities = state.capabilities;
         let durable = self.sync_and_commit(state)?;
         if let Some(endpoint) = durable.as_ref() {
             history.advance(endpoint.height.saturating_add(1));
+            if capabilities.contains(IndexCapability::ScriptLive) {
+                self.runtime.clear_script_live();
+                self.release_seed_lease_if_superseded(Some(*endpoint));
+            }
         }
         Ok(durable)
     }
@@ -463,8 +541,8 @@ impl Worker {
     /// durable watermarks at the frontier so the rebuild starts at the first
     /// surviving height instead of asking for deleted history forever.
     ///
-    /// `ScriptLive` needs no anchor: it reseeds from the authoritative UTXO
-    /// view at the tip, so the reset alone sends it through that path.
+    /// `ScriptLive` needs no anchor: it reseeds from an immutable artifact or
+    /// retained history, so the reset alone sends it through that path.
     fn rebuild_from_pruned(
         &self,
         capabilities: IndexCapabilities,
@@ -519,12 +597,13 @@ impl Worker {
     /// returned prefix is exactly the set of prefetched positions the reader
     /// consumed; the body that reaches the byte cap may carry the total past it.
     /// Stops early, keeping what was loaded, on shutdown. `Ok(None)` when a
-    /// body is unavailable.
+    /// body is unavailable. Returns the loaded prefix and whether a successor
+    /// was absent, so callers can retain the prefix instead of discarding it.
     fn load_body_prefix(
         &self,
         reader: &mut dyn BlockBodyReader,
         identities: &[BlockIdentity],
-    ) -> Result<Option<Vec<Vec<u8>>>, StorageError> {
+    ) -> Result<(Vec<Vec<u8>>, bool), StorageError> {
         let mut bodies = Vec::new();
         let mut loaded_bytes = 0_usize;
         for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
@@ -533,7 +612,7 @@ impl Worker {
             }
             let hash = Hash256::from_le_bytes(&identity.hash);
             let Some(body) = reader.load_block_body(identity.height, hash)? else {
-                return Ok(None);
+                return Ok((bodies, true));
             };
             loaded_bytes = loaded_bytes.saturating_add(body.len());
             bodies.push(body);
@@ -541,7 +620,7 @@ impl Worker {
                 break;
             }
         }
-        Ok(Some(bodies))
+        Ok((bodies, false))
     }
 
     pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {

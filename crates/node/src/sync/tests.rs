@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
 use bitcoin_rs_script::push_int;
 use bitcoin_rs_utxo::UtxoSet;
@@ -70,11 +70,11 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
             invalid_hashes,
         ),
     ] {
-        let bodies = blocks
+        let payloads = blocks
             .iter()
-            .map(|&block| bytes::Bytes::from(consensus_bytes(block)))
+            .map(|block| BlockPayload::from_local((*block).clone()))
             .collect::<Vec<_>>();
-        let error = match adapter.commit_window(&blocks, &bodies) {
+        let error = match adapter.commit_window(&payloads) {
             Ok(count) => panic!("invalid window committed {count} blocks"),
             Err(error) => error,
         };
@@ -137,11 +137,7 @@ fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Ve
     block
 }
 
-type MaturedChain = (
-    Chainstate,
-    Vec<Block>,
-    HashMap<Hash256, (Block, bytes::Bytes)>,
-);
+type MaturedChain = (Chainstate, Vec<Block>, HashMap<Hash256, BlockPayload>);
 
 fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>> {
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -184,16 +180,16 @@ fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>>
         Arc::new(ArcSwapOption::empty()),
         Arc::new(RwLock::new(tree)),
     );
-    handles.apply_block(&genesis, None)?;
+    handles.apply_block(&BlockPayload::from_local(genesis))?;
     for block in &blocks {
-        handles.apply_block(block, None)?;
+        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
     }
     let bodies = blocks
         .iter()
         .map(|block| {
             (
                 Hash256::from_le_bytes(block.block_hash().as_bytes()),
-                (block.clone(), bytes::Bytes::from(consensus_bytes(block))),
+                BlockPayload::from_local(block.clone()),
             )
         })
         .collect();

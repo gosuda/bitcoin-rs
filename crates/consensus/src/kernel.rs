@@ -378,7 +378,7 @@ fn verify_tx_scripts_kernel(
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Network, consensus_bytes};
+    use bitcoin_rs_primitives::{BlockPayload, Network};
 
     use super::*;
 
@@ -401,7 +401,8 @@ mod tests {
             .copied()
             .filter(|engine| engine.is_supported())
         {
-            let parsed = BlockParse::parse(&consensus_bytes(&block), engine)
+            let payload = BlockPayload::from_local(block.clone());
+            let parsed = BlockParse::parse(payload.bytes(), engine)
                 .unwrap_or_else(|error| panic!("fixture parse: {error}"));
             let (parsed, _) = parsed
                 .into_parts(&block.txs)
@@ -419,7 +420,7 @@ mod tests {
     fn kernel_verify_api_error_propagates_as_kernel_error() {
         let block = Network::Regtest.genesis_block();
         let tx = &block.txs[0];
-        let tx_bytes = consensus_bytes(tx);
+        let tx_bytes = bitcoin_rs_primitives::consensus_bytes(tx);
         let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
             .unwrap_or_else(|error| panic!("genesis tx kernel parse: {error}"));
         let prevout = tx.outputs[0].clone();

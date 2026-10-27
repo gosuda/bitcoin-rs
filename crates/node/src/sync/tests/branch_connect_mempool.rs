@@ -56,7 +56,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     for block in &fork_blocks {
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            (block.clone(), bytes::Bytes::from(consensus_bytes(block))),
+            BlockPayload::from_local(block.clone()),
         );
     }
 
@@ -290,9 +290,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             ),
             role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
-    handles.apply_block(&genesis, None)?;
+    handles.apply_block(&BlockPayload::from_local(genesis))?;
     for block in &blocks {
-        handles.apply_block(block, None)?;
+        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
     }
 
     let parent = parent_tx.ok_or_else(|| std::io::Error::other("package not built"))?;

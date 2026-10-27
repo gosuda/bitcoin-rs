@@ -27,7 +27,8 @@ use bitcoin_rs_mining::{
     MiningError, STALE_PARENT_REASON,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, Script, Tx, TxOut, Txid, Witness,
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Script, Tx, TxOut,
+    Txid, Witness,
     encode::{consensus_bytes, double_sha256},
     varint,
 };
@@ -611,10 +612,9 @@ pub struct AcceptedShare {
 pub struct FoundBlock {
     /// The accepted share that found it; `share.class` is [`ShareClass::Block`].
     pub share: AcceptedShare,
-    /// The complete block: reassembled coinbase, then the candidate's transactions.
-    pub block: Block,
-    /// Exact consensus serialization of `block`.
-    pub raw: Vec<u8>,
+    /// Exact payload: reassembled coinbase plus candidate transactions with the
+    /// exact consensus serialization, built once at share time.
+    pub payload: BlockPayload,
     /// Txid of the block's coinbase.
     pub coinbase_txid: Txid,
     /// Total coinbase output value (subsidy plus fees).
@@ -628,7 +628,7 @@ impl FoundBlock {
     /// or an [`BlockStatus::Undetermined`] receipt means the chain outcome is
     /// unknown: the caller must not infer acceptance or rejection.
     pub fn submit(&self, control: &dyn MiningControl) -> Result<BlockReceipt, MiningControlError> {
-        let result = control.submit_block_with_bytes(self.block.clone(), self.raw.clone())?;
+        let result = control.submit_block(self.payload.clone())?;
         Ok(BlockReceipt {
             hash: self.share.hash,
             height: self.share.height,
@@ -1127,11 +1127,10 @@ impl Job {
             header: share.header,
             txs,
         };
-        let raw = consensus_bytes(&block);
+        let payload = BlockPayload::from_local(block);
         FoundBlock {
             share,
-            block,
-            raw,
+            payload,
             coinbase_txid,
             coinbase_value: self.candidate.coinbase_value,
         }

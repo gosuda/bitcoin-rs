@@ -12,7 +12,8 @@ use bitcoin_rs_chain::{
     BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+    consensus_bytes,
 };
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
@@ -137,12 +138,8 @@ impl SyncChain for TestChain {
             }))
     }
 
-    fn connect_historical(
-        &self,
-        block: &Block,
-        _serialized: bytes::Bytes,
-    ) -> Result<(), SyncChainError> {
-        let hash = block.block_hash().0;
+    fn connect_historical(&self, payload: &BlockPayload) -> Result<(), SyncChainError> {
+        let hash = payload.block().block_hash().0;
         assert_eq!(
             self.historical.lock().pop_front().map(|(_, hash)| hash),
             Some(hash)
@@ -259,14 +256,11 @@ impl SyncChain for TestChain {
         count
     }
 
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        _bodies: &[bytes::Bytes],
-    ) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[BlockPayload]) -> Result<usize, WindowCommitError> {
         let mut tree = self.block_tree.write();
         let mut applied = 0_usize;
-        for block in blocks {
+        for payload in payloads {
+            let block = payload.block();
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let scripted = *self.scripted_commit_failure.lock();
             let failure = match scripted {
@@ -341,7 +335,7 @@ impl SyncChain for TestChain {
     fn switch_to_branch(
         &self,
         _target: NodeId,
-        _staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        _staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         let scripted = self.scripted_branch_switch.lock().take();
@@ -427,18 +421,14 @@ impl SyncChain for RefusingChain {
         self.0.window_len(serialized_sizes)
     }
 
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        bodies: &[bytes::Bytes],
-    ) -> Result<usize, WindowCommitError> {
-        self.0.commit_window(blocks, bodies)
+    fn commit_window(&self, payloads: &[BlockPayload]) -> Result<usize, WindowCommitError> {
+        self.0.commit_window(payloads)
     }
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         self.0.switch_to_branch(target, staged_body, connected_body)
@@ -754,7 +744,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             .requeue_for_retry(&hash, height, Instant::now());
     }
 
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
@@ -800,13 +790,9 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
     );
 
     let source = current_source(&peers, addr);
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block,
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block);
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
 
     let applied = applied_tip
@@ -866,13 +852,9 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
     for block in [block2, block1] {
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        inbound_blocks_tx.send(crate::InboundBlock {
-            block,
-            serialized,
-            source: Some(source),
-            forward_credit: None,
-        })?;
+        let mut inbound = crate::InboundBlock::from_local(block);
+        inbound.source = Some(source);
+        inbound_blocks_tx.send(inbound)?;
     }
     // Whichever order the pass tries the carried headers, the second drain
     // admits whichever waited on the other's parent.
@@ -925,13 +907,9 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
-    let serialized = bytes::Bytes::from(consensus_bytes(&block2));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block: block2.clone(),
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block2.clone());
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
     let Message::GetHeaders(_) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected recovery getheaders").into());
@@ -968,13 +946,9 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         "header admission must reconcile the staged child's height"
     );
 
-    let serialized = bytes::Bytes::from(consensus_bytes(&block1));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block: block1,
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block1);
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
     sync.tick();
     let applied = applied_tip
@@ -1273,7 +1247,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     // Deliver only the successor: it stages (waiting on block1, which the
     // stalled peer will never send) and exactly exhausts the staging byte
     // budget, closing the request gate.
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
     assert!(!{
         let scheduler = sync.scheduler.lock();
@@ -1387,12 +1361,10 @@ fn apply_cache_fixture(
 
 fn stage_body(sync: &BlockSync, block: &Block) {
     let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
-    let serialized = bytes::Bytes::from(consensus_bytes(block));
     sync.scheduler.lock().stager.insert(
         hash,
         None,
-        block.clone(),
-        serialized,
+        BlockPayload::from_local(block.clone()),
         None,
         Instant::now(),
     );
@@ -1407,7 +1379,7 @@ fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
 fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
     let hash = Hash256::from(block.block_hash());
     sync.buffer_received_block_chunk(
-        &mut vec![crate::InboundBlock::from_decoded(block)],
+        &mut vec![crate::InboundBlock::from_local(block)],
         Some(hash),
     );
     assert_eq!(sync.apply_buffered_blocks(Some(hash)), (1, 0));
@@ -1458,9 +1430,9 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> T
     // rewind onto it would be observable.
     let staged = sync.buffer_received_block_chunk(
         &mut vec![
-            crate::InboundBlock::from_decoded(blocks.remove(0)),
-            crate::InboundBlock::from_decoded(extra_coinbase),
-            crate::InboundBlock::from_decoded(follower),
+            crate::InboundBlock::from_local(blocks.remove(0)),
+            crate::InboundBlock::from_local(extra_coinbase),
+            crate::InboundBlock::from_local(follower),
         ],
         None,
     );
@@ -1522,9 +1494,9 @@ fn unrequested_body_admission_matches_core_acceptance() -> TestResult {
     let far_hash = Hash256::from(far_body.block_hash());
     let fork_hash = Hash256::from(fork_body.block_hash());
     let mut delivery = vec![
-        crate::InboundBlock::from_decoded(successor),
-        crate::InboundBlock::from_decoded(far_body),
-        crate::InboundBlock::from_decoded(fork_body),
+        crate::InboundBlock::from_local(successor),
+        crate::InboundBlock::from_local(far_body),
+        crate::InboundBlock::from_local(fork_body),
     ];
     sync.buffer_received_block_chunk(&mut delivery, None);
 
@@ -1825,7 +1797,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     chain.bootstrap_genesis();
     for block in &blocks[..2] {
         chain
-            .commit_window(&[block], &[])
+            .commit_window(&[BlockPayload::from_local(block.clone())])
             .map_err(|error| format!("fixture commit: {error:?}"))?;
     }
     chain
@@ -1846,12 +1818,9 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     let mut corrupt = blocks[0].clone();
     corrupt.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
     for block in [corrupt, blocks[2].clone()] {
-        harness.inbound_blocks_tx.send(crate::InboundBlock {
-            serialized: bytes::Bytes::from(consensus_bytes(&block)),
-            block,
-            source: Some(source),
-            forward_credit: None,
-        })?;
+        let mut inbound = crate::InboundBlock::from_local(block);
+        inbound.source = Some(source);
+        harness.inbound_blocks_tx.send(inbound)?;
     }
     harness.sync.tick();
     assert!(chain.historical_connected.lock().is_empty());
@@ -1890,12 +1859,9 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .try_iter()
             .any(|message| matches!(message, Message::GetData(_)))
     );
-    harness.inbound_blocks_tx.send(crate::InboundBlock {
-        block: blocks[0].clone(),
-        serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
-        source: Some(retry_source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(blocks[0].clone());
+    inbound.source = Some(retry_source);
+    harness.inbound_blocks_tx.send(inbound)?;
     harness.sync.tick();
     assert_eq!(
         *chain.historical_connected.lock(),
@@ -2017,7 +1983,7 @@ fn staged_count_wedge(
         );
     }
     for height in 3..=16_u32 {
-        blocks_tx.send(crate::InboundBlock::from_decoded(header_chain_block(
+        blocks_tx.send(crate::InboundBlock::from_local(header_chain_block(
             &expected, height,
         )?))?;
     }
@@ -2800,7 +2766,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         blocks_rx,
         crate::sync::syncing_ibd_latch(),
     ));
-    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     let addr = test_addr(9770, 0)?;
@@ -2831,7 +2797,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
 
 /// Delivers the fixture's block 2 body from the connection that announced it.
 fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
-    let mut inbound = crate::InboundBlock::from_decoded(fixture.block2.clone());
+    let mut inbound = crate::InboundBlock::from_local(fixture.block2.clone());
     inbound.source = Some(fixture.source);
     fixture.blocks_tx.send(inbound)?;
     fixture.sync.tick();
@@ -2990,7 +2956,7 @@ impl NotFoundFixture {
     }
 
     fn deliver(&self, source: PeerSource, index: usize) -> TestResult {
-        let mut inbound = crate::InboundBlock::from_decoded(self.blocks[index].clone());
+        let mut inbound = crate::InboundBlock::from_local(self.blocks[index].clone());
         inbound.source = Some(source);
         self.blocks_tx.send(inbound)?;
         Ok(())
@@ -3434,18 +3400,14 @@ impl SyncChain for TreeReadHook {
         self.chain.window_len(serialized_sizes)
     }
 
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        bodies: &[bytes::Bytes],
-    ) -> Result<usize, WindowCommitError> {
-        self.chain.commit_window(blocks, bodies)
+    fn commit_window(&self, payloads: &[BlockPayload]) -> Result<usize, WindowCommitError> {
+        self.chain.commit_window(payloads)
     }
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         self.chain

@@ -162,26 +162,17 @@ assumptions of `CONV-1`.
   evidence. Known bounded holds: apply holds both fences only around the
   mutation window (`EVT-02`).
 
-**Open contention and proof gap (recorded, not proven safe):**
-`seed_live_from_utxo()` (`crates/index/src/runtime/rollback.rs`) acquires
-`utxo.lock_stable_view()` for the entire UTXO scan plus all bounded batch
-persistence, while every foreground UTXO commit needs the matching write
-lock (`crates/utxo/src/set.rs::stable_view_lock`). Batching the DB writes
-bounds each write, not the read-lock hold. Optional `ScriptLive` seeding can
-therefore stall authoritative chain commits for the full seed duration, and
-the cited tick/fencing tests do **not** prove foreground progress during
-seeding. Follow-up: bound the hold at the existing owner (capture a bounded
-immutable view or hand the scan data off the lock), then add a
-process-level contention regression. No open tracker owns the
-`seed_live_from_utxo` hold or its foreground-progress proof; `SYNC-03`
-remains unsatisfied for that path until `crates/index/src/runtime/rollback.rs`
-has a bounded hold and evidence; this clause only records the obligation.
-This is the concrete case this clause records instead of claiming isolation
-is proven.
+**Seeding and replay isolation:** `ScriptLive` seeding no longer holds the
+live UTXO stable-view lock. It consumes an accepted immutable snapshot
+artifact or replays retained block bodies and undo records through the
+existing worker. Missing history produces a scoped `ScriptLive`
+`Unavailable`; it does not block the worker, other indexes, or authoritative
+chain commits. The paused-seed proof covers concurrent applies and lease
+retention. This closes the former `seed_live_from_utxo` lock-hold gap.
 
-- Proof (bounded holds only): `EVT-02` step 1–7 fencing tests; the event-loop
-  tick tests (`crates/node/src/event_loop.rs`, `EMB-10`). The seeding hold is
-  explicitly **not** proven and is recorded above.
+- Proof: `EVT-02` step 1–7 fencing tests; the event-loop tick tests
+  (`crates/node/src/event_loop.rs`, `EMB-10`); the index paused-seed and
+  recovery suites.
 
 ### `SYNC-04`: Failure classification and recovery semantics
 
@@ -364,7 +355,7 @@ per hypothetical feature.
 | Discovery | A lost/cancelled frontier request becomes requestable again | P2P `BlockSync` sweeps (`P2P-05`) | `crates/p2p/src/sync/tests/` frontier/handover regressions | None recorded |
 | Scheduling/execution | An eligible request is actually sent to a peer, or the tick records why not | Event-loop sync tick → `BlockSync::tick` | `crates/p2p/src/sync/tests/header_progress.rs::tick_fetches_new_tip_headers_from_at_tip_peers`, `headroom_throttling.rs::cold_start_stall_hedges_front_without_reassigning_owner`, `download_frontier.rs::tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer`, `peer_fanout.rs::tick_retries_when_all_selected_peers_have_expired_pending` | None recorded |
 | Recovery closure | A peer loss/timeout/failed delivery ends in retry, handover, or terminal outcome without restart | `P2P-05` strike/expiry and peer handover; startup dialing on persisted AddrMan recovery (not `RCV-08`, which covers chainstate reorg disconnect/reconnect) | `crates/p2p/src/sync/tests/` expiry strikes; `bin/bitcoin-rs/tests/addrman_restart_e2e.rs` restart reconnection | Live reorg + expiry combined lane is main-only |
-| Non-starvation | A foreground commit lands while optional work runs, on paths the fences bound | Apply fences (`EVT-02`) — bounded by construction | `EVT-02` fencing tests (fences held only around the mutation window) | **Not proven for seeding:** `EVT-02` fencing tests do not establish foreground isolation for ScriptLive seeding, which holds the stable UTXO view across its scan and batch writes (`crates/index/src/runtime/rollback.rs`), so commits needing that write lock contend. Recorded as an unresolved contention obligation above |
+| Non-starvation | A foreground commit lands while optional work runs, on paths the fences bound | Apply fences (`EVT-02`) and immutable artifact/replay seeding | `EVT-02` fencing tests; paused-seed concurrent-apply proof | No live-UTXO seed lock; scoped `ScriptLive` unavailability is isolated from other work |
 | Index delay/failure | Queries refuse honestly during index worker failure | `IDX-07` supervision + `SYNC-01` authorities | `unusable_worker_makes_queries_unavailable` (marks the worker failed, asserts `TxQueryError::Unavailable`) | **Not proven for delay or apply isolation:** no test covers queries during index delay/rebuild or applies a block while the index is unusable, so "index failure never blocks apply" is an unproven obligation resting on the `SYNC-03` fences and `EVT-02` evidence |
 | Durable convergence | A successful apply survives restart at the published tip | Durable head + checkpoint (`RCV-01`–`RCV-04`) | `crates/node/tests/crash_recovery.rs` `RCV-04` matrix | Formal temporal runs are not completed proofs |
 

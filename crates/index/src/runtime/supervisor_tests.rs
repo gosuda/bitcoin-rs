@@ -27,6 +27,7 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         utxo: None,
         chain_transition: None,
         bundle: crate::portable::IndexBundleDirective::None,
+        seed_slot: None,
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
                 bitcoin_rs_storage::FjallStore::open_with_cache(dir, 8 * 1024 * 1024)

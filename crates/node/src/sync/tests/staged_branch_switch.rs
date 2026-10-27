@@ -37,7 +37,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         fork_prev = block.block_hash();
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+            BlockPayload::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -132,7 +132,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         fork_prev = block.block_hash();
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+            BlockPayload::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -155,7 +155,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
     // walk disconnects it.
     bodies.insert(
         Hash256::from_le_bytes(racing.block_hash().as_bytes()),
-        (racing.clone(), bytes::Bytes::from(consensus_bytes(&racing))),
+        BlockPayload::from_local(racing.clone()),
     );
 
     let (preloaded_tx, preloaded_rx) = std::sync::mpsc::sync_channel(0);
@@ -184,7 +184,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         preloaded_rx.recv().map_err(|_| {
             std::io::Error::other("branch switch did not pause after preloading began")
         })?;
-        handles.apply_block(&racing, None)?;
+        handles.apply_block(&BlockPayload::from_local(racing))?;
         continue_tx
             .send(())
             .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;

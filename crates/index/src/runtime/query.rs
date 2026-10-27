@@ -174,7 +174,7 @@ pub(crate) struct CapabilityFloors {
 
 impl CapabilityFloors {
     /// Assigns `floor` to `capability`'s slot. `ScriptLive` has no coverage
-    /// floor — it reseeds from the UTXO view — so it stores nothing.
+    /// floor. It reseeds from an immutable artifact or retained history, so it stores nothing.
     pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup = floor,
@@ -344,6 +344,16 @@ impl DerivedIndexQueryEngine {
                 TxUnavailableCause::CompactFilterFailed(reason),
             ));
         }
+        // Scoped ScriptLive outage: no watermark can prove the live view while the
+        // seed/replay failure flag is set, so answer Unavailable before taking the
+        // chain-transition lock. Other capabilities never inspect this flag.
+        if required.contains(IndexCapability::ScriptLive)
+            && let Some(reason) = self.runtime.script_live_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptLiveUnavailable(reason),
+            ));
+        }
 
         // Live answers compose the index snapshot, the authoritative UTXO set,
         // and the applied tip. Apply mutates UTXO before publishing that tip,
@@ -410,6 +420,15 @@ impl DerivedIndexQueryEngine {
         {
             return Err(TxQueryError::Unavailable(
                 TxUnavailableCause::CompactFilterFailed(reason),
+            ));
+        }
+        // A ScriptLive outage published mid-query must not surface as `Retry`:
+        // the missing-watermark path below is unproven, not raced.
+        if required.contains(IndexCapability::ScriptLive)
+            && let Some(reason) = self.runtime.script_live_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptLiveUnavailable(reason),
             ));
         }
         let tip_after = self.applied_tip.load_full();

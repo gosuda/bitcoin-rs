@@ -2,6 +2,7 @@
 use super::*;
 use crate::assumeutxo::{DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL, HistoricalAdvance};
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
 use bitcoin_rs_storage::{FjallStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore};
@@ -50,7 +51,7 @@ fn open_persistent(
     active.durable_head = head_store;
     active.undo_store = Arc::new(KvUndoStore::new(store.clone()));
     active.block_body_store = Some(Arc::new(IndexedBlockBodyStore::new(store, files)));
-    active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)))?;
+    active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)), None)?;
     crate::recover_disconnect_marker(&active)?;
     Ok(Arc::new(active))
 }
@@ -137,9 +138,11 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
         fixture.blocks[2].block_hash(),
         3,
     )?;
-    active.begin_transition()?.connect(&child, None)?;
-    manager.step_historical(&fixture.blocks[0], None)?;
-    manager.step_historical(&fixture.blocks[1], None)?;
+    active
+        .begin_transition()?
+        .connect(&BlockPayload::from_local(child.clone()))?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
     let expected_stats = active.coin_stats.snapshot();
     let expected_tip = active
         .applied_tip_snapshot()
@@ -188,7 +191,7 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
         archived_extent
     );
     let events = active.chain_events.snapshot();
-    manager.step_historical(&fixture.blocks[2], None)?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     assert!(active.role().is_ordinary());
     assert_eq!(active.chain_events.snapshot(), events);
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
@@ -292,8 +295,8 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
     }?;
-    manager.step_historical(&fixture.blocks[0], None)?;
-    manager.step_historical(&fixture.blocks[1], None)?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
     let status = manager.status()?;
     let checkpoint = match status {
         AssumeUtxoDiskStatus::Validating {
@@ -321,7 +324,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     historical
         .lock_transition()?
         .into_transition()
-        .connect(&fixture.blocks[2], None)?;
+        .connect(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     let unaccepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
     assert_ne!(unaccepted_coins, accepted_coins);
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
@@ -330,7 +333,8 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         genesis: Network::Regtest.genesis_block_hash(),
     };
     for _ in 0..2 {
-        crate::checkpoint::write_checkpoint_from_dir_at(
+        // Historical root never mints: drop the witness, keep publication.
+        let _ = crate::checkpoint::write_checkpoint_from_dir_at(
             &data,
             config,
             &historical.block_tree,
@@ -412,7 +416,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
 
     // The checkpoint restored blocks 0..1.  Only the remaining archived suffix
     // is replayed before the historical role reaches the pinned base.
-    manager.step_historical(&fixture.blocks[2], None)?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -442,7 +446,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
         1,
     )?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(block, None)?;
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
     }
     let root = dir
         .path()
@@ -457,7 +461,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     // relying on permissions (which differ for elevated users and platforms).
     let blocker = generation.join("operator-backup");
     std::fs::create_dir(&blocker)?;
-    manager.step_historical(&fixture.blocks[2], None)?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -641,7 +645,8 @@ fn committed_snapshot_corruption_fails_closed_but_orphan_import_is_ignored() -> 
     let dir = tempfile::tempdir()?;
     // Import bytes without committing a root cannot activate a chainstate.
     crate::events::initialize_data_dir(dir.path())?;
-    crate::assumeutxo_snapshot::write_coins(dir.path(), &fixture.load()?.set, &fixture.pinned)?;
+    let _ =
+        crate::assumeutxo_snapshot::write_coins(dir.path(), &fixture.load()?.set, &fixture.pinned)?;
     let cold = open_persistent(dir.path(), &fixture.pinned)?;
     assert!(cold.applied_tip_snapshot().is_none());
     drop(cold);
@@ -758,7 +763,8 @@ fn crash_writer() -> TestResult {
             .collect::<Vec<_>>(),
     )?;
     if phase == "import" {
-        crate::assumeutxo_snapshot::write_coins(&dir, &fixture.load()?.set, &fixture.pinned)?;
+        let _ =
+            crate::assumeutxo_snapshot::write_coins(&dir, &fixture.load()?.set, &fixture.pinned)?;
         await_kill(&dir);
     }
     let checkpoint_phase = phase.starts_with("checkpoint-");
@@ -780,29 +786,31 @@ fn crash_writer() -> TestResult {
         fixture.blocks[2].block_hash(),
         3,
     )?;
-    active.begin_transition()?.connect(&child, None)?;
+    active
+        .begin_transition()?
+        .connect(&BlockPayload::from_local(child))?;
     for (height, block) in fixture.blocks.iter().enumerate() {
-        manager.step_historical(block, None)?;
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
         if checkpoint_phase && height == 0 {
             // Seed an accepted genesis checkpoint so the next production step
             // replaces an existing head reference at the kill boundary.
             let historical = manager.historical_chainstate().ok_or("missing history")?;
             let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&dir)?;
-            let crate::checkpoint::CheckpointWrite::Published { reference } =
-                crate::checkpoint::write_checkpoint_from_dir_at(
-                    &data,
-                    crate::checkpoint::headers::HeaderCheckpointConfig {
-                        network: Network::Regtest,
-                        genesis: Network::Regtest.genesis_block_hash(),
-                    },
-                    &historical.block_tree,
-                    &historical.utxo,
-                    &historical.coin_stats,
-                    historical.applied_tip_snapshot().as_deref(),
-                    bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
-                    bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
-                )?
-            else {
+            // Historical root never mints: drop the witness, keep the reference.
+            let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
+                &data,
+                crate::checkpoint::headers::HeaderCheckpointConfig {
+                    network: Network::Regtest,
+                    genesis: Network::Regtest.genesis_block_hash(),
+                },
+                &historical.block_tree,
+                &historical.utxo,
+                &historical.coin_stats,
+                historical.applied_tip_snapshot().as_deref(),
+                bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+                bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
+            )?;
+            let crate::checkpoint::CheckpointWrite::Published { reference } = write else {
                 return Err("missing genesis checkpoint".into());
             };
             let mut status = manager.status()?;
@@ -937,9 +945,11 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
         fixture.blocks[2].block_hash(),
         3,
     )?;
-    active.begin_transition()?.connect(&child, None)?;
+    active
+        .begin_transition()?
+        .connect(&BlockPayload::from_local(child.clone()))?;
     for block in &fixture.blocks {
-        manager.step_historical(block, None)?;
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
     }
     assert!(active.publish_checkpoint()?.is_some());
     let stats = active.coin_stats.snapshot();
@@ -1017,10 +1027,14 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
     }?;
-    manager.step_historical(&fixture.blocks[0], None)?;
+    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
     let mut invalid = fixture.blocks[1].clone();
     invalid.txs.clear();
-    assert!(manager.step_historical(&invalid, None).is_err());
+    assert!(
+        manager
+            .step_historical(&BlockPayload::from_local(invalid.clone()))
+            .is_err()
+    );
     assert!(active.is_closed_for_recovery());
     assert!(
         matches!(manager.status()?, AssumeUtxoDiskStatus::Validating { pending: Some(pending), .. } if pending.height == 1)
@@ -1079,9 +1093,13 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
                 .commit(Some(&prior), &next, &CommitRecords::default())?;
         }
         for block in &fixture.blocks[..2] {
-            manager.step_historical(block, None)?;
+            manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
         }
-        assert!(manager.step_historical(&fixture.blocks[2], None).is_err());
+        assert!(
+            manager
+                .step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))
+                .is_err()
+        );
         assert!(active.is_closed_for_recovery());
         let head = active.durable_head.load()?.ok_or("missing head")?;
         assert!(matches!(

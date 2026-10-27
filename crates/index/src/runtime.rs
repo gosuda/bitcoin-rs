@@ -44,8 +44,9 @@ use crate::query_api::{
 use bitcoin_rs_storage::{
     PrefixScanLimit,
     block_body::BlockBodyStore,
-    pruning::{HistoryAccess, HistoryUnavailable},
+    pruning::{HistoryAccess, HistoryLease, HistoryUnavailable},
 };
+use bitcoin_rs_utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
 
 use compact_str::CompactString;
 use std::sync::atomic::AtomicU64;
@@ -96,6 +97,7 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
+    script_live_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
 
@@ -110,6 +112,7 @@ impl DerivedIndexRuntime {
             wake_tx,
             failure_message: RwLock::new(None),
             compact_filter_failure: RwLock::new(None),
+            script_live_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
         }
     }
@@ -155,6 +158,31 @@ impl DerivedIndexRuntime {
         *self.compact_filter_failure.write() = Some(error.to_string().into());
         self.publish_leg(IndexCapabilities::COMPACT_FILTERS, ReconcileLeg::Forward);
         self.wake();
+    }
+
+    /// Scoped `ScriptLive` outage: history the seed or replay needs is gone.
+    /// The worker keeps running and every other capability keeps serving;
+    /// only `ScriptLive` queries answer `Unavailable`. Never publishes global
+    /// failure. Mirrors `fail_compact_filters`.
+    pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
+        tracing::error!(%error, "ScriptLive index unavailable; other indexes continue");
+        *self.script_live_failure.write() = Some(error.to_string().into());
+        self.publish_leg(IndexCapabilities::SCRIPT_LIVE, ReconcileLeg::Forward);
+        self.wake();
+    }
+
+    /// Clears a scoped `ScriptLive` outage: a usable seed artifact arrived,
+    /// a seed committed its watermark, or forward replay made durable
+    /// progress. A fresh `Pruned` refusal sets the flag again.
+    pub(crate) fn clear_script_live(&self) {
+        self.script_live_failure.write().take();
+    }
+
+    /// Reads the scoped `ScriptLive` outage message, if set.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn script_live_failure(&self) -> Option<CompactString> {
+        self.script_live_failure.read().clone()
     }
 
     /// Reads the wake revision.
@@ -484,6 +512,12 @@ pub struct DerivedIndexOpenSpec {
     #[expect(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
+    /// Worker-owned seed cell shared with the checkpoint publisher and the
+    /// post-start activation control. `None` when `ScriptLive` is disabled or
+    /// in tests that never offer a snapshot artifact; the seed dispatch then
+    /// falls back to genesis replay. The cell holds demand plus at most one
+    /// queued artifact and performs no I/O.
+    pub seed_slot: Option<SeedOfferCell>,
     /// Authoritative UTXO set used to seed and resolve the compact live view.
     /// Test-only open specs may leave this unset; live queries then fail closed.
     pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
@@ -660,10 +694,33 @@ struct Worker {
     /// and rebuild instead of a per-block rewind. `u32::MAX` means rewind
     /// at any depth (pre-cutover behavior).
     rollback_rebuild_cutover: u32,
-    /// Authoritative UTXO source for live-view seeding.
-    utxo: Option<bitcoin_rs_utxo::UtxoReader>,
-    /// Read role over the transition domain shared with apply and RPC reads.
-    chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    /// NOTE: the worker no longer holds the live UTXO view or the chain
+    /// transition handle. Seeding replays one immutable snapshot artifact
+    /// through `seed_script_live_stream`; live queries use the query
+    /// engine's own handles. There is no live-UTXO seed fallback.
+    /// Worker-owned seed cell cloned from the open spec. The worker takes,
+    /// wants, and rests demand here; publishers offer at most one queued
+    /// artifact. The cell lock covers pointer moves only, never I/O.
+    seed_slot: Option<SeedOfferCell>,
+    /// The one worker-owned active seed: an accepted snapshot artifact plus
+    /// the history pin covering its suffix. At most one bundle lives here
+    /// besides at most one queued cell artifact. Behind a mutex only so
+    /// `&self` worker methods can move it; the worker thread is the sole
+    /// accessor and the guard is never held across I/O.
+    seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
+}
+
+/// One worker-owned active seed: the exact accepted bytes plus the history
+/// pin, held locally across passes until committed, poisoned, discarded, or
+/// shut down.
+///
+/// `artifact` is `Some` while the seed has not yet committed its watermark;
+/// the outer `Ok` clears it (dropping the descriptor) and keeps `lease` for
+/// the first catch-up leg. `lease` is `None` until the worker requests it at
+/// take time, and while a stall waits on a deferred grant.
+pub(crate) struct SeedBundle {
+    pub(crate) artifact: Option<VerifiedSnapshotArtifact>,
+    pub(crate) lease: Option<HistoryLease>,
 }
 
 /// Uncommitted contiguous rows based on one unchanged durable watermark.
@@ -786,12 +843,11 @@ pub enum DerivedIndexWorkerError {
     /// A capability requiring bodies was enabled without a body store.
     #[error("txindex worker: body store missing")]
     NoBodyStore,
-    /// `ScriptLive` was enabled without the authoritative UTXO view.
-    #[error("txindex worker: authoritative UTXO view missing for ScriptLive")]
-    MissingUtxo,
-    /// `ScriptLive` was enabled without the chain transition authority.
-    #[error("txindex worker: chain transition authority missing for ScriptLive")]
-    MissingChainTransition,
+    /// The `ScriptLive` history the seed or replay needs is pruned. Scoped
+    /// outage only: the worker keeps running, the flag marks the capability
+    /// unavailable, and every other capability keeps serving.
+    #[error("txindex worker: ScriptLive history pruned; seed or replay unavailable")]
+    ScriptLiveHistoryPruned,
     /// A rewind needed an undo record that is missing or unreadable.
     #[error("txindex worker: undo record missing or unreadable at height {height}, hash {hash}")]
     UndoUnavailable {
@@ -834,3 +890,7 @@ mod supervisor_tests;
 #[cfg(all(test, feature = "fjall"))]
 #[expect(clippy::expect_used, clippy::panic)]
 mod recovery_tests;
+
+#[cfg(all(test, feature = "fjall"))]
+#[expect(clippy::expect_used, clippy::panic)]
+mod seed_paused_tests;

@@ -13,10 +13,10 @@ pub use bitcoin_rs_chainstate::WindowApplyDisposition;
 pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_primitives::Block;
+use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
-use bytes::Bytes;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -79,7 +79,7 @@ pub trait SyncChain: Send + Sync {
     }
 
     /// Validates a requested historical body through the chainstate owner.
-    fn connect_historical(&self, _block: &Block, _body: Bytes) -> Result<(), SyncChainError> {
+    fn connect_historical(&self, _payload: &BlockPayload) -> Result<(), SyncChainError> {
         Err("historical validation is not configured".into())
     }
     /// Network the applied chain validates against.
@@ -132,13 +132,9 @@ pub trait SyncChain: Send + Sync {
     /// (apply-side batch policy).
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
-    /// Commits `blocks` in order as one chain transition. `Ok(n)` = all `n`
+    /// Commits `payloads` in order as one chain transition. `Ok(n)` = all `n`
     /// committed and settled.
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        bodies: &[Bytes],
-    ) -> Result<usize, WindowCommitError>;
+    fn commit_window(&self, payloads: &[BlockPayload]) -> Result<usize, WindowCommitError>;
 
     /// Moves the applied chain onto `target`'s branch. `staged_body`
     /// resolves connect-side bodies from bounded staging; `connected_body`
@@ -151,7 +147,7 @@ pub trait SyncChain: Send + Sync {
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, Bytes)>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError>;
 }

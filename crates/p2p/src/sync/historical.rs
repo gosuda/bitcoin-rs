@@ -85,10 +85,7 @@ impl BlockSync {
                 self.request_historical(height, Instant::now());
                 return;
             };
-            if let Err(error) = self
-                .chain
-                .connect_historical(&staged.block, staged.serialized)
-            {
+            if let Err(error) = self.chain.connect_historical(staged.payload()) {
                 tracing::warn!(%error, "historical validation stopped");
                 self.historical.lock().clear();
                 return;
@@ -203,7 +200,7 @@ impl BlockSync {
     /// Consumes owned historical bodies; returns foreground deliveries intact.
     pub(super) fn receive_historical(&self, inbound: InboundBlock) -> Option<InboundBlock> {
         let _work = self.historical_work.lock();
-        let hash = inbound.block.block_hash().0;
+        let hash = inbound.payload().block().block_hash().0;
         let Some(source) = inbound.source else {
             return Some(inbound);
         };
@@ -214,7 +211,7 @@ impl BlockSync {
             return None;
         }
         let now = Instant::now();
-        if let Err(error) = self.chain.check_body_binding(&inbound.block) {
+        if let Err(error) = self.chain.check_body_binding(inbound.payload().block()) {
             tracing::warn!(%error, "historical body rejected");
             let mut historical = self.historical.lock();
             historical.window.reject_delivery(hash, Some(source), now);
@@ -229,11 +226,11 @@ impl BlockSync {
                 next_expected,
                 ..
             } = &mut *historical;
+            let _ = inbound.forward_credit;
             match stager.insert(
                 hash,
                 *next_expected,
-                inbound.block,
-                inbound.serialized,
+                inbound.into_payload(),
                 Some(source),
                 now,
             ) {

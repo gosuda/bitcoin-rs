@@ -82,7 +82,9 @@ fn reopen(config: NodeConfig) -> Result<NodeState> {
 
 fn apply_genesis(state: &NodeState) -> Result<()> {
     state
-        .apply_block(&Network::Regtest.genesis_block())
+        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            Network::Regtest.genesis_block(),
+        ))
         .map(|_| ())
         .map_err(|error| anyhow!("genesis apply failed: {error}"))
 }
@@ -199,7 +201,9 @@ fn mine_and_apply(
         .ok_or_else(|| anyhow!("block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state
-        .apply_block(&block)
+        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            block.clone(),
+        ))
         .map_err(|error| anyhow!("apply failed at height {height}: {error}"))?;
     Ok(block)
 }

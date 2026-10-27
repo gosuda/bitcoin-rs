@@ -242,7 +242,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
     );
 
     for block in &blocks[..4] {
-        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+        let mut inbound = crate::InboundBlock::from_local(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -291,7 +291,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight() -> TestResult {
     let _ = next_getdata(&winner_rx)?;
     let predecessor = current_source(&peers, winner);
     for block in &blocks[..4] {
-        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+        let mut inbound = crate::InboundBlock::from_local(block.clone());
         inbound.source = Some(predecessor);
         blocks_tx.send(inbound)?;
     }
@@ -441,7 +441,7 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() 
         std::vec![blocks[0].block_hash(), blocks[1].block_hash()]
     );
 
-    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
+    blocks_tx.send(crate::InboundBlock::from_local(blocks[1].clone()))?;
     sync.tick();
     {
         let scheduler = sync.scheduler.lock();
@@ -469,7 +469,7 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() 
         std::vec![blocks[0].block_hash()]
     );
 
-    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     sync.tick();
     let applied_height = applied_tip

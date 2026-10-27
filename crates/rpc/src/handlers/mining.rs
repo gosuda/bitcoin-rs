@@ -9,7 +9,8 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Block, ConsensusDecode, Header, Network, Tx, Txid, deserialize};
+use bitcoin_rs_primitives::{BlockPayload, Header, Network, Tx, Txid, deserialize};
+use bytes::Bytes;
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
@@ -83,22 +84,20 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         }
     }
     let hex = required_str(params, 0, "block hex is required")?;
-    let (block, bytes) = decode_submitted_block(hex)?;
-    match control.submit_block_with_bytes(block, bytes) {
+    let (payload, _) = decode_submitted_block(hex)?;
+    match control.submit_block(payload) {
         Ok(result) => Ok(render_validation_result(result)),
         Err(error) => Err(map_mining_control_error(error)),
     }
 }
 
-fn decode_submitted_block(hex: &str) -> Result<(Block, Vec<u8>), RpcError> {
-    let mut bytes = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
-    // See the API-15 contract for DecodeHexBlk compatibility behavior.
-    let mut reader: &[u8] = &bytes;
-    let block = <Block as ConsensusDecode>::consensus_decode(&mut reader)
-        .map_err(|_| block_decode_failed())?;
-    let consumed = bytes.len() - reader.len();
-    bytes.truncate(consumed);
-    Ok((block, bytes))
+fn decode_submitted_block(hex: &str) -> Result<(BlockPayload, usize), RpcError> {
+    let raw = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
+    // See the API-15 contract for DecodeHexBlk compatibility behavior:
+    // one shared decode keeps the consumed prefix and discards the remainder.
+    let (payload, consumed) =
+        BlockPayload::from_prefix(Bytes::from(raw)).map_err(|_| block_decode_failed())?;
+    Ok((payload, consumed))
 }
 
 fn block_decode_failed() -> RpcError {
@@ -480,9 +479,9 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             .ok_or_else(|| {
                 RpcError::InvalidType("Missing data String key for proposal".to_owned())
             })?;
-        let (block, _) = decode_submitted_block(data)?;
+        let (payload, _) = decode_submitted_block(data)?;
         return Ok(BlockTemplateRequest {
-            mode: BlockTemplateMode::Proposal(block),
+            mode: BlockTemplateMode::Proposal(payload.into_block()),
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
@@ -766,6 +765,7 @@ fn map_mining_control_error(error: MiningControlError) -> RpcError {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
+    use bitcoin_rs_primitives::Block;
     use core::sync::atomic::Ordering;
 
     use bitcoin_rs_mining::{

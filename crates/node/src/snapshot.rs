@@ -21,6 +21,7 @@ use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::{
     CoreV2WriteReport, SnapshotError, SnapshotLimits, read_and_verify, write_core_v2,
 };
+use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
@@ -35,6 +36,10 @@ pub(crate) struct SnapshotControl {
     followers: ChainFollowers,
     data_dir: PathBuf,
     network: Network,
+    // Post-start ScriptLive seed demand. `None` when ScriptLive is disabled at
+    // composition time; the cell itself is worker-owned demand shared with the
+    // publisher and the worker spec. This handle never mints, only offers.
+    seed_offer: Option<SeedOfferCell>,
     // One imported UTXO set may be materialized at a time. This is a resource
     // permit, not a second lifecycle state. No chain write lock spans decoding.
     import: Mutex<()>,
@@ -240,6 +245,7 @@ impl SnapshotControl {
         followers: ChainFollowers,
         data_dir: PathBuf,
         network: Network,
+        seed_offer: Option<SeedOfferCell>,
     ) -> Self {
         Self {
             manager,
@@ -247,6 +253,7 @@ impl SnapshotControl {
             followers,
             data_dir,
             network,
+            seed_offer,
             import: Mutex::new(()),
             export: Mutex::new(()),
         }
@@ -500,7 +507,15 @@ impl SnapshotControl {
         base_hash: bitcoin_rs_primitives::Hash256,
         height: u32,
     ) -> Result<(), SnapshotImportError> {
-        let change = self.followers.begin_mempool_change()?;
+        // Take-and-drop on this early exit too: every return from `activate`
+        // leaves no staged witness behind, so none can pair with a later call.
+        let change = match self.followers.begin_mempool_change() {
+            Ok(change) => change,
+            Err(error) => {
+                self.drop_activation_witness();
+                return Err(SnapshotImportError::Admission(error));
+            }
+        };
         // The generation fence serializes with in-flight admission and prevents
         // new commits. Drop the pool read guard before costly activation work.
         if self
@@ -514,8 +529,10 @@ impl SnapshotControl {
                 && let Err(error) = change.finish()
             {
                 self.chainstate.fail_closed_for_recovery();
+                self.drop_activation_witness();
                 return Err(SnapshotImportError::Settlement(error));
             }
+            self.drop_activation_witness();
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
         let result = self.manager.activate_snapshot_state(set, base_hash, height);
@@ -527,6 +544,9 @@ impl SnapshotControl {
             && let Err(settlement) = change.finish()
         {
             self.chainstate.fail_closed_for_recovery();
+            // Settlement failed after (or without) manager success: nothing may
+            // be offered, and no staged witness may survive to a later call.
+            self.drop_activation_witness();
             return match result {
                 Err(activation) => Err(SnapshotImportError::ActivationAndSettlement {
                     activation,
@@ -535,7 +555,82 @@ impl SnapshotControl {
                 Ok(()) => Err(SnapshotImportError::Settlement(settlement)),
             };
         }
-        result.map_err(SnapshotImportError::Activation)
+        if let Err(activation) = result {
+            self.drop_activation_witness();
+            Err(SnapshotImportError::Activation(activation))
+        } else {
+            // Full success only: manager activation plus followers plus
+            // settlement. A later restart mints from the durable Validating
+            // state instead, so nothing is offered on any other path.
+            self.offer_activation_seed(base_hash);
+            Ok(())
+        }
+    }
+
+    /// Takes and drops any staged activation witness. Every activation error,
+    /// settlement, abort, and interruption path calls this so a stale witness
+    /// can never pair with a later activation call.
+    fn drop_activation_witness(&self) {
+        let _ = self.manager.take_pending_activation_witness();
+    }
+
+    /// C4 offer: after full activation success, seals the committed archive
+    /// `coins.dat` for `base_hash` with the staged witness and offers it into
+    /// the shared seed cell. Skips without any file I/O when no cell is
+    /// installed or the cell is not wanted; a length mismatch or I/O error
+    /// drops the opened file and leaves the cell untouched.
+    fn offer_activation_seed(&self, base_hash: bitcoin_rs_primitives::Hash256) {
+        let Some(witness) = self.manager.take_pending_activation_witness() else {
+            return;
+        };
+        Self::offer_witness_file(
+            self.seed_offer.as_ref(),
+            &self.data_dir,
+            &witness,
+            base_hash,
+        );
+    }
+
+    /// Shared pre-check/open/check/seal/offer step. Pure pointer moves happen
+    /// inside the cell; no lock is held across open, reads, or sealing.
+    fn offer_witness_file(
+        seed_offer: Option<&SeedOfferCell>,
+        data_dir: &Path,
+        witness: &V4Witness,
+        base_hash: bitcoin_rs_primitives::Hash256,
+    ) {
+        let Some(cell) = seed_offer else {
+            return;
+        };
+        if !cell.is_wanted() {
+            return;
+        }
+        let path = data_dir
+            .join("assumeutxo")
+            .join(base_hash.to_string())
+            .join("coins.dat");
+        // Same hardened opener as snapshot inputs: O_NONBLOCK plus a
+        // regular-file check, so a planted FIFO can neither hang activation
+        // nor be seeded. Rejection drops the witness with the cell untouched.
+        let file = match open_regular_input(&path) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let len = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => return,
+        };
+        if len != witness.byte_len() {
+            return;
+        }
+        let artifact = VerifiedSnapshotArtifact::seal(
+            file,
+            *witness,
+            SeedProvenance::AssumeUtxoArchive {
+                base: base_hash.to_le_bytes(),
+            },
+        );
+        let _ = cell.offer(artifact);
     }
 
     pub(crate) fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
@@ -669,7 +764,9 @@ mod tests {
         config.data_dir = dir.join("node");
         config.p2p.listen.clear();
         let state = crate::state::NodeState::open(config, None)?;
-        state.apply_block(&Network::Regtest.genesis_block())?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            Network::Regtest.genesis_block(),
+        ))?;
         let raw: Vec<String> = serde_json::from_str(include_str!(
             "../../utxo/tests/fixtures/core-v2/blocks200.json"
         ))?;
