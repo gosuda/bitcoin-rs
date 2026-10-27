@@ -190,6 +190,13 @@
                 "reachable": false,
                 "proxy": "",
                 "proxy_randomize_credentials": false
+              },
+              {
+                "name": "i2p",
+                "limited": true,
+                "reachable": false,
+                "proxy": "",
+                "proxy_randomize_credentials": false
               }
             ],
             "relayfee": 1e-05,
