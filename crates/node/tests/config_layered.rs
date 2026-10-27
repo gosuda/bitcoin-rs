@@ -11,6 +11,71 @@ use bitcoin_rs_primitives::Network;
 use bitcoin_rs_rpc::zmq::ZmqTopic;
 
 #[test]
+fn public_listener_is_opt_in_and_budgets_resolve_independently() -> Result<()> {
+    let defaults = NodeConfig::default_for_network(Network::Regtest);
+    assert_eq!(defaults.rpc.public_bind, None);
+    assert_eq!(defaults.rpc.max_connections, 128);
+    assert_eq!(defaults.rpc.public_max_connections, 128);
+    let file: UserConfig = toml::from_str(
+        "public_bind = '0.0.0.0:8080'\nrpc_max_connections = 8\npublic_max_connections = 32",
+    )?;
+    let mut environment = UserConfig::default();
+    environment.apply_env(
+        "BITCOIN_RS_PUBLIC_BIND",
+        std::ffi::OsStr::new("127.0.0.1:9090"),
+    )?;
+    environment.apply_env(
+        "BITCOIN_RS_PUBLIC_MAX_CONNECTIONS",
+        std::ffi::OsStr::new("16"),
+    )?;
+    let config = resolve(&[&file, &environment])?;
+    assert_eq!(config.rpc.public_bind, Some("127.0.0.1:9090".parse()?));
+    assert_eq!(config.rpc.max_connections, 8);
+    assert_eq!(config.rpc.public_max_connections, 16);
+    for invalid in [
+        "rpc_max_connections = 0",
+        "public_max_connections = 0",
+        "rpc_bind = '127.0.0.1:8332'\npublic_bind = '127.0.0.1:8332'",
+    ] {
+        let layer: UserConfig = toml::from_str(invalid)?;
+        assert!(resolve(&[&layer]).is_err(), "{invalid}");
+    }
+    Ok(())
+}
+
+#[test]
+fn public_listener_bind_validation_handles_wildcards_and_ephemeral_ports() -> Result<()> {
+    for (management, public, valid) in [
+        ("127.0.0.1:8332", "127.0.0.1:8332", false),
+        ("0.0.0.0:8332", "127.0.0.1:8332", false),
+        ("127.0.0.1:8332", "0.0.0.0:8332", false),
+        ("[::]:8332", "[::1]:8332", false),
+        ("[::1]:8332", "[::]:8332", false),
+        ("127.0.0.1:8332", "127.0.0.2:8332", true),
+        ("127.0.0.1:8332", "127.0.0.1:8080", true),
+        ("0.0.0.0:0", "0.0.0.0:0", true),
+        ("127.0.0.1:0", "127.0.0.1:8332", true),
+        ("127.0.0.1:8332", "127.0.0.1:0", true),
+    ] {
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.rpc.bind = management.parse()?;
+        config.rpc.public_bind = Some(public.parse()?);
+        config.rpc.auth = bitcoin_rs_node::Auth::basic("operator", "secret");
+        let result = config.validate();
+        assert_eq!(result.is_ok(), valid, "{management}, {public}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains("must not overlap"), "{error}");
+        }
+    }
+    // Both sockets stay bound: the second port-zero bind must select a
+    // different available port rather than reuse the first listener's port.
+    let management = std::net::TcpListener::bind("0.0.0.0:0")?;
+    let public = std::net::TcpListener::bind("0.0.0.0:0")?;
+    assert_ne!(management.local_addr()?.port(), public.local_addr()?.port());
+    Ok(())
+}
+
+#[test]
 fn silent_payments_toml_overlay_preserves_explicit_disable() -> Result<()> {
     assert!(
         !NodeConfig::default_for_network(Network::Regtest)
@@ -533,33 +598,6 @@ p2p_noban = ["192.0.2.99/24", "::1"]
             .apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new("bad-subnet"))
             .is_err()
     );
-    Ok(())
-}
-
-#[test]
-fn rpc_public_bind_defaults_none_and_resolves_across_layers() -> Result<()> {
-    let default_config = resolve(&[])?;
-    assert_eq!(default_config.rpc.public_bind, None);
-
-    let toml_layer: UserConfig = toml::from_str("rpc_public_bind = \"127.0.0.1:8334\"\n")?;
-    let config = resolve(&[&toml_layer])?;
-    let expected = std::net::SocketAddr::from(([127, 0, 0, 1], 8334));
-    assert_eq!(config.rpc.public_bind, Some(expected));
-
-    let mut env_layer = UserConfig::default();
-    env_layer.apply_env(
-        "BITCOIN_RS_RPC_PUBLIC_BIND",
-        std::ffi::OsStr::new("127.0.0.1:8335"),
-    )?;
-    let config = resolve(&[&toml_layer, &env_layer])?;
-    let expected_env = std::net::SocketAddr::from(([127, 0, 0, 1], 8335));
-    assert_eq!(config.rpc.public_bind, Some(expected_env));
-
-    // Equality with rpc.bind is rejected.
-    let conflicting: UserConfig =
-        toml::from_str("rpc_bind = \"127.0.0.1:8332\"\nrpc_public_bind = \"127.0.0.1:8332\"\n")?;
-    let err = resolve(&[&conflicting]);
-    assert!(err.is_err(), "conflicting binds must fail validation");
     Ok(())
 }
 

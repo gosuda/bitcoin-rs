@@ -1072,36 +1072,3 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
         "a field no layer set still fills from the winning profile"
     );
 }
-
-#[test]
-fn rpc_public_bind_rejects_equality_with_rpc_bind() {
-    let bind = SocketAddr::from(([127, 0, 0, 1], 8332));
-    let conflicting = UserConfig {
-        rpc: RpcOverrides {
-            bind: Some(bind),
-            public_bind: Some(bind),
-            ..RpcOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&conflicting]) else {
-        panic!("public RPC bind equal to rpc.bind must fail validation");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("public RPC bind must not equal rpc.bind"),
-        "{error}"
-    );
-
-    let separate = SocketAddr::from(([127, 0, 0, 1], 8334));
-    let valid = UserConfig {
-        rpc: RpcOverrides {
-            bind: Some(bind),
-            public_bind: Some(separate),
-            ..RpcOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    assert!(super::resolve(&[&valid]).is_ok());
-}

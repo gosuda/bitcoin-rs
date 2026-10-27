@@ -412,7 +412,12 @@ pub struct P2pConfig {
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub bind: SocketAddr,
+    /// Opt-in separate public REST/Esplora listener.
     pub public_bind: Option<SocketAddr>,
+    /// Connection budget of the shared or management listener.
+    pub max_connections: usize,
+    /// Independent connection budget of the public listener.
+    pub public_max_connections: usize,
     pub rest: bool,
     /// Optional experimental keyless BIP352 read service, off by default.
     pub silent_payments: bool,
@@ -584,6 +589,8 @@ impl NodeConfig {
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
                 public_bind: settings.rpc.public_bind,
+                max_connections: settings.rpc.max_connections.unwrap_or(128),
+                public_max_connections: settings.rpc.public_max_connections.unwrap_or(128),
                 rest: settings.rpc.rest.unwrap_or(false),
                 silent_payments: settings.rpc.silent_payments.unwrap_or(false),
                 compressed_transactions: settings.rpc.compressed_transactions.unwrap_or(false),
@@ -669,15 +676,29 @@ impl NodeConfig {
                 "RPC password must not use the publicly known legacy default"
             );
         }
-        if let Some(public_bind) = self.rpc.public_bind {
-            anyhow::ensure!(
-                public_bind != self.rpc.bind,
-                "public RPC bind must not equal rpc.bind"
-            );
-        }
         anyhow::ensure!(
             self.rpc.bind.ip().is_loopback() || self.rpc.auth != Auth::GeneratedCookie,
             "non-loopback RPC bind requires explicit credentials (--rpc-password or --rpc-cookie)"
+        );
+        anyhow::ensure!(
+            self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0,
+            "RPC and public connection limits must be positive"
+        );
+        anyhow::ensure!(
+            self.rpc.public_bind.is_none_or(|address| {
+                let management = self.rpc.bind;
+                // Port zero asks the OS for an unused port. Distinct
+                // concrete IPs may share a port; a same-family wildcard
+                // overlaps every concrete address on that port.
+                // Cross-family dual-stack conflicts remain OS-checked at bind.
+                address.port() == 0
+                    || address.port() != management.port()
+                    || (address.ip() != management.ip()
+                        && (address.is_ipv4() != management.is_ipv4()
+                            || (!address.ip().is_unspecified()
+                                && !management.ip().is_unspecified())))
+            }),
+            "public-bind and rpc-bind must not overlap"
         );
         anyhow::ensure!(
             self.storage.backend.is_compiled_in(),

@@ -255,16 +255,16 @@ fn describe_node_metrics() {
         "pre-coalescing planned logical write bytes by index row family"
     );
     metrics::describe_gauge!(
-        "node.rpc.connections",
-        "concurrent RPC connections by surface"
+        "rpc.connections.active",
+        "admitted live HTTP connections, by listener surface"
     );
     metrics::describe_counter!(
-        "node.rpc.connection_rejections_total",
-        "RPC connection rejections by surface and reason"
+        "rpc.connections.rejected_total",
+        "HTTP connection budget refusals, by listener surface"
     );
     metrics::describe_histogram!(
-        "node.rpc.request_seconds",
-        "RPC request duration in seconds by surface"
+        "rpc.http.request_seconds",
+        "HTTP time from complete request head through response, by listener surface and route family"
     );
 }
 

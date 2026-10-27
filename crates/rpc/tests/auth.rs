@@ -427,7 +427,6 @@ fn spawn_with_rest(
         max_connections: 8,
         idle_timeout: Duration::from_secs(2),
         rest_enabled,
-        role: bitcoin_rs_rpc::ListenerRole::All,
     };
     let shutdown = Arc::new(AtomicBool::new(false));
     thread::spawn(move || {

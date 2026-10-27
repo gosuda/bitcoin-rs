@@ -19,7 +19,7 @@ fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> 
             &handler,
             enabled,
             Duration::from_secs(2),
-            ListenerRole::All,
+            RpcSurface::Shared,
         )
     });
     client.write_all(request)?;
@@ -524,7 +524,7 @@ fn oversized_unterminated_head_is_rejected_before_newline() -> std::io::Result<(
                 &handler,
                 false,
                 core::time::Duration::from_secs(5),
-                ListenerRole::All,
+                RpcSurface::Shared,
             )
         });
 
@@ -560,7 +560,7 @@ fn exact_request_head_budget_is_accepted() -> std::io::Result<()> {
             &handler,
             false,
             core::time::Duration::from_secs(5),
-            ListenerRole::All,
+            RpcSurface::Shared,
         )
     });
 
@@ -640,7 +640,7 @@ fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
             &handler,
             false,
             core::time::Duration::from_secs(1),
-            ListenerRole::All,
+            RpcSurface::Shared,
         )
     });
 
@@ -1210,7 +1210,7 @@ fn exchange(request: &[u8]) -> io::Result<Exchange> {
             &Handler::new(Arc::new(Context::new())),
             false,
             Duration::from_secs(30),
-            ListenerRole::All,
+            RpcSurface::Shared,
         )
     });
     let started = Instant::now();
@@ -1455,7 +1455,7 @@ fn authorized_request_proceeds_to_body_framing() -> io::Result<()> {
             &Handler::new(Arc::new(Context::new())),
             false,
             Duration::from_secs(30),
-            ListenerRole::All,
+            RpcSurface::Shared,
         )
     });
     let mut request = json_rpc_head(Some(GOOD_TOKEN), 16);
@@ -1513,7 +1513,7 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
         errors.push(io::Error::from_raw_os_error(10024)); // WSAEMFILE
         let mut errors = errors.into_iter();
         let start = Instant::now();
-        server.serve_accept_loop(&stop.into(), |listener| {
+        server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
             if let Some(error) = errors.next() {
                 return Err(error);
             }
@@ -1544,7 +1544,7 @@ fn repeated_accept_errors_back_off_and_observe_shutdown() -> io::Result<()> {
     let stop = Arc::clone(&shutdown);
     let start = Instant::now();
     let mut attempts = 0;
-    server.serve_accept_loop(&shutdown.into(), |_| {
+    server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
         attempts += 1;
         if attempts == 3 {
             stop.store(true, Ordering::Release);
@@ -1562,7 +1562,7 @@ fn invalid_listener_errors_are_returned() -> io::Result<()> {
         let server = accept_test_server()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut attempts = 0;
-        let result = server.serve_accept_loop(&shutdown.into(), |_| {
+        let result = server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
             attempts += 1;
             Err(kind.into())
         });
@@ -1582,24 +1582,23 @@ impl TestServerHandle {
     fn spawn(
         auth: &Arc<Auth>,
         ctx: &Arc<Context>,
-        role: ListenerRole,
+        role: RpcSurface,
         max_conns: usize,
         idle_timeout: Duration,
         rest_enabled: bool,
     ) -> io::Result<Self> {
-        let server = RpcServer::bind_with_role(
+        let server = RpcServer::bind(
             "127.0.0.1:0",
             Arc::clone(auth),
             Arc::new(Handler::new(Arc::clone(ctx))),
             max_conns,
             idle_timeout,
             rest_enabled,
-            role,
         )?;
         let addr = server.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let sd = Arc::clone(&shutdown);
-        let handle = thread::spawn(move || server.serve_with_shutdown(sd));
+        let handle = thread::spawn(move || server.serve_surface_with_shutdown(sd, role));
         Ok(Self {
             addr,
             shutdown,
@@ -1638,14 +1637,14 @@ fn assert_public_role_routes(public_addr: SocketAddr) -> io::Result<()> {
         "public POST / with auth must be 404: {resp}"
     );
 
-    // Public REST -> 404
+    // Public REST follows the server's REST setting.
     let resp = send_req(
         public_addr,
         b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
     assert!(
-        resp.starts_with("HTTP/1.1 404 Not Found"),
-        "public REST must be 404: {resp}"
+        resp.starts_with("HTTP/1.1 200 OK"),
+        "public REST must be 200: {resp}"
     );
 
     // Public Esplora GET -> 200
@@ -1714,14 +1713,14 @@ fn assert_management_role_routes(mgmt_addr: SocketAddr) -> io::Result<()> {
         "management JSON-RPC with auth must be 200: {resp}"
     );
 
-    // Management REST -> 200
+    // Management REST is outside the JSON-RPC-only surface.
     let resp = send_req(
         mgmt_addr,
         b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )?;
     assert!(
-        resp.starts_with("HTTP/1.1 200 OK"),
-        "management REST must be 200: {resp}"
+        resp.starts_with("HTTP/1.1 404 Not Found"),
+        "management REST must be 404: {resp}"
     );
     Ok(())
 }
@@ -1734,7 +1733,7 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
     let public_server = TestServerHandle::spawn(
         &auth,
         &ctx,
-        ListenerRole::Public,
+        RpcSurface::Public,
         16,
         Duration::from_secs(5),
         true,
@@ -1742,7 +1741,7 @@ fn listener_role_filtering_and_public_post_is_404_not_401() -> io::Result<()> {
     let mgmt_server = TestServerHandle::spawn(
         &auth,
         &ctx,
-        ListenerRole::Management,
+        RpcSurface::Management,
         16,
         Duration::from_secs(5),
         true,
@@ -1890,7 +1889,7 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     let public_server = TestServerHandle::spawn(
         &auth,
         &ctx,
-        ListenerRole::Public,
+        RpcSurface::Public,
         4,
         Duration::from_secs(30),
         false,
@@ -1898,7 +1897,7 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     let mgmt_server = TestServerHandle::spawn(
         &auth,
         &ctx,
-        ListenerRole::Management,
+        RpcSurface::Management,
         16,
         Duration::from_secs(30),
         false,
@@ -1918,19 +1917,19 @@ fn public_held_keep_alive_sockets_exhaust_only_public_pool_and_broadcast_cross_q
     );
     assert!(fifth_resp.contains("busy"), "503 body must be busy");
 
-    // Pool-full metric counter is incremented with closed labels surface=esplora_public, reason=pool_full
+    // Pool-full rejection uses the shared RPC metric with bounded labels.
     let scrape = metrics_handle.render();
     assert!(
-        scrape.contains("node_rpc_connection_rejections_total"),
-        "scrape must contain node_rpc_connection_rejections_total: {scrape}"
+        scrape.contains("rpc_connections_rejected_total"),
+        "scrape must contain rpc_connections_rejected_total: {scrape}"
     );
     assert!(
         scrape.contains(r#"reason="pool_full""#),
         "scrape must contain reason=\"pool_full\": {scrape}"
     );
     assert!(
-        scrape.contains(r#"surface="esplora_public""#),
-        "scrape must contain surface=\"esplora_public\": {scrape}"
+        scrape.contains(r#"surface="public""#),
+        "scrape must contain surface=\"public\": {scrape}"
     );
 
     // Concurrently, management listener serves authenticated JSON-RPC getblockcount as 200 OK

@@ -231,16 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn rpc_public_bind_resolves_from_cli_and_conf() {
-        let config = resolved(&["bitcoin-rs", "--rpc-public-bind=127.0.0.1:8336"], &[]);
+    fn public_bind_resolves_from_cli_and_config() {
+        let config = resolved(&["bitcoin-rs", "--public-bind=127.0.0.1:8336"], &[]);
         assert_eq!(
             config.rpc.public_bind,
             Some(SocketAddr::from(([127, 0, 0, 1], 8336)))
         );
 
         let config = load_file(
-            "--bitcoin-conf",
-            "rpcpublicbind=127.0.0.1:8337\n",
+            "--config",
+            "public_bind = '127.0.0.1:8337'\n",
             &[],
             std::iter::empty(),
         )
@@ -322,6 +322,39 @@ mod tests {
                 password: "runtime-only-secret".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn public_listener_cli_overrides_environment_and_file() -> anyhow::Result<()> {
+        let config = load_file(
+            "--config",
+            "public_bind = '127.0.0.1:8080'\nrpc_max_connections = 4\npublic_max_connections = 32\n",
+            &[
+                "--public-bind",
+                "0.0.0.0:9090",
+                "--public-max-connections",
+                "16",
+            ],
+            [
+                (
+                    OsString::from("BITCOIN_RS_PUBLIC_BIND"),
+                    OsString::from("127.0.0.1:8081"),
+                ),
+                (
+                    OsString::from("BITCOIN_RS_RPC_MAX_CONNECTIONS"),
+                    OsString::from("8"),
+                ),
+                (
+                    OsString::from("BITCOIN_RS_PUBLIC_MAX_CONNECTIONS"),
+                    OsString::from("24"),
+                ),
+            ]
+            .into_iter(),
+        )?;
+        assert_eq!(config.rpc.public_bind, Some("0.0.0.0:9090".parse()?));
+        assert_eq!(config.rpc.max_connections, 8);
+        assert_eq!(config.rpc.public_max_connections, 16);
+        Ok(())
     }
 
     #[test]

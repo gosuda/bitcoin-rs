@@ -29,14 +29,10 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`,
-`node.sync.no_progress_ticks{reason}` in `crates/p2p/src/sync.rs`,
-and `node.rpc.connection_rejections_total{surface,reason}` where `surface` in
-`{json_rpc, esplora_public}` and `reason` in
-`{pool_full, per_source_limit}` for the pattern), the closed surface labels of
-`node.rpc.connections{surface}` (`surface` in `{json_rpc, esplora_public}`) and
-`node.rpc.request_seconds{surface}` (`surface` in
-`{json_rpc, rest, esplora_public, esplora_backend}`),
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs` and
+`node.sync.no_progress_ticks{reason}` in `crates/p2p/src/sync.rs`
+for the pattern), the closed RPC `surface` (`shared`, `management`, `public`)
+and `route` labels of the connection-isolation signals documented below,
 the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
 `family` in `{tx_lookup, script_history, script_live, headers, filters}`.
@@ -180,6 +176,22 @@ early-multi rows were not valid binding comparisons (all 60 s first refusals
 arrived after the corpus was fully requested; 30 s rounds 1-2 had no refusal).
 Synthetic regtest only (early/small and modern/large-OP_RETURN corpora, 3 runs
 per arm); no mainnet, p99, or whole-node claim.
+
+RPC connection isolation (API-34/WF-02) exposes `rpc.connections.active`
+(gauge, admitted live workers), `rpc.connections.rejected_total` (counter,
+connection-budget refusals), and `rpc.http.request_seconds` (histogram,
+complete request head through body read, authentication and response write,
+including subsequent failures; excludes idle/head acquisition). The closed `surface`
+label is `shared`, `management`, or `public`; the histogram's closed `route`
+label is `json_rpc`, `rest`, `esplora_public`, `esplora_backend`, or `not_found`.
+`route` records classification before the listener's route policy is checked;
+it includes refused routes. For example, `surface=management, route=rest`
+records a REST request rejected by the management listener with 404.
+Values aggregate bindings of the same surface. Operators can distinguish
+public saturation from management pressure and compare classified request
+latency. Occupancy updates follow the existing connection permit lifetime,
+including spawn failure and shutdown; no second admission counter is added.
+No paths, method names, credentials, addresses, hashes or txids are labels.
 
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 

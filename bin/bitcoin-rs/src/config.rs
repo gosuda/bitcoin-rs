@@ -474,12 +474,6 @@ mod compat_tests {
         assert!(config.indexes.txindex);
         assert_eq!(config.storage.dbcache_mb, 768);
 
-        let conf_with_public_bind = load_conf("rpcpublicbind=127.0.0.1:8334\n", Network::Mainnet)?;
-        assert_eq!(
-            conf_with_public_bind.rpc.public_bind,
-            Some(SocketAddr::from(([127, 0, 0, 1], 8334)))
-        );
-
         let conf_with_overlays = load_conf(
             r"
 proxy=127.0.0.1:9050
