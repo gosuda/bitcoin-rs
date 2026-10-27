@@ -24,8 +24,8 @@ pub use bip22::{
     STALE_PARENT_REASON, chain_reject_reason, consensus_reject_reason, header_reject_reason,
 };
 pub use coinbase::{
-    MiningError, WITNESS_RESERVED_VALUE, update_uncommitted_block_structures,
-    witness_commitment_script,
+    MiningError, WITNESS_RESERVED_VALUE, needs_witness_reserved_value,
+    update_uncommitted_block_structures, witness_commitment_script,
 };
 pub use context::MiningChainContext;
 #[cfg(any(test, feature = "test-seam"))]
