@@ -319,8 +319,8 @@ impl Worker {
     fn finish_reconcile_pass(
         &self,
         target: Option<Arc<TipSnapshot>>,
-        fence: IndexWriteFence,
-        watermarks: IndexWatermarks,
+        mut fence: IndexWriteFence,
+        mut watermarks: IndexWatermarks,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         self.runtime
@@ -347,6 +347,15 @@ impl Worker {
                 } else {
                     self.writer
                         .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                        .map_err(DerivedIndexWorkerError::Index)?;
+                    // The reset cleared the watermark in storage: the
+                    // pre-reset capture above is stale, so reload before
+                    // selecting legs. Running selection on the stale tuple
+                    // would treat the erased watermark as synced and could
+                    // claim caught-up while storage has no watermark.
+                    (fence, watermarks) = self
+                        .writer
+                        .fenced_watermarks()
                         .map_err(DerivedIndexWorkerError::Index)?;
                     match self.seed_dispatch(pending.as_ref())? {
                         SeedFlow::Return(action) => return Ok(action),

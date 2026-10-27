@@ -502,6 +502,16 @@ impl DerivedIndexQueryEngine {
             let Some(watermark_id) = tree.lookup(hash) else {
                 return Err(HistoricalQueryError::Retry);
             };
+            // The watermark names a chain position, not just a hash: a node
+            // whose height disagrees with the watermark is a stale or torn
+            // view, so retry instead of joining a prefix the watermark never
+            // covered.
+            let watermark_node = tree
+                .node(watermark_id)
+                .map_err(|_| HistoricalQueryError::Retry)?;
+            if watermark_node.height != watermark.height {
+                return Err(HistoricalQueryError::Retry);
+            };
             match Self::bounded_common_ancestor(&tree, anchor_id, watermark_id, remaining) {
                 Ok(Some(joined)) => anchor_id = joined,
                 Ok(None) => return Err(HistoricalQueryError::Retry),
@@ -1011,5 +1021,82 @@ mod tests {
         assert!(weak_b.upgrade().is_some());
         drop(budget);
         assert!(weak_b.upgrade().is_none());
+    }
+
+    struct UnreachableReader;
+
+    impl IndexReader for UnreachableReader {
+        fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, crate::IndexError> {
+            unreachable!("covered_anchor never snapshots the index")
+        }
+    }
+
+    fn anchor_test_engine(tree: bitcoin_rs_chain::BlockTree) -> DerivedIndexQueryEngine {
+        use parking_lot::RwLock;
+
+        let tree = Arc::new(RwLock::new(tree));
+        let tip_cell = Arc::new(arc_swap::ArcSwapOption::empty());
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        DerivedIndexQueryEngine::new(
+            runtime,
+            Arc::new(UnreachableReader),
+            bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree)),
+            bitcoin_rs_chain::TipReader::new(tip_cell),
+            None,
+            QueryEngineLive {
+                utxo: None,
+                chain_transition: None,
+                enabled: IndexCapabilities::ALL,
+            },
+        )
+    }
+
+    #[test]
+    fn covered_anchor_rejects_watermark_height_mismatch() {
+        use bitcoin_rs_chain::NodeStatus;
+
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let mut tree = bitcoin_rs_chain::BlockTree::new();
+        let genesis_id = tree
+            .insert_header(genesis.header, NodeStatus::HeaderValid)
+            .expect("genesis header");
+        let node = tree.node(genesis_id).expect("genesis node");
+        let (height, hash) = (node.height, node.hash);
+        let engine = anchor_test_engine(tree);
+
+        // A watermark naming the node's own height joins at the node itself.
+        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
+        let matching = IndexWatermark {
+            height,
+            hash: *hash.as_byte_array(),
+        };
+        let (anchor_id, anchor_height, _) = engine
+            .covered_anchor(
+                genesis_id,
+                &[(IndexCapability::TxLookup, matching)],
+                &mut remaining,
+            )
+            .expect("matching watermark joins");
+        assert_eq!(anchor_id, genesis_id);
+        assert_eq!(anchor_height, height);
+
+        // The hash resolves but the height disagrees: a stale or torn view
+        // must retry, never join a prefix the watermark did not cover.
+        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
+        let mismatched = IndexWatermark {
+            height: height.saturating_add(1),
+            hash: *hash.as_byte_array(),
+        };
+        assert!(
+            matches!(
+                engine.covered_anchor(
+                    genesis_id,
+                    &[(IndexCapability::TxLookup, mismatched)],
+                    &mut remaining
+                ),
+                Err(HistoricalQueryError::Retry)
+            )
+        );
     }
 }

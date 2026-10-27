@@ -211,13 +211,16 @@ impl Worker {
         }
 
         let action = self.finish_catch_up(state, chunk_end, target, &pass_history, pending)?;
-        // Only a commit-backed advance releases the pin: `chunk_end` short of
-        // the tip returns `Progressed` with rows retained and no durable
-        // commit, so the pin parks back like any other stall.
+        // Only a commit-backed advance releases the pin: any retained
+        // `pending` rows keep their history cover, whether the pass stalled,
+        // buffered, or progressed after the target tip moved past the batch
+        // endpoint. A short `chunk_end` is one such retained case; a moved
+        // tip at equal height is another.
         if !matches!(
             action,
             ReconcileAction::Progressed | ReconcileAction::CaughtUp
         ) || chunk_end < target.height
+            || pending.is_some()
         {
             Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
         }
@@ -260,20 +263,26 @@ impl Worker {
         seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
         // Single-holder rule: a live seed pin covering this start is consumed
-        // directly with no second `request_history`. A dead pin is superseded
-        // (dropped) before the fresh request; a live pin starting above this
-        // leg stays parked for a later leg.
+        // directly with no second `request_history`. Any other seed pin is
+        // dropped before the fresh request — a dead pin is superseded, and a
+        // live higher pin is subsumed by the lower grant (which pins a
+        // superset while the committed seed watermark already covers that
+        // height) — so no observer ever sees two live leases. A refusal
+        // restores the live pin, so a transient `Reserved`, `Missing`,
+        // `Shutdown`, or `Pruned` never loses the seed.
+        let mut parked = None;
         if let Some(lease) = seed_lease.take() {
             if lease.floor().is_some_and(|floor| floor <= start_height) {
                 return Ok(ControlFlow::Continue(lease));
             }
             if lease.floor().is_some() {
-                *seed_lease = Some(lease);
+                parked = Some(lease);
             }
         }
         let action = match self.history.request_history(start_height) {
             Ok(lease) => return Ok(ControlFlow::Continue(lease)),
             Err(HistoryUnavailable::Pruned { below }) => {
+                *seed_lease = parked;
                 tracing::warn!(
                     below,
                     start_height,
@@ -308,6 +317,7 @@ impl Worker {
                 }
             }
             Err(error) => {
+                *seed_lease = parked;
                 // The grant is deferred, not denied: keep the prepared rows
                 // so the retry continues where this pass left off instead of
                 // re-deriving them.
