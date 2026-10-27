@@ -321,7 +321,7 @@ impl Served {
                     outbound_rx,
                     close,
                     Arc::clone(&handle),
-                    addr.into(),
+                    addr,
                     None,
                 )?;
                 (None, thread)
@@ -333,7 +333,7 @@ impl Served {
         let session_lease = lease.clone();
         let (outcome_tx, outcome) = crossbeam_channel::bounded(1);
         let session = std::thread::spawn(move || {
-            let result = run_message_loop(&mut peer, addr.into(), &session_lease, &shared, None);
+            let result = run_message_loop(&mut peer, addr, &session_lease, &shared, None);
             let _ = outcome_tx.send(result);
         });
         Ok(Self {
@@ -755,7 +755,7 @@ fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
         outbound_rx,
         lease.close_signal(),
         lease.budget_handle(),
-        addr.into(),
+        addr,
         None,
     )?;
 

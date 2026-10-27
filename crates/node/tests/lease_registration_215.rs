@@ -74,18 +74,18 @@ fn peer_table_owns_handshake_publication_and_replacement() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
     let (old_tx, _old_rx) = unbounded::<QueuedFrame>();
     let old = PeerLease::new(old_tx);
-    assert!(!table.register(addr.into(), old.clone()));
-    assert!(table.publish_info(addr.into(), &old, info(addr)));
+    assert!(!table.register(addr, old.clone()));
+    assert!(table.publish_info(addr, &old, info(addr)));
     assert!(!old.is_cancelled());
     assert_eq!(table.len(), 1);
     assert_eq!(table.infos().len(), 1);
 
     let (new_tx, _new_rx) = unbounded::<QueuedFrame>();
     let new = PeerLease::new(new_tx);
-    assert!(table.register(addr.into(), new.clone()));
+    assert!(table.register(addr, new.clone()));
     assert!(old.is_cancelled());
     assert!(!new.is_cancelled());
-    assert!(table.is_current(new.source(addr.into())));
+    assert!(table.is_current(new.source(addr)));
 
     let sync = make_sync(Arc::clone(&table));
     sync.tick();

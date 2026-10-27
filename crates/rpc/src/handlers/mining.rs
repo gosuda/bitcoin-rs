@@ -901,7 +901,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::QueuedFrame>(1);
         ctx.network.peer_table.register(
             "127.0.0.1:8333"
-                .parse()
+                .parse::<bitcoin_rs_p2p::PeerRemote>()
                 .unwrap_or_else(|error| panic!("dummy peer addr: {error}")),
             bitcoin_rs_p2p::PeerLease::new(tx),
         );

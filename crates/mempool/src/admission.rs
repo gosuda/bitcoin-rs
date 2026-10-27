@@ -891,7 +891,10 @@ mod tests {
 
     fn source() -> PeerToken {
         PeerToken {
-            addr: bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 1],
+                8333,
+            ))),
             connection_id: 7,
         }
     }

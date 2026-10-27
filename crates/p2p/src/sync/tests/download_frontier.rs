@@ -115,7 +115,7 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
         inbound_blocks_tx: _inbound_blocks_tx,
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
-    let peer = PeerEndpoint::from(([127, 0, 0, 1], 18_460));
+    let peer = PeerRemote::from(([127, 0, 0, 1], 18_460));
     let rx = connect_peer(&peers, synthetic_peer(peer, 100));
 
     assert!(
@@ -262,7 +262,10 @@ fn tick_does_not_resend_same_getheaders_while_pending() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 8));
 
     sync.tick();
@@ -297,7 +300,10 @@ fn inbound_headers_response_releases_getheaders_gate() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 8));
 
     sync.tick();
@@ -349,7 +355,10 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately() -> TestRe
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 8));
 
     sync.tick();
@@ -386,7 +395,10 @@ fn orphan_headers_keep_source_peer_connected() -> TestResult {
         peers,
         ..
     } = header_sync_with_genesis()?;
-    let peer_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let peer_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let _rx = connect_peer(&peers, synthetic_peer(peer_addr, 8));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![
@@ -427,7 +439,10 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix() -> Test
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let first_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let first_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let first_rx = connect_peer(&peers, synthetic_peer(first_addr, 100));
 
     sync.tick();
@@ -442,7 +457,10 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix() -> Test
         return Err(std::io::Error::other("expected first peer getheaders").into());
     }
 
-    let second_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let second_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let second_rx = connect_peer(&peers, synthetic_peer(second_addr, 100));
 
     sync.tick();
@@ -476,8 +494,14 @@ fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer() -> Te
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let stale_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let healthy_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let stale_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
+    let healthy_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let stale_rx = connect_peer(&peers, synthetic_peer(stale_addr, 100));
 
     sync.tick();

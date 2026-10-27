@@ -1022,7 +1022,7 @@ impl P2pService {
     }
 
     /// Disconnects any active connection with the given address.
-    pub fn disconnect(&self, addr: PeerEndpoint) -> bool {
+    pub fn disconnect(&self, addr: impl Into<crate::PeerRemote>) -> bool {
         self.peer_table.disconnect(addr)
     }
 
@@ -1142,7 +1142,7 @@ fn spawn_feeler(
         .sessions()
         .into_iter()
         .filter(|session| !session.lease.is_cancelled())
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let mut addresses: Vec<_> = active.keys().copied().collect();
     addresses.extend_from_slice(&connected);
@@ -1288,9 +1288,12 @@ fn count_address_failure(
         .filter(|session| {
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     book.count_failure(&outbound, maximum)
 }
@@ -1340,7 +1343,8 @@ fn spawn_outbound_dial(
         .keys()
         .any(|addr| crate::addrman::canonical(*addr) == dial.addr)
         || peer_table.sessions().iter().any(|session| {
-            !session.lease.is_cancelled() && crate::addrman::canonical(session.addr) == dial.addr
+            !session.lease.is_cancelled()
+                && session.addr.endpoint().map(crate::addrman::canonical) == Some(dial.addr)
         })
     {
         // A manual request cannot release a queued automatic request's claim.
@@ -1445,7 +1449,11 @@ fn next_outbound_role(
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
                 && !session.lease.is_manual()
-                && !pending.get(&session.addr).is_some_and(|entry| entry.feeler)
+                && !session
+                    .addr
+                    .endpoint()
+                    .and_then(|addr| pending.get(&addr))
+                    .is_some_and(|entry| entry.feeler)
         })
         .collect();
     let connected_full = census
@@ -1465,7 +1473,9 @@ fn next_outbound_role(
                 !outbound.manual
                     && !outbound.feeler
                     && outbound.role == want
-                    && !census.iter().any(|session| session.addr == **addr)
+                    && !census
+                        .iter()
+                        .any(|session| session.addr.endpoint() == Some(**addr))
             })
             .count()
     };
@@ -1646,7 +1656,10 @@ fn ready_address_count(peer_table: &crate::PeerTable, book: &crate::addrman::Add
                 && !session.lease.is_manual()
                 && !session.lease.is_cancelled()
                 && session.info.is_some()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
         .count()
 }
@@ -1662,9 +1675,12 @@ fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) ->
                 && session.lease.role() == crate::PeerRole::BlockRelayOnly
                 && session.info.is_some()
                 && !session.demonstrated_tips.is_empty()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect()
 }
 
@@ -1691,9 +1707,12 @@ fn queue_restart_anchors(
                 && !session.lease.is_manual()
                 && session.lease.role() == crate::PeerRole::BlockRelayOnly
                 && session.info.is_some()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     if let Some(addr) = *attempting
         && maintenance.address_book.anchor_eligible(addr, &[], now)
@@ -1777,8 +1796,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
         let tick_time = SystemTime::now();
         let now = tick_time
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+            .map_or(0, |duration| duration.as_secs());
         let ready_count = ready_address_count(&maintenance.peer_table, &maintenance.address_book);
         if maintenance.network_active.load(Ordering::Acquire) {
             if !anchors_taken && maintenance.block_slots > 0 {
@@ -1798,7 +1816,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 .sessions()
                 .into_iter()
                 .filter(|session| !session.lease.is_cancelled())
-                .map(|session| session.addr)
+                .filter_map(|session| session.addr.endpoint())
                 .collect();
             let policy = maintenance.banned.automatic_snapshot(tick_time);
             {
@@ -1837,9 +1855,12 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 .filter(|session| {
                     !session.lease.is_cancelled()
                         && !session.lease.is_inbound()
-                        && !maintenance.address_book.is_feeler(session.addr)
+                        && !session
+                            .addr
+                            .endpoint()
+                            .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
                 })
-                .map(|session| session.addr)
+                .filter_map(|session| session.addr.endpoint())
                 .collect();
             let reserved = queue_restart_anchors(
                 maintenance,
@@ -1909,16 +1930,19 @@ fn queue_address_candidates(
     let mut active: Vec<_> = sessions
         .iter()
         .filter(|session| !session.lease.is_cancelled())
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let grouped: Vec<_> = sessions
         .iter()
         .filter(|session| {
             !session.lease.is_cancelled()
                 && !session.lease.is_inbound()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let automatic: Vec<_> = sessions
         .iter()
@@ -1926,9 +1950,12 @@ fn queue_address_candidates(
             !session.lease.is_cancelled()
                 && !session.lease.is_inbound()
                 && !session.lease.is_manual()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let occupied = automatic.len() + maintenance.address_book.pending_count_excluding(&automatic);
     let needed = (maintenance.target + extra).saturating_sub(occupied + reserved_anchors);
@@ -2301,7 +2328,7 @@ mod tests {
             .expect("three full-relay peers are one extra");
         assert_eq!(
             excess.addr,
-            addr(6),
+            crate::PeerRemote::Endpoint(addr(6)),
             "the newest aged connection is the one"
         );
         assert_eq!(excess.lease.role(), PeerRole::FullRelay);
@@ -2398,7 +2425,7 @@ mod tests {
             newest_excess_full_relay(&table, 2, now, |_| false)
                 .expect("the aged excess peer is eligible")
                 .addr,
-            addr(4),
+            crate::PeerRemote::Endpoint(addr(4)),
             "the same peer is the victim once its download completes"
         );
     }
@@ -2444,7 +2471,7 @@ mod tests {
             newest_excess_full_relay(&table, 2, now, |_| false)
                 .expect("three automatic connections are one extra")
                 .addr,
-            addr(4),
+            crate::PeerRemote::Endpoint(addr(4)),
             "a real automatic excess still retires its newest aged peer"
         );
     }
@@ -2616,7 +2643,7 @@ mod tests {
             };
             table.register(addr, lease.clone());
             let info = crate::PeerInfo {
-                addr,
+                addr: crate::PeerRemote::Endpoint(addr),
                 version: 70016,
                 wtxid_relay: false,
                 relay_transactions: true,
@@ -2721,11 +2748,11 @@ mod tests {
         let table = crate::PeerTable::new();
         let (tx, _) = crossbeam_channel::bounded(1);
         table.register(
-            "8.8.0.1:8333".parse().expect("peer"),
+            "8.8.0.1:8333".parse::<PeerEndpoint>().expect("peer"),
             crate::PeerLease::new(tx.clone()),
         );
         table.register(
-            "9.9.0.1:8333".parse().expect("same ASN"),
+            "9.9.0.1:8333".parse::<PeerEndpoint>().expect("same ASN"),
             crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay),
         );
         assert!(
@@ -2735,7 +2762,9 @@ mod tests {
         assert!(count_address_failure(&table, 2, &book));
         let independent = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
         table.register(
-            "8.8.1.1:8333".parse().expect("independent ASN"),
+            "8.8.1.1:8333"
+                .parse::<PeerEndpoint>()
+                .expect("independent ASN"),
             independent.clone(),
         );
         assert!(
@@ -2752,7 +2781,7 @@ mod tests {
         assert!(count_address_failure(&table, 125, &book));
         independent.cancel();
         table.register(
-            "8.8.1.2:8333".parse().expect("inbound"),
+            "8.8.1.2:8333".parse::<PeerEndpoint>().expect("inbound"),
             crate::PeerLease::new_inbound(tx),
         );
         assert!(!count_address_failure(&table, 125, &book));
@@ -3722,8 +3751,8 @@ mod tests {
         let path = directory.path().join("peers-01010101.dat");
         let book = crate::addrman::AddressBook::open(Some(base), [1; 4], false, Some(&map));
         maintenance.address_book = Arc::clone(&book);
-        let anchor: PeerEndpoint = "8.8.0.1:8333".parse().expect("anchor");
-        let same_as: PeerEndpoint = "9.9.0.1:8333".parse().expect("same ASN");
+        let anchor: PeerEndpoint = "8.8.0.1:8333".parse::<PeerEndpoint>().expect("anchor");
+        let same_as: PeerEndpoint = "9.9.0.1:8333".parse::<PeerEndpoint>().expect("same ASN");
         book.learn_dns("seed", &[anchor], 10_000);
         book.succeeded(anchor, 9, 10_000);
         // Promotion frees New before learning the same-AS peer: two fresh

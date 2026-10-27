@@ -534,7 +534,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
             4,
-            PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+            crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             crate::peer_info::PeerRole::FullRelay,
             false,
         ));
@@ -564,7 +564,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(frame), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
             2,
-            PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+            crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
         ));
 
         let (message, payload) = peer

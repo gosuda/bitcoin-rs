@@ -76,7 +76,7 @@ pub(crate) enum NetworkClass {
 pub(crate) fn network_class(address: impl Into<PeerAddress>) -> NetworkClass {
     let ip = match address.into() {
         PeerAddress::Ip(ip) => ip,
-        PeerAddress::Onion(_) | PeerAddress::AnonymousTor(_) => return NetworkClass::Onion,
+        PeerAddress::Onion(_) => return NetworkClass::Onion,
         PeerAddress::I2p(_) => return NetworkClass::I2p,
     };
     if !routable(ip) {
@@ -169,9 +169,6 @@ impl NetGroups {
             PeerAddress::Ip(ip) => ip,
             PeerAddress::Onion(key) => return vec![4, key[0] | 15],
             PeerAddress::I2p(key) => return vec![5, key[0] | 15],
-            // The remote identity is unknown: fresh circuit handles cannot
-            // establish independent network diversity.
-            PeerAddress::AnonymousTor(_) => return vec![4],
         };
         // Core applies ASMap only to IPv4/IPv6 network classes; local and
         // unroutable IPs keep the prefix owner's unclassified group.
@@ -347,7 +344,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overlay_groups_use_address_prefixes_and_share_unknown_tor_origins() {
+    fn overlay_groups_use_address_prefixes() {
         let groups = NetGroups::default();
         for (address, class, group) in [
             (
@@ -359,12 +356,6 @@ mod tests {
                 PeerAddress::I2p([0x23; 32]),
                 NetworkClass::I2p,
                 vec![5, 0x2f],
-            ),
-            (PeerAddress::AnonymousTor(1), NetworkClass::Onion, vec![4]),
-            (
-                PeerAddress::AnonymousTor(u64::MAX),
-                NetworkClass::Onion,
-                vec![4],
             ),
         ] {
             assert_eq!(network_class(address), class);

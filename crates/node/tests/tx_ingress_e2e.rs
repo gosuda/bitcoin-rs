@@ -253,8 +253,7 @@ impl LoopbackPeer {
     fn close(&mut self) -> bool {
         self.lease.cancel();
         let _ = self.dialer.shutdown(Shutdown::Both);
-        self.peer_table
-            .remove_current(self.peer_addr.into(), &self.lease);
+        self.peer_table.remove_current(self.peer_addr, &self.lease);
         let service_ok = self
             .service
             .take()
@@ -302,7 +301,7 @@ fn open_loopback_peer(
         pump: None,
         service: None,
     };
-    wiring.peer_table.register(peer_addr.into(), lease.clone());
+    wiring.peer_table.register(peer_addr, lease.clone());
     let pump_lease = lease.clone();
     peer.pump = Some(
         std::thread::Builder::new()
@@ -372,7 +371,7 @@ fn serve_connection(
         return;
     };
     let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
-        peer_addr.into(),
+        peer_addr,
         addr_bind,
         version,
         0,
@@ -380,10 +379,7 @@ fn serve_connection(
         Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
     );
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
-    if !wiring
-        .peer_table
-        .publish_info(peer_addr.into(), lease, info)
-    {
+    if !wiring.peer_table.publish_info(peer_addr, lease, info) {
         return;
     }
     let _ = peer.stream.set_read_timeout(Some(READ_POLL));
@@ -397,7 +393,7 @@ fn serve_connection(
         match read_message(&mut peer.stream, magic) {
             Ok((message, _raw)) => {
                 if let Message::Tx(tx) = message {
-                    let source = lease.source(peer_addr.into());
+                    let source = lease.source(peer_addr);
                     let _ = wiring.ingress_tx.try_send(InboundTx::new(tx, source));
                     continue;
                 }
@@ -422,7 +418,7 @@ fn serve_connection(
                     &mut |items| {
                         wiring
                             .peer_table
-                            .announce_transactions(lease.source(peer_addr.into()), &items);
+                            .announce_transactions(lease.source(peer_addr), &items);
                         wiring
                             .peer_table
                             .poll_transaction_requests(gateway.as_ref());
@@ -644,13 +640,10 @@ impl Harness {
         dial_handshake(&source.dialer, magic, false)?;
         dial_handshake(&bystander.dialer, magic, false)?;
         wait_until(OBSERVE_TIMEOUT, || {
-            wiring
-                .peer_table
-                .ready_source(source.peer_addr.into())
-                .is_some()
+            wiring.peer_table.ready_source(source.peer_addr).is_some()
                 && wiring
                     .peer_table
-                    .ready_source(bystander.peer_addr.into())
+                    .ready_source(bystander.peer_addr)
                     .is_some()
         })?;
 
@@ -701,10 +694,7 @@ impl Harness {
         let peer = open_loopback_peer(&wiring, Arc::clone(&self.gateway), name)?;
         dial_handshake(&peer.dialer, self.magic, wtxid_relay)?;
         wait_until(OBSERVE_TIMEOUT, || {
-            wiring
-                .peer_table
-                .ready_source(peer.peer_addr.into())
-                .is_some()
+            wiring.peer_table.ready_source(peer.peer_addr).is_some()
         })?;
         Ok(peer)
     }
@@ -750,8 +740,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Re
     let tx = spending_tx(parent_txid(0xDD), 40_000);
     let txid = tx.txid();
     let (outbound_tx, _outbound_rx) = crossbeam_channel::bounded(1);
-    let source =
-        PeerLease::new(outbound_tx).source(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into());
+    let source = PeerLease::new(outbound_tx).source(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)));
     let ingress = spawn_tx_ingress_consumer(
         &state,
         Arc::clone(&gateway),

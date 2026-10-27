@@ -91,15 +91,4 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
         restored.select(&[onion], &[], EPOCH + 10, u64::MAX, |_| true),
         Some(i2p)
     );
-    let count = restored.len();
-    restored.learn_peer(
-        crate::PeerAddress::AnonymousTor(7),
-        &[(addr(99), 9, EPOCH)],
-        EPOCH,
-    );
-    assert_eq!(
-        restored.len(),
-        count,
-        "anonymous circuits are not durable learning sources"
-    );
 }

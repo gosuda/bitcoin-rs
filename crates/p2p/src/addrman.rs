@@ -203,9 +203,6 @@ fn endpoint_key(addr: PeerEndpoint) -> Vec<u8> {
         crate::PeerAddress::Ip(IpAddr::V6(ip)) => ip.octets().to_vec(),
         crate::PeerAddress::Onion(key) => [vec![4], key.to_vec()].concat(),
         crate::PeerAddress::I2p(key) => [vec![5], key.to_vec()].concat(),
-        crate::PeerAddress::AnonymousTor(_) => {
-            unreachable!("anonymous circuits never enter AddrMan")
-        }
     };
     bytes.extend_from_slice(&addr.port().to_be_bytes());
     bytes
@@ -721,7 +718,6 @@ fn routable(addr: PeerEndpoint, allow_local: bool) -> bool {
     }
     match addr.address() {
         crate::PeerAddress::Onion(_) | crate::PeerAddress::I2p(_) => true,
-        crate::PeerAddress::AnonymousTor(_) => false,
         crate::PeerAddress::Ip(IpAddr::V4(ip)) => {
             let octets = ip.octets();
             if ip.is_broadcast() || octets[0] == 0 || octets[0] >= 240 {
@@ -862,9 +858,6 @@ impl AddressBook {
         now: u64,
     ) {
         let source = source.into();
-        if matches!(source, crate::PeerAddress::AnonymousTor(_)) {
-            return;
-        }
         let mut manager = self.state.lock();
         for &(addr, services, seen) in addresses.iter().take(MAX_GOSSIP) {
             manager.learn(
@@ -1396,7 +1389,6 @@ impl AddressBook {
                 crate::PeerAddress::Ip(IpAddr::V6(ip)) => bitcoin::p2p::address::AddrV2::Ipv6(ip),
                 crate::PeerAddress::Onion(key) => bitcoin::p2p::address::AddrV2::TorV3(key),
                 crate::PeerAddress::I2p(hash) => bitcoin::p2p::address::AddrV2::I2p(hash),
-                crate::PeerAddress::AnonymousTor(_) => continue,
             };
             gossip.push(bitcoin::p2p::address::AddrV2Message {
                 time: u32::try_from(entry.last_seen).unwrap_or(u32::MAX),

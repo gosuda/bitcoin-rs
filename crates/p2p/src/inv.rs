@@ -32,11 +32,12 @@ pub fn request_missing_parents(
 ) -> bool {
     use bitcoin::hashes::Hash as _;
 
+    let source = crate::PeerSource::from(source);
     let Some(lease) = peers.lease(source.addr) else {
         return false;
     };
     let connection = lease.source(source.addr);
-    if PeerToken::from(connection) != source {
+    if connection != source {
         return false;
     }
     let mut witness = false;
@@ -141,7 +142,10 @@ mod tests {
         let (sender, receiver) = crate::test_support::message_channel_bounded(2);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
-        table.register(source.addr, lease.clone());
+        table.register(
+            source.addr.unwrap_or_else(|| panic!("known destination")),
+            lease.clone(),
+        );
 
         assert!(request_missing_parents(
             &table,
@@ -169,7 +173,10 @@ mod tests {
                 let (sender, receiver) = crate::test_support::message_channel_bounded(1);
                 let lease = PeerLease::new(sender);
                 let source = source(&lease);
-                table.register(source.addr, lease.clone());
+                table.register(
+                    source.addr.unwrap_or_else(|| panic!("known destination")),
+                    lease.clone(),
+                );
                 let mut version = crate::handshake::version_message(
                     1,
                     0,
@@ -182,9 +189,10 @@ mod tests {
                     ServiceFlags::NETWORK
                 };
                 let mut info = crate::PeerInfo::inbound_from_version(
-                    source.addr,
+                    source.addr.unwrap_or_else(|| panic!("known destination")),
                     source
                         .addr
+                        .unwrap_or_else(|| panic!("known destination"))
                         .socket_addr()
                         .unwrap_or_else(|| panic!("expected IP fixture")),
                     &version,
@@ -193,7 +201,11 @@ mod tests {
                     Arc::new(crate::PeerCounters::default()),
                 );
                 info.wtxid_relay = wtxid_relay;
-                assert!(table.publish_info(source.addr, &lease, info));
+                assert!(table.publish_info(
+                    source.addr.unwrap_or_else(|| panic!("known destination")),
+                    &lease,
+                    info
+                ));
 
                 assert!(request_missing_parents(
                     &table,
@@ -247,10 +259,20 @@ mod tests {
         let (old_sender, old_receiver) = crate::test_support::message_channel_bounded(1);
         let old = PeerLease::new(old_sender);
         let stale_source = source(&old);
-        table.register(stale_source.addr, old);
+        table.register(
+            stale_source
+                .addr
+                .unwrap_or_else(|| panic!("known destination")),
+            old,
+        );
         let (new_sender, new_receiver) = crate::test_support::message_channel_bounded(1);
         let current = PeerLease::new(new_sender);
-        table.register(stale_source.addr, current.clone());
+        table.register(
+            stale_source
+                .addr
+                .unwrap_or_else(|| panic!("known destination")),
+            current.clone(),
+        );
 
         assert!(current.send(Message::Ping(7)).is_ok());
         assert!(!request_missing_parents(&table, stale_source, &[parent(1)]));
@@ -273,7 +295,10 @@ mod tests {
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
-        table.register(source.addr, lease.clone());
+        table.register(
+            source.addr.unwrap_or_else(|| panic!("known destination")),
+            lease.clone(),
+        );
         assert!(lease.send(Message::Ping(1)).is_ok());
 
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
@@ -286,7 +311,10 @@ mod tests {
         let (sender, receiver) = crate::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
-        table.register(source.addr, lease.clone());
+        table.register(
+            source.addr.unwrap_or_else(|| panic!("known destination")),
+            lease.clone(),
+        );
         lease.cancel();
 
         assert!(!request_missing_parents(&table, source, &[parent(1)]));

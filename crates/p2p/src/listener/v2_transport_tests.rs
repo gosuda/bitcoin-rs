@@ -450,9 +450,8 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
         let cancel_handle = lease.clone();
         let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
         run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr.into(), &client)?;
-        let loop_handle = std::thread::spawn(move || {
-            run_message_loop(&mut peer, addr.into(), &lease, &client, None)
-        });
+        let loop_handle =
+            std::thread::spawn(move || run_message_loop(&mut peer, addr, &lease, &client, None));
         // Liveness proof: the loop must dispatch the writer's ping through
         // the production path and queue the pong on the peer's reply queue.
         // A decoy drop, a v1 byte-count alias, or a loop that exits early

@@ -205,7 +205,10 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes() -> TestResu
 fn single_peer_can_fill_default_pending_window() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 300));
 
     let mut requested = Vec::new();
@@ -247,7 +250,10 @@ fn tick_preserves_partial_window_order_across_pending_gap() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();

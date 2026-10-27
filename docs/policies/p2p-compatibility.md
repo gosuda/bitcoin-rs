@@ -734,6 +734,14 @@ Accepted I2P SAM streams have ephemeral local bind ports, so their clocks are
 per stream rather than shared by application destination. This remains a
 deviation from Core's shared inbound clock policy.
 
+Routable `PeerAddress`/`PeerEndpoint` values contain only IP, Tor-v3 and I2P
+destinations. Anonymous Tor circuits live in the connection owner's
+`PeerRemote`, keyed by the lease's process-unique connection id. They share
+one unknown-origin admission group, receive no proxy-loopback protection, and
+have no destination to learn, persist, discourage or advertise through AddrMan.
+Their RPC connection handle remains `tor-inbound-N:0`; it is not accepted by
+destination configuration or dialing APIs.
+
 AddrMan endpoint/source persistence follows the canonical v1 definition in
 section 7. Invalid current source representations keep the original file
 untouched with persistence disabled.

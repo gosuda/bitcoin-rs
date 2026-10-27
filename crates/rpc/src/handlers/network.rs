@@ -231,7 +231,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             address: peer.addr.to_string(),
             address_bind: Some(peer.addr_bind.to_string()),
             address_local: None,
-            network: peer.addr.address().network().name().to_owned(),
+            network: peer.addr.network().name().to_owned(),
             mapped_as: None,
             services: format!("{:016x}", peer.services),
             services_names: peer
@@ -481,7 +481,7 @@ fn control_error_to_rpc_error(error: bitcoin_rs_p2p::P2pControlError) -> RpcErro
 pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let address = required_str(params, 0, "address is required")?;
-    let addr = bitcoin_rs_p2p::PeerEndpoint::from_str(address)
+    let addr = bitcoin_rs_p2p::PeerRemote::from_str(address)
         .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
 
     // Optional nodeid — the index reported by `getpeerinfo`, used to
@@ -554,19 +554,18 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
     // Live peers carry real service flags and handshake times.
     for peer in ctx.network.peer_table.infos() {
-        if matches!(
-            peer.addr.address(),
-            bitcoin_rs_p2p::PeerAddress::AnonymousTor(_)
-        ) || !seen.insert(peer.addr)
-        {
+        let Some(endpoint) = peer.addr.endpoint() else {
+            continue;
+        };
+        if !seen.insert(endpoint) {
             continue;
         }
         entries.push(v31::NodeAddress {
             time: peer.conn_time,
             services: peer.services,
-            address: peer.addr.address().to_string(),
-            port: peer.addr.port(),
-            network: peer.addr.address().network().name().to_owned(),
+            address: endpoint.address().to_string(),
+            port: endpoint.port(),
+            network: peer.addr.network().name().to_owned(),
         });
     }
 
@@ -892,10 +891,8 @@ mod addnode_validation_tests {
         };
         let (tx, _rx) = unbounded();
         let lease = PeerLease::new(tx);
-        ctx.network.peer_table.register(addr.into(), lease.clone());
-        ctx.network
-            .peer_table
-            .publish_info(addr.into(), &lease, info);
+        ctx.network.peer_table.register(addr, lease.clone());
+        ctx.network.peer_table.publish_info(addr, &lease, info);
         let ctx = Arc::new(ctx);
 
         let result = disconnectnode(&ctx, &json!([addr.to_string().as_str()]))
@@ -959,12 +956,8 @@ mod admin_rpc_tests {
         let (tx_b, _rx_b) = unbounded();
         let lease_a = PeerLease::new(tx_a);
         let lease_b = PeerLease::new(tx_b);
-        ctx.network
-            .peer_table
-            .register(addr_a.into(), lease_a.clone());
-        ctx.network
-            .peer_table
-            .register(addr_b.into(), lease_b.clone());
+        ctx.network.peer_table.register(addr_a, lease_a.clone());
+        ctx.network.peer_table.register(addr_b, lease_b.clone());
         let ctx = Arc::new(ctx);
 
         let _ = setnetworkactive(&ctx, &json!([false]))

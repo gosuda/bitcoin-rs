@@ -1,6 +1,6 @@
 //! Public peer metadata published after a successful handshake.
 
-use bitcoin_rs_primitives::PeerEndpoint;
+use crate::PeerRemote;
 use std::sync::Arc;
 
 use bitcoin::p2p::message_network::VersionMessage;
@@ -40,7 +40,7 @@ impl PeerRole {
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
     /// Logical remote Bitcoin endpoint.
-    pub addr: PeerEndpoint,
+    pub addr: PeerRemote,
     /// Protocol version advertised by the remote.
     pub version: u32,
     /// Whether this connection requested BIP339 witness-id announcements.
@@ -90,7 +90,7 @@ impl PeerInfo {
     /// Constructs a `PeerInfo` for an inbound peer from the captured remote `VersionMessage`.
     #[must_use]
     pub fn inbound_from_version(
-        addr: PeerEndpoint,
+        addr: impl Into<PeerRemote>,
         addr_bind: std::net::SocketAddr,
         version: &VersionMessage,
         conn_time: u64,
@@ -113,7 +113,7 @@ impl PeerInfo {
     /// Constructs a `PeerInfo` for an outbound peer from the captured remote `VersionMessage`.
     #[must_use]
     pub(crate) fn outbound_from_version(
-        addr: PeerEndpoint,
+        addr: impl Into<PeerRemote>,
         addr_bind: std::net::SocketAddr,
         version: &VersionMessage,
         conn_time: u64,
@@ -121,7 +121,7 @@ impl PeerInfo {
         counters: Arc<PeerCounters>,
     ) -> Self {
         Self {
-            addr,
+            addr: addr.into(),
             version: version.version,
             wtxid_relay: false,
             relay_transactions: version.relay,
@@ -171,7 +171,7 @@ pub fn service_flag_names(flags: u64) -> Vec<&'static str> {
 mod tests {
     use super::*;
 
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use crate::PeerRemote;
     use std::net::{IpAddr, Ipv4Addr};
 
     use bitcoin::p2p::ServiceFlags;
@@ -199,12 +199,16 @@ mod tests {
     }
 
     fn peer_info_with_services(services: u64) -> PeerInfo {
-        let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+        let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            8333,
+        ));
         PeerInfo {
             services,
             ..PeerInfo::outbound_from_version(
                 addr,
-                addr.socket_addr()
+                addr.endpoint()
+                    .and_then(crate::PeerEndpoint::socket_addr)
                     .unwrap_or_else(|| panic!("expected IP fixture")),
                 &fake_version(),
                 0,
@@ -228,12 +232,16 @@ mod tests {
 
     #[test]
     fn time_offset_is_the_peers_clock_against_ours() {
-        let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+        let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            8333,
+        ));
         let mut version = fake_version();
         version.timestamp = 1_700_000_120;
         let info = PeerInfo::inbound_from_version(
             addr,
-            addr.socket_addr()
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             1_700_000_000,
@@ -245,7 +253,8 @@ mod tests {
         version.timestamp = 1_699_999_940;
         let behind = PeerInfo::inbound_from_version(
             addr,
-            addr.socket_addr()
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             1_700_000_000,
@@ -259,8 +268,14 @@ mod tests {
     fn peer_table_projection_keeps_remote_and_bind_apart() {
         use crate::peer_table::PeerTable;
 
-        let peer = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
-        let bind = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 51_234);
+        let peer = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            8333,
+        ));
+        let bind = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            51_234,
+        ));
         let table = PeerTable::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
@@ -271,7 +286,8 @@ mod tests {
                 &lease,
                 PeerInfo::inbound_from_version(
                     peer,
-                    bind.socket_addr()
+                    bind.endpoint()
+                        .and_then(crate::PeerEndpoint::socket_addr)
                         .unwrap_or_else(|| panic!("expected IP fixture")),
                     &fake_version(),
                     0,
@@ -287,20 +303,31 @@ mod tests {
         assert_eq!(infos[0].addr, peer);
         assert_eq!(
             infos[0].addr_bind,
-            bind.socket_addr()
+            bind.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture"))
         );
-        assert_ne!(infos[0].addr.socket_addr(), Some(infos[0].addr_bind));
+        assert_ne!(
+            infos[0]
+                .addr
+                .endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr),
+            Some(infos[0].addr_bind)
+        );
     }
 
     #[test]
     fn constructors_preserve_direction_and_handshake_metadata() {
-        let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+        let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            8333,
+        ));
         let version = fake_version();
         let counters = counters();
         let inbound = PeerInfo::inbound_from_version(
             addr,
-            addr.socket_addr()
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             100,
@@ -309,7 +336,8 @@ mod tests {
         );
         let outbound = PeerInfo::outbound_from_version(
             addr,
-            addr.socket_addr()
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             100,
@@ -336,10 +364,14 @@ mod tests {
     #[test]
     fn services_names_decodes_inbound_peer_with_network_witness() {
         let version = version_with_services(ServiceFlags::NETWORK | ServiceFlags::WITNESS);
-        let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+        let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            8333,
+        ));
         let info = PeerInfo::inbound_from_version(
             addr,
-            addr.socket_addr()
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             0,

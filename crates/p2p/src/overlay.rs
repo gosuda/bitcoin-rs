@@ -179,7 +179,7 @@ impl OverlayTransport {
                     || table
                         .infos()
                         .iter()
-                        .any(|peer| peer.addr.address().network() == network),
+                        .any(|peer| peer.addr.network() == network),
                 proxy: match network {
                     PeerNetwork::Onion => self.config.onion_proxy,
                     PeerNetwork::I2p => self.config.i2p_sam,
@@ -226,9 +226,6 @@ impl OverlayTransport {
                 cancelled,
             ),
             PeerAddress::I2p(_) => return self.sam_connect(endpoint, cancelled),
-            PeerAddress::AnonymousTor(_) => {
-                Err(invalid("anonymous inbound circuit is not dialable"))
-            }
         }?;
         Ok(Connected {
             stream,
@@ -589,7 +586,7 @@ fn pause(cancelled: &dyn Fn() -> bool, delay: Duration) {
 }
 fn retire(table: &crate::PeerTable, network: PeerNetwork) {
     for session in table.sessions() {
-        if session.addr.address().network() == network {
+        if session.addr.network() == network {
             session.lease.cancel();
         }
     }

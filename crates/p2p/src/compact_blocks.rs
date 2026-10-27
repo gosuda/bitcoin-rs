@@ -1338,7 +1338,10 @@ mod tests {
 
     fn peer_source(connection_id: u64) -> bitcoin_rs_mempool::PeerToken {
         bitcoin_rs_mempool::PeerToken {
-            addr: bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 1],
+                8333,
+            ))),
             connection_id,
         }
     }

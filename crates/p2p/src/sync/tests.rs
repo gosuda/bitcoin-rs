@@ -1,5 +1,5 @@
+use crate::PeerRemote;
 pub(crate) use crate::test_support::{OrFail, TestResult};
-use bitcoin_rs_primitives::PeerEndpoint;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -558,7 +558,10 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -653,7 +656,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_101);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_101,
+    ));
     let mut relaying = synthetic_peer(addr, 100);
     relaying.compact_block_relay = true;
     let rx = connect_peer(&peers, relaying);
@@ -662,7 +668,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_102);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_102,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
     sync.tick();
     assert_flavor(&first_getdata(&rx), false);
@@ -677,7 +686,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_103);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_103,
+    ));
     let mut relaying = synthetic_peer(addr, 100);
     relaying.compact_block_relay = true;
     let rx = connect_peer(&peers, relaying);
@@ -723,7 +735,10 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -787,7 +802,10 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
 
     sync.tick();
@@ -856,7 +874,10 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
@@ -916,7 +937,10 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
@@ -1180,7 +1204,10 @@ fn clean_fast_path_caps_request_at_peer_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 2));
 
     sync.tick();
@@ -1253,8 +1280,14 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let stalled_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let healthy_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let stalled_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
+    let healthy_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let stalled_rx = connect_peer(&peers, synthetic_peer(stalled_addr, 100));
 
     sync.tick();
@@ -1329,7 +1362,10 @@ fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, Box<dyn st
         },
     );
 
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let outbound_rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     Ok(DeterministicProxyFixture {
@@ -2378,7 +2414,7 @@ fn assert_applied_genesis(
     Ok(())
 }
 
-pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: PeerEndpoint) -> PeerSource {
+pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: PeerRemote) -> PeerSource {
     peer_table.lease(addr).map_or_else(
         || panic!("test peer {addr} must be connected"),
         |lease| lease.source(addr),
@@ -2398,7 +2434,7 @@ fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
 }
 /// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK` plus
 /// `NODE_WITNESS`, so it may serve block bodies at any height.
-pub(crate) fn synthetic_peer(addr: PeerEndpoint, start_height: i32) -> PeerInfo {
+pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         addr,
         version: 70_016,
@@ -2414,7 +2450,8 @@ pub(crate) fn synthetic_peer(addr: PeerEndpoint, start_height: i32) -> PeerInfo 
         conn_time: 0,
         inbound: false,
         addr_bind: addr
-            .socket_addr()
+            .endpoint()
+            .and_then(crate::PeerEndpoint::socket_addr)
             .unwrap_or_else(|| panic!("expected IP fixture")),
         time_offset: 0,
         counters: std::sync::Arc::new(crate::PeerCounters::default()),
@@ -2424,7 +2461,7 @@ pub(crate) fn synthetic_peer(addr: PeerEndpoint, start_height: i32) -> PeerInfo 
 
 /// A peer that may not serve block bodies at all: inbound (attacker-chosen)
 /// and advertising no services.
-pub(crate) fn ineligible_peer(addr: PeerEndpoint, start_height: i32) -> PeerInfo {
+pub(crate) fn ineligible_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         services: 0,
         inbound: true,
@@ -2435,11 +2472,11 @@ pub(crate) fn ineligible_peer(addr: PeerEndpoint, start_height: i32) -> PeerInfo
 pub(crate) fn test_addr(
     base_port: usize,
     idx: usize,
-) -> Result<PeerEndpoint, Box<dyn std::error::Error>> {
-    Ok(PeerEndpoint::new(
+) -> Result<PeerRemote, Box<dyn std::error::Error>> {
+    Ok(PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         u16::try_from(base_port + idx)?,
-    ))
+    )))
 }
 
 pub(crate) fn connect_peer(

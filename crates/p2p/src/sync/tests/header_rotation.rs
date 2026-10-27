@@ -8,8 +8,14 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let invalid_peer = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let other_peer = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let invalid_peer = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
+    let other_peer = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let (invalid_tx, invalid_rx) = crate::test_support::message_channel();
     let (other_tx, other_rx) = crate::test_support::message_channel();
 
@@ -94,7 +100,10 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let peer_addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let peer_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let _rx = connect_peer(&peers, synthetic_peer(peer_addr, 8));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![nbits_mismatch_header(genesis.compute_hash(), 1)],
@@ -120,7 +129,10 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
 #[test]
 fn disconnected_outbound_channel_does_not_mark_blocks_pending() -> TestResult {
     let (sync, peers, block_tree, applied_tip, _expected) = sync_with_header_chain(3)?;
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     register_info(&peers, synthetic_peer(addr, 100));
     let (tx, rx) = crate::test_support::message_channel();
     drop(rx);

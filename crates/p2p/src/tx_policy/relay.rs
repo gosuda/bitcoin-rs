@@ -36,9 +36,11 @@ pub(super) struct InboundClockKey {
 }
 
 impl InboundClockKey {
-    fn new(remote: crate::PeerAddress, bind: std::net::SocketAddr) -> Self {
+    fn new(remote: crate::PeerRemote, bind: std::net::SocketAddr) -> Self {
         Self {
-            network: network_class(remote),
+            network: remote.endpoint().map_or(NetworkClass::Onion, |endpoint| {
+                network_class(endpoint.address())
+            }),
             bind_ip: canonical_ip(bind.ip()),
             bind_port: bind.port(),
         }
@@ -205,7 +207,7 @@ impl PeerTable {
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
+                .then(|| InboundClockKey::new(session.addr, info.addr_bind));
             let TxPolicy {
                 relay, inbound_inv, ..
             } = &mut *policy;
@@ -262,7 +264,7 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
+            .then(|| InboundClockKey::new(session.addr, info.addr_bind));
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -307,7 +309,7 @@ impl PeerTable {
         let inbound = session
             .lease
             .is_inbound()
-            .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
+            .then(|| InboundClockKey::new(session.addr, info.addr_bind));
         {
             let mut policy = self.tx_policy.lock();
             if let Some(peer) = policy.relay.get_mut(&source) {
@@ -366,7 +368,7 @@ impl PeerTable {
             let inbound = session
                 .lease
                 .is_inbound()
-                .then(|| InboundClockKey::new(session.addr.address(), info.addr_bind));
+                .then(|| InboundClockKey::new(session.addr, info.addr_bind));
             let requests = {
                 let mut policy = self.tx_policy.lock();
                 let TxPolicy {
@@ -652,7 +654,7 @@ mod tests {
         role: crate::PeerRole,
         ready: bool,
     ) -> (PeerSource, MessageReceiver) {
-        let addr = ([127, 0, 0, 1], port).into();
+        let addr: crate::PeerEndpoint = ([127, 0, 0, 1], port).into();
         connect_at(table, addr, addr, inbound, wtxid, role, ready)
     }
 
@@ -805,9 +807,10 @@ mod tests {
         // GetPort. IPv4 mapped bind bytes are identical; scope/flow are absent.
         let key = |remote: &str, bind: &str| {
             InboundClockKey::new(
-                remote
-                    .parse()
-                    .unwrap_or_else(|error| panic!("remote: {error}")),
+                remote.parse::<crate::PeerAddress>().map_or_else(
+                    |error| panic!("remote: {error}"),
+                    |address| crate::PeerEndpoint::new(address, 0).into(),
+                ),
                 bind.parse().unwrap_or_else(|error| panic!("bind: {error}")),
             )
         };
@@ -825,7 +828,7 @@ mod tests {
         let bind = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(plain, 8333, 123, 456));
         assert_eq!(
             key("8.8.8.8", "[fe80::1]:8333"),
-            InboundClockKey::new(std::net::IpAddr::from([8, 8, 8, 8]).into(), bind),
+            InboundClockKey::new(crate::PeerRemote::from(([8, 8, 8, 8], 0)), bind),
         );
     }
 
@@ -1049,7 +1052,7 @@ mod tests {
         port: u16,
         aggregate: &Arc<crate::connection::SharedOutboundBudget>,
     ) -> (PeerSource, MessageReceiver) {
-        let addr = ([127, 0, 0, 1], port).into();
+        let addr: crate::PeerEndpoint = ([127, 0, 0, 1], port).into();
         let (sender, receiver) = message_channel_bounded(1024);
         let lease = crate::PeerLease::new(sender).with_shared_budget(aggregate);
         let source = lease.source(addr);

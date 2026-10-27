@@ -83,12 +83,8 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
 
     let listeners: Vec<TcpListener> = (0..3)
         .map(|_| {
-            let listener = TcpListener::bind(
-                PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
-                    .socket_addr()
-                    .unwrap_or_else(|| panic!("expected IP fixture")),
-            )
-            .expect("bind a fake peer listener");
+            let listener =
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind a fake peer listener");
             listener
                 .set_nonblocking(true)
                 .expect("nonblocking fake peer listener");

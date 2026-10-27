@@ -1,15 +1,13 @@
 //! External Tor control service, with a dedicated unprivileged forwarding listener.
 use super::{
-    AtomicBool, Duration, Instant, Ordering, OverlayTransport, POLL, PeerAddress, PeerEndpoint,
-    SETUP_TIMEOUT, Setup, SocketAddr, identity, invalid, io, pause,
+    AtomicBool, Duration, Instant, Ordering, OverlayTransport, POLL, PeerEndpoint, SETUP_TIMEOUT,
+    Setup, SocketAddr, identity, invalid, io, pause,
 };
 use bitcoin::hashes::{Hash as _, HashEngine as _, hmac, sha256};
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::secp256k1::rand::RngCore as _;
 use std::io::Read as _;
 use std::net::TcpListener;
-use std::sync::atomic::AtomicU64;
-static NEXT_ANONYMOUS: AtomicU64 = AtomicU64::new(1);
 fn reply(setup: &mut Setup<'_>) -> io::Result<Vec<String>> {
     let mut lines = Vec::new();
     for _ in 0..32 {
@@ -183,16 +181,7 @@ impl OverlayTransport {
                     }
                     match listener.accept() {
                         Ok((stream, _forward_socket)) => {
-                            let id = NEXT_ANONYMOUS
-                                .try_update(Ordering::AcqRel, Ordering::Acquire, |id| {
-                                    id.checked_add(1)
-                                })
-                                .map_err(|_| invalid("Tor inbound identity exhausted"))?;
-                            crate::listener::admit_inbound(
-                                stream,
-                                PeerEndpoint::new(PeerAddress::AnonymousTor(id), 0),
-                                shared,
-                            );
+                            crate::listener::admit_anonymous_tor(stream, shared);
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                             pause(&cancelled, POLL);
@@ -207,7 +196,7 @@ impl OverlayTransport {
             // Forwarded connections belong to the lost service, but outbound Tor circuits
             // use the independently configured SOCKS route and need not be retired.
             for session in shared.peer_table.sessions() {
-                if matches!(session.addr.address(), PeerAddress::AnonymousTor(_)) {
+                if matches!(session.addr, crate::PeerRemote::AnonymousTor(_)) {
                     session.lease.cancel();
                 }
             }

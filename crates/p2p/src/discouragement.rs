@@ -32,13 +32,9 @@ impl DiscouragedPeers {
     }
 
     /// Record a reconnectable address and report whether it is retained.
-    /// Anonymous Tor circuit identities are ephemeral and are never recorded.
     pub(crate) fn insert(&mut self, ip: impl Into<PeerAddress>, now: Instant) -> bool {
         self.expire(now);
         let ip = ip.into().to_canonical();
-        if matches!(ip, PeerAddress::AnonymousTor(_)) {
-            return false;
-        }
         if self.deadlines.contains_key(&ip) {
             return true;
         }
@@ -106,21 +102,6 @@ pub(crate) fn is_local(address: impl Into<PeerAddress>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn anonymous_circuits_cannot_displace_reconnectable_identities() {
-        let now = Instant::now();
-        let mut entries = DiscouragedPeers::default();
-        let ip = IpAddr::from([8, 8, 8, 8]);
-        assert!(entries.insert(ip, now));
-        assert!(entries.insert(ip, now));
-        for id in 0..=u64::try_from(MAX_DISCOURAGED_IPS).unwrap_or(u64::MAX) {
-            assert!(!entries.insert(PeerAddress::AnonymousTor(id), now));
-        }
-        assert!(entries.contains(ip, now));
-        assert_eq!(entries.deadlines.len(), 1);
-        assert_eq!(entries.oldest.len(), 1);
-    }
 
     #[test]
     fn avoidance_is_bounded_expires_and_does_not_refresh_on_repetition()

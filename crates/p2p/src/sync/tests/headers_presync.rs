@@ -1,6 +1,6 @@
 //! Header-presync admission gating over the real headers drain.
 
-use bitcoin_rs_primitives::PeerEndpoint;
+use crate::PeerRemote;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Instant;
@@ -105,12 +105,11 @@ fn connect(
     peers: &Arc<PeerTable>,
     port: u16,
     start_height: i32,
-) -> (
-    PeerEndpoint,
-    PeerLease,
-    crate::test_support::MessageReceiver,
-) {
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+) -> (PeerRemote, PeerLease, crate::test_support::MessageReceiver) {
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+    ));
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());

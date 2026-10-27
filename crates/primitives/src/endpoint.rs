@@ -34,7 +34,7 @@ impl PeerNetwork {
     }
 }
 
-/// Remote identity. An accepted Tor circuit does not reveal a remote onion key.
+/// Routable Bitcoin peer address, independent of a live connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum PeerAddress {
     /// Ordinary IP address.
@@ -43,8 +43,6 @@ pub enum PeerAddress {
     Onion([u8; 32]),
     /// SHA256 of an I2P public Destination.
     I2p([u8; 32]),
-    /// Opaque process-unique accepted Tor connection, never persisted or relayed.
-    AnonymousTor(u64),
 }
 
 impl PeerAddress {
@@ -75,7 +73,7 @@ impl PeerAddress {
                     PeerNetwork::Ipv6
                 }
             }
-            Self::Onion(_) | Self::AnonymousTor(_) => PeerNetwork::Onion,
+            Self::Onion(_) => PeerNetwork::Onion,
             Self::I2p(_) => PeerNetwork::I2p,
         }
     }
@@ -238,7 +236,6 @@ impl fmt::Display for PeerAddress {
             Self::Ip(ip) => ip.fmt(f),
             Self::Onion(key) => write!(f, "{}.onion", base32_encode(&onion_bytes(key))),
             Self::I2p(hash) => write!(f, "{}.b32.i2p", base32_encode(hash)),
-            Self::AnonymousTor(id) => write!(f, "tor-inbound-{id}"),
         }
     }
 }
@@ -276,12 +273,6 @@ impl FromStr for PeerAddress {
             }
             return Ok(Self::I2p(base32_decode(name)?));
         }
-        if let Some(id) = text.strip_prefix("tor-inbound-") {
-            return Ok(Self::AnonymousTor(
-                id.parse()
-                    .map_err(|_| "invalid anonymous Tor connection handle")?,
-            ));
-        }
         Err("expected IP, Tor v3, or I2P base32 destination")
     }
 }
@@ -313,11 +304,6 @@ impl<'de> Deserialize<'de> for PeerEndpoint {
         let endpoint: Self = String::deserialize(deserializer)?
             .parse()
             .map_err(serde::de::Error::custom)?;
-        if matches!(endpoint.address(), PeerAddress::AnonymousTor(_)) {
-            return Err(serde::de::Error::custom(
-                "anonymous Tor connection handles are not durable destinations",
-            ));
-        }
         Ok(endpoint)
     }
 }
@@ -331,11 +317,6 @@ impl<'de> Deserialize<'de> for PeerAddress {
         let address: Self = String::deserialize(deserializer)?
             .parse()
             .map_err(serde::de::Error::custom)?;
-        if matches!(address, Self::AnonymousTor(_)) {
-            return Err(serde::de::Error::custom(
-                "anonymous Tor connection handles are not durable identities",
-            ));
-        }
         Ok(address)
     }
 }

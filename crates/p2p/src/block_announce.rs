@@ -19,7 +19,7 @@
 //! - Coalesces wakeups under queue saturation and rereads the committed tip from chainstate.
 //! - Disconnect cleanly removes peer announcement state.
 
-use bitcoin_rs_primitives::PeerEndpoint;
+use crate::PeerRemote;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -198,7 +198,7 @@ impl BlockAnnouncer {
 
     /// Returns the current list of peers we requested high-bandwidth compact blocks from.
     #[cfg(test)]
-    pub fn high_bandwidth_requested_peers(&self) -> Vec<PeerEndpoint> {
+    pub fn high_bandwidth_requested_peers(&self) -> Vec<PeerRemote> {
         let state = self.state.lock();
         state
             .high_bandwidth_requested_peers
@@ -209,7 +209,7 @@ impl BlockAnnouncer {
 
     /// Returns the best block known for `addr`.
     #[cfg(test)]
-    pub fn peer_known_block(&self, addr: PeerEndpoint) -> Option<Hash256> {
+    pub fn peer_known_block(&self, addr: PeerRemote) -> Option<Hash256> {
         let source = self.peers.lease(addr)?.source(addr);
         self.peers
             .announcement_state(source)
@@ -246,7 +246,7 @@ impl BlockAnnouncer {
         &self,
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
-        sent: &mut Vec<(PeerEndpoint, Message)>,
+        sent: &mut Vec<(PeerRemote, Message)>,
     ) {
         // BIP152 asks for high-bandwidth slots to go to peers that recently
         // delivered blocks quickly. Filling strictly in session order
@@ -279,7 +279,7 @@ impl BlockAnnouncer {
 
     /// Reconciles the selected high-bandwidth compact-relay peers against
     /// current ready sessions and IBD state.
-    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(PeerEndpoint, Message)> {
+    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(PeerRemote, Message)> {
         let eligible: Vec<_> = self
             .peers
             .sessions()
@@ -497,7 +497,7 @@ impl BlockAnnouncer {
         block: &Block,
         hash: Hash256,
         height: u32,
-    ) -> Vec<(PeerEndpoint, Message)> {
+    ) -> Vec<(PeerRemote, Message)> {
         if self.in_ibd() {
             return Vec::new();
         }
@@ -642,7 +642,7 @@ impl BlockAnnouncer {
     }
 
     /// Rereads and processes the current committed tip.
-    pub fn process_tip(&self) -> Vec<(PeerEndpoint, Message)> {
+    pub fn process_tip(&self) -> Vec<(PeerRemote, Message)> {
         self.reconcile_high_bandwidth_peers();
         if self.in_ibd() {
             return Vec::new();
@@ -719,7 +719,7 @@ impl BlockAnnouncer {
     /// ready peers rearms the retry. Peers that already know it are skipped
     /// by the planner, and an `inv` fallback may repeat. Without a pending
     /// retry, nothing happens.
-    pub fn process_tip_retry(&self) -> Vec<(PeerEndpoint, Message)> {
+    pub fn process_tip_retry(&self) -> Vec<(PeerRemote, Message)> {
         // IBD suppresses announcements entirely; consuming the intent here
         // would drop a disconnect-armed retry before the first poll that can
         // act on it. Keep it armed until `process_tip` can run.
@@ -944,11 +944,11 @@ mod tests {
         }
     }
 
-    fn test_addr(port: u16) -> PeerEndpoint {
-        PeerEndpoint::from(([127, 0, 0, 1], port))
+    fn test_addr(port: u16) -> PeerRemote {
+        PeerRemote::from(([127, 0, 0, 1], port))
     }
 
-    fn test_peer_info(addr: PeerEndpoint, send_headers: bool) -> PeerInfo {
+    fn test_peer_info(addr: PeerRemote, send_headers: bool) -> PeerInfo {
         PeerInfo {
             addr,
             version: 70016,
@@ -963,7 +963,8 @@ mod tests {
             conn_time: 0,
             inbound: false,
             addr_bind: addr
-                .socket_addr()
+                .endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
                 .unwrap_or_else(|| panic!("expected IP fixture")),
             time_offset: 0,
             counters: Arc::new(crate::counters::PeerCounters::default()),
@@ -974,7 +975,7 @@ mod tests {
     fn setup_peer(
         table: &Arc<PeerTable>,
         announcer: &BlockAnnouncer,
-        addr: PeerEndpoint,
+        addr: PeerRemote,
         send_headers: bool,
     ) -> (PeerLease, crate::test_support::MessageReceiver) {
         let (tx, rx) = crate::test_support::message_channel();
@@ -987,22 +988,17 @@ mod tests {
         (lease, rx)
     }
 
-    fn source(table: &PeerTable, addr: PeerEndpoint) -> PeerSource {
+    fn source(table: &PeerTable, addr: PeerRemote) -> PeerSource {
         table.lease(addr).expect("live test peer").source(addr)
     }
 
-    fn mark_known(
-        table: &PeerTable,
-        _announcer: &BlockAnnouncer,
-        addr: PeerEndpoint,
-        hash: Hash256,
-    ) {
+    fn mark_known(table: &PeerTable, _announcer: &BlockAnnouncer, addr: PeerRemote, hash: Hash256) {
         table.note_announced_block(source(table, addr), hash);
     }
 
     fn note_compact_preference(
         table: &PeerTable,
-        addr: PeerEndpoint,
+        addr: PeerRemote,
         high_bandwidth: bool,
         version: u64,
     ) {

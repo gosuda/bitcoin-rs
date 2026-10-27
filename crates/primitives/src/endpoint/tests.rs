@@ -46,10 +46,7 @@ fn ip_sockets_keep_scope_and_anonymous_circuits_are_not_durable_destinations() {
     let endpoint = PeerEndpoint::from(socket);
     assert_eq!(endpoint.socket_addr(), Some(socket));
     assert_eq!(endpoint.to_canonical(), endpoint);
-    let handle = "tor-inbound-7:0"
-        .parse::<PeerEndpoint>()
-        .expect("RPC handle");
-    assert_eq!(handle.address(), PeerAddress::AnonymousTor(7));
-    assert!(!handle.address().is_loopback());
+    assert!("tor-inbound-7:0".parse::<PeerEndpoint>().is_err());
+    assert!("tor-inbound-7".parse::<PeerAddress>().is_err());
     assert!(serde_json::from_str::<PeerEndpoint>("\"tor-inbound-7:0\"").is_err());
 }

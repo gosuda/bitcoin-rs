@@ -782,7 +782,7 @@ mod tests {
     }
 
     pub(super) fn source(port: u16) -> PeerSource {
-        PeerSource::for_test(([127, 0, 0, 1], port).into())
+        PeerSource::for_test(([127, 0, 0, 1], port))
     }
     pub(super) fn item(n: u32) -> Inventory {
         let mut hash = [0; 32];
@@ -1017,7 +1017,7 @@ mod tests {
         let table = Arc::new(PeerTable::new());
         let (sender, receiver) = crate::test_support::message_channel_bounded(4);
         let lease = crate::PeerLease::new(sender);
-        let addr = ([127, 0, 0, 1], 8333).into();
+        let addr: crate::PeerEndpoint = ([127, 0, 0, 1], 8333).into();
         table.register(addr, lease.clone());
         let version = crate::handshake::version_message(
             1,
@@ -1061,7 +1061,7 @@ mod tests {
         let pending_table = Arc::clone(&table);
         let (new_sender, new_receiver) = crate::test_support::message_channel_bounded(4);
         let new_lease = crate::PeerLease::new(new_sender);
-        let new_addr = ([127, 0, 0, 1], 8334).into();
+        let new_addr: crate::PeerEndpoint = ([127, 0, 0, 1], 8334).into();
         POLL_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 // A new ready connection and its announcement both appear
@@ -1110,7 +1110,7 @@ mod tests {
         port: u16,
         lease: &crate::PeerLease,
     ) -> PeerSource {
-        let addr = ([127, 0, 0, 1], port).into();
+        let addr: crate::PeerEndpoint = ([127, 0, 0, 1], port).into();
         table.register(addr, lease.clone());
         let version = crate::handshake::version_message(
             1,

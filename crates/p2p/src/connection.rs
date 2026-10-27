@@ -10,7 +10,7 @@ use parking_lot::{Condvar, Mutex};
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Process-unique identity for one peer connection.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
@@ -39,11 +39,86 @@ impl ConnectionId {
     }
 }
 
+/// Remote identity of a live connection. Only destinations belong in `AddrMan`;
+/// an anonymous inbound circuit is identified by its own connection lease.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PeerRemote {
+    /// A routable Bitcoin peer destination.
+    Endpoint(PeerEndpoint),
+    /// An inbound Tor circuit whose remote destination is unknown.
+    AnonymousTor(ConnectionId),
+}
+
+impl PeerRemote {
+    /// Destination, when the connection reveals one.
+    pub const fn endpoint(self) -> Option<PeerEndpoint> {
+        match self {
+            Self::Endpoint(endpoint) => Some(endpoint),
+            Self::AnonymousTor(_) => None,
+        }
+    }
+
+    /// Network carrying this connection, independent of proxy sockets.
+    pub const fn network(self) -> crate::PeerNetwork {
+        match self {
+            Self::Endpoint(endpoint) => endpoint.address().network(),
+            Self::AnonymousTor(_) => crate::PeerNetwork::Onion,
+        }
+    }
+}
+
+impl From<PeerEndpoint> for PeerRemote {
+    fn from(endpoint: PeerEndpoint) -> Self {
+        Self::Endpoint(endpoint)
+    }
+}
+
+impl From<std::net::SocketAddr> for PeerRemote {
+    fn from(socket: std::net::SocketAddr) -> Self {
+        Self::Endpoint(socket.into())
+    }
+}
+
+impl<T> From<(T, u16)> for PeerRemote
+where
+    std::net::SocketAddr: From<(T, u16)>,
+{
+    fn from(value: (T, u16)) -> Self {
+        Self::from(std::net::SocketAddr::from(value))
+    }
+}
+
+impl std::fmt::Display for PeerRemote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Endpoint(endpoint) => endpoint.fmt(f),
+            Self::AnonymousTor(id) => write!(f, "tor-inbound-{}:0", id.get()),
+        }
+    }
+}
+
+impl std::str::FromStr for PeerRemote {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(id) = value
+            .strip_prefix("tor-inbound-")
+            .and_then(|id| id.strip_suffix(":0"))
+        {
+            return id
+                .parse()
+                .map(|id| Self::AnonymousTor(ConnectionId(id)))
+                .map_err(|_| "invalid anonymous Tor connection handle");
+        }
+        value.parse().map(Self::Endpoint)
+    }
+}
+
 /// Attribution token for an event delivered by one connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PeerSource {
-    /// Logical remote Bitcoin endpoint at delivery time.
-    pub(crate) addr: PeerEndpoint,
+    /// Remote connection identity at delivery time.
+    pub(crate) addr: PeerRemote,
     connection_id: ConnectionId,
 }
 
@@ -56,9 +131,9 @@ impl PeerSource {
 
     /// Mints a source with a fresh process-unique identity for tests.
     #[cfg(test)]
-    pub(crate) fn for_test(addr: PeerEndpoint) -> Self {
+    pub(crate) fn for_test(addr: impl Into<PeerRemote>) -> Self {
         Self {
-            addr,
+            addr: addr.into(),
             connection_id: ConnectionId::allocate(),
         }
     }
@@ -67,8 +142,21 @@ impl PeerSource {
 impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
     fn from(source: PeerSource) -> Self {
         Self {
-            addr: source.addr,
+            addr: source.addr.endpoint(),
             connection_id: source.connection_id.get(),
+        }
+    }
+}
+
+impl From<bitcoin_rs_mempool::PeerToken> for PeerSource {
+    fn from(token: bitcoin_rs_mempool::PeerToken) -> Self {
+        let connection_id = ConnectionId(token.connection_id);
+        Self {
+            addr: token.addr.map_or(
+                PeerRemote::AnonymousTor(connection_id),
+                PeerRemote::Endpoint,
+            ),
+            connection_id,
         }
     }
 }
@@ -1029,9 +1117,9 @@ impl PeerLease {
 
     /// Stamps an inbound event with this connection's identity and address.
     #[must_use]
-    pub fn source(&self, addr: PeerEndpoint) -> PeerSource {
+    pub fn source(&self, addr: impl Into<PeerRemote>) -> PeerSource {
         PeerSource {
-            addr,
+            addr: addr.into(),
             connection_id: self.id,
         }
     }
@@ -1235,7 +1323,7 @@ mod tests {
 
     fn peer_info(addr: PeerEndpoint, conn_time: u64) -> crate::PeerInfo {
         crate::PeerInfo {
-            addr,
+            addr: addr.into(),
             version: 70_016,
             wtxid_relay: false,
             relay_transactions: true,

@@ -38,6 +38,10 @@ This page assigns ownership and cites proof under the
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
+  `connection::PeerRemote` distinguishes a destination from an anonymous
+  inbound Tor circuit identified by its lease's `ConnectionId`. Address-book
+  and dial APIs accept only `PeerEndpoint` destinations. Transaction attribution
+  retains the connection id even when no destination is known.
 - Automatic discouragement is owned by the P2P service's `BannedReader` and
   bounded ephemeral policy. The listener records only typed remote violations
   from a current lease. Immutable exclusion snapshots precede address-book

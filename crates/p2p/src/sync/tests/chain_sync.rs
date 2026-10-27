@@ -15,7 +15,10 @@ use crate::sync::peers::{
 
 /// An outbound connection that demonstrated `height`.
 fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+    ));
     UsablePeer {
         source: PeerSource::for_test(addr),
         info: synthetic_peer(addr, i32::try_from(height).unwrap_or(i32::MAX)),

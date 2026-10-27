@@ -12,7 +12,10 @@ fn tick_retries_expired_pending_before_new_heights() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -47,7 +50,10 @@ fn tick_fills_mixed_retry_and_new_height_batch() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -90,7 +96,10 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx,
     } = SyncHarness::new(tree);
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(genesis))?;
 
@@ -135,7 +144,10 @@ fn oversized_received_block_releases_pending_budget_for_retry() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -217,7 +229,10 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
