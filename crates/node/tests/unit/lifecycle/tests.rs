@@ -28,6 +28,82 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
 }
 
 #[test]
+fn split_rpc_listeners_start_and_join_through_node_services() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let management_address = management.local_addr()?;
+    let public_address = public.local_addr()?;
+    let mut config = isolated_config(dir.path());
+    config.rpc.bind = management_address;
+    config.rpc.public_bind = Some(public_address);
+    drop((management, public));
+    let node = start_node(config, RuntimeInputs::default(), false)?;
+    assert_eq!(
+        node.services
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing node services"))?
+            .rpc_threads
+            .len(),
+        2
+    );
+    for (address, request, expected) in [
+        (
+            public_address,
+            "OPTIONS /api/tx HTTP/1.1\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 204 No Content",
+        ),
+        (
+            management_address,
+            "POST / HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 401 Unauthorized",
+        ),
+    ] {
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(WITNESS_BOUND))?;
+        stream.write_all(request.as_bytes())?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        assert!(response.starts_with(expected), "{response}");
+    }
+    node.shutdown_blocking()?;
+    let _management = std::net::TcpListener::bind(management_address)?;
+    let _public = std::net::TcpListener::bind(public_address)?;
+    Ok(())
+}
+
+#[test]
+fn public_bind_failure_rolls_back_management_binding_and_node_state() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = management.local_addr()?;
+    let mut config = isolated_config(dir.path());
+    config.rpc.bind = address;
+    config.rpc.public_bind = Some(public.local_addr()?);
+    drop(management);
+    let error = start_node(config.clone(), RuntimeInputs::default(), false)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("occupied public bind must fail startup"))?;
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to bind public HTTP listener at {}",
+            public.local_addr()?
+        )
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::AddrInUse)
+    );
+    let _management = std::net::TcpListener::bind(address)?;
+    let _reopened = NodeState::open(config, None)?;
+    Ok(())
+}
+
+#[test]
 fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> anyhow::Result<()> {
     use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, snapshot};
     use bitcoin_rs_primitives::{Hash256, Network, Txid};
@@ -975,8 +1051,9 @@ fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
         state.config().mining.payout_script.clone(),
     ));
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
-    let (_context, server) = bind_rpc(state, &mining_control, state.block_body_source()?)?;
-    Ok(server)
+    let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
+    assert_eq!(bindings.listeners.len(), 1);
+    Ok(bindings.listeners.remove(0).0)
 }
 
 #[test]

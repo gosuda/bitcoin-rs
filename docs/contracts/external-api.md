@@ -1046,6 +1046,24 @@ evidence does not establish mainnet memory or throughput qualifications.
   `busy`. A source is an address, so clients behind loopback, a Docker gateway
   or a reverse proxy share one. Pools below four workers keep no per-source
   share.
+  The node defaults to one shared listener with 128 connections. Opting into
+  `public_bind` moves the HTTP query/broadcast surfaces to an independently
+  bounded listener and leaves authenticated JSON-RPC on `rpc_bind` (WF-02).
+  `rpc_max_connections` and `public_max_connections` independently default to
+  128 and must be positive. All admitted connections, including incomplete
+  heads, idle keep-alives and blocking requests, count against their binding.
+  Public occupancy cannot consume management permits; neither binding is
+  exempt from admission. Each accept loop can additionally hold one refused
+  socket while writing its 503, bounded by the configured idle timeout.
+  This isolates connection capacity, not shared CPU, process descriptors,
+  storage or lock contention. Each binding retains the
+  existing dispatcher-owned blocking quota and shutdown latch. Both listeners
+  bind before either starts; startup rollback and normal teardown own both.
+  Proof: `rpc::server::tests::listeners::public_saturation_preserves_management_and_recovers`,
+  `split_listener_routes_are_closed_before_authentication_and_body_upload`,
+  and node lifecycle tests
+  `split_rpc_listeners_start_and_join_through_node_services` and
+  `public_bind_failure_rolls_back_management_binding_and_node_state`.
   - Interrupted and aborted accepts retry immediately. Other accept errors,
     including descriptor exhaustion and Linux's pending-connection `EOPNOTSUPP`
     (`Unsupported`), warn and retry after 100 ms; shutdown is checked before

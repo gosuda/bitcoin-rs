@@ -258,11 +258,36 @@ Example regtest startup:
 
 The wallet-facing contract is [contracts/wallet-facing.md](contracts/wallet-facing.md).
 
+To keep public connections from using management RPC capacity, add
+`--public-bind 0.0.0.0:8080`. In this opt-in mode `/api`, `/esplora`, and
+REST (when enabled) move to the public port; `--rpc-bind` serves authenticated
+JSON-RPC only. Keep the management port on loopback or a trusted network.
+The public port preserves both existing Esplora namespaces, including backend
+helpers and transaction broadcast; choose exposure accordingly. A public port
+does not accept JSON-RPC, even with valid credentials.
+
+`--rpc-max-connections` and `--public-max-connections` each default to 128
+and must be positive. The bounds include slow/incomplete requests and idle
+keep-alives, with the existing per-source reservation and head/body/idle
+timeouts. Separation protects connection capacity; CPU, process descriptor
+limits, storage and locks remain shared. Without `--public-bind`, the existing
+combined listener and routes remain the default.
+
+These options also resolve through TOML (`public_bind`, `rpc_max_connections`,
+`public_max_connections`) and environment variables (`BITCOIN_RS_PUBLIC_BIND`,
+`BITCOIN_RS_RPC_MAX_CONNECTIONS`, `BITCOIN_RS_PUBLIC_MAX_CONNECTIONS`), using
+the normal file < environment < CLI precedence. Both listeners use the same
+chain, mempool, indexes and broadcast gateway.
+
 A Compose example runs the upstream mempool explorer against these endpoints: [btc-mempool-explorer](../tools/btc-mempool-explorer/README.md).
 
 ### REST
 
-`--rest=true` (or `rest=1` in `bitcoin.conf`) serves Core-compatible REST on the RPC port without authentication. The CLI option takes an explicit boolean; bare `--rest` is not the enablement syntax. See [rest-interface.md](rest-interface.md).
+`--rest=true` (or `rest=1` in `bitcoin.conf`) serves Core-compatible REST without
+authentication on the combined `--rpc-bind` listener by default. With
+`--public-bind`, REST moves to that public listener and the RPC port serves
+management JSON-RPC only. The CLI option takes an explicit boolean; bare
+`--rest` is not the enablement syntax. See [rest-interface.md](rest-interface.md).
 
 ### ZMQ
 

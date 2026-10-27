@@ -655,6 +655,24 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_RPC_BIND", str::parse]
                         toml native("rpc_bind")
                     }
+                    /// Separate public HTTP bind; when set, rpc-bind serves JSON-RPC only.
+                    public_bind as public_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "public-bind")]]
+                        env["BITCOIN_RS_PUBLIC_BIND", str::parse]
+                        toml native("public_bind")
+                    }
+                    /// Maximum live connections on the RPC listener (default 128).
+                    max_connections as rpc_max_connections: Option<usize> {
+                        cli[#[arg(long = "rpc-max-connections")]]
+                        env["BITCOIN_RS_RPC_MAX_CONNECTIONS", str::parse]
+                        toml native("rpc_max_connections")
+                    }
+                    /// Maximum live connections on the optional public listener (default 128).
+                    public_max_connections as public_max_connections: Option<usize> {
+                        cli[#[arg(long = "public-max-connections")]]
+                        env["BITCOIN_RS_PUBLIC_MAX_CONNECTIONS", str::parse]
+                        toml native("public_max_connections")
+                    }
                     /// Whether the REST gateway is enabled.
                     rest as rest: Option<bool> {
                         cli[#[arg(long = "rest")]]

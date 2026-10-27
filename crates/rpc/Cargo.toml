@@ -40,6 +40,7 @@ compact_str.workspace = true
 hashbrown.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 sha2.workspace = true
 corepc-types.workspace = true
 anyhow.workspace = true

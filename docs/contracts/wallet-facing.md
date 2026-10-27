@@ -29,8 +29,23 @@ stay in the external process.
 
 ### `WF-02`: Operations a wallet actually issues
 
-Esplora lives at `/api` on the JSON-RPC listener. That directory is the
-electrs/mempool.space base URL. Relative routes below are appended to it.
+By default, Esplora lives at `/api` on the JSON-RPC listener. That directory
+is the electrs/mempool.space base URL; relative routes below are appended to it.
+With the opt-in
+`public_bind`, REST (if enabled), `/api`, and `/esplora` move to that separate
+public listener, and `rpc_bind` serves authenticated JSON-RPC only. The public
+listener refuses JSON-RPC, including the legacy unknown-POST fallback, with
+404 and closes before authentication or body upload. Both bindings share the
+same Context and authoritative services; routing, capability gates, broadcast
+origins and CORS inside the public namespaces are unchanged. Each binding
+owns its connection budget, dispatcher cancellation latch and blocking quota
+(API-34). Proof:
+`rpc::server::tests::listeners::split_listener_routes_are_closed_before_authentication_and_body_upload`,
+`rpc::server::tests::listeners::public_saturation_preserves_management_and_recovers`,
+and node lifecycle tests
+`split_rpc_listeners_start_and_join_through_node_services` and
+`public_bind_failure_rolls_back_management_binding_and_node_state`.
+
 Every read captures the applied-tip publication and answers from one coherent view. A
 moved chain generation returns the declared unavailable response, never a
 mixed-tip page.

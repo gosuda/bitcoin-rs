@@ -1,8 +1,9 @@
 # REST interface
 
 bitcoin-rs can expose the small Bitcoin Core-compatible REST surface needed by
-remote chain validators. REST uses the existing JSON-RPC listener and port; it
-does not create a second listener. Enable it on the CLI (`--rest=true`), via
+remote chain validators. REST uses the existing JSON-RPC listener and port by
+default. With `--public-bind`, REST moves to that separate public listener;
+see [public consumers](getting-started.md#public-consumers). Enable it on the CLI (`--rest=true`), via
 `BITCOIN_RS_REST=true`, in TOML (`rest = true`), or with Core-style
 `bitcoin.conf` configuration:
 
@@ -10,10 +11,11 @@ does not create a second listener. Enable it on the CLI (`--rest=true`), via
 rest=1
 ```
 
-The REST requests are unauthenticated, as in Bitcoin Core. JSON-RPC requests on
-the same listener continue to require their configured authentication. Select
-the listener with the existing `--rpc-bind` option (or its layered config
-equivalent; see [getting-started.md](getting-started.md#rest)).
+The REST requests are unauthenticated, as in Bitcoin Core. JSON-RPC requests
+continue to require their configured authentication. By default, `--rpc-bind`
+selects the combined listener. In split mode, `--public-bind` selects the REST
+listener and `--rpc-bind` serves management JSON-RPC only (or use the layered
+config equivalents; see [getting-started.md](getting-started.md#rest)).
 
 The gateway registers these Core REST prefixes:
 

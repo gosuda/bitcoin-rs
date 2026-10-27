@@ -44,6 +44,36 @@ const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
 
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
+/// Routes admitted by one listener, with an independent connection budget.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RpcSurface {
+    /// Historical combined JSON-RPC, REST and Esplora listener.
+    #[default]
+    Shared,
+    /// Authenticated JSON-RPC only.
+    Management,
+    /// REST (when enabled) and both existing Esplora namespaces; no JSON-RPC.
+    Public,
+}
+
+impl RpcSurface {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Management => "management",
+            Self::Public => "public",
+        }
+    }
+
+    fn allows(self, route: &HttpRoute<'_>) -> bool {
+        match self {
+            Self::Shared => true,
+            Self::Management => matches!(route, HttpRoute::JsonRpc | HttpRoute::NotFound),
+            Self::Public => !matches!(route, HttpRoute::JsonRpc),
+        }
+    }
+}
+
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
     /// Bound TCP listener.
@@ -103,12 +133,23 @@ impl RpcServer {
         self,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> io::Result<()> {
-        self.serve_accept_loop(&shutdown.into(), TcpListener::accept)
+        self.serve_surface_with_shutdown(shutdown, RpcSurface::Shared)
+    }
+
+    /// Runs this listener with a closed route selection and its own budget.
+    /// The historical serving entrypoint retains the shared surface.
+    pub fn serve_surface_with_shutdown(
+        self,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        surface: RpcSurface,
+    ) -> io::Result<()> {
+        self.serve_accept_loop(&shutdown.into(), surface, TcpListener::accept)
     }
 
     fn serve_accept_loop(
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
         mut accept: impl FnMut(&TcpListener) -> io::Result<(TcpStream, SocketAddr)>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
@@ -121,7 +162,7 @@ impl RpcServer {
                 Ok((stream, addr)) => {
                     if let Err(error) = stream
                         .set_nonblocking(false)
-                        .and_then(|()| self.handle_accept(&active, stream, addr.ip()))
+                        .and_then(|()| self.handle_accept(&active, stream, addr.ip(), surface))
                     {
                         debug!(%error, "rpc connection setup failed");
                     }
@@ -157,6 +198,7 @@ impl RpcServer {
         active: &Arc<Mutex<ActiveConnections>>,
         stream: TcpStream,
         peer: IpAddr,
+        surface: RpcSurface,
     ) -> io::Result<()> {
         // Connection-local: a nodelay failure must not stop the accept loop.
         let mut stream = match prepare_http_socket(stream) {
@@ -168,6 +210,9 @@ impl RpcServer {
         };
         let should_accept = active.lock().admit(peer, self.max_connections);
         if !should_accept {
+            metrics::counter!("rpc.connections.rejected_total", "surface" => surface.label())
+                .increment(1);
+            stream.set_write_timeout(Some(self.idle_timeout))?;
             write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
             return Ok(());
         }
@@ -175,7 +220,9 @@ impl RpcServer {
         let permit = ConnectionPermit {
             active: Arc::clone(active),
             peer,
+            surface,
         };
+        metrics::gauge!("rpc.connections.active", "surface" => surface.label()).increment(1.0);
         let auth = Arc::clone(&self.auth);
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
@@ -185,7 +232,7 @@ impl RpcServer {
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
-                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
+                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
@@ -240,15 +287,34 @@ impl ActiveConnections {
 struct ConnectionPermit {
     active: Arc<Mutex<ActiveConnections>>,
     peer: IpAddr,
+    surface: RpcSurface,
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.lock().release(self.peer);
+        metrics::gauge!("rpc.connections.active", "surface" => self.surface.label()).decrement(1.0);
     }
 }
 
 struct RpcStop(Arc<Handler>);
+
+struct RequestTimer {
+    started: Instant,
+    surface: RpcSurface,
+    route: &'static str,
+}
+
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        metrics::histogram!(
+            "rpc.http.request_seconds",
+            "surface" => self.surface.label(),
+            "route" => self.route,
+        )
+        .record(self.started.elapsed().as_secs_f64());
+    }
+}
 
 impl Drop for RpcStop {
     fn drop(&mut self) {
@@ -313,6 +379,7 @@ fn serve_connection(
     handler: &Handler,
     rest_enabled: bool,
     idle_timeout: Duration,
+    surface: RpcSurface,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
@@ -327,7 +394,7 @@ fn serve_connection(
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
             Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled {
+                let response = if rest_enabled && surface != RpcSurface::Management {
                     crate::rest::getutxos_body_too_large()
                 } else {
                     crate::rest::not_found()
@@ -354,6 +421,18 @@ fn serve_connection(
                 return Err(error);
             }
         };
+        let route = classify(&head.method, &head.path);
+        let _request_timer = RequestTimer {
+            started: Instant::now(),
+            surface,
+            route: route.label(),
+        };
+        // Reject a route outside this listener before authentication or body
+        // upload. Closing also prevents pipelined bytes crossing the boundary.
+        if !surface.allows(&route) {
+            write_not_found(reader.get_mut().socket_mut(), false)?;
+            return Ok(());
+        }
         // Authentication runs from the head alone, before any body byte is
         // read: a 16 MiB declared body without credentials gets its 401 at
         // once instead of after its upload (Core `httprpc.cpp` checks inside
@@ -366,7 +445,7 @@ fn serve_connection(
         let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
             Ok(request) => request,
             Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled {
+                let response = if rest_enabled && surface != RpcSurface::Management {
                     crate::rest::getutxos_body_too_large()
                 } else {
                     crate::rest::not_found()
@@ -1033,6 +1112,33 @@ enum HttpRoute<'a> {
     JsonRpc,
 }
 
+impl HttpRoute<'_> {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Rest { .. } | Self::RestPost { .. } => "rest",
+            Self::EsploraGet {
+                surface: HttpSurface::EsploraPublic,
+                ..
+            }
+            | Self::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                ..
+            }
+            | Self::Preflight { .. } => "esplora_public",
+            Self::EsploraGet {
+                surface: HttpSurface::EsploraBackend,
+                ..
+            }
+            | Self::EsploraPost {
+                surface: HttpSurface::EsploraBackend,
+                ..
+            } => "esplora_backend",
+            Self::NotFound => "not_found",
+            Self::JsonRpc => "json_rpc",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpSurface {
     EsploraPublic,
@@ -1209,6 +1315,8 @@ struct ResponseHead<'a> {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
+    mod listeners;
+
     use super::*;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -1256,6 +1364,7 @@ mod tests {
                 &Handler::new(Arc::new(Context::new())),
                 false,
                 Duration::from_secs(30),
+                RpcSurface::Shared,
             )
         });
         let started = Instant::now();
@@ -1504,6 +1613,7 @@ mod tests {
                 &Handler::new(Arc::new(Context::new())),
                 false,
                 Duration::from_secs(30),
+                RpcSurface::Shared,
             )
         });
         let mut request = json_rpc_head(Some(GOOD_TOKEN), 16);
@@ -1533,6 +1643,7 @@ mod tests {
                 &handler,
                 enabled,
                 Duration::from_secs(2),
+                RpcSurface::Shared,
             )
         });
         client.write_all(request)?;
@@ -1792,7 +1903,7 @@ mod tests {
             errors.push(io::Error::from_raw_os_error(10024)); // WSAEMFILE
             let mut errors = errors.into_iter();
             let start = Instant::now();
-            server.serve_accept_loop(&stop.into(), |listener| {
+            server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
                 if let Some(error) = errors.next() {
                     return Err(error);
                 }
@@ -1823,7 +1934,7 @@ mod tests {
         let stop = Arc::clone(&shutdown);
         let start = Instant::now();
         let mut attempts = 0;
-        server.serve_accept_loop(&shutdown.into(), |_| {
+        server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
             attempts += 1;
             if attempts == 3 {
                 stop.store(true, Ordering::Release);
@@ -1841,7 +1952,7 @@ mod tests {
             let server = accept_test_server()?;
             let shutdown = Arc::new(AtomicBool::new(false));
             let mut attempts = 0;
-            let result = server.serve_accept_loop(&shutdown.into(), |_| {
+            let result = server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
                 attempts += 1;
                 Err(kind.into())
             });
@@ -2125,6 +2236,7 @@ mod tests {
                     &handler,
                     false,
                     core::time::Duration::from_secs(5),
+                    RpcSurface::Shared,
                 )
             });
 
@@ -2160,6 +2272,7 @@ mod tests {
                 &handler,
                 false,
                 core::time::Duration::from_secs(5),
+                RpcSurface::Shared,
             )
         });
 
@@ -2239,6 +2352,7 @@ mod tests {
                 &handler,
                 false,
                 core::time::Duration::from_secs(1),
+                RpcSurface::Shared,
             )
         });
 
