@@ -165,49 +165,6 @@ fn connected_collision_good_uses_ip_not_port_but_not_linked_ipv6_group() {
     assert_eq!(state(&book, target()).last_success, EPOCH - 20_000);
 }
 
-const V3_ANCHORS: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v3-anchors.dat");
-const V4_ANCHORS: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v4-anchors.dat");
-const V6_REFS: &[u8] = include_bytes!("../../../tests/data/addrman-core-v6-eight-refs.dat");
-
-#[test]
-fn actual_historical_anchor_and_v6_files_migrate_with_exact_backup() {
-    for (schema, bytes) in [(3, V3_ANCHORS), (4, V4_ANCHORS), (6, V6_REFS)] {
-        let directory = tempfile::tempdir().expect("directory");
-        let base = directory.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        fs::write(&path, bytes).expect("historic bytes");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        {
-            let manager = book.state.lock();
-            assert!(manager.writable);
-            assert_eq!(manager.stored.version, VERSION);
-            assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
-            if schema == 6 {
-                assert_eq!(refs(&manager, target()), 8);
-            } else {
-                assert_eq!(manager.stored.anchors.len(), 2);
-                assert!(
-                    manager
-                        .stored
-                        .anchors
-                        .iter()
-                        .all(|anchor| anchor.confirmed_at == EPOCH + 6)
-                );
-            }
-            assert_indexes(&manager);
-        }
-        let backup = path.with_extension(format!(
-            "v{schema}-{}.bak",
-            Sha256::digest(bytes)[..].to_lower_hex_string()
-        ));
-        assert_eq!(fs::read(backup).expect("backup"), bytes);
-        book.save();
-        let restored = AddressBook::open(Some(base), [1; 4], false, None);
-        assert_eq!(restored.len(), book.len());
-        assert_indexes(&restored.state.lock());
-    }
-}
-
 #[test]
 fn anchors_consume_durably_and_return_original_metadata_only_before_dispatch() {
     let directory = tempfile::tempdir().expect("directory");
@@ -568,57 +525,6 @@ fn successful_connected_challenger_can_promote_without_losing_pending_identity()
     assert!(state(&book, challenger()).tried);
     assert!(book.is_pending(challenger()));
     assert_indexes(&book.state.lock());
-}
-
-#[test]
-fn historical_anchor_migration_obeys_configured_map_and_unknown_shape_barriers() {
-    for bytes in [V3_ANCHORS, V4_ANCHORS] {
-        let directory = tempfile::tempdir().expect("directory");
-        let base = directory.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        let map = directory.path().join("map.raw");
-        fs::write(&path, bytes).expect("old bytes");
-        fs::write(&map, b"invalid map").expect("invalid map");
-        let invalid = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-        assert!(!invalid.state.lock().writable);
-        assert_eq!(
-            invalid.take_restart_anchors(EPOCH + 10),
-            Vec::<PeerEndpoint>::new()
-        );
-        assert_eq!(invalid.state.lock().stored.anchors.len(), 2);
-        invalid.save();
-        assert_eq!(fs::read(&path).expect("preserved"), bytes);
-        assert_eq!(
-            fs::read_dir(directory.path()).expect("directory").count(),
-            2,
-            "invalid map creates no migration backup"
-        );
-        fs::write(
-            &map,
-            include_bytes!("../../../tests/data/asmap-linked-ipv4-core-v31.1.raw"),
-        )
-        .expect("restore map");
-        let restored = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-        assert!(restored.state.lock().writable);
-        assert_eq!(restored.state.lock().stored.anchors.len(), 2);
-        assert_indexes(&restored.state.lock());
-        restored.save();
-        let prefix = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(prefix.state.lock().writable);
-        assert_eq!(prefix.state.lock().stored.anchors.len(), 2);
-        assert_indexes(&prefix.state.lock());
-        prefix.save();
-        let current = fs::read(&path).expect("current");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&current[..current.len() - 32]).expect("JSON");
-        value["anchors"] = serde_json::json!([{"addr":"9.9.9.9:8333","confirmed_at":EPOCH}]);
-        let malformed = fixture_bytes(&value);
-        fs::write(&path, &malformed).expect("orphan anchor");
-        let rejected = AddressBook::open(Some(base), [1; 4], false, None);
-        assert!(!rejected.state.lock().writable);
-        rejected.save();
-        assert_eq!(fs::read(path).expect("rejected preserved"), malformed);
-    }
 }
 
 #[test]

@@ -372,7 +372,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 
    The fixed indexes occupy 327,680 bytes; endpoint count is bounded at 81,920,
    with at most eight New bucket IDs each and at most 65,536 occupied New slots.
-   On the tested 64-bit target Candidate is 144 bytes and Source is 24 bytes,
+   On the tested 64-bit target Candidate is 184 bytes and Source is 40 bytes,
    excluding allocator/index/vector overhead. Fixed-width serialized fields
    have a conservative 512-byte/record bound (315-byte max-width fixture), so
    record separators plus bounded header/checksum remain below the 64 MiB file
@@ -386,62 +386,77 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    Core ASN groups serialize as NET_IPV6 followed by little-endian ASN bytes,
    grouping IPv4/IPv6 together. ASN0 uses the corrected prefix/HE fallback;
    public linked-IPv4 forms use their embedded IPv4 without rewriting the dial
-   endpoint. Internal and legacy DNS sources retain their source namespaces.
+   endpoint. Internal DNS sources retain their source namespace.
    Startup logs the raw-file SHA256 identity. Invalid or unavailable configured
    maps permit memory-only prefix fallback but disable all book publication
-   and migration backup creation; restoring the map recovers the untouched
-   book. Intentionally omitting the map permits backed-up prefix migration.
+   and incompatible-file preservation; restoring the map recovers the untouched
+   book. Intentionally changing or omitting a map rebuckets the current format
+   through the existing placement owner, prioritizing proven/recent successes
+   and logging retained/demoted/dropped counts. Anchors are pruned only when
+   their endpoint is removed. Same-map restart retains every reference.
 
-   Schema v9 persists the secret, original source, health, map identity,
-   New membership and at most two anchors in one checksummed snapshot. Services
-   is a required field: JSON null means unknown DNS metadata, while numeric zero
-   means a known zero-bit claim. Null is valid only for an Internal/legacy-DNS
-   original source with no prior Good. Missing or invalid fields fail closed.
-   Same-map restart restores every reference; same-classifier v5/v6/v7/v8-to-v9
-   upgrades preserve all references and anchors exactly. Known v1–v8 formats,
-   including genuine v3 files carrying anchors, are strict migration sources.
-   In v1–v7, service fields must be numeric u64; old null or missing fields remain
-   invalid. V8 retains its explicit nullable DNS-service representation.
-   Historical DNS zero/no-Good records cannot reveal whether zero was
-   actually observed. Decoding infers only that ambiguous case as unknown in
-   memory, where it may retry; its next accepted VERSION records the observation
-   precisely. Exact-byte backup gates publication of the upgraded file, not
-   in-memory discovery. If backup fails, the original file remains untouched and
-   the in-memory book runs with persistence disabled. IP zero and every
-   prior-Good zero stay known. No source, success or failure value is rewritten
-   to manufacture evidence.
-   The v1 reader retains its original 4,096-record/64-source/slot checks;
-   historical ASMap layouts validate source/record shape before re-bucketing.
-   The actual source bytes are copied to an exclusive content-named
-   `.v<schema>-<sha256>.bak` and file/directory-synced before replacement.
-   Schema-only upgrades do not discard corroboration. Changed classifiers or
-   old custom placement use deterministic original-source re-bucketing,
-   prioritizing proven/recent successes and logging retained/demoted/dropped
-   counts. Historic DNS u64 hashes retain a labelled legacy namespace; no
-   recovered seed name or Core hash is invented. Operational attempt/Good
-   times reset; advertised time, success and failures remain intact. A backup
-   failure allows memory discovery but disables writes. Unknown versions or
-   fields remain read-only. Retained anchors keep their original confirmation
-   time and remain a unique successful-record subset; regrouping prunes anchors
-   only when their endpoint is actually removed.
+   AddrMan reads and writes one canonical checksummed JSON snapshot, identified
+   by `format: "bitcoin-rs-addrman"` and `version: 1`. `SCHEMA_VERSION` MUST remain
+   `1` until the first official bitcoin-rs release. Before that release, edit
+   this definition directly; do not add compatibility readers or increment the
+   version. Only after release may a breaking change increment the version with
+   an explicit compatibility decision; release itself needs no increment.
 
-   Actual Core group/placement evidence includes 224 ASMap rows and official
-   Tried236/New795 anchors. Migration fixtures were emitted by the original
-   v1/v2/v3/v4/v5/v6/v7/v8 writers; v5/v6/v7 fixtures pin all eight retained references.
-   The v8 endpoint fixture pins exact IP membership and anchor preservation. These
-   are specific algorithm/persistence checks, not full peer-lifecycle parity.
+   The canonical object has `format`, `version`, `magic` (four P2P magic bytes),
+   `secret` (32 bytes), `records`, `asmap_id` (null or 32 bytes), and `anchors`.
+   The trailing 32 bytes are SHA256 of the exact UTF-8 JSON payload. Endpoint
+   strings represent IP sockets, Tor-v3 host:port or I2P host:port; mapped IPv4
+   endpoints canonicalize to IPv4. Each record contains `addr`, `services`,
+   `source`, `last_seen`, `last_success`, `failures`, `tried`, `new_buckets`.
+   Source is exactly one of `{"ip": <IP string>}`, `{"overlay": <onion/I2P
+   address string>}`, or `{"internal": <10 SHA256 seed-hash bytes>}`. Overlay
+   sources cannot contain IP or ephemeral connection handles. Each anchor is
+   `{"addr": <endpoint string>, "confirmed_at": <Unix seconds>}` and must name
+   a unique successful record, with at most two anchors. Runtime attempt,
+   count-attempt, global-Good times and creation IDs are not persisted.
+
+   Services is required: JSON null means unknown DNS metadata, while numeric
+   zero means a known zero-bit claim. Null is valid only for an Internal source
+   with no prior Good. Unknown fields, invalid membership, unsafe endpoints,
+   malformed anchors, or excessive sizes fail closed. Tor/I2P endpoint hash
+   keys use BIP155 tags 4/5 followed by the 32 identity bytes and big-endian
+   port; netgroups are `[4, key[0] | 15]` / `[5, hash[0] | 15]`. Internal source
+   groups use tag 6 plus the ten seed-hash bytes. ASMap applies only to IP.
+   Both overlay branches must use these same identity, source and placement
+   rules when adopting this canonical definition; divergent development v9
+   layouts are not supported inputs for record import.
+
+   Unmarked pre-release v1-v9 files are never decoded or migrated. Only their
+   bounded JSON envelope, checksum and network identity are checked. Before
+   replacing one with an empty or freshly seeded canonical book, its exact bytes
+   are exclusively published and file/directory-synced to
+   `.pre-release-<sha256>.bak`. A pre-existing backup is reusable only if it is a
+   regular file with identical bytes and is flushed successfully. Preservation
+   failure disables replacement. The original stays at its source path until
+   atomic save succeeds; a crash before save can retry preservation safely.
+   No old peers, secrets, health or anchors are imported. Relearning uses the
+   existing discovery path. This discards development cache knowledge, not
+   authoritative chainstate, keys or operator configuration.
 
    Filenames remain scoped to actual P2P magic: `peers.dat` becomes
    `peers-<8 hexadecimal magic digits>.dat`, including custom/drynet magics.
-   A valid scoped book wins; same-magic legacy-base import retains the base,
-   and a valid foreign-magic base is left untouched. Corrupt/unknown/unreadable
-   files disable publication while in-memory discovery continues. Publication
+   A valid scoped book wins. A same-magic unscoped current book can be copied
+   into the scoped path without altering its source; an unmarked development
+   book there follows the same preservation-before-fresh-start rule. A valid
+   foreign-magic base is left untouched. Corrupt/unknown/unreadable files
+   disable publication while in-memory discovery continues. Publication
    retains exclusive random temporary creation with bounded collisions, file
    sync, atomic installation and the storage owner's directory-sync policy.
    First installation cannot overwrite a newly appeared destination. Saves
    retain the captured revision only after durable success, outside the state
    lock; concurrent later changes remain dirty. Periodic saves occur every
    15 minutes and shutdown/explicit barriers remain immediate.
+
+   Actual Core group/placement evidence includes 224 ASMap rows and official
+   Tried236/New795 anchors. Current-format tests retain IP/Tor/I2P round trips,
+   anchors, membership, services, map changes and atomic publication proofs.
+   These are specific algorithm/persistence checks, not full peer-lifecycle
+   parity. Historical upgrade fixtures are not a compatibility requirement.
 
    Restart anchors come only from automatic block-relay peers that supplied
    accepted chain evidence, with the existing seven-day age limit. On the first
@@ -719,12 +734,8 @@ Accepted I2P SAM streams have ephemeral local bind ports, so their clocks are
 per stream rather than shared by application destination. This remains a
 deviation from Core's shared inbound clock policy.
 
-Schema v9 adds overlay endpoints and source identities using the existing
-backup-before-migration path. Upgrading v8 IP records preserves the secret,
-all membership references, services and restart anchors; IP hash bytes and
-grouping remain unchanged.
-Overlay source tags admit only Tor v3 and I2P identities; IP sources retain
-their existing IP tag. Invalid source representations keep the original file
+AddrMan endpoint/source persistence follows the canonical v1 definition in
+section 7. Invalid current source representations keep the original file
 untouched with persistence disabled.
 Application keys have a separate versioned,
 checksummed create-once format. A bad existing identity fails startup and is

@@ -117,7 +117,6 @@ fn accepted_version_service_update_is_metadata_only_canonical_and_idempotent() {
 fn only_unknown_dns_services_keep_native_bootstrap_exception() {
     for source in [
         Source::dns("seed"),
-        Source::LegacyDns(77),
         Source::Ip(
             addr(2)
                 .address()
@@ -128,7 +127,7 @@ fn only_unknown_dns_services_keep_native_bootstrap_exception() {
         let directory = tempfile::tempdir().expect("directory");
         let path = directory.path().join("peers.dat");
         let book = AddressBook::open(Some(path.clone()), [1; 4], false, None);
-        let dns = matches!(source, Source::Internal(_) | Source::LegacyDns(_));
+        let dns = matches!(source, Source::Internal(_));
         let services = if dns { None } else { Some(0) };
         book.state
             .lock()

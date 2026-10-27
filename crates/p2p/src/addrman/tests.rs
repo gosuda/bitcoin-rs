@@ -160,7 +160,7 @@ fn scoped_network_books_and_stale_temporary_files_are_independent() {
 }
 
 #[test]
-fn legacy_import_retains_original_and_scoped_state_wins() {
+fn unscoped_current_import_retains_original_and_scoped_state_wins() {
     let dir = tempfile::tempdir().expect("dir");
     let base = dir.path().join("peers.dat");
     let source = book();
@@ -253,6 +253,7 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
             .expect("published")
             .expect("exists")
             .stored
+            .expect("current schema")
             .records
             .len(),
         1
@@ -754,95 +755,6 @@ fn fixture_bytes(value: &serde_json::Value) -> Vec<u8> {
     bytes.extend_from_slice(&hash);
     bytes
 }
-fn old_fixture() -> serde_json::Value {
-    serde_json::json!({"version":1,"magic":[1,1,1,1],"secret":vec![1;32],"records":[{
-        "addr":"8.8.8.8:8333","services":9,"source_group":(1_u64<<48)|0x0101,"source_ip":"1.1.1.1",
-        "last_seen":EPOCH,"last_attempt":EPOCH-1,"last_success":0,"failures":3,"tried":false
-    }]})
-}
-
-#[test]
-fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
-    for scoped in [false, true] {
-        let dir = tempfile::tempdir().expect("dir");
-        let base = dir.path().join("peers.dat");
-        let source = if scoped {
-            network_path(&base, [1; 4])
-        } else {
-            base.clone()
-        };
-        let bytes = fixture_bytes(&old_fixture());
-        fs::write(&source, &bytes).expect("old operator book");
-        let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert_eq!(restored.len(), 1);
-        assert_eq!(
-            restored.select(&[], &[], EPOCH, u64::MAX, |_| true),
-            Some(target()),
-            "failed knowledge still selectable with DNS off"
-        );
-        let backups: Vec<_> = fs::read_dir(dir.path())
-            .expect("entries")
-            .map(|entry| entry.expect("entry").path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "bak"))
-            .collect();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(fs::read(&backups[0]).expect("backup"), bytes);
-        {
-            let manager = restored.state.lock();
-            let entry = &manager.stored.records[0];
-            assert_eq!(entry.failures, 3);
-            assert_eq!(entry.last_attempt, 0);
-            assert_eq!(entry.last_count_attempt, 0);
-            assert_eq!(manager.last_good, 1);
-            assert_indexes(&manager);
-        }
-        let retry = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(
-            retry.state.lock().writable,
-            "matching durable backup is reusable before first migration publication"
-        );
-        assert_eq!(retry.len(), 1);
-        restored.save();
-        if !scoped {
-            assert_eq!(fs::read(&source).expect("legacy retained"), bytes);
-        }
-        let again = AddressBook::open(Some(base), [1; 4], false, None);
-        assert_eq!(again.len(), 1);
-        assert_eq!(again.state.lock().stored.version, VERSION);
-    }
-}
-
-#[test]
-fn migration_backup_failure_and_unknown_child_schemas_preserve_operator_files() {
-    use bitcoin::hex::DisplayHex as _;
-    let dir = tempfile::tempdir().expect("dir");
-    let base = dir.path().join("peers.dat");
-    let path = network_path(&base, [1; 4]);
-    let bytes = fixture_bytes(&old_fixture());
-    fs::write(&path, &bytes).expect("old");
-    let digest = Sha256::digest(&bytes);
-    let backup = path.with_extension(format!("v1-{}.bak", digest[..].to_lower_hex_string()));
-    fs::create_dir(&backup).expect("unusable backup");
-    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-    assert_eq!(book.len(), 1);
-    assert!(!book.state.lock().writable);
-    book.learn_dns("seed", &[addr(8)], EPOCH);
-    book.save();
-    assert_eq!(fs::read(&path).expect("preserved"), bytes);
-    for version in [2, 3, 4, 7, 99] {
-        let mut value = old_fixture();
-        value["version"] = version.into();
-        value["anchors"] = serde_json::json!([{"addr":"8.8.8.8:8333","confirmed_at":EPOCH}]);
-        let bytes = fixture_bytes(&value);
-        fs::write(&path, &bytes).expect("unknown");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(!book.state.lock().writable);
-        book.learn_dns("seed", &[addr(9)], EPOCH);
-        book.save();
-        assert_eq!(fs::read(&path).expect("preserved"), bytes);
-    }
-}
-
 #[test]
 fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() {
     let dir = tempfile::tempdir().expect("dir");
@@ -1449,3 +1361,5 @@ mod eligibility_tests;
 mod services_tests;
 
 mod overlay_destinations;
+
+mod persistence;

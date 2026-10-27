@@ -50,7 +50,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 - **Owner scripts & suites**:
   - Pinned installer: `scripts/install-bitcoind.sh` (POSIX) / `scripts/install-bitcoind.ps1` (Windows).
   - Test runner: `scripts/run-p2p-core-interop.sh`.
-  - Evidence validator: `crates/p2p/tests/core_interop_live.rs` (BIP324 vector provenance in [`crates/p2p/tests/data/bip324/README.md`](../crates/p2p/tests/data/bip324/README.md); AddrMan/ASMap reference fixtures in [`crates/p2p/tests/support/README.md`](../crates/p2p/tests/support/README.md), [`crates/p2p/tests/data/asmap-core-v31.1.README.md`](../crates/p2p/tests/data/asmap-core-v31.1.README.md), [`crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.README.md`](../crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.README.md), and [`crates/p2p/tests/data/addrman-historical.README.md`](../crates/p2p/tests/data/addrman-historical.README.md)).
+  - Evidence validator: `crates/p2p/tests/core_interop_live.rs` (BIP324 vector provenance in [`crates/p2p/tests/data/bip324/README.md`](../crates/p2p/tests/data/bip324/README.md); AddrMan/ASMap reference fixtures in [`crates/p2p/tests/support/README.md`](../crates/p2p/tests/support/README.md), [`crates/p2p/tests/data/asmap-core-v31.1.README.md`](../crates/p2p/tests/data/asmap-core-v31.1.README.md), [`crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.README.md`](../crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.README.md)).
 - **What is verified**:
   - Pinned Bitcoin Core 31.1 binary downloaded from bitcoincore.org and checked
     against the SHA-256 archive digest pinned in `crates/rpc/core-compat.toml`.

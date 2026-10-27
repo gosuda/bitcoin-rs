@@ -28,7 +28,9 @@ const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
-const VERSION: u32 = 9;
+// Frozen until the first official release; pre-release layouts are not migrated.
+const SCHEMA_VERSION: u32 = 1;
+const FORMAT: &str = "bitcoin-rs-addrman";
 const MAX_COLLISIONS: usize = 10;
 const REPLACEMENT_WINDOW: u64 = 4 * 60 * 60;
 const COLLISION_TEST_WINDOW: u64 = 40 * 60;
@@ -43,8 +45,6 @@ enum Source {
     Ip(IpAddr),
     Overlay(crate::PeerAddress),
     Internal([u8; 10]),
-    // Historical formats did not retain the seed name or full Core internal hash.
-    LegacyDns(u64),
 }
 impl Source {
     fn dns(seed: &str) -> Self {
@@ -60,15 +60,6 @@ impl Source {
             Self::Internal(bytes) => {
                 let mut group = vec![6];
                 group.extend_from_slice(bytes);
-                group
-            }
-            Self::LegacyDns(id) => {
-                let mut hasher = Sha256::new();
-                hasher.update(b"bitcoin-rs v1 DNS source");
-                hasher.update(id.to_le_bytes());
-                let hash = hasher.finalize();
-                let mut group = vec![6];
-                group.extend_from_slice(&hash[..10]);
                 group
             }
         }
@@ -97,7 +88,7 @@ struct Candidate {
 }
 impl Candidate {
     fn allows_unknown_services(&self) -> bool {
-        self.last_success == 0 && matches!(self.source, Source::Internal(_) | Source::LegacyDns(_))
+        self.last_success == 0 && matches!(self.source, Source::Internal(_))
     }
     fn ordinary_services_eligible(&self, best_block_depth: u64) -> bool {
         self.services.map_or_else(
@@ -109,14 +100,6 @@ impl Candidate {
                 )
             },
         )
-    }
-    fn infer_historical_services(mut self) -> Self {
-        // Old schemas cannot distinguish an unobserved DNS record from a
-        // rejected VERSION0 before Good. Preserve their exact source backup.
-        if self.services == Some(0) && self.allows_unknown_services() {
-            self.services = None;
-        }
-        self
     }
     fn terrible(&self, now: u64) -> bool {
         if now.saturating_sub(self.last_attempt) <= 60 {
@@ -155,6 +138,7 @@ enum PendingClaim {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
+    format: String,
     version: u32,
     magic: [u8; 4],
     secret: [u8; 32],
@@ -265,7 +249,8 @@ impl Manager {
         rng.fill_bytes(&mut secret);
         Self {
             stored: Stored {
-                version: VERSION,
+                format: FORMAT.to_owned(),
+                version: SCHEMA_VERSION,
                 magic,
                 secret,
                 records: Vec::new(),
@@ -566,7 +551,7 @@ impl Manager {
         let self_source = match &source {
             Source::Ip(ip) => Some(crate::netgroup::canonical_ip(*ip)) == addr.address().ip(),
             Source::Overlay(address) => *address == addr.address(),
-            _ => false,
+            Source::Internal(_) => false,
         };
         let time_penalty = if self_source { 0 } else { time_penalty };
         let existing = self.by_addr.get(&addr).copied();
@@ -770,22 +755,6 @@ fn routable(addr: PeerEndpoint, allow_local: bool) -> bool {
     }
 }
 
-fn legacy_prefix(ip: IpAddr) -> u64 {
-    match ip {
-        IpAddr::V4(ip) => {
-            let bytes = ip.octets();
-            (1_u64 << 48) | u64::from(u16::from_be_bytes([bytes[0], bytes[1]]))
-        }
-        IpAddr::V6(ip) => {
-            if let Some(ip) = ip.to_ipv4_mapped() {
-                return legacy_prefix(ip.into());
-            }
-            let bytes = ip.octets();
-            (2_u64 << 48) | u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-    }
-}
-
 impl AddressBook {
     pub(crate) fn open(
         path: Option<PathBuf>,
@@ -802,7 +771,7 @@ impl AddressBook {
             let loaded = match read_book(&scoped, Some(magic), allow_local, &manager.groups) {
                 Ok(Some(loaded)) => Some((scoped, true, loaded)),
                 Ok(None) => path.and_then(|legacy| match read_book(&legacy, None, true, &manager.groups) {
-                    Ok(Some(loaded)) if loaded.stored.magic == magic => Some((legacy, false, loaded)),
+                    Ok(Some(loaded)) if loaded.magic == magic => Some((legacy, false, loaded)),
                     Ok(_) => None,
                     Err(error) => {
                         tracing::warn!(path=%legacy.display(), %error, "legacy address book unavailable; preserving file and disabling writes");
@@ -815,48 +784,48 @@ impl AddressBook {
                 }
             };
             if let Some((source_path, scoped_source, loaded)) = loaded {
-                if loaded
-                    .stored
-                    .records
-                    .iter()
-                    .all(|entry| routable(entry.addr, allow_local))
-                {
-                    manager.stored = loaded.stored;
-                    manager.published = scoped_source;
-                    let rebucket =
-                        loaded.schema <= 4 || manager.stored.asmap_id != manager.groups.identity();
-                    let migrate = loaded.schema != VERSION || rebucket;
-                    if migrate && manager.writable {
-                        if let Err(error) =
-                            backup_before_migration(&source_path, &loaded.bytes, loaded.schema)
-                        {
-                            tracing::warn!(path=%source_path.display(), %error, "address book migration backup failed; preserving source and disabling writes");
+                if let Some(stored) = loaded.stored {
+                    if stored
+                        .records
+                        .iter()
+                        .all(|entry| routable(entry.addr, allow_local))
+                    {
+                        manager.stored = stored;
+                        manager.published = scoped_source;
+                        let rebucket = manager.stored.asmap_id != manager.groups.identity();
+                        if rebucket {
+                            manager.rebucket();
+                            manager.stored.asmap_id = manager.groups.identity();
+                            manager.revision = 1;
+                        } else {
+                            manager.install_indexes();
+                        }
+                        // Collision state is empty on restart; IDs remain runtime-only.
+                        for (index, entry) in manager.stored.records.iter_mut().enumerate() {
+                            entry.creation_id = u64::try_from(index).unwrap_or(u64::MAX);
+                        }
+                        manager.next_creation_id =
+                            u64::try_from(manager.stored.records.len()).unwrap_or(u64::MAX);
+                        if !scoped_source {
+                            manager.revision = manager.revision.wrapping_add(1);
+                        }
+                    } else {
+                        tracing::warn!(path=%source_path.display(), "address book contains inadmissible addresses; preserving file and disabling writes");
+                        manager.writable = false;
+                    }
+                } else if manager.writable {
+                    match preserve_incompatible(&source_path, &loaded.bytes) {
+                        Ok(backup) => {
+                            tracing::warn!(path=%source_path.display(), backup=%backup.display(), "pre-release address book preserved; starting fresh discovery without migration");
+                            // Keep the old scoped file until atomic publication succeeds.
+                            manager.published = scoped_source;
+                            manager.revision = 1;
+                        }
+                        Err(error) => {
+                            tracing::warn!(path=%source_path.display(), %error, "address book preservation failed; disabling writes");
                             manager.writable = false;
                         }
                     }
-                    if rebucket {
-                        manager.rebucket();
-                    } else {
-                        manager.install_indexes();
-                    }
-                    // Collision state is empty on restart, so persisted record
-                    // order establishes fresh runtime IDs without a disk field.
-                    for (index, entry) in manager.stored.records.iter_mut().enumerate() {
-                        entry.creation_id = u64::try_from(index).unwrap_or(u64::MAX);
-                    }
-                    manager.next_creation_id =
-                        u64::try_from(manager.stored.records.len()).unwrap_or(u64::MAX);
-                    if migrate {
-                        manager.stored.version = VERSION;
-                        manager.stored.asmap_id = manager.groups.identity();
-                        manager.revision = 1;
-                    }
-                    if !scoped_source {
-                        manager.revision = manager.revision.wrapping_add(1);
-                    }
-                } else {
-                    tracing::warn!(path=%source_path.display(), "legacy address book contains inadmissible addresses; preserving file and disabling writes");
-                    manager.writable = false;
                 }
             }
         }
@@ -1494,8 +1463,8 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 struct Loaded {
-    stored: Stored,
-    schema: u32,
+    stored: Option<Stored>,
+    magic: [u8; 4],
     bytes: Vec<u8>,
 }
 
@@ -1584,115 +1553,6 @@ fn read_anchors<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_seq(Anchors)
 }
 
-// Historical v1–v4 shapes are read only for validated, backed-up migration.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyCandidate {
-    addr: PeerEndpoint,
-    services: u64,
-    source_group: u64,
-    source_ip: Option<IpAddr>,
-    last_seen: u64,
-    last_attempt: u64,
-    last_success: u64,
-    failures: u8,
-    tried: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    records: Vec<LegacyCandidate>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GroupedLegacyStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    records: Vec<LegacyCandidate>,
-    asmap_id: Option<[u8; 32]>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReferencedCandidate {
-    addr: PeerEndpoint,
-    services: u64,
-    source: Source,
-    last_seen: u64,
-    last_success: u64,
-    failures: u32,
-    tried: bool,
-    #[serde(deserialize_with = "read_new_buckets")]
-    new_buckets: Vec<u16>,
-}
-impl From<ReferencedCandidate> for Candidate {
-    fn from(old: ReferencedCandidate) -> Self {
-        Self {
-            creation_id: 0,
-            addr: old.addr,
-            services: Some(old.services),
-            source: old.source,
-            last_seen: old.last_seen,
-            last_success: old.last_success,
-            failures: old.failures,
-            tried: old.tried,
-            new_buckets: old.new_buckets,
-            last_attempt: 0,
-            last_count_attempt: 0,
-        }
-        .infer_historical_services()
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PrefixStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    #[serde(deserialize_with = "read_records")]
-    records: Vec<ReferencedCandidate>,
-}
-
-// These separate structs admit only fields present in the published schemas.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnchoredLegacyStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    records: Vec<LegacyCandidate>,
-    asmap_id: Option<[u8; 32]>,
-    #[serde(default, deserialize_with = "read_anchors")]
-    anchors: Vec<Anchor>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GroupedStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    #[serde(deserialize_with = "read_records")]
-    records: Vec<ReferencedCandidate>,
-    asmap_id: Option<[u8; 32]>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnchoredReferencedStored {
-    version: u32,
-    magic: [u8; 4],
-    secret: [u8; 32],
-    #[serde(deserialize_with = "read_records")]
-    records: Vec<ReferencedCandidate>,
-    asmap_id: Option<[u8; 32]>,
-    #[serde(deserialize_with = "read_anchors")]
-    anchors: Vec<Anchor>,
-}
 fn validate_anchors(stored: &Stored) -> io::Result<()> {
     let mut anchors = HashSet::new();
     if stored.anchors.len() > MAX_ANCHORS {
@@ -1717,7 +1577,10 @@ fn validate_current(
     allow_local: bool,
     groups: Option<&NetGroups>,
 ) -> io::Result<()> {
-    if stored.version != VERSION || stored.records.len() > MAX_RECORDS {
+    if stored.format != FORMAT
+        || stored.version != SCHEMA_VERSION
+        || stored.records.len() > MAX_RECORDS
+    {
         return Err(invalid("address book version/count"));
     }
     let mut endpoints = HashSet::new();
@@ -1742,7 +1605,7 @@ fn validate_current(
                 return Err(invalid("Tried count exceeds table"));
             }
             // A changed map cannot reproduce the old Tried slots. Validate all
-            // map-independent structure, then back up and rebucket at open.
+            // map-independent structure, then rebucket at open.
             if let Some(groups) = groups {
                 let bucket = tried_bucket(&stored.secret, entry.addr, groups);
                 let position = bucket_position(&stored.secret, entry.addr, false, bucket);
@@ -1769,133 +1632,6 @@ fn validate_current(
     }
     Ok(())
 }
-fn legacy_slot(secret: &[u8; 32], entry: &LegacyCandidate, ip: IpAddr) -> u64 {
-    let mut hash = Sha256::new();
-    hash.update(secret);
-    hash.update(legacy_prefix(ip).to_le_bytes());
-    if !entry.tried {
-        hash.update(entry.source_group.to_le_bytes());
-    }
-    let mut first = [0; 8];
-    first.copy_from_slice(&hash.finalize()[..8]);
-    let bucket = u64::from_le_bytes(first);
-    let endpoint = Sha256::digest(entry.addr.to_string().as_bytes());
-    let offset = u64::from(endpoint[0] & 15);
-    if entry.tried {
-        3072 + bucket % 64 * 16 + offset
-    } else {
-        bucket % 192 * 16 + offset
-    }
-}
-fn convert_legacy(old: LegacyStored, allow_local: bool) -> io::Result<Stored> {
-    if !(1..=4).contains(&old.version) || old.records.len() > 4096 {
-        return Err(invalid("legacy address book version/count"));
-    }
-    let mut addresses = HashSet::new();
-    let mut sources = HashMap::new();
-    let mut slots = HashSet::new();
-    for entry in &old.records {
-        let ip = entry
-            .addr
-            .address()
-            .ip()
-            .ok_or_else(|| invalid("overlay in legacy IP schema"))?;
-        if entry.addr.address().ip().is_none()
-            || !routable(entry.addr, allow_local)
-            || canonical(entry.addr) != entry.addr
-            || !addresses.insert(entry.addr)
-            || entry
-                .source_ip
-                .is_some_and(|ip| legacy_prefix(ip) != entry.source_group)
-            || entry.tried && entry.last_success == 0
-            || old.version == 1 && !slots.insert(legacy_slot(&old.secret, entry, ip))
-        {
-            return Err(invalid("invalid legacy address record"));
-        }
-        let count = sources.entry(entry.source_group).or_insert(0_usize);
-        *count += 1;
-        if old.version == 1 && *count > 64 {
-            return Err(invalid("legacy source limit"));
-        }
-    }
-    let records = old
-        .records
-        .into_iter()
-        .map(|entry| {
-            // Core's local attempt timestamps are deliberately not restored.
-            let _ = entry.last_attempt;
-            Candidate {
-                creation_id: 0,
-                addr: entry.addr,
-                services: Some(entry.services),
-                source: entry
-                    .source_ip
-                    .map_or(Source::LegacyDns(entry.source_group), Source::Ip),
-                last_seen: entry.last_seen,
-                last_success: entry.last_success,
-                failures: u32::from(entry.failures),
-                tried: entry.tried,
-                new_buckets: Vec::new(),
-                last_attempt: 0,
-                last_count_attempt: 0,
-            }
-            .infer_historical_services()
-        })
-        .collect();
-    Ok(Stored {
-        version: VERSION,
-        magic: old.magic,
-        secret: old.secret,
-        records,
-        asmap_id: None,
-        anchors: Vec::new(),
-    })
-}
-// Historical shapes are decoded explicitly before conversion; current fields
-// cannot be smuggled into older formats through defaults or version relabeling.
-fn decode_legacy_book(payload: &[u8], version: u32, allow_local: bool) -> io::Result<Stored> {
-    if version == 1 {
-        let old = serde_json::from_slice(payload).map_err(io::Error::other)?;
-        convert_legacy(old, allow_local)
-    } else {
-        let (old, asmap_id, anchors) = if version == 2 {
-            let old: GroupedLegacyStored =
-                serde_json::from_slice(payload).map_err(io::Error::other)?;
-            (
-                LegacyStored {
-                    version: old.version,
-                    magic: old.magic,
-                    secret: old.secret,
-                    records: old.records,
-                },
-                old.asmap_id,
-                Vec::new(),
-            )
-        } else {
-            let old: AnchoredLegacyStored =
-                serde_json::from_slice(payload).map_err(io::Error::other)?;
-            (
-                LegacyStored {
-                    version: old.version,
-                    magic: old.magic,
-                    secret: old.secret,
-                    records: old.records,
-                },
-                old.asmap_id,
-                old.anchors,
-            )
-        };
-        let mut stored = convert_legacy(old, allow_local)?;
-        stored.asmap_id = asmap_id;
-        stored.anchors = anchors;
-        validate_anchors(&stored)?;
-        Ok(stored)
-    }
-}
-#[expect(
-    clippy::too_many_lines,
-    reason = "Historical schema admission and validation stay ordered before backed-up publication"
-)]
 fn read_book(
     path: &Path,
     magic: Option<[u8; 4]>,
@@ -1904,7 +1640,15 @@ fn read_book(
 ) -> io::Result<Option<Loaded>> {
     #[derive(Deserialize)]
     struct Header {
+        #[serde(default, deserialize_with = "present_format")]
+        format: Option<String>,
         version: u32,
+        magic: [u8; 4],
+    }
+    fn present_format<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        String::deserialize(deserializer).map(Some)
     }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1926,107 +1670,47 @@ fn read_book(
         return Err(invalid("address book checksum"));
     }
     let header: Header = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-    let stored = match header.version {
-        1..=4 => {
-            if bytes.len() > 2 * 1024 * 1024 {
-                return Err(invalid("legacy address book size"));
-            }
-            decode_legacy_book(&bytes[..payload_len], header.version, allow_local)?
-        }
-        5 => {
-            let old: PrefixStored =
-                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-            if old.version != 5 {
-                return Err(invalid("prefix address book version"));
-            }
-            Stored {
-                version: VERSION,
-                magic: old.magic,
-                secret: old.secret,
-                records: old.records.into_iter().map(Candidate::from).collect(),
-                asmap_id: None,
-                anchors: Vec::new(),
-            }
-        }
-        6 => {
-            let old: GroupedStored =
-                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-            if old.version != 6 {
-                return Err(invalid("grouped address book version"));
-            }
-            Stored {
-                version: VERSION,
-                magic: old.magic,
-                secret: old.secret,
-                records: old.records.into_iter().map(Candidate::from).collect(),
-                asmap_id: old.asmap_id,
-                anchors: Vec::new(),
-            }
-        }
-        7 => {
-            let old: AnchoredReferencedStored =
-                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-            if old.version != 7 {
-                return Err(invalid("anchored address book version"));
-            }
-            Stored {
-                version: VERSION,
-                magic: old.magic,
-                secret: old.secret,
-                records: old.records.into_iter().map(Candidate::from).collect(),
-                asmap_id: old.asmap_id,
-                anchors: old.anchors,
-            }
-        }
-        8 | VERSION => {
-            let mut stored: Stored =
-                serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-            if header.version == 8
-                && stored.records.iter().any(|entry| {
-                    entry.addr.address().ip().is_none()
-                        || matches!(entry.source, Source::Overlay(_))
-                })
-            {
-                return Err(invalid("overlay in historical IP schema"));
-            }
-            stored.version = VERSION;
-            stored
-        }
-        _ => return Err(invalid("unsupported address book schema")),
-    };
-    if header.version < VERSION
-        && stored.records.iter().any(|entry| {
-            entry.addr.address().ip().is_none() || matches!(entry.source, Source::Overlay(_))
-        })
-    {
-        return Err(invalid("overlay identity in historical IP schema"));
-    }
-    if header.version >= 5 {
-        let prefix = NetGroups::default();
-        let classifier = if stored.asmap_id.is_none() {
-            Some(&prefix)
-        } else if stored.asmap_id == groups.identity() {
-            Some(groups)
-        } else {
-            None
-        };
-        validate_current(&stored, allow_local, classifier)?;
-    }
-    validate_anchors(&stored)?;
-    if magic.is_some_and(|magic| magic != stored.magic) {
+    if magic.is_some_and(|magic| magic != header.magic) {
         return Err(invalid("address book network"));
     }
+    // Only the checked envelope identifies disposable development snapshots.
+    // Their records are never decoded or converted into the current schema.
+    if header.format.is_none() && (1..=9).contains(&header.version) {
+        return Ok(Some(Loaded {
+            stored: None,
+            magic: header.magic,
+            bytes,
+        }));
+    }
+    if header.format.as_deref() != Some(FORMAT) || header.version != SCHEMA_VERSION {
+        return Err(invalid("unsupported address book format/version"));
+    }
+    let stored: Stored = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+    let prefix = NetGroups::default();
+    let classifier = if stored.asmap_id.is_none() {
+        Some(&prefix)
+    } else if stored.asmap_id == groups.identity() {
+        Some(groups)
+    } else {
+        None
+    };
+    validate_current(&stored, allow_local, classifier)?;
+    validate_anchors(&stored)?;
     Ok(Some(Loaded {
-        stored,
-        schema: header.version,
+        stored: Some(stored),
+        magic: header.magic,
         bytes,
     }))
 }
-fn backup_before_migration(path: &Path, bytes: &[u8], schema: u32) -> io::Result<()> {
+
+// Preserve rejected bytes before allowing replacement. Exclusive atomic
+// publication cannot clobber an existing backup, including an unsafe file type.
+// An interrupted first save can reuse only a byte-identical, flushed backup.
+fn preserve_incompatible(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     use bitcoin::hex::DisplayHex as _;
     let digest = Sha256::digest(bytes);
     let backup = path.with_extension(format!(
-        "v{schema}-{}.bak",
+        "pre-release-{}.bak",
         digest[..].to_lower_hex_string()
     ));
     match fs::symlink_metadata(&backup) {
@@ -2034,17 +1718,15 @@ fn backup_before_migration(path: &Path, bytes: &[u8], schema: u32) -> io::Result
             if !metadata.is_file()
                 || metadata.len() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
             {
-                return Err(invalid("migration backup size/type"));
+                return Err(invalid("address book backup size/type"));
             }
-            // Read, revalidate and flush the same handle. Windows requires
-            // GENERIC_WRITE for FlushFileBuffers even when bytes are unchanged.
             let mut file = OpenOptions::new().read(true).write(true).open(&backup)?;
             let mut existing = Vec::new();
             (&mut file)
                 .take(MAX_FILE_BYTES + 1)
                 .read_to_end(&mut existing)?;
             if existing != bytes {
-                return Err(invalid("migration backup differs"));
+                return Err(invalid("address book backup differs"));
             }
             file.sync_all()?;
             let parent = backup
@@ -2053,15 +1735,16 @@ fn backup_before_migration(path: &Path, bytes: &[u8], schema: u32) -> io::Result
                 .unwrap_or_else(|| Path::new("."));
             bitcoin_rs_storage::checkpoint::fs::sync_dir(
                 &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,
-            )
+            )?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             publish_bytes_with_nonce(&backup, bytes, &mut false, || {
                 bitcoin::secp256k1::rand::thread_rng().next_u64()
-            })
+            })?;
         }
-        Err(error) => Err(error),
+        Err(error) => return Err(error),
     }
+    Ok(backup)
 }
 impl Manager {
     fn rebucket(&mut self) {
@@ -2169,7 +1852,7 @@ fn publish_bytes_with_nonce(
         file.write_all(bytes)?;
         file.sync_all()?;
         // Close before publication for Windows. Initial publication must not
-        // clobber an operator file created since open/migration observed absence.
+        // clobber an operator file created since open observed absence.
         drop(file);
         if *replace {
             fs::rename(&tmp, path)?;
