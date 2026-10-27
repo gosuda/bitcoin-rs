@@ -362,6 +362,10 @@ impl NodeConfig {
     /// This is the fail-early gate for engine selection: an engine this build
     /// cannot execute is rejected here — before the data directory opens,
     /// chainstate exists, or any worker starts.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep resolved cross-field checks in one ordered fail-early gate before startup"
+    )]
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             self.mempool_snapshot_max_bytes >= 1024 * 1024
