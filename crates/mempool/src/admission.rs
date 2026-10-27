@@ -851,6 +851,7 @@ impl MempoolGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::reconstruction_identities;
     use crate::{Mempool, MempoolEntry};
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
@@ -1040,13 +1041,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Every identity the reconstruction walk offers, in visit order.
-    fn reconstruction_identities(gateway: &MempoolGateway) -> Vec<(Txid, Wtxid)> {
-        let mut seen = Vec::new();
-        gateway.for_each_reconstruction_identity(|txid, wtxid| seen.push((txid, wtxid)));
-        seen
     }
 
     /// A standard-shaped spend of `outpoint` whose output script is

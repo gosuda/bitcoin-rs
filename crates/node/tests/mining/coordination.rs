@@ -24,10 +24,10 @@ use super::preparation_barrier::{
 };
 use super::support::{
     HIGH_FEE_SATS, LATE_FEE_SATS, LOW_FEE_SATS, PRIORITY_DELTA_SATS, PRIORITY_SEED_BLOCKS, PROMPT,
-    PendingPoll, REGTEST_SUBSIDY_SATS, admit_to_mempool, advance_mempool_sequence, coordinator,
-    current_tip, expect_template, live_long_poll_id, mined_child, open_at_genesis,
-    priority_fixture, regtest_mining, rpc_handler, seed_coinbase_spend_at, template_request,
-    to_lower_hex, txid_strings,
+    PendingPoll, REGTEST_SUBSIDY_SATS, admit_to_mempool, advance_mempool_sequence,
+    assert_publish_lock_free, coordinator, current_tip, expect_template, live_long_poll_id,
+    mined_child, open_at_genesis, priority_fixture, regtest_mining, rpc_handler,
+    seed_coinbase_spend_at, template_request, to_lower_hex, txid_strings,
 };
 use sonic_rs::{JsonValueTrait as _, json};
 
@@ -439,31 +439,9 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> Result<()> {
 /// pool write lock and calling it must return immediately, not deadlock.
 #[test]
 fn publish_generation_from_does_not_take_mempool_lock() -> Result<()> {
-    let (state, mining) = regtest_mining()?;
-
-    // Hold the mempool write lock for the duration of the call — a reentrant
-    // read would deadlock (parking_lot RwLock is not reentrant).
-    let mempool = state.mempool();
-    let _write_guard = mempool.write();
-
-    let (done_tx, done_rx) = bounded::<()>(1);
-    let handle = thread::spawn(move || {
+    assert_publish_lock_free("publish_generation_from", |mining| {
         mining.publish_generation_from(1);
-        let _ = done_tx.send(());
-    });
-
-    done_rx
-        .recv_timeout(Duration::from_millis(200))
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "publish_generation_from deadlocked under the mempool write lock \
-                 — it must not take the mempool read lock"
-            )
-        })?;
-    handle
-        .join()
-        .unwrap_or_else(|_| panic!("publish_generation_from thread panicked"));
-    Ok(())
+    })
 }
 
 /// A long-poll waiter must return in well under 1 s after a mempool-sequence
@@ -795,30 +773,9 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
 /// the RPC handler and observers call it around pool mutations.
 #[test]
 fn publish_fee_delta_generation_does_not_take_mempool_lock() -> Result<()> {
-    let (state, mining) = regtest_mining()?;
-
-    // A reentrant read would deadlock (parking_lot RwLock is not reentrant).
-    let mempool = state.mempool();
-    let _write_guard = mempool.write();
-
-    let (done_tx, done_rx) = bounded::<()>(1);
-    let handle = thread::spawn(move || {
+    assert_publish_lock_free("publish_fee_delta_generation", |mining| {
         mining.publish_fee_delta_generation(1);
-        let _ = done_tx.send(());
-    });
-
-    done_rx
-        .recv_timeout(Duration::from_millis(200))
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "publish_fee_delta_generation deadlocked under the mempool write lock \
-                 — it must not take the mempool read lock"
-            )
-        })?;
-    handle
-        .join()
-        .unwrap_or_else(|_| panic!("publish_fee_delta_generation thread panicked"));
-    Ok(())
+    })
 }
 
 // Staged-template durability proofs.

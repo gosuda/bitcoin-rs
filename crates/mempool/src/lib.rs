@@ -42,6 +42,9 @@ pub mod snapshot;
 /// Transaction relay standardness policy.
 pub mod standardness;
 mod submit_package;
+/// Fixtures shared by this crate's unit tests.
+#[cfg(test)]
+mod test_support;
 /// BIP431 topology policy.
 mod truc;
 

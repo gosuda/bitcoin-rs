@@ -667,12 +667,7 @@ impl SyncFixture {
     /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
     /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
     fn prebuild_run(mut self) -> Self {
-        self.prebuilt_inbound = self.blocks[1..]
-            .iter()
-            .rev()
-            .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
-            .collect();
+        self.prebuilt_inbound = prebuild_run_inbound(&self.blocks);
         self
     }
 
@@ -996,12 +991,7 @@ impl ProductionStateSyncFixture {
     /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
     /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
     fn prebuild_run(mut self) -> Self {
-        self.prebuilt_inbound = self.blocks[1..]
-            .iter()
-            .rev()
-            .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
-            .collect();
+        self.prebuilt_inbound = prebuild_run_inbound(&self.blocks);
         self
     }
 
@@ -1312,17 +1302,12 @@ fn spend_heavy_proxy_blocks() -> Vec<Block> {
     blocks
 }
 
-fn child_coinbase_block(parent: &Block, height: u32) -> Block {
+/// Child block mined on `parent` carrying `txs`: regtest header, merkle
+/// root, then grind to the declared target.
+fn mined_child_block(parent: &Block, txs: Vec<Tx>) -> Block {
     let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![coinbase_transaction(height)],
+        header: child_header(parent.block_hash(), parent.header.time.saturating_add(1)),
+        txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
@@ -1330,22 +1315,12 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
     block
 }
 
+fn child_coinbase_block(parent: &Block, height: u32) -> Block {
+    mined_child_block(parent, vec![coinbase_transaction(height)])
+}
+
 fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![fanout_coinbase_transaction(height)],
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(parent, vec![fanout_coinbase_transaction(height)])
 }
 
 fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -> Block {
@@ -1362,21 +1337,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
     for vout in 0..SPEND_PROXY_FANOUT {
         txs.push(spend_proxy_transaction(source_txid, vout));
     }
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs,
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(parent, txs)
 }
 
 fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
@@ -1503,6 +1464,17 @@ fn secret_key(byte: u8) -> SecretKey {
     SecretKey::from_slice(&[byte; 32]).unwrap_or_else(|e| panic!("invalid secret key: {e}"))
 }
 
+/// The `run` inbound send order both sync fixtures share: heights `2..=N`
+/// reversed, then height 1 last (sent after tick 2).
+fn prebuild_run_inbound(blocks: &[Block]) -> Vec<bitcoin_rs_p2p::InboundBlock> {
+    blocks[1..]
+        .iter()
+        .rev()
+        .chain(std::iter::once(&blocks[0]))
+        .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+        .collect()
+}
+
 /// Builds the 117-block signed-spend corpus.
 ///
 /// Heights 1..100: fanout coinbase blocks funding 64 outputs split across P2PKH,
@@ -1512,6 +1484,14 @@ fn secret_key(byte: u8) -> SecretKey {
 /// admissible; see `build_signed_spend_tx`).
 /// Witness-bearing blocks carry a BIP141 commitment output on the coinbase.
 fn signed_spend_proxy_blocks() -> Vec<Block> {
+    signed_spend_proxy_blocks_with(child_signed_spend_fanout_block)
+}
+
+/// The 117-block signed-spend corpus shape: `spend_block` selects the spend
+/// builder so the legacy and step-4 corpora share one traversal.
+fn signed_spend_proxy_blocks_with(
+    spend_block: impl Fn(&Block, u32, &Block, &SigningKeys) -> Block,
+) -> Vec<Block> {
     let keys = SigningKeys::new();
     let spend_start = SPEND_PROXY_COINBASE_MATURITY.saturating_add(1);
     let spend_end = spend_start
@@ -1530,7 +1510,7 @@ fn signed_spend_proxy_blocks() -> Vec<Block> {
             let source_height = height.saturating_sub(SPEND_PROXY_COINBASE_MATURITY);
             let source_index = usize::try_from(source_height)
                 .unwrap_or_else(|e| panic!("invalid source height: {e}"));
-            child_signed_spend_fanout_block(&parent, height, &blocks[source_index], &keys)
+            spend_block(&parent, height, &blocks[source_index], &keys)
         };
         parent = block.clone();
         blocks.push(block);
@@ -1545,22 +1525,10 @@ fn signed_spend_proxy_blocks() -> Vec<Block> {
 /// witness-paying outputs, the coinbase includes a BIP141 witness commitment
 /// output and a 32-byte reserved witness element.
 fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningKeys) -> Block {
-    let coinbase = signed_fanout_coinbase_transaction(height, keys);
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    mined_child_block(
+        parent,
+        vec![signed_fanout_coinbase_transaction(height, keys)],
+    )
 }
 
 fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
@@ -1656,25 +1624,12 @@ fn witness_commitment_script_pubkey(commitment: &Hash256) -> Vec<u8> {
 /// recompute, trivial-PoW mining); parameterizing the spend set lets every
 /// measured sample connect a distinct block. The coinbase is the same
 /// 64-output funding coinbase the step-4 corpus uses, so its shape is proven.
-fn child_signed_target_block(
-    parent: &Block,
-    height: u32,
-    keys: &SigningKeys,
-    spends: Vec<Tx>,
-) -> Block {
-    let mut txs = Vec::with_capacity(spends.len().saturating_add(1));
-    // Coinbase for this target block (witness-bearing, with commitment).
-    txs.push(signed_fanout_coinbase_transaction(height, keys));
-    txs.extend(spends);
+/// Child block mined on `parent` carrying `txs`, where `txs[0]` is a
+/// witness-bearing coinbase whose last output is the BIP141 commitment
+/// placeholder: merkle root, real commitment, merkle root again, then mine.
+fn committed_child_block(parent: &Block, txs: Vec<Tx>) -> Block {
     let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
+        header: child_header(parent.block_hash(), parent.header.time.saturating_add(1)),
         txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
@@ -1685,13 +1640,26 @@ fn child_signed_target_block(
     let last = coinbase
         .outputs
         .last_mut()
-        .unwrap_or_else(|| panic!("target coinbase missing commitment output"));
+        .unwrap_or_else(|| panic!("coinbase missing commitment output"));
     last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
     // Recompute merkle root after updating the commitment.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining target block failed: {error}"));
+        .unwrap_or_else(|error| panic!("mining committed block failed: {error}"));
     block
+}
+
+fn child_signed_target_block(
+    parent: &Block,
+    height: u32,
+    keys: &SigningKeys,
+    spends: Vec<Tx>,
+) -> Block {
+    let mut txs = Vec::with_capacity(spends.len().saturating_add(1));
+    // Coinbase for this target block (witness-bearing, with commitment).
+    txs.push(signed_fanout_coinbase_transaction(height, keys));
+    txs.extend(spends);
+    committed_child_block(parent, txs)
 }
 
 /// Spend block consuming 64 coinbase outputs from 100 blocks back, each with a
@@ -2008,30 +1976,7 @@ fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
 /// history comparable; the step-4 arms stay byte-identical to the accepted
 /// baseline.
 fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
-    let keys = SigningKeys::new();
-    let spend_start = SPEND_PROXY_COINBASE_MATURITY.saturating_add(1);
-    let spend_end = spend_start
-        .saturating_add(SPEND_PROXY_SPEND_BLOCKS)
-        .saturating_sub(1);
-    let capacity = usize::try_from(spend_end.saturating_add(1))
-        .unwrap_or_else(|e| panic!("invalid spend capacity: {e}"));
-    let genesis = Network::Regtest.genesis_block();
-    let mut blocks = Vec::with_capacity(capacity);
-    blocks.push(genesis.clone());
-    let mut parent = genesis;
-    for height in 1..=spend_end {
-        let block = if height < spend_start {
-            child_signed_fanout_coinbase_block(&parent, height, &keys)
-        } else {
-            let source_height = height.saturating_sub(SPEND_PROXY_COINBASE_MATURITY);
-            let source_index = usize::try_from(source_height)
-                .unwrap_or_else(|e| panic!("invalid source height: {e}"));
-            legacy_child_signed_spend_fanout_block(&parent, height, &blocks[source_index], &keys)
-        };
-        parent = block.clone();
-        blocks.push(block);
-    }
-    blocks
+    signed_spend_proxy_blocks_with(legacy_child_signed_spend_fanout_block)
 }
 
 /// Legacy spend block: the pre-step-4 fanout shape with 1-sat, `push_int(1)`
@@ -2055,29 +2000,7 @@ fn legacy_child_signed_spend_fanout_block(
         let spend_tx = legacy_build_signed_spend_tx(source_txid, vout, prevout_value, keys);
         txs.push(spend_tx);
     }
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: Hash256::default(),
-            time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
-            nonce: 0,
-        },
-        txs,
-    };
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    let commitment = block_witness_commitment(&block.txs);
-    let coinbase = &mut block.txs[0];
-    let last = coinbase
-        .outputs
-        .last_mut()
-        .unwrap_or_else(|| panic!("coinbase missing commitment output"));
-    last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    regtest_fixture::mine_block_to_declared_target(&mut block)
-        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
-    block
+    committed_child_block(parent, txs)
 }
 
 /// Legacy spend dispatcher: same classes as `build_signed_spend_tx`, with

@@ -140,38 +140,11 @@ mod tests {
         use alloc::sync::Arc;
 
         use bitcoin_rs_consensus::ValidationEngine;
-        use bitcoin_rs_primitives::{
-            Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-        };
+        use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
         use parking_lot::RwLock;
 
+        use crate::test_support::tx_with;
         use crate::{AdmissionOrigin, Mempool, MempoolEntry, MempoolError, MempoolGateway};
-
-        fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
-            Tx {
-                version: 2,
-                lock_time: LockTime::ZERO,
-                inputs: inputs
-                    .iter()
-                    .map(|previous_output| TxIn {
-                        previous_output: *previous_output,
-                        script_sig: Script::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    })
-                    .collect(),
-                outputs: (0..outputs)
-                    .map(|vout| TxOut {
-                        value: Amount::from_sat(
-                            10_000_u64
-                                .saturating_add(u64::from(vout))
-                                .saturating_add(tag.saturating_mul(1_000)),
-                        ),
-                        script_pubkey: alloc::vec![0x51].into(),
-                    })
-                    .collect(),
-            }
-        }
 
         let gateway = MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits {

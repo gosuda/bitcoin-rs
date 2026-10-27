@@ -76,6 +76,32 @@ pub(crate) fn regtest_mining() -> Result<(NodeFixture, MiningCoordinator)> {
     Ok((fixture, mining))
 }
 
+/// Holds the mempool write lock while `publish` runs on a thread: a reentrant
+/// mempool read would deadlock (`parking_lot` `RwLock` is not reentrant), so
+/// returning in time proves the publish path takes no mempool lock.
+pub(crate) fn assert_publish_lock_free(
+    label: &'static str,
+    publish: impl FnOnce(&MiningCoordinator) + Send + 'static,
+) -> Result<()> {
+    let (state, mining) = regtest_mining()?;
+    let mempool = state.mempool();
+    let _write_guard = mempool.write();
+
+    let (done_tx, done_rx) = bounded::<()>(1);
+    let handle = thread::spawn(move || {
+        publish(&mining);
+        let _ = done_tx.send(());
+    });
+
+    done_rx.recv_timeout(Duration::from_millis(200)).map_err(|_| {
+        anyhow!("{label} deadlocked under the mempool write lock — it must not take the mempool read lock")
+    })?;
+    handle
+        .join()
+        .unwrap_or_else(|_| panic!("{label} thread panicked"));
+    Ok(())
+}
+
 pub(crate) fn coordinator(state: &NodeState) -> MiningCoordinator {
     // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(

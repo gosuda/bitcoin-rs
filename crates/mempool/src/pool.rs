@@ -4537,35 +4537,10 @@ mod spend_index_tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_primitives::OutPoint;
 
     use super::*;
-
-    fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
-        Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: inputs
-                .iter()
-                .map(|previous_output| TxIn {
-                    previous_output: *previous_output,
-                    script_sig: Script::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                })
-                .collect(),
-            outputs: (0..outputs)
-                .map(|vout| TxOut {
-                    value: Amount::from_sat(
-                        10_000_u64
-                            .saturating_add(u64::from(vout))
-                            .saturating_add(tag.saturating_mul(1_000)),
-                    ),
-                    script_pubkey: alloc::vec![0x51].into(),
-                })
-                .collect(),
-        }
-    }
+    use crate::test_support::tx_with;
 
     fn graph_pool() -> (Mempool, Txid) {
         let confirmed = OutPoint::new(txid_of([7_u8; 32]), 0);

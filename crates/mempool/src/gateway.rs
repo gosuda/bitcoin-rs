@@ -1821,6 +1821,7 @@ mod tests {
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
     use crate::standardness::PackageTxContext;
+    use crate::test_support::{reconstruction_identities, tx};
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -1888,23 +1889,6 @@ mod tests {
             _metadata: &metrics::Metadata<'_>,
         ) -> metrics::Histogram {
             metrics::Histogram::noop()
-        }
-    }
-
-    fn tx(label: u8) -> Tx {
-        Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51, label].into(),
-            }],
         }
     }
 
@@ -3168,15 +3152,6 @@ mod tests {
             gateway.read().contains_txid(&replacement_txid),
             "replacement must be in the pool"
         );
-    }
-
-    /// Every identity the reconstruction walk offers, in visit order.
-    fn reconstruction_identities(
-        gateway: &MempoolGateway,
-    ) -> Vec<(Txid, bitcoin_rs_primitives::Wtxid)> {
-        let mut seen = Vec::new();
-        gateway.for_each_reconstruction_identity(|txid, wtxid| seen.push((txid, wtxid)));
-        seen
     }
 
     fn retain(ring: &mut ExtraTxnRing, tx: &Arc<Tx>) {
