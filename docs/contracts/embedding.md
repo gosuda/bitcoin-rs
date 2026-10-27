@@ -12,7 +12,7 @@ the first embedder — there is one lifecycle implementation, not two.
   an RPC context for a caller to assemble. `StartupGuard::finish` transfers
   ownership only after every service has started. Both callers stop through
   `lifecycle.rs::NodeServices::teardown`: request shutdown and wake
-  the event loop; join the event loop and RPC listener; stop metrics; join
+  the event loop; join the event loop and all configured RPC/HTTP listeners; stop metrics; join
   P2P core, ingress, and relay workers; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
   On every stop path — including `StartupGuard` rollback — the

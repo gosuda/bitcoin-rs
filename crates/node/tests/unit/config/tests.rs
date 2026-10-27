@@ -1090,7 +1090,7 @@ fn rpc_public_bind_rejects_equality_with_rpc_bind() {
     assert!(
         error
             .to_string()
-            .contains("public RPC bind must not equal rpc.bind"),
+            .contains("public-bind and rpc-bind must not overlap"),
         "{error}"
     );
 
