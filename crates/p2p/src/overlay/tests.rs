@@ -1,6 +1,8 @@
 use super::*;
 use std::net::TcpListener;
 
+mod recovery;
+
 fn shared(owner: &Arc<OverlayTransport>) -> crate::listener::ConnectionShared {
     let mut shared = crate::listener::ConnectionShared::new(
         Arc::new(crate::PeerTable::new()),

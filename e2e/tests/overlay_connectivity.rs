@@ -52,6 +52,29 @@ fn ready(node: &mut ProcessNode, network: &'static str, expected: Option<&str>) 
         },
     )
 }
+fn exchange(
+    sender: &mut ProcessNode,
+    receiver: &mut ProcessNode,
+    count: u32,
+    height: u64,
+) -> Result<()> {
+    let hashes = mine_bare_blocks(sender, count)?;
+    let tip = hashes.last().expect("nonempty mined chain");
+    receiver.wait_block_count(height, Duration::from_secs(180))?;
+    assert_eq!(receiver.rpc("getbestblockhash", &json!([]))?, json!(tip));
+    // Check admitted headers and complete bodies, not just peer byte counters.
+    for hash in hashes {
+        assert_eq!(
+            receiver.rpc("getblockheader", &json!([hash, false]))?,
+            sender.rpc("getblockheader", &json!([hash, false]))?
+        );
+        assert_eq!(
+            receiver.rpc("getblock", &json!([hash, 0]))?,
+            sender.rpc("getblock", &json!([hash, 0]))?
+        );
+    }
+    Ok(())
+}
 fn roundtrip(
     network: &'static str,
     suffix: &'static str,
@@ -76,7 +99,7 @@ fn roundtrip(
     client.rpc("addnode", &json!([address, "add"]))?;
     ready(&mut client, network, Some(&address))?;
     ready(&mut server, network, None)?;
-    mine_bare_blocks(&mut server, 3)?;
+    exchange(&mut server, &mut client, 3, 3)?;
     let peers = server.rpc("getpeerinfo", &json!([]))?;
     let remote = peers[0]["addr"].as_str().expect("remote identity");
     if network == "onion" {
@@ -84,11 +107,7 @@ fn roundtrip(
     } else {
         assert!(remote.contains(".b32.i2p:"), "{remote}");
     }
-    client.wait_block_count(3, Duration::from_secs(180))?;
-    assert_eq!(
-        client.rpc("getbestblockhash", &json!([]))?,
-        server.rpc("getbestblockhash", &json!([]))?
-    );
+    exchange(&mut client, &mut server, 2, 5)?;
     let info = client.rpc("getnetworkinfo", &json!([]))?;
     for row in info["networks"].as_array().expect("networks") {
         if row["name"] == "ipv4" || row["name"] == "ipv6" {
@@ -108,8 +127,8 @@ fn roundtrip(
     client.rpc("setnetworkactive", &json!([true]))?;
     ready(&mut client, network, Some(&address))?;
     ready(&mut server, network, None)?;
-    mine_bare_blocks(&mut server, 1)?;
-    client.wait_block_count(4, Duration::from_secs(180))?;
+    exchange(&mut server, &mut client, 1, 6)?;
+    exchange(&mut client, &mut server, 1, 7)?;
     client.stop()?;
     server.stop()
 }
