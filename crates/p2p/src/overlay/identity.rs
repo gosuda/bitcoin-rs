@@ -45,6 +45,40 @@ pub(super) fn public_destination(text: &str) -> io::Result<Vec<u8>> {
     if bytes.len() != length {
         return Err(invalid("invalid I2P public destination length"));
     }
+    let payload = &bytes[387..];
+    let valid = match bytes[384] {
+        0 | 2 => payload.is_empty(),
+        1 | 4 => true,
+        3 => matches!(payload.len(), 40 | 72),
+        5 if payload.len() >= 4 => {
+            let signing = u16::from_be_bytes([payload[0], payload[1]]);
+            let crypto = u16::from_be_bytes([payload[2], payload[3]]);
+            let signing_len: usize = match signing {
+                0 | 10 => 128,
+                1 | 9 => 64,
+                2 => 96,
+                3 => 132,
+                4 => 256,
+                5 => 384,
+                6 => 512,
+                7 | 8 | 11 => 32,
+                _ => return Err(invalid("unsupported I2P signing key type")),
+            };
+            let crypto_len: usize = match crypto {
+                0 => 256,
+                1 => 64,
+                2 => 96,
+                3 => 132,
+                4 | 6 | 7 => 32,
+                _ => return Err(invalid("unsupported I2P encryption key type")),
+            };
+            payload.len() == 4 + signing_len.saturating_sub(128) + crypto_len.saturating_sub(256)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid("invalid I2P destination certificate"));
+    }
     Ok(bytes)
 }
 fn destination_length(bytes: &[u8]) -> io::Result<usize> {
@@ -88,11 +122,31 @@ pub(super) fn validate(text: &str, kind: Kind) -> io::Result<()> {
     Ok(())
 }
 pub(super) fn read(path: &Path, kind: Kind) -> io::Result<Option<String>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    #[cfg(unix)]
+    let opened = {
+        use rustix::fs::{Mode, OFlags};
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(io::Error::from)
+    };
+    #[cfg(not(unix))]
+    let opened = (|| {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() {
+            return Err(invalid("invalid overlay identity file type or size"));
+        }
+        File::open(path)
+    })();
+    let file = match opened {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > LIMIT {
         return Err(invalid("invalid overlay identity file type or size"));
     }
@@ -104,9 +158,10 @@ pub(super) fn read(path: &Path, kind: Kind) -> io::Result<Option<String>> {
         }
     }
     let mut text = String::new();
-    File::open(path)?
-        .take(LIMIT + 1)
-        .read_to_string(&mut text)?;
+    file.take(LIMIT + 1).read_to_string(&mut text)?;
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > LIMIT {
+        return Err(invalid("overlay identity file too large"));
+    }
     let stored: Stored =
         serde_json::from_str(&text).map_err(|_| invalid("damaged overlay identity file"))?;
     if stored.version != 1

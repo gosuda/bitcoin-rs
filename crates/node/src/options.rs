@@ -595,7 +595,7 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_TOR_CONTROL", str::parse]
                         toml native("tor_control")
                     }
-                    /// Tor control authentication cookie file; otherwise use NULL authentication.
+                    /// Tor SAFECOOKIE file; otherwise use NULL authentication.
                     tor_cookie as tor_cookie: Option<PathBuf> {
                         cli[#[arg(long = "tor-cookie")]]
                         env["BITCOIN_RS_TOR_COOKIE", parse_path]

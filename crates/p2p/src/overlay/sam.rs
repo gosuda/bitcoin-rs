@@ -33,6 +33,17 @@ fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
         Some(value)
     }
 }
+#[derive(Debug, thiserror::Error)]
+#[error("SAM stream session no longer exists")]
+struct InvalidSession;
+
+fn retire_invalid_session(error: &io::Error, alive: &AtomicBool) {
+    if matches!(error.get_ref(), Some(cause) if cause.is::<InvalidSession>()) {
+        // The flag belongs to the session used by this request. A late reply
+        // cannot revoke a replacement session's distinct flag.
+        alive.store(false, Ordering::Release);
+    }
+}
 fn status(setup: &mut Setup<'_>, prefix: &str) -> io::Result<String> {
     let line = setup.line()?;
     if !line.starts_with(prefix) || field(&line, "RESULT") != Some("OK") {
@@ -48,6 +59,9 @@ fn status(setup: &mut Setup<'_>, prefix: &str) -> io::Result<String> {
             _ => "malformed reply",
         };
         let message = format!("SAM {prefix}{result}");
+        if prefix == "STREAM STATUS " && line.starts_with(prefix) && result == "INVALID_ID" {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession));
+        }
         if prefix == "STREAM STATUS "
             && line.starts_with(prefix)
             && matches!(result, "CANT_REACH_PEER" | "TIMEOUT")
@@ -110,10 +124,23 @@ impl OverlayTransport {
         endpoint: PeerEndpoint,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<Connected> {
+        self.sam_connect_until(
+            endpoint,
+            cancelled,
+            Instant::now() + Duration::from_secs(80),
+        )
+    }
+    fn sam_connect_until(
+        &self,
+        endpoint: PeerEndpoint,
+        cancelled: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> io::Result<Connected> {
         let (id, alive) = self.sam_session()?;
         let stop = || cancelled() || !alive.load(Ordering::Acquire);
         let address = self.config.i2p_sam.ok_or_else(|| invalid("SAM disabled"))?;
-        let mut naming = Setup::new(address, &stop)?;
+        let mut naming =
+            Setup::new_until(address, &stop, deadline.min(Instant::now() + SETUP_TIMEOUT))?;
         hello(&mut naming)?;
         let (public, resolved) = lookup(&mut naming, &endpoint.address().to_string())?;
         if resolved != endpoint.address() {
@@ -122,9 +149,10 @@ impl OverlayTransport {
             ));
         }
         drop(naming);
-        let mut setup = Setup::new(address, &stop)?;
+        let mut setup =
+            Setup::new_until(address, &stop, deadline.min(Instant::now() + SETUP_TIMEOUT))?;
         hello(&mut setup)?;
-        setup.deadline = Instant::now() + Duration::from_secs(60);
+        setup.deadline = deadline.min(Instant::now() + Duration::from_secs(60));
         // Connect to the validated public destination, not a second name lookup.
         setup.write(
             format!(
@@ -134,7 +162,11 @@ impl OverlayTransport {
             )
             .as_bytes(),
         )?;
-        status(&mut setup, "STREAM STATUS ")?;
+        if let Err(error) = status(&mut setup, "STREAM STATUS ") {
+            retire_invalid_session(&error, &alive);
+            return Err(error);
+        }
+        setup.check()?;
         if !alive.load(Ordering::Acquire) {
             return Err(cancelled_error());
         }
@@ -212,7 +244,8 @@ impl OverlayTransport {
                         .i2p_accept
                         .then(|| scope.spawn(|| self.accept_sam(&id, &alive, shared, &cancelled)));
                     let monitored = (|| -> io::Result<()> {
-                        while !cancelled() {
+                        let stop = || cancelled() || !alive.load(Ordering::Acquire);
+                        while !stop() {
                             control.deadline = Instant::now() + SETUP_TIMEOUT;
                             control.write(b"PING bitcoin-rs\n")?;
                             if control.line()? != "PONG bitcoin-rs" {
@@ -221,9 +254,13 @@ impl OverlayTransport {
                             if healthy_since.elapsed() >= Duration::from_secs(60) {
                                 backoff = Duration::from_secs(1);
                             }
-                            pause(&cancelled, Duration::from_secs(1));
+                            pause(&stop, Duration::from_secs(1));
                         }
-                        Ok(())
+                        if !alive.load(Ordering::Acquire) && !cancelled() {
+                            Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession))
+                        } else {
+                            Ok(())
+                        }
                     })();
                     alive.store(false, Ordering::Release);
                     if let Some(accept) = accept {
@@ -265,7 +302,10 @@ impl OverlayTransport {
                 // IVNP sends STATUS only after accepting a circuit. This is a listener wait,
                 // not an unbounded setup operation; cancellation still polls every 100ms.
                 setup.deadline = Instant::now() + Duration::from_hours(24);
-                status(&mut setup, "STREAM STATUS ")?;
+                if let Err(error) = status(&mut setup, "STREAM STATUS ") {
+                    retire_invalid_session(&error, alive);
+                    return Err(error);
+                }
                 setup.deadline = Instant::now() + SETUP_TIMEOUT;
                 let metadata = setup.line()?;
                 let public = metadata
@@ -389,6 +429,156 @@ mod tests {
             transport.sam.write().take();
             assert!(state().local_address.is_none());
         }
+    }
+
+    #[test]
+    fn late_invalid_session_retires_only_its_observed_epoch() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("SAM");
+        let address = listener.local_addr().expect("address");
+        let public = [0u8; 387];
+        let endpoint = PeerEndpoint::new(PeerAddress::I2p(Sha256::digest(public).into()), 8333);
+        let (sent, received) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let fixture = std::thread::spawn(move || {
+            for naming in [true, false] {
+                let (mut stream, _) = listener.accept().expect("connection");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("hello");
+                stream
+                    .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                    .expect("hello reply");
+                line.clear();
+                reader.read_line(&mut line).expect("request");
+                if naming {
+                    stream
+                        .write_all(
+                            format!(
+                                "NAMING REPLY RESULT=OK VALUE={}\n",
+                                identity::i2p_base64().encode(public)
+                            )
+                            .as_bytes(),
+                        )
+                        .expect("naming reply");
+                } else {
+                    assert!(line.starts_with("STREAM CONNECT ID=old "));
+                    sent.send(()).expect("request observed");
+                    gate.recv_timeout(Duration::from_secs(3)).expect("release");
+                    stream
+                        .write_all(b"STREAM STATUS RESULT=INVALID_ID\n")
+                        .expect("late reply");
+                }
+            }
+        });
+        let transport = Arc::new(OverlayTransport::new(Arc::new(crate::OverlayConfig {
+            i2p_sam: Some(address),
+            ..crate::OverlayConfig::default()
+        })));
+        let old = Arc::new(AtomicBool::new(true));
+        *transport.sam.write() = Some(Session {
+            id: "old".into(),
+            alive: Arc::clone(&old),
+            local_address: endpoint,
+        });
+        let caller = Arc::clone(&transport);
+        let dial = std::thread::spawn(move || caller.sam_connect(endpoint, &|| false).is_err());
+        received
+            .recv_timeout(Duration::from_secs(3))
+            .expect("stream request");
+        let replacement = Arc::new(AtomicBool::new(true));
+        *transport.sam.write() = Some(Session {
+            id: "new".into(),
+            alive: Arc::clone(&replacement),
+            local_address: endpoint,
+        });
+        release.send(()).expect("release");
+        assert!(dial.join().expect("dial"));
+        fixture.join().expect("fixture");
+        assert!(!old.load(Ordering::Acquire));
+        assert!(replacement.load(Ordering::Acquire));
+        assert_eq!(transport.sam_session().expect("replacement").0, "new");
+    }
+
+    #[test]
+    fn naming_and_stream_share_the_dial_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("SAM");
+        let address = listener.local_addr().expect("address");
+        let public = [0u8; 387];
+        let endpoint = PeerEndpoint::new(PeerAddress::I2p(Sha256::digest(public).into()), 8333);
+        let fixture = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("naming");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("hello");
+            stream
+                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                .expect("hello reply");
+            line.clear();
+            reader.read_line(&mut line).expect("lookup");
+            std::thread::sleep(Duration::from_millis(200));
+            stream
+                .write_all(
+                    format!(
+                        "NAMING REPLY RESULT=OK VALUE={}\n",
+                        identity::i2p_base64().encode(public)
+                    )
+                    .as_bytes(),
+                )
+                .expect("naming reply");
+            listener.set_nonblocking(true).expect("nonblocking");
+            let end = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(stream) => break stream,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < end =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("stream accept: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            line.clear();
+            reader.read_line(&mut line).expect("hello");
+            stream
+                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                .expect("hello reply");
+            line.clear();
+            reader.read_line(&mut line).expect("stream request");
+            assert!(line.starts_with("STREAM CONNECT "));
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).expect("deadline closes stream"),
+                0
+            );
+        });
+        let transport = OverlayTransport::new(Arc::new(crate::OverlayConfig {
+            i2p_sam: Some(address),
+            ..crate::OverlayConfig::default()
+        }));
+        *transport.sam.write() = Some(Session {
+            id: "fixture".to_owned(),
+            alive: Arc::new(AtomicBool::new(true)),
+            local_address: endpoint,
+        });
+        let started = Instant::now();
+        let error = match transport.sam_connect_until(
+            endpoint,
+            &|| false,
+            started + Duration::from_millis(500),
+        ) {
+            Ok(_) => panic!("stalled stream accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(!super::super::remote_connect_failed(&error));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        fixture.join().expect("fixture");
     }
 
     #[test]

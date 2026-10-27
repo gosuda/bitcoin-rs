@@ -467,6 +467,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

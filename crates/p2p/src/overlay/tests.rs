@@ -223,6 +223,22 @@ fn application_identity_is_create_once_and_corruption_is_explicit() {
     assert_eq!(std::fs::read_to_string(path).expect("preserved"), "damaged");
 }
 
+#[cfg(unix)]
+#[test]
+fn identity_reader_refuses_existing_and_dangling_symlinks() {
+    use std::os::unix::fs::symlink;
+    let directory = tempfile::tempdir().expect("directory");
+    let target = directory.path().join("target");
+    let link = directory.path().join("identity");
+    std::fs::write(&target, b"operator bytes").expect("target");
+    symlink(&target, &link).expect("symlink");
+    assert!(identity::read(&link, identity::Kind::Tor).is_err());
+    assert_eq!(std::fs::read(&target).expect("target"), b"operator bytes");
+    std::fs::remove_file(&target).expect("remove target");
+    assert!(identity::read(&link, identity::Kind::Tor).is_err());
+    assert!(link.is_symlink());
+}
+
 #[test]
 fn sam_private_destination_requires_the_encryption_and_signing_fields() {
     use base64::Engine as _;
@@ -236,11 +252,40 @@ fn sam_private_destination_requires_the_encryption_and_signing_fields() {
 }
 
 #[test]
+fn sam_public_destination_validates_certificate_structure() {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| identity::i2p_base64().encode(bytes);
+    let mut public = vec![0; 387];
+    assert!(identity::public_destination(&encode(&public)).is_ok());
+    public[384] = 255;
+    assert!(identity::public_destination(&encode(&public)).is_err());
+    public[384] = 5;
+    assert!(identity::public_destination(&encode(&public)).is_err());
+    public[386] = 4;
+    public.extend_from_slice(&[0, 7, 0, 0]);
+    assert!(identity::public_destination(&encode(&public)).is_ok());
+    public[390] = 255;
+    assert!(identity::public_destination(&encode(&public)).is_err());
+    public[390] = 0;
+    public.push(0);
+    assert!(identity::public_destination(&encode(&public)).is_err());
+}
+
+#[test]
+fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback() {
+    sam_session_recovery(false);
+}
+
+#[test]
+fn sam_invalid_id_revokes_stream_epoch_and_reconnects_while_control_responds() {
+    sam_session_recovery(true);
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "One fixture follows control setup, loss, epoch revocation, reconnect, and shutdown"
 )]
-fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback() {
+fn sam_session_recovery(invalid_id: bool) {
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};
     use std::io::{BufRead as _, BufReader};
@@ -310,6 +355,12 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
                                         )
                                         .expect("local destination");
                                 } else if line.starts_with("STREAM CONNECT ") {
+                                    if invalid_id && break_control.load(Ordering::Acquire) {
+                                        stream
+                                            .write_all(b"STREAM STATUS RESULT=INVALID_ID\n")
+                                            .expect("invalid session");
+                                        break;
+                                    }
                                     assert!(line.contains(&format!("DESTINATION={public}")));
                                     assert!(line.contains("TO_PORT=18444 SILENT=false"));
                                     stream
@@ -320,7 +371,10 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
                                     }
                                     break;
                                 } else if line == "PING bitcoin-rs\n" {
-                                    if epoch == 1 && break_control.load(Ordering::Acquire) {
+                                    if !invalid_id
+                                        && epoch == 1
+                                        && break_control.load(Ordering::Acquire)
+                                    {
                                         break;
                                     }
                                     stream.write_all(b"PONG bitcoin-rs\n").expect("heartbeat");
@@ -352,6 +406,9 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
     shared.peer_table.register(endpoint, lease.clone());
     assert!(!lease.is_cancelled());
     break_control.store(true, Ordering::Release);
+    if invalid_id {
+        assert!(owner.connect(endpoint, &|| false).is_err());
+    }
     until(|| lease.is_cancelled());
     until(|| controls.load(Ordering::Acquire) >= 2 && owner.sam.read().is_some());
     assert!(

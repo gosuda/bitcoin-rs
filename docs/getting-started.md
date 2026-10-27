@@ -54,7 +54,7 @@ describes routing, persistence, and the evidence boundary.
 | `--i2p-sam IP:port` | `i2p_sam` | Unset. SAM v3.1–3.3 on an operator-managed `ivnpd`; its usual bridge is `127.0.0.1:7656`. |
 | `--i2p-accept` | `i2p_accept` | `false`. Persistent I2P application destination and `STREAM ACCEPT`; requires `i2p_sam`. |
 | `--tor-control IP:port` | `tor_control` | Unset. Enables a persistent v3 onion service; requires `onion_proxy`. |
-| `--tor-cookie PATH` | `tor_cookie` | Unset selects Tor control NULL authentication; set this to external Tor's 32-byte authentication cookie file. |
+| `--tor-cookie PATH` | `tor_cookie` | Unset selects Tor control NULL authentication; set this to external Tor's 32-byte authentication cookie file and enable SAFECOOKIE on its control endpoint. |
 | `--overlay-port PORT` | `overlay_port` | The selected Bitcoin network's default P2P port. Public service port, independent of local forwarding sockets. |
 
 Each option also has a `BITCOIN_RS_` environment spelling using the uppercase

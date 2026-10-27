@@ -36,7 +36,7 @@ pub struct OverlayConfig {
     pub i2p_accept: bool,
     /// External Tor control socket, enabling a persistent inbound onion service.
     pub tor_control: Option<SocketAddr>,
-    /// Tor control cookie. Absence selects NULL authentication on a local control socket.
+    /// Tor SAFECOOKIE file. Absence selects NULL authentication on a local control socket.
     pub tor_cookie: Option<PathBuf>,
     /// Application identity directory, separate from IVNP router keys.
     pub identity_dir: PathBuf,
@@ -386,8 +386,14 @@ struct Setup<'a> {
 }
 impl<'a> Setup<'a> {
     fn new(address: SocketAddr, cancelled: &'a dyn Fn() -> bool) -> io::Result<Self> {
-        let deadline = Instant::now() + SETUP_TIMEOUT;
-        let stream = connect(address, cancelled)?;
+        Self::new_until(address, cancelled, Instant::now() + SETUP_TIMEOUT)
+    }
+    fn new_until(
+        address: SocketAddr,
+        cancelled: &'a dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> io::Result<Self> {
+        let stream = connect(address, cancelled, deadline)?;
         stream.set_read_timeout(Some(POLL))?;
         stream.set_write_timeout(Some(POLL))?;
         Ok(Self {
@@ -470,8 +476,11 @@ fn poll_error(error: &io::Error) -> bool {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
     )
 }
-fn connect(address: SocketAddr, cancelled: &dyn Fn() -> bool) -> io::Result<TcpStream> {
-    let deadline = Instant::now() + SETUP_TIMEOUT;
+fn connect(
+    address: SocketAddr,
+    cancelled: &dyn Fn() -> bool,
+    deadline: Instant,
+) -> io::Result<TcpStream> {
     loop {
         if cancelled() {
             return Err(cancelled_error());
