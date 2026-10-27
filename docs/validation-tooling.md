@@ -397,3 +397,27 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
   # Run offline hermetic synthetic smoke probe (launches no workloads):
   uv run --offline --no-project --script tools/benchmark-campaign/test_measured_campaign.py
   ```
+
+## 12a. Filesystem-aware Linux measurement boundary
+
+- **Tier**: In-tree benchmark campaign harness (diagnostic, not a product-cell qualification).
+- **Owner scripts & tools**:
+  - Scope owner: `tools/benchmark-campaign/filesystem.py` (one owner for mount/filesystem/backing-counter scope plus read-only cumulative counter samples; no project or toolchain migration, stdlib only).
+  - Contract tests: `tools/benchmark-campaign/test_filesystem.py`.
+  - Consumer: the private index-write-attribution harness delegates its former mountinfo/sysfs/diskstats lookup, counter reads, and sector deltas to this owner; the harness keeps its own strict qualification gate.
+- **Boundary**: one target filesystem per run. Apparent bytes, allocated file bytes, per-process I/O counters, and attributable host block-device writes are reported separately and never merged. Allocated-file measurement stays in the existing Rust `storage-footprint` tool and is not duplicated here.
+- **Supported scopes**:
+  - `regular_block_device`: the mount resolves to one bare block device with a readable kernel sectors-written counter. Available (host-wide for that device).
+  - `zfs_pool`: ZFS datasets report pool-wide accounting that cannot isolate one filesystem, so the scope is unavailable; no pool total is converted into a per-filesystem value.
+  - `composite_anonymous`: overlay/tmpfs/ramfs/network/fuse/9p/virtiofs mounts (and other major-0 mounts) expose no per-filesystem block counter. Unavailable.
+  - `ambiguous_multi_device`: btrfs or any stacked (mapped) device over one or more underlying devices. A mapped device is never assumed to be a single disk; underlying counters are listed, never summed. Unavailable.
+  - `unavailable`: no mount entry, missing counter file or permission, unparsable counter, counter wrap/reset/recreation, or a `--device` override that names anything other than the mount's own `MAJ:MIN` (operator assertion alone is not proof of backing). Unavailable is reported with an explicit reason, never as zero.
+- **Mechanisms checked** (read-only; the owner spawns no subprocess): `/proc/self/mountinfo` with octal-escape decoding and longest-prefix mount selection, the chosen device's `/sys/dev/block/<MAJ:MIN>/stat` sectors-written counter (kernel 512-byte block-layer unit regardless of filesystem block size), `/proc/diskstats` as an optional cross-check, and `slaves`/`holders`/`shared-mount` topology plus informational queue/model attributes. Exactly one device counter is ever read per scope: a partition's own counter, never the parent disk added to it.
+- **Honest limits**: the counter is host-wide for its device (every writer included); the collector never attests isolation and never qualifies a run. Counter wrap/reset yields unavailable, not a negative or zero delta. Per-filesystem physical writes are never fabricated from allocation counters, per-process I/O counters, or pool totals.
+- **Parent live observation** (bounded, read-only):
+  ```sh
+  # Identify the scope behind a scratch path:
+  python3 tools/benchmark-campaign/filesystem.py identify --path /srv/scratch
+  # Identify and take one cumulative sample:
+  python3 tools/benchmark-campaign/filesystem.py sample --path /srv/scratch
+  ```
