@@ -1652,6 +1652,37 @@ mod getnodeaddresses_tests {
     }
 
     #[test]
+    fn anonymous_handles_are_visible_and_disconnectable_but_not_destinations() {
+        let ctx = Context::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new_inbound(tx);
+        let remote = bitcoin_rs_p2p::PeerRemote::AnonymousTor(lease.connection_id());
+        let mut info = peer("127.0.0.1:8333", 9);
+        info.addr = remote;
+        info.inbound = true;
+        ctx.network.peer_table.register(remote, lease.clone());
+        ctx.network.peer_table.publish_info(remote, &lease, info);
+        let ctx = Arc::new(ctx);
+        let listed = getpeerinfo(&ctx, &json!([])).expect("peer info");
+        let row = &listed.as_array().expect("peers")[0];
+        let handle = remote.to_string();
+        assert_eq!(
+            row.get("addr").and_then(JsonValueTrait::as_str),
+            Some(handle.as_str())
+        );
+        assert_eq!(
+            row.get("network").and_then(JsonValueTrait::as_str),
+            Some("onion")
+        );
+        let destinations = getnodeaddresses(&ctx, &json!([0])).expect("destinations");
+        assert_eq!(destinations.as_array().expect("addresses").len(), 0);
+        assert!(addnode(&ctx, &json!([handle.as_str(), "add"])).is_err());
+        assert!(disconnectnode(&ctx, &json!([handle.as_str()])).is_ok());
+        assert!(lease.is_cancelled());
+        assert!(ctx.network.peer_table.is_empty());
+    }
+
+    #[test]
     fn empty_context_returns_empty_array() {
         let ctx = Arc::new(Context::new());
         let result = getnodeaddresses(&ctx, &json!([]))

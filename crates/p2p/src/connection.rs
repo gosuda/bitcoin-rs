@@ -961,6 +961,12 @@ impl PeerLease {
         self
     }
 
+    pub(crate) fn belongs_to_transport_epoch(&self, epoch: &Arc<AtomicBool>) -> bool {
+        self.transport_alive
+            .as_ref()
+            .is_some_and(|alive| Arc::ptr_eq(alive, epoch))
+    }
+
     pub(crate) fn with_no_ban(mut self, no_ban: bool) -> Self {
         self.no_ban = no_ban;
         self

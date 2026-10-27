@@ -272,10 +272,11 @@ impl Served {
         let (server_stream, addr) = listener.accept()?;
         configure_peer_stream(&client_stream)?;
         configure_peer_stream(&server_stream)?;
-        let writer_socket = server_stream.try_clone()?;
         if let WriterKind::Production { write_timeout } = writer {
             server_stream.set_write_timeout(Some(*write_timeout))?;
         }
+        // Windows clones retain the timeout present at duplication time.
+        let writer_socket = server_stream.try_clone()?;
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let mut lease = PeerLease::new_with_budget(outbound_tx, true, budget);

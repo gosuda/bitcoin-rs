@@ -164,6 +164,17 @@ impl PeerTable {
         Self::default()
     }
 
+    /// The transport owner revokes its epoch, then asks the table to wake only
+    /// that epoch's leases. Connection owners retain identity-checked removal;
+    /// neither a late teardown nor a replacement epoch can remove its successor.
+    pub(crate) fn cancel_transport_epoch(&self, epoch: &Arc<AtomicBool>) {
+        for entry in self.entries.read().values() {
+            if entry.lease.belongs_to_transport_epoch(epoch) {
+                entry.lease.cancel();
+            }
+        }
+    }
+
     /// Registers `lease` as the live connection at `addr`, cancelling and
     /// replacing any predecessor. Returns whether a different connection was
     /// replaced; re-registering the same connection is a no-op that keeps its
@@ -1044,6 +1055,36 @@ impl PeerTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_an_epoch_wakes_its_leases_without_cancelling_a_replacement() {
+        let table = PeerTable::new();
+        let old_epoch = Arc::new(AtomicBool::new(true));
+        let new_epoch = Arc::new(AtomicBool::new(true));
+        let address = crate::PeerEndpoint::new(crate::PeerAddress::I2p([7; 32]), 8333);
+        let other = crate::PeerEndpoint::new(crate::PeerAddress::I2p([8; 32]), 8333);
+        let old = lease().with_transport_alive(Some(Arc::clone(&old_epoch)));
+        let remaining = lease().with_transport_alive(Some(Arc::clone(&old_epoch)));
+        table.register(address, old.clone());
+        table.register(other, remaining.clone());
+        let successor = lease().with_transport_alive(Some(new_epoch));
+        table.register(address, successor.clone());
+
+        // The SAM worker revokes admission before waking the old epoch's I/O.
+        old_epoch.store(false, Ordering::Release);
+        assert!(!remaining.cancellation().load(Ordering::Acquire));
+        table.cancel_transport_epoch(&old_epoch);
+        assert!(remaining.cancellation().load(Ordering::Acquire));
+        assert!(!successor.is_cancelled());
+        assert!(!table.remove_current(address, &old));
+        assert!(
+            table
+                .lease(address)
+                .is_some_and(|lease| lease.same_connection(&successor))
+        );
+        table.cancel_transport_epoch(&old_epoch);
+        assert!(!successor.is_cancelled());
+    }
 
     #[test]
     fn anonymous_sources_keep_independent_leases_and_roundtrip_mempool_attribution() {

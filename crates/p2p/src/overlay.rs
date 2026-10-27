@@ -584,10 +584,3 @@ fn pause(cancelled: &dyn Fn() -> bool, delay: Duration) {
         std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
-fn retire(table: &crate::PeerTable, network: PeerNetwork) {
-    for session in table.sessions() {
-        if session.addr.network() == network {
-            session.lease.cancel();
-        }
-    }
-}

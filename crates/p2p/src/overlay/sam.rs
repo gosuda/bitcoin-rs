@@ -1,8 +1,7 @@
 //! IVNP SAM v3 STREAM session lifecycle, naming, connect, and accept.
 use super::{
     Arc, AtomicBool, Connected, Duration, Instant, Ordering, OverlayTransport, PeerAddress,
-    PeerEndpoint, PeerNetwork, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity,
-    invalid, io, pause, retire,
+    PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io, pause,
 };
 use sha2::{Digest, Sha256};
 pub(super) struct Session {
@@ -276,11 +275,14 @@ impl OverlayTransport {
                     monitored
                 })
             })();
+            // This worker alone unpublishes the epoch and wakes its leases.
+            // Connect/accept failures may revoke admission through `alive`, but
+            // cannot remove sessions or cancel connections of another epoch.
             let retired = self.sam.write().take();
             if let Some(session) = retired {
                 session.alive.store(false, Ordering::Release);
+                shared.peer_table.cancel_transport_epoch(&session.alive);
             }
-            retire(&shared.peer_table, PeerNetwork::I2p);
             if let Err(error) = result {
                 if !cancelled() {
                     tracing::warn!(%error, "IVNP SAM unavailable; retiring streams and retrying");
@@ -346,6 +348,7 @@ impl OverlayTransport {
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::PeerNetwork;
     use base64::Engine as _;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::TcpListener;
