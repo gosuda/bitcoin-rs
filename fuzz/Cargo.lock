@@ -252,6 +252,7 @@ dependencies = [
  "hkdf",
  "metrics",
  "parking_lot",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
