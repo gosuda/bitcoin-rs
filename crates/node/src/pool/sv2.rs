@@ -1,3 +1,4 @@
+use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -8,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_stratum::{BlockStatus, ConnectionLimiter, PoolCore};
-use bitcoin_rs_stratum_v2::{
+use bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter;
+use bitcoin_rs_mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, Connection, ERROR_CODE_SHARE_NOT_RECORDED,
     ERROR_CODE_SUBMIT_SHARES_STALE_SHARE, Event, Limits, MAX_FEED_LEN, ServerConfig,
 };
+use bitcoin_rs_mining::pool::{BlockStatus, PoolCore};
 use pool_ledger::MinerId;
 
 use super::authority;
@@ -496,6 +498,14 @@ mod tests {
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     use bitcoin_rs_chain::compact_is_met_by;
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+    use bitcoin_rs_mining::pool::ledger::{Ledger, MinerId, PayoutPolicy};
+    use bitcoin_rs_mining::pool::stratum::sv2::{
+        AdmitError, AuthorityKeypair, Connection, FLAG_REQUIRES_STANDARD_JOBS, Limits, ServerConfig,
+    };
+    use bitcoin_rs_mining::pool::{
+        BIP320_VERSION_MASK, Extranonce, ExtranonceLayout, Job, JobBookConfig,
+        MAX_NTIME_FORWARD_SECS, PoolCore, ShareLedger, ShareTarget,
+    };
     use bitcoin_rs_mining::{
         Candidate, CandidateContext, CoinbaseBudget, FakeMiningControl, MiningControl,
         assemble_candidate,
@@ -503,13 +513,6 @@ mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
     use bitcoin_rs_rpc::context::PoolOperator as _;
     use bitcoin_rs_storage::KvStore;
-    use bitcoin_rs_stratum::{
-        BIP320_VERSION_MASK, Extranonce, ExtranonceLayout, Job, JobBookConfig,
-        MAX_NTIME_FORWARD_SECS, PoolCore, ShareLedger, ShareTarget,
-    };
-    use bitcoin_rs_stratum_v2::{
-        AdmitError, AuthorityKeypair, Connection, FLAG_REQUIRES_STANDARD_JOBS, Limits, ServerConfig,
-    };
     use codec_sv2::{
         Decoded, Decrypted, Handshake, InitiatorSent, MessageFrame, NoiseDecoder, NoiseEncoder,
         TransportDecryptState, TransportEncryptState,
@@ -526,7 +529,6 @@ mod tests {
         SubmitSharesStandard,
     };
     use noise_sv2::{INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE, Initiator};
-    use pool_ledger::{Ledger, MinerId, PayoutPolicy};
     use zeroize::Zeroizing;
 
     use super::{LedgerHost, announce_current_job, handle_events};
@@ -566,7 +568,10 @@ mod tests {
 
     fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, Box<dyn Error>> {
         let store: Arc<dyn KvStore> = Arc::new(Store::open(path)?);
-        let ledger = Ledger::create(store, pool_ledger::PoolConfig::new(1_000, PAYOUT.to_vec()))?;
+        let ledger = Ledger::create(
+            store,
+            bitcoin_rs_mining::pool::ledger::PoolConfig::new(1_000, PAYOUT.to_vec()),
+        )?;
         ledger.set_payout_script(MinerId(42), PAYOUT)?;
         Ok(Arc::new(LedgerHost::new(
             Arc::new(ledger),

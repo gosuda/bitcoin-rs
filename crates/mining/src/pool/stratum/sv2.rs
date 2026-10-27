@@ -6,7 +6,7 @@
 //!    EllSwift_ChaChaPoly_SHA256` responder of the Stratum V2 specification,
 //!    run by the Stratum Reference Implementation's own `noise_sv2` and
 //!    `codec_sv2` (never home-grown crypto). The pool authority key crosses
-//!    this crate as 32 raw bytes ([`AuthorityKeypair`]), so no `secp256k1`
+//!    this module as 32 raw bytes ([`AuthorityKeypair`]), so no `secp256k1`
 //!    type is shared with the repository's `secp256k1 0.29` graph:
 //!    `noise_sv2 2.0.0` resolves its own `secp256k1 0.28.2` and the two meet
 //!    only at the byte boundary.
@@ -16,14 +16,14 @@
 //!    `CloseChannel`, `Reconnect`, and the error and cancel semantics around
 //!    them, using the official message layouts from `mining_sv2 12.0.0` and
 //!    `common_messages_sv2 9.0.0`.
-//! 3. **The one job and share owner**, [`bitcoin_rs_stratum::JobBook`]. This
-//!    crate never assembles a template, never builds a coinbase, and never
+//! 3. **The one job and share owner**, [`crate::pool::JobBook`]. This
+//!    module never assembles a template, never builds a coinbase, and never
 //!    validates a share or a block: it passes the owner's `Job` to the wire
 //!    and maps the owner's `ShareError` to an official error code.
 //!
 //! # What is real, and what is not
 //!
-//! Implemented and exercised by `tests/protocol.rs` with real Noise
+//! Implemented and exercised by `tests/pool_sv2.rs` with real Noise
 //! handshakes, real encrypted frames and real regtest candidates: the Mining
 //! Protocol server role. [`ROLES`] states every other role explicitly; none of
 //! them is advertised in `SetupConnection`:
@@ -42,7 +42,7 @@
 //!   `extension_type` are discarded as §3.4.1 requires.
 //!
 //! Not run: a network daemon, a real key, a real funds path. Nothing in this
-//! crate opens a socket: [`Connection`] is sans-IO (`feed` bytes in,
+//! module opens a socket: [`Connection`] is sans-IO (`feed` bytes in,
 //! `take_transmit` bytes out).
 //!
 //! # Host loop
@@ -91,7 +91,7 @@ pub use session::{
 use std::fmt;
 use std::time::Duration;
 
-use bitcoin_rs_stratum::{Installed, JobBook, ShareTarget};
+use crate::pool::{Installed, JobBook, ShareTarget};
 use codec_sv2::{
     Decoded, Decrypted, ENCRYPTED_SV2_FRAME_HEADER_SIZE, Handshake, NoiseDecoder, NoiseEncoder,
     SV2_FRAME_PLAINTEXT_CHUNK_SIZE, SerializedFrame, TransportDecryptState, TransportEncryptState,
@@ -133,7 +133,7 @@ pub struct Frame {
 /// Whether one protocol role is implemented by this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoleStatus {
-    /// Implemented and covered by `tests/protocol.rs`.
+    /// Implemented and covered by `tests/pool_sv2.rs`.
     Implemented,
     /// Not implemented; never advertised.
     NotImplemented,
@@ -173,7 +173,7 @@ pub const ROLES: &[Role] = &[
         name: "Standard channels",
         spec: "05 §5.2.1",
         status: RoleStatus::Implemented,
-        detail: "pool-fixed extranonce; merkle root from bitcoin_rs_stratum::Job::merkle_root",
+        detail: "pool-fixed extranonce; merkle root from crate::pool::Job::merkle_root",
     },
     Role {
         name: "Extended channels",
@@ -215,7 +215,7 @@ pub const ROLES: &[Role] = &[
         name: "Work selection and custom jobs (SetCustomMiningJob)",
         spec: "05 §5.3.18-5.3.20",
         status: RoleStatus::NotImplemented,
-        detail: "bitcoin_rs_stratum::JobBook::install accepts only a pool-built Candidate; a miner-declared job needs an owner-side install and validate path that does not exist, and a second one here would duplicate template and share validation",
+        detail: "crate::pool::JobBook::install accepts only a pool-built Candidate; a miner-declared job needs an owner-side install and validate path that does not exist, and a second one here would duplicate template and share validation",
     },
     Role {
         name: "Job Declaration server",

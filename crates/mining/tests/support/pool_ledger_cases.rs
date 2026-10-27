@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use pool_ledger::*;
+use bitcoin_rs_mining::pool::ledger::*;
 use std::sync::Arc;
 use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, RedbStore};
 use tempfile::TempDir;

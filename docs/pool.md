@@ -41,7 +41,7 @@ Set `--pool` and provide each required value below. No listener, pool directory,
 | `--pool-min-payout-sat` / `pool_min_payout_sat` | `u64`; `546` | Between 546 and 2,100,000,000,000,000 satoshis. |
 | `--pool-max-payout-outputs` / `pool_max_payout_outputs` | `u32`; `2500` | Between 1 and 2500 outputs. |
 
-Write difficulty with an ASCII-digit integer part and, if needed, a decimal point and fractional digits, such as `16384` or `0.001`. There MUST be at most 19 digits in total. Signs, exponent notation, a missing integer part, and zero are rejected. The target conversion uses integer-ratio arithmetic; see `ShareTarget::from_pool_difficulty_decimal` in [`job.rs`](../crates/stratum/src/job.rs).
+Write difficulty with an ASCII-digit integer part and, if needed, a decimal point and fractional digits, such as `16384` or `0.001`. There MUST be at most 19 digits in total. Signs, exponent notation, a missing integer part, and zero are rejected. The target conversion uses integer-ratio arithmetic; see `ShareTarget::from_pool_difficulty_decimal` in [`job.rs`](../crates/mining/src/pool/job.rs).
 
 At least one protocol bind MUST be present. Ports MUST be nonzero, and the two bind addresses MUST differ. Non-loopback binds require explicit permission even when the address is a wildcard. Operators SHOULD keep candidate listeners on loopback.
 
@@ -53,7 +53,7 @@ On Unix, the authority file MUST be a regular file with mode exactly `0600`, inc
 
 The loader opens the path with `RDONLY | CLOEXEC | NOFOLLOW | NONBLOCK` and checks metadata on the opened descriptor. A final-component symlink, FIFO, directory, or insecure mode is not accepted. `NOFOLLOW` is not a claim that every parent directory is trusted; operators SHOULD protect the containing directory from modification by other users. Secure authority-file loading fails closed on non-Unix platforms.
 
-The input buffer, decoded secret, and stored authority secret use `Zeroizing`; the authority object's debug output redacts the secret. Parse errors do not include file contents. These protections cover the owned buffers in this implementation, not every internal copy in a cryptographic dependency or operating-system memory. See [`authority.rs`](../crates/node/src/pool/authority.rs) and [`AuthorityKeypair`](../crates/stratum-v2/src/lib.rs).
+The input buffer, decoded secret, and stored authority secret use `Zeroizing`; the authority object's debug output redacts the secret. Parse errors do not include file contents. These protections cover the owned buffers in this implementation, not every internal copy in a cryptographic dependency or operating-system memory. See [`authority.rs`](../crates/node/src/pool/authority.rs) and [`AuthorityKeypair`](../crates/mining/src/pool/stratum/sv2.rs).
 
 ## Register miners and inspect accounting
 

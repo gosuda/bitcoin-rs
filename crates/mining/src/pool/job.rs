@@ -19,13 +19,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use bitcoin_rs_chain::{ChainWork, compact_is_met_by};
-use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_mining::{
+use crate::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, Candidate, CoinbaseBudget, MiningControl, MiningControlError,
     MiningError, STALE_PARENT_REASON,
 };
+use bitcoin_rs_chain::{ChainWork, compact_is_met_by};
+use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Script, Tx, TxOut,
     Txid, Witness,

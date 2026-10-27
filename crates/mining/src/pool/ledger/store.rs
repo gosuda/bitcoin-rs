@@ -10,7 +10,7 @@
 //! second time, because the identity it keys on (header hash, block hash, idempotency key, txid,
 //! round or batch state) is checked inside the same transaction that would apply it.
 
-use crate::kv::{Database, Table, TableDefinition, WriteTransaction};
+use super::kv::{Database, Table, TableDefinition, WriteTransaction};
 use bitcoin_rs_storage::KvStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,8 +18,8 @@ use std::sync::Arc;
 #[cfg(feature = "test-seam")]
 use std::sync::Mutex;
 
-use crate::codec::{Dec, Enc};
-use crate::{
+use super::codec::{Dec, Enc};
+use super::{
     AuditKind, AuditRecord, Balance, BatchState, BatchTransition, BlockFound, BlockRecorded,
     CancelBasis, ChainView, Closure, Confirmation, ExternalSigner, Hash32, LedgerError,
     MAX_BATCH_OUTPUTS, MAX_EXTRANONCE_LEN, MAX_MONEY_SAT, MAX_SCRIPT_LEN, MinerId,
@@ -652,13 +652,13 @@ impl Ledger {
         let mut observations = Vec::with_capacity(open.len());
         for round in &open {
             let canon = match chain.block_location(&round.block_hash, round.height)? {
-                crate::BlockLocation::Canonical { height } if height == round.height => {
+                super::BlockLocation::Canonical { height } if height == round.height => {
                     Canon::Canonical
                 }
-                crate::BlockLocation::Canonical { .. } | crate::BlockLocation::Side => {
+                super::BlockLocation::Canonical { .. } | super::BlockLocation::Side => {
                     Canon::Displaced
                 }
-                crate::BlockLocation::Unknown => Canon::Unknown,
+                super::BlockLocation::Unknown => Canon::Unknown,
             };
             let coinbase = if canon == Canon::Canonical && !round.reward_fixed {
                 chain.coinbase_of(&round.block_hash)?
@@ -779,7 +779,7 @@ impl Ledger {
     /// # Errors
     /// Returns [`LedgerError::InvalidInput`] for an empty, oversized or `OP_RETURN` script.
     pub fn set_payout_script(&self, account: MinerId, script: &[u8]) -> Result<(), LedgerError> {
-        crate::validate_script(script)?;
+        super::validate_script(script)?;
         let txn = self.db.begin_write()?;
         let changed = {
             let tables = Tables::open(&txn)?;
@@ -795,7 +795,7 @@ impl Ledger {
                     &tables,
                     AuditKind::PayoutScriptSet,
                     account.0,
-                    &crate::sha256(script),
+                    &super::sha256(script),
                     &ZERO_HASH,
                     [0, 0, 0],
                 )?;
@@ -869,7 +869,7 @@ impl Ledger {
             if picks.is_empty() {
                 return Ok(None);
             }
-            let total = crate::check_outputs(&picks)?;
+            let total = super::check_outputs(&picks)?;
             let id = compute_batch_id(&idempotency_key, &picks)?;
             let seq = bump(&tables.meta_u64, M_NEXT_BATCH, 1)?;
             for pick in &picks {
@@ -2002,7 +2002,7 @@ fn observe_batch(
         let status = chain.tx_status(&tx.txid)?;
         let (canonical, depth) = match status {
             TxStatus::Confirmed { block_hash, height } => (
-                matches!(chain.block_location(&block_hash, height)?, crate::BlockLocation::Canonical { height: observed } if observed == height),
+                matches!(chain.block_location(&block_hash, height)?, super::BlockLocation::Canonical { height: observed } if observed == height),
                 confirmations(tip, height),
             ),
             _ => (false, 0),
@@ -2048,7 +2048,7 @@ fn find_dead_spend(
         {
             continue;
         }
-        let canonical = matches!(chain.block_location(&spend.block_hash, spend.height)?, crate::BlockLocation::Canonical { height } if height == spend.height);
+        let canonical = matches!(chain.block_location(&spend.block_hash, spend.height)?, super::BlockLocation::Canonical { height } if height == spend.height);
         if canonical && confirmations(tip, spend.height) >= u64::from(config.abandon_confirmations)
         {
             return Ok(Some(spend.spender_txid));

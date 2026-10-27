@@ -1,7 +1,7 @@
 use std::io::{self, Read as _};
 use std::path::Path;
 
-use bitcoin_rs_stratum_v2::AuthorityKeypair;
+use bitcoin_rs_mining::pool::stratum::sv2::AuthorityKeypair;
 use thiserror::Error;
 use zeroize::Zeroizing;
 

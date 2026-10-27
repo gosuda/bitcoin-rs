@@ -10,10 +10,10 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 | --- | --- | --- |
 | Operator options | `crates/node/src/options.rs`, `config.rs` | Feature/runtime gating, explicit configuration, and validation. |
 | Composition and shutdown | `crates/node/src/lifecycle.rs`, `pool.rs` | Ledger construction, RPC handle publication, listeners, reconciliation, and draining. |
-| Jobs and SV1 | `crates/stratum/src/` | MiningControl-backed jobs, share validation, bounded admission, and SV1 protocol handling. |
-| SV2 protocol | `crates/stratum-v2/src/` | Noise responder, mining channels, job/share frames, and deferred acknowledgements. |
+| Jobs and SV1 | `crates/mining/src/pool/job.rs`, `pool/core.rs`, `pool/stratum/sv1.rs` | MiningControl-backed jobs, share validation, bounded admission, and SV1 protocol handling. |
+| SV2 protocol | `crates/mining/src/pool/stratum/sv2.rs` | Noise responder, mining channels, job/share frames, and deferred acknowledgements. |
 | Node SV2 adapter | `crates/node/src/pool/sv2.rs`, `authority.rs` | Socket lifecycle, account mapping, found-block handling, and authority-file security. |
-| Accounting | `crates/pool-ledger/src/lib.rs`, `store.rs`, `kv.rs` | PPLNS work, round/batch transitions, balance conservation, audit records, and versioned payout codecs over `KvStore`. |
+| Accounting | `crates/mining/src/pool/ledger.rs`, `ledger/store.rs`, `ledger/kv.rs` | PPLNS work, round/batch transitions, balance conservation, audit records, and versioned payout codecs over `KvStore`. |
 | Applied-chain observations | `crates/node/src/pool/ledger.rs` | Hash-keyed canonicality, coinbase bodies, payout transaction/spend observations, and stable reconciliation. |
 | Management API | `crates/rpc/src/handlers/pool.rs` | Authenticated key-free accounting operations through the composed pool handle. |
 
@@ -99,7 +99,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 
 - Composition MUST construct the ledger/operator handle before management RPC publication. Mining listeners MUST start only after RPC binds successfully and an initial template is available.
 - Reconciliation MUST refresh work and observe rounds/payouts without holding shutdown hostage to a future mining generation. Shutdown MUST stop admission, cancel and join protocol workers, and drain bounded deferred accounting work within the node's shutdown deadline. A missed deadline or worker panic MUST remain an error, not a success report.
-- SV2 support is limited to the role matrix in `crates/stratum-v2/src/lib.rs`: Noise responder transport, mining setup version 2, standard and extended channels, a per-connection group, and job/share handling, including the adapter's reconnect API.
+- SV2 support is limited to the role matrix in `crates/mining/src/pool/stratum/sv2.rs`: Noise responder transport, mining setup version 2, standard and extended channels, a per-connection group, and job/share handling, including the adapter's reconnect API.
 - Custom jobs/work selection, Job Declaration, a Template Distribution server, extranonce-prefix changes, and extensions negotiation MUST NOT be advertised as implemented. The in-process template source MUST NOT be confused with a Template Distribution server.
 
 ## Evidence boundary and source map
@@ -110,10 +110,10 @@ The supplied evidence baseline records **71 prior protocol tests**, **112 prior 
 | --- | --- | --- |
 | Options and validation | `crates/node/src/options.rs`, `config.rs::resolve_pool`, `PoolConfig::validate` | Implemented configuration, not deployment approval. |
 | Persistence and budgets | `crates/node/src/pool.rs::LedgerComposer`, `PoolService::prepare`, `PoolService::start`; `pool/ledger.rs::try_reserve_block_slot` | Approved additive storage and runtime bounds; no operator-data cutover. |
-| Key security | `crates/node/src/pool/authority.rs::load`, `open_private_file`; `crates/stratum-v2/src/lib.rs::AuthorityKeypair` | Descriptor checks and explicitly owned zeroizing buffers. |
-| Block and share records | `crates/node/src/pool/ledger.rs::record_submitted_block`; `pool/sv2.rs::handle_events`; `crates/stratum/src/sv1/session.rs::Completion`, `PoolCore::submit`, `on_submit`, `poll` | Submission ordering and deferred durable success in both protocols; not miner interoperability. |
-| Canonicality and reward reversal | `crates/pool-ledger/src/store.rs::reconcile_rounds`, `apply_round_observation`, `fix_reward`, `reverse_round_credits`; node `RawChainView` | Hash-keyed observations within the watch horizon. |
-| Signer codecs and receipt checks | `crates/pool-ledger/src/lib.rs::PayoutRequest`, `PayoutReceipt`, `verify_payout_transaction`; `store.rs::record_signed` | Exact output/txid checks; no in-process wallet or signature-verification claim. |
+| Key security | `crates/node/src/pool/authority.rs::load`, `open_private_file`; `crates/mining/src/pool/stratum/sv2.rs::AuthorityKeypair` | Descriptor checks and explicitly owned zeroizing buffers. |
+| Block and share records | `crates/node/src/pool/ledger.rs::record_submitted_block`; `pool/sv2.rs::handle_events`; `crates/mining/src/pool/core.rs::Completion`, `PoolCore::submit`; `pool/stratum/sv1/session.rs::on_submit`, `poll` | Submission ordering and deferred durable success in both protocols; not miner interoperability. |
+| Canonicality and reward reversal | `crates/mining/src/pool/ledger/store.rs::reconcile_rounds`, `apply_round_observation`, `fix_reward`, `reverse_round_credits`; node `RawChainView` | Hash-keyed observations within the watch horizon. |
+| Signer codecs and receipt checks | `crates/mining/src/pool/ledger.rs::PayoutRequest`, `PayoutReceipt`, `verify_payout_transaction`; `store.rs::record_signed` | Exact output/txid checks; no in-process wallet or signature-verification claim. |
 | Operator API | `crates/rpc/src/handlers/pool.rs` | Selected node/RPC evidence, not strict final-gate completion. |
 
 For operator configuration and the external signing sequence, read [Native pool operation](../pool.md). Existing operator databases MUST remain untouched by this work. Deployment and existing-data cutover require separate approval.

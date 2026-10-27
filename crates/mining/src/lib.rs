@@ -48,3 +48,7 @@ pub use template::{
     TemplateId, assemble_candidate, assemble_ordered_candidate, select_template_body,
     select_template_body_after, solve_block,
 };
+
+/// Optional native mining pool protocols and accounting.
+#[cfg(feature = "pool")]
+pub mod pool;

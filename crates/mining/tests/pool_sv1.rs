@@ -19,18 +19,21 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use bitcoin_rs_chain::compact_is_met_by;
+use bitcoin_rs_mining::pool::stratum::sv1::{
+    ConnectionLimiter, DifficultyPolicy, FrameError, LineBuffer, Observer, RefusalReason, Server,
+    ServerConfig, ServerDeps, ServerEvent, StaticAccountResolver, prevhash_from_wire,
+    prevhash_to_wire, swap_words,
+};
+use bitcoin_rs_mining::pool::{
+    AcceptedShare, Extranonce, ExtranonceLayout, FoundBlock, Job, JobBookConfig, PoolCore,
+    RecordOutcome, ShareLedger,
+};
 use bitcoin_rs_mining::{
     BlockValidationResult, Candidate, CoinbaseBudget, FakeMiningControl, MiningControl,
     MiningControlError, STALE_PARENT_REASON, TemplateId,
 };
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-};
-use bitcoin_rs_stratum::{
-    AcceptedShare, ConnectionLimiter, DifficultyPolicy, Extranonce, ExtranonceLayout, FoundBlock,
-    FrameError, Job, JobBookConfig, LineBuffer, Observer, PoolCore, RecordOutcome, RefusalReason,
-    Server, ServerConfig, ServerDeps, ServerEvent, ShareLedger, StaticAccountResolver,
-    prevhash_from_wire, prevhash_to_wire, swap_words,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -78,9 +81,9 @@ impl TestLedger {
 impl ShareLedger for TestLedger {
     fn record_share(
         &self,
-        worker: &bitcoin_rs_stratum::WorkerIdentity,
+        worker: &bitcoin_rs_mining::pool::WorkerIdentity,
         share: &AcceptedShare,
-    ) -> Result<RecordOutcome, bitcoin_rs_stratum::LedgerUnavailable> {
+    ) -> Result<RecordOutcome, bitcoin_rs_mining::pool::LedgerUnavailable> {
         self.share_calls.fetch_add(1, Ordering::SeqCst);
         let mut fail = self
             .fail_shares
@@ -90,7 +93,7 @@ impl ShareLedger for TestLedger {
             && *remaining > 0
         {
             *remaining -= 1;
-            return Err(bitcoin_rs_stratum::LedgerUnavailable);
+            return Err(bitcoin_rs_mining::pool::LedgerUnavailable);
         }
         let mut shares = self
             .shares
@@ -109,10 +112,10 @@ impl ShareLedger for TestLedger {
 
     fn record_block(
         &self,
-        worker: &bitcoin_rs_stratum::WorkerIdentity,
+        worker: &bitcoin_rs_mining::pool::WorkerIdentity,
         block: &FoundBlock,
-        _submission: &Result<bitcoin_rs_stratum::BlockReceipt, MiningControlError>,
-    ) -> Result<(), bitcoin_rs_stratum::LedgerUnavailable> {
+        _submission: &Result<bitcoin_rs_mining::pool::BlockReceipt, MiningControlError>,
+    ) -> Result<(), bitcoin_rs_mining::pool::LedgerUnavailable> {
         self.blocks
             .lock()
             .unwrap_or_else(|error| panic!("test operation failed: {error}"))

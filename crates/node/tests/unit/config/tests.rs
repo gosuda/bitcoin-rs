@@ -95,7 +95,7 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<
     assert_eq!(pool.share_difficulty, "2.5");
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal("2.5")?
+        bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("2.5")?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);

@@ -1,21 +1,23 @@
+use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_index::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_mempool::MempoolReader;
-use bitcoin_rs_primitives::encode::deserialize;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
-use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_stratum::{
-    AcceptedShare, AccountResolver, AuthDenied, BlockReceipt, FoundBlock, LedgerUnavailable,
-    Password, RecordOutcome, ShareLedger, WorkerIdentity,
-};
-use pool_ledger::{
+use bitcoin_rs_mining::pool::ledger::{
     BlockFound as LedgerBlockFound, BlockLocation, ChainView, ChainViewError, ConfirmedSpend,
     Ledger, MinerId, ObservedCoinbase, ShareCredit, ShareReceipt, TxOut, TxStatus,
     work_from_le_bytes,
 };
+use bitcoin_rs_mining::pool::stratum::sv1::{AccountResolver, AuthDenied, Password};
+use bitcoin_rs_mining::pool::{
+    AcceptedShare, BlockReceipt, FoundBlock, LedgerUnavailable, RecordOutcome, ShareLedger,
+    WorkerIdentity,
+};
+use bitcoin_rs_primitives::encode::deserialize;
+use bitcoin_rs_primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
+use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 /// Node-backed observation of the fully applied chain.
 ///

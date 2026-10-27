@@ -1,5 +1,5 @@
 //! Snapshot-backed logical tables and a single revision-guarded durable commit.
-use crate::LedgerError;
+use super::LedgerError;
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, WriteCondition};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -8,7 +8,6 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
-#[path = "../tests/support/kv_transactions.rs"]
 mod tests;
 
 const PREFIX: &[u8] = b"pool-ledger/v1/";
