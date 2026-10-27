@@ -1383,6 +1383,98 @@ def _run_phase(
     return code, wall_ns, cpu_ns, peak_rss
 
 
+def _custody_indexed_stream_path(root: Path) -> Path:
+    """Single regular file carrying the pinned indexed logical stream."""
+
+    return root / "custody" / "indexed-archive"
+
+
+def _require_stream_match(path: Path, archive: FileRef) -> None:
+    """Refuse when the materialized indexed stream no longer matches the pin."""
+
+    info, digest = _hash_regular(path, "indexed stream")
+    if info.st_size != archive.size or digest != archive.sha256:
+        raise ContractError("indexed stream changed after its pin")
+
+
+def _write_indexed_stream(config: Config, pinned: PinnedCorpus, root: Path, dest: Path) -> None:
+    """Materialize the pinned indexed logical stream to one custody file."""
+
+    indexed = config.indexed
+    if indexed is None or pinned.index is None:
+        raise ContractError("indexed stream requested without an indexed pin")
+    _check_file_ref_binding(indexed.products, "indexed products")
+    freeze = _load_indexed_freeze(indexed.products)
+    freeze_magic = freeze.network_magic
+    if not isinstance(freeze_magic, (bytes, bytearray)):
+        raise ContractError("indexed freeze has no network magic")
+    if bytes(freeze_magic) != config.network_magic:
+        raise ContractError("indexed freeze network magic does not match the config")
+    module = _campaign_corpus()
+    sources_dir = root / "custody" / "sources"
+    try:
+        dest_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400)
+    except OSError as error:
+        raise ContractError(f"cannot create indexed stream {dest}: {error}") from error
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        framed = module.iter_indexed_framed(freeze, pinned.index.path, sources_dir)
+        for chunk in framed:
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise ContractError("indexed stream yielded non-bytes")
+            hasher.update(chunk)
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ContractError("indexed logical stream exceeds MAX_ARCHIVE_BYTES")
+            written = 0
+            while written < len(chunk):
+                written += os.write(dest_fd, chunk[written:])
+        os.fsync(dest_fd)
+    except (ValueError, OSError) as error:
+        try:
+            os.close(dest_fd)
+        except OSError as close_error:
+            raise ContractError(f"cannot close indexed stream: {close_error}") from close_error
+        dest.unlink(missing_ok=True)
+        raise ContractError(f"cannot write indexed stream: {error}") from error
+    try:
+        os.close(dest_fd)
+    except OSError as error:
+        dest.unlink(missing_ok=True)
+        raise ContractError(f"cannot close indexed stream: {error}") from error
+    info, digest = _hash_regular(dest, "indexed stream")
+    if info.st_size != config.archive.size or digest != config.archive.sha256:
+        dest.unlink(missing_ok=True)
+        raise ContractError("indexed stream does not match the packed archive")
+    try:
+        dirfd = os.open(dest.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as error:
+        dest.unlink(missing_ok=True)
+        raise ContractError(f"cannot dirsync indexed stream: {error}") from error
+    try:
+        os.fsync(dirfd)
+    except OSError as error:
+        raise ContractError(f"cannot dirsync indexed stream: {error}") from error
+    finally:
+        os.close(dirfd)
+
+
+def _corpus_path_for_arm(config: Config, pinned: PinnedCorpus, root: Path) -> Path:
+    """Resolve ``{corpus_path}`` to the indexed pin when present, else packed."""
+
+    if config.indexed is None or pinned.index is None:
+        return pinned.archive.path
+    dest = _custody_indexed_stream_path(root)
+    if dest.is_symlink():
+        raise ContractError("indexed stream must not be a symlink")
+    if dest.exists():
+        _require_stream_match(dest, config.archive)
+        return dest
+    _write_indexed_stream(config, pinned, root, dest)
+    return dest
+
+
 def _run_arm(
     config: Config,
     program: Program,
@@ -1403,7 +1495,7 @@ def _run_arm(
         program.command,
         binary_path=binary_path,
         data_dir=data_dir,
-        corpus_path=pinned.archive.path,
+        corpus_path=_corpus_path_for_arm(pinned),
         manifest_path=pinned.manifest.path,
         state_path=state_path,
     )
@@ -1428,7 +1520,7 @@ def _run_arm(
             program.reopen_command,
             binary_path=binary_path,
             data_dir=data_dir,
-            corpus_path=pinned.archive.path,
+            corpus_path=_corpus_path_for_arm(pinned),
             manifest_path=pinned.manifest.path,
             state_path=reopen_path,
         )

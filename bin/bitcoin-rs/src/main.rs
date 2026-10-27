@@ -27,8 +27,22 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    let result = config::resolve(cli, std::env::vars_os())
-        .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()));
+    // Foreground offline import shares the timed `{corpus_path}` contract:
+    // one regular file, never the indexed `sources` directory. All three
+    // flags must appear together; a partial set is a caller error, not a
+    // daemon run.
+    let import = (cli.corpus.clone(), cli.manifest.clone(), cli.state.clone());
+    let result = config::resolve(cli, std::env::vars_os()).and_then(|config| match import {
+        (Some(corpus), Some(manifest), Some(state)) => {
+            bitcoin_rs_node::offline_import::run_offline_import(config, &corpus, &manifest, &state)
+        }
+        (None, None, None) => {
+            bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default())
+        }
+        _ => Err(anyhow::anyhow!(
+            "--corpus, --manifest, and --state must be given together"
+        )),
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

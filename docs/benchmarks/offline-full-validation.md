@@ -44,14 +44,20 @@ One `offline-full-validation-config-v1` document binds every arm:
   manifest into a private campaign directory, re-hashes both, and
   chmod's them `0o400`. When `indexed` is present it also copies the index
   document and every declared `blkNNNNN.dat` source into private custody at
-  `0o400`. Arms read the archive pin (`{corpus_path}` still resolves to the
-  packed archive pin); the index and blk pins are custody-only, verified but
-  not consumed through arm argv. Before and after every child, the
-  controller re-hashes every pin (archive, manifest, index, each blk source)
-  and checks device, inode, size, and mtime. A same-user child that chmod's
-  and rewrites a pin fails closed. Dual custody transiently holds the corpus
-  twice (packed bytes plus indexed sources); moving `{corpus_path}` to the
-  indexed pin belongs to the unresolved arm-invocation slice.
+  `0o400`. Both arms read the archive pin: `_corpus_path_for_arm` binds
+  `{corpus_path}` to `custody/archive`, the single regular file whose bytes
+  equal the indexed logical stream by the verified parity above. The index
+  and blk pins are custody-pinned and re-hashed before and after every
+  child, but they are never passed as `{corpus_path}`: the custody `sources`
+  directory holds multiple `blkNNNNN.dat` files while the timed command
+  expects one regular corpus file, and Core opens each `-loadblock` path
+  with `fopen(path, "rb")` (`bitcoin-core/src/node/blockstorage.cpp`,
+  `ImportBlocks`). Before and after every child, the controller re-hashes
+  every pin (archive, manifest, index, each blk source) and checks device,
+  inode, size, and mtime. A same-user child that chmod's and rewrites a pin
+  fails closed. Dual custody transiently holds the corpus twice (packed
+  bytes plus indexed sources); no third copy is materialized because parity
+  already binds the executed bytes to the indexed stream.
 - **Posture**: `assume_valid` must be false. `txindex`, `blockfilterindex`,
   and `coinstatsindex` must be off. Cache policy is the closed set
   `process-cold/page-cache-unspecified`. The sibling MuHash comparator
@@ -85,15 +91,27 @@ persistence, flush, and shutdown. No stage is subtracted. CPU (`utime+stime`)
 and peak RSS are sampled from `/proc` and reported separately; they are not
 an alternate definition of speed.
 
-The child must remain in the foreground and exit. Bitcoin Core commands
-must not daemonize (`-daemon=0`) and should stop after import
-(`-stopafterblockimport=1`, `-assumevalid=0`, `-stopatheight=H`). bitcoin-rs
-commands must apply the same archive through height `H` with
-`--assume-valid-height 0`, persist bodies and undo, publish the production
-clean checkpoint, and exit nonzero if publication fails. After wait, the
-process group must be empty and the comparator, running as a Linux child
-subreaper, must own no leftover descendants. A fixture that forks a
-sleeper and then exits 0 is refused; no result JSON is published.
+The child must remain in the foreground and exit. Bitcoin Core consumes the
+`{corpus_path}` file through its checked-in `-loadblock` family: flag
+`bitcoin-core/src/init.cpp:529`, collection `2128-2136` (`vImportFiles`,
+`ImportBlocks(chainman, vImportFiles)`, then `ActivateBestChains`), fan-out
+`bitcoin-core/src/node/blockstorage.cpp:1270` (`ImportBlocks`), and
+`bitcoin-core/src/validation.cpp:4975`
+(`ChainstateManager::LoadExternalBlockFile` magic scan, size gate, header
+hash, `AcceptBlock` without `ProcessNewBlock`). Core commands must not
+daemonize (`-daemon=0`) and should stop after import
+(`-stopafterblockimport=1`, `-assumevalid=0`, `-stopatheight=H`).
+bitcoin-rs consumes the same single regular `{corpus_path}` file through
+`crates/node/src/offline_import.rs` (`--corpus`, `--manifest`, `--state`
+with `--data-dir` and `--assume-valid-height 0`): Core-framed walk with
+manifest binding, full validation, durable bodies plus undo, production
+clean checkpoint, and an eight-field certified state. It persists bodies
+and undo, publishes the production clean checkpoint, exits nonzero when
+publication or any gate fails, never daemonizes or forks, and leaves no
+descendants. After wait, the process group must be empty and the
+comparator, running as a Linux child subreaper, must own no leftover
+descendants. A fixture that forks a sleeper and then exits 0 is refused; no
+result JSON is published.
 
 ## Correctness gates, in order
 

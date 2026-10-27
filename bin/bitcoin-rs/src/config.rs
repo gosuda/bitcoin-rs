@@ -71,6 +71,26 @@ macro_rules! emit_cli {
             pub(crate) config: Option<PathBuf>,
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
+            /// Single regular Core-framed archive file for foreground offline import.
+            ///
+            /// Meta flag: never reaches `UserConfig`. All three import flags
+            /// must be present together to run the offline import; otherwise
+            /// the daemon runs. The file must be the custody archive pin
+            /// whose bytes equal the indexed logical stream by parity.
+            #[arg(long)]
+            pub(crate) corpus: Option<PathBuf>,
+            /// Archive manifest binding the corpus identity and stop tip.
+            ///
+            /// Meta flag: never reaches `UserConfig`. Required with
+            /// `--corpus` and `--state` for the offline import.
+            #[arg(long)]
+            pub(crate) manifest: Option<PathBuf>,
+            /// Output certified-state JSON for the offline import.
+            ///
+            /// Meta flag: never reaches `UserConfig`. Required with
+            /// `--corpus` and `--manifest` for the offline import.
+            #[arg(long)]
+            pub(crate) state: Option<PathBuf>,
             $(
                 $(#[$fdoc])*
                 $($fcli)*
