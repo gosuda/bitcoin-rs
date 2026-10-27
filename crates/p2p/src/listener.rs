@@ -275,18 +275,19 @@ impl ConnectionShared {
         }
         let protected = lease.is_protected();
         let local = crate::discouragement::is_local(addr.address());
+        let mut discouraged = false;
         let current = self.peer_table.with_current(lease.source(addr), || {
             if !protected && !local {
-                self.banned.discourage(addr.address());
+                discouraged = self.banned.discourage(addr.address());
             }
         });
         if current {
             if lease.ignores_protocol_error(error) {
                 tracing::debug!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
-                    discouraged = !protected && !local, "peer protocol violation");
+                    discouraged, "peer protocol violation");
             } else {
                 tracing::warn!(peer_addr = %addr, node_id = lease.node_id(), %error, protected, local,
-                    discouraged = !protected && !local, "peer protocol violation");
+                    discouraged, "peer protocol violation");
             }
         }
     }

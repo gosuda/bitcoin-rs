@@ -31,17 +31,19 @@ impl DiscouragedPeers {
         }
     }
 
-    pub(crate) fn insert(&mut self, ip: impl Into<PeerAddress>, now: Instant) {
+    /// Record a reconnectable address and report whether it is retained.
+    /// Anonymous Tor circuit identities are ephemeral and are never recorded.
+    pub(crate) fn insert(&mut self, ip: impl Into<PeerAddress>, now: Instant) -> bool {
         self.expire(now);
         let ip = ip.into().to_canonical();
         if matches!(ip, PeerAddress::AnonymousTor(_)) {
-            return;
+            return false;
         }
         if self.deadlines.contains_key(&ip) {
-            return;
+            return true;
         }
         let Some(until) = now.checked_add(DISCOURAGEMENT_LIFETIME) else {
-            return;
+            return false;
         };
         if self.deadlines.len() == MAX_DISCOURAGED_IPS
             && let Some(oldest) = self.oldest.pop_front()
@@ -50,6 +52,7 @@ impl DiscouragedPeers {
         }
         self.deadlines.insert(ip, until);
         self.oldest.push_back(ip);
+        true
     }
 
     pub(crate) fn contains(&mut self, ip: impl Into<PeerAddress>, now: Instant) -> bool {
@@ -109,9 +112,10 @@ mod tests {
         let now = Instant::now();
         let mut entries = DiscouragedPeers::default();
         let ip = IpAddr::from([8, 8, 8, 8]);
-        entries.insert(ip, now);
+        assert!(entries.insert(ip, now));
+        assert!(entries.insert(ip, now));
         for id in 0..=u64::try_from(MAX_DISCOURAGED_IPS).unwrap_or(u64::MAX) {
-            entries.insert(PeerAddress::AnonymousTor(id), now);
+            assert!(!entries.insert(PeerAddress::AnonymousTor(id), now));
         }
         assert!(entries.contains(ip, now));
         assert_eq!(entries.deadlines.len(), 1);

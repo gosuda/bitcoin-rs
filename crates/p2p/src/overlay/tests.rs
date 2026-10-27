@@ -259,50 +259,49 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
     let break_control = Arc::new(AtomicBool::new(false));
     let public = identity::i2p_base64().encode([0; 387]);
     let endpoint = PeerEndpoint::new(PeerAddress::I2p(Sha256::digest([0; 387]).into()), 18444);
-    let fixture =
-        {
-            let stop = Arc::clone(&shutdown);
-            let controls = Arc::clone(&controls);
-            let break_control = Arc::clone(&break_control);
-            std::thread::spawn(move || {
-                let mut connections = Vec::new();
-                while !stop.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
+    let fixture = {
+        let stop = Arc::clone(&shutdown);
+        let controls = Arc::clone(&controls);
+        let break_control = Arc::clone(&break_control);
+        std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            while !stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("blocking fixture stream");
+                        let stop = Arc::clone(&stop);
+                        let controls = Arc::clone(&controls);
+                        let break_control = Arc::clone(&break_control);
+                        let public = public.clone();
+                        connections.push(std::thread::spawn(move || {
                             stream
-                                .set_nonblocking(false)
-                                .expect("blocking fixture stream");
-                            let stop = Arc::clone(&stop);
-                            let controls = Arc::clone(&controls);
-                            let break_control = Arc::clone(&break_control);
-                            let public = public.clone();
-                            connections.push(std::thread::spawn(move || {
-                                stream
-                                    .set_read_timeout(Some(Duration::from_secs(3)))
-                                    .expect("timeout");
-                                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-                                let mut line = String::new();
-                                reader.read_line(&mut line).expect("hello");
+                                .set_read_timeout(Some(Duration::from_secs(3)))
+                                .expect("timeout");
+                            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                            let mut line = String::new();
+                            reader.read_line(&mut line).expect("hello");
 
-                                assert_eq!(line, "HELLO VERSION MIN=3.1 MAX=3.3\n");
-                                stream
-                                    .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
-                                    .expect("hello reply");
-                                let mut epoch = 0;
-                                while !stop.load(Ordering::Acquire) {
-                                    line.clear();
-                                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                                        break;
-                                    }
+                            assert_eq!(line, "HELLO VERSION MIN=3.1 MAX=3.3\n");
+                            stream
+                                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                                .expect("hello reply");
+                            let mut epoch = 0;
+                            while !stop.load(Ordering::Acquire) {
+                                line.clear();
+                                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                    break;
+                                }
 
-                                    if line.starts_with("SESSION CREATE STYLE=STREAM ") {
-                                        assert!(line.contains("DESTINATION=TRANSIENT"));
-                                        epoch = controls.fetch_add(1, Ordering::AcqRel) + 1;
-                                        stream
-                                            .write_all(b"SESSION STATUS RESULT=OK\n")
-                                            .expect("session");
-                                    } else if line == "NAMING LOOKUP NAME=ME\n" {
-                                        stream
+                                if line.starts_with("SESSION CREATE STYLE=STREAM ") {
+                                    assert!(line.contains("DESTINATION=TRANSIENT"));
+                                    epoch = controls.fetch_add(1, Ordering::AcqRel) + 1;
+                                    stream
+                                        .write_all(b"SESSION STATUS RESULT=OK\n")
+                                        .expect("session");
+                                } else if line.starts_with("NAMING LOOKUP NAME=") {
+                                    stream
                                         .write_all(
                                             format!(
                                                 "NAMING REPLY RESULT=OK NAME=ME VALUE={public}\n"
@@ -310,41 +309,38 @@ fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback(
                                             .as_bytes(),
                                         )
                                         .expect("local destination");
-                                    } else if line.starts_with("STREAM CONNECT ") {
-                                        assert!(line.contains(&format!(
-                                            "DESTINATION={}",
-                                            endpoint.address()
-                                        )));
-                                        assert!(line.contains("TO_PORT=18444 SILENT=false"));
-                                        stream
-                                            .write_all(b"STREAM STATUS RESULT=OK\nbitcoin")
-                                            .expect("stream");
-                                        while !stop.load(Ordering::Acquire) {
-                                            std::thread::sleep(POLL);
-                                        }
-                                        break;
-                                    } else if line == "PING bitcoin-rs\n" {
-                                        if epoch == 1 && break_control.load(Ordering::Acquire) {
-                                            break;
-                                        }
-                                        stream.write_all(b"PONG bitcoin-rs\n").expect("heartbeat");
-                                    } else {
-                                        panic!("unexpected SAM command");
+                                } else if line.starts_with("STREAM CONNECT ") {
+                                    assert!(line.contains(&format!("DESTINATION={public}")));
+                                    assert!(line.contains("TO_PORT=18444 SILENT=false"));
+                                    stream
+                                        .write_all(b"STREAM STATUS RESULT=OK\nbitcoin")
+                                        .expect("stream");
+                                    while !stop.load(Ordering::Acquire) {
+                                        std::thread::sleep(POLL);
                                     }
+                                    break;
+                                } else if line == "PING bitcoin-rs\n" {
+                                    if epoch == 1 && break_control.load(Ordering::Acquire) {
+                                        break;
+                                    }
+                                    stream.write_all(b"PONG bitcoin-rs\n").expect("heartbeat");
+                                } else {
+                                    panic!("unexpected SAM command");
                                 }
-                            }));
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("accept: {error}"),
+                            }
+                        }));
                     }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
                 }
-                for connection in connections {
-                    connection.join().expect("connection fixture");
-                }
-            })
-        };
+            }
+            for connection in connections {
+                connection.join().expect("connection fixture");
+            }
+        })
+    };
     let workers = owner.start(&shared, &shutdown).expect("backend worker");
     until(|| owner.sam.read().is_some());
     let mut connected = owner.connect(endpoint, &|| false).expect("SAM stream");

@@ -350,8 +350,8 @@ impl BannedReader {
     }
 
     // Only current, typed remote violations at the connection boundary call this.
-    pub(crate) fn discourage(&self, ip: impl Into<crate::PeerAddress>) {
-        self.discouraged.lock().insert(ip, Instant::now());
+    pub(crate) fn discourage(&self, ip: impl Into<crate::PeerAddress>) -> bool {
+        self.discouraged.lock().insert(ip, Instant::now())
     }
 
     /// Acquires a shared read lock on the ban list.

@@ -64,6 +64,13 @@ fn destination(text: &str) -> io::Result<PeerAddress> {
     ))
 }
 
+fn lookup(setup: &mut Setup<'_>, name: &str) -> io::Result<(String, PeerAddress)> {
+    setup.write(format!("NAMING LOOKUP NAME={name}\n").as_bytes())?;
+    let line = status(setup, "NAMING REPLY ")?;
+    let public = field(&line, "VALUE").ok_or_else(|| invalid("SAM naming lacks destination"))?;
+    Ok((public.to_owned(), destination(public)?))
+}
+
 impl OverlayTransport {
     fn sam_session(&self) -> io::Result<(String, Arc<AtomicBool>)> {
         let (id, alive) = self
@@ -92,17 +99,11 @@ impl OverlayTransport {
             &stop,
         )?;
         hello(&mut setup)?;
-        setup.write(format!("NAMING LOOKUP NAME={name}\n").as_bytes())?;
-        let line = status(&mut setup, "NAMING REPLY ")?;
+        let (_, address) = lookup(&mut setup, name)?;
         if !alive.load(Ordering::Acquire) {
             return Err(cancelled_error());
         }
-        Ok(PeerEndpoint::new(
-            destination(
-                field(&line, "VALUE").ok_or_else(|| invalid("SAM naming lacks destination"))?,
-            )?,
-            port,
-        ))
+        Ok(PeerEndpoint::new(address, port))
     }
     pub(super) fn sam_connect(
         &self,
@@ -111,17 +112,24 @@ impl OverlayTransport {
     ) -> io::Result<Connected> {
         let (id, alive) = self.sam_session()?;
         let stop = || cancelled() || !alive.load(Ordering::Acquire);
-        let mut setup = Setup::new(
-            self.config.i2p_sam.ok_or_else(|| invalid("SAM disabled"))?,
-            &stop,
-        )?;
+        let address = self.config.i2p_sam.ok_or_else(|| invalid("SAM disabled"))?;
+        let mut naming = Setup::new(address, &stop)?;
+        hello(&mut naming)?;
+        let (public, resolved) = lookup(&mut naming, &endpoint.address().to_string())?;
+        if resolved != endpoint.address() {
+            return Err(invalid(
+                "SAM naming destination does not match requested identity",
+            ));
+        }
+        drop(naming);
+        let mut setup = Setup::new(address, &stop)?;
         hello(&mut setup)?;
         setup.deadline = Instant::now() + Duration::from_secs(60);
-        // IVNP resolves base32 names inside the router; no system DNS is involved.
+        // Connect to the validated public destination, not a second name lookup.
         setup.write(
             format!(
                 "STREAM CONNECT ID={id} DESTINATION={} TO_PORT={} SILENT=false\n",
-                endpoint.address(),
+                public,
                 endpoint.port()
             )
             .as_bytes(),
@@ -291,8 +299,62 @@ impl OverlayTransport {
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::TcpListener;
+
+    #[test]
+    fn naming_mismatch_or_invalid_destination_never_opens_a_stream() {
+        for public in [
+            identity::i2p_base64().encode([0; 387]),
+            identity::i2p_base64().encode([0; 388]),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("SAM");
+            let address = listener.local_addr().expect("address");
+            let fixture = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("naming connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("hello");
+                stream
+                    .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                    .expect("hello reply");
+                line.clear();
+                reader.read_line(&mut line).expect("lookup");
+                assert!(line.starts_with("NAMING LOOKUP NAME="));
+                stream
+                    .write_all(format!("NAMING REPLY RESULT=OK VALUE={public}\n").as_bytes())
+                    .expect("naming reply");
+                line.clear();
+                assert_eq!(reader.read_line(&mut line).expect("closed"), 0);
+                listener.set_nonblocking(true).expect("nonblocking");
+                assert_eq!(
+                    listener.accept().expect_err("no stream connection").kind(),
+                    io::ErrorKind::WouldBlock
+                );
+            });
+            let transport = OverlayTransport::new(Arc::new(crate::OverlayConfig {
+                i2p_sam: Some(address),
+                ..crate::OverlayConfig::default()
+            }));
+            let endpoint = PeerEndpoint::new(PeerAddress::I2p([1; 32]), 8333);
+            *transport.sam.write() = Some(Session {
+                id: "fixture".to_owned(),
+                alive: Arc::new(AtomicBool::new(true)),
+                local_address: endpoint,
+            });
+            let error = match transport.sam_connect(endpoint, &|| false) {
+                Ok(_) => panic!("untrusted destination accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(!super::super::remote_connect_failed(&error));
+            fixture.join().expect("fixture");
+        }
+    }
 
     #[test]
     fn advertised_i2p_address_belongs_to_a_live_accepting_session() {
