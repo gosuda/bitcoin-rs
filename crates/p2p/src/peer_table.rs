@@ -1072,9 +1072,9 @@ mod tests {
 
         // The SAM worker revokes admission before waking the old epoch's I/O.
         old_epoch.store(false, Ordering::Release);
-        assert!(!remaining.cancellation().load(Ordering::Acquire));
+        assert!(remaining.close_signal().try_recv().is_err());
         table.cancel_transport_epoch(&old_epoch);
-        assert!(remaining.cancellation().load(Ordering::Acquire));
+        assert!(remaining.close_signal().try_recv().is_ok());
         assert!(!successor.is_cancelled());
         assert!(!table.remove_current(address, &old));
         assert!(

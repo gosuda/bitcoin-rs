@@ -729,8 +729,16 @@ One-shot manual requests do not create retained retry state. Remote-vs-local
 failure attribution remains with the transport/listener and AddrMan owners
 described above; there is no overlay-specific peer retry loop.
 
-Control-session loss revokes I2P stream epochs, including late registrations,
-and the worker restores the selected stable destination with bounded backoff.
+`run_sam` alone publishes/removes the SAM session record and starts replacement
+epochs. Each epoch has one irreversible liveness marker shared by its streams
+and leases. Control-session loss or `INVALID_ID` revokes only the observed
+marker; a late failure cannot revoke the replacement. Reads, including reads
+in the middle of a payload, use `PeerLease::is_cancelled`, which combines local
+connection cancellation with that same epoch marker. The SAM worker asks the
+peer table to wake only leases carrying its exact epoch marker. Ordinary
+identity-checked lease teardown and sync reconciliation handle revocation;
+there is no network-wide I2P cancellation sweep. The SAM worker restores the
+selected stable destination with bounded backoff, independently of remote-peer retries.
 
 Inbound Tor service identity is persistent but remote circuit identity is
 unknown. Opaque per-connection handles are usable for disconnecting a live

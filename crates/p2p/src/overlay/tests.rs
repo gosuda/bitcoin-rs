@@ -357,7 +357,10 @@ fn sam_session_recovery(invalid_id: bool) {
                                         )
                                         .expect("local destination");
                                 } else if line.starts_with("STREAM CONNECT ") {
-                                    if invalid_id && break_control.load(Ordering::Acquire) {
+                                    if invalid_id
+                                        && break_control.load(Ordering::Acquire)
+                                        && controls.load(Ordering::Acquire) == 1
+                                    {
                                         stream
                                             .write_all(b"STREAM STATUS RESULT=INVALID_ID\n")
                                             .expect("invalid session");
@@ -407,6 +410,15 @@ fn sam_session_recovery(invalid_id: bool) {
     let lease = crate::PeerLease::new(tx).with_transport_alive(connected.alive.clone());
     shared.peer_table.register(endpoint, lease.clone());
     assert!(!lease.is_cancelled());
+    // A shared network label is not epoch ownership. This lease carries a
+    // different marker and must survive both old-session recovery and shutdown.
+    let (other_tx, _other_rx) = crossbeam_channel::unbounded();
+    let independent =
+        crate::PeerLease::new(other_tx).with_transport_alive(Some(Arc::new(AtomicBool::new(true))));
+    let other_endpoint = PeerEndpoint::new(PeerAddress::I2p([8; 32]), 18444);
+    shared
+        .peer_table
+        .register(other_endpoint, independent.clone());
     break_control.store(true, Ordering::Release);
     if invalid_id {
         assert!(owner.connect(endpoint, &|| false).is_err());
@@ -416,9 +428,36 @@ fn sam_session_recovery(invalid_id: bool) {
     assert!(
         connected
             .alive
+            .as_ref()
             .is_some_and(|alive| !alive.load(Ordering::Acquire)),
         "old stream never adopts new session"
     );
+    assert!(
+        !independent.is_cancelled(),
+        "retirement is scoped to one epoch"
+    );
+    let mut fresh = owner
+        .connect(endpoint, &|| false)
+        .expect("replacement stream");
+    fresh
+        .stream
+        .read_exact(&mut bytes)
+        .expect("replacement P2P bytes");
+    assert_eq!(&bytes, b"bitcoin");
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let replacement = crate::PeerLease::new(tx).with_transport_alive(fresh.alive.clone());
+    shared.peer_table.register(endpoint, replacement.clone());
+    assert!(!shared.peer_table.remove_current(endpoint, &lease));
+    connected
+        .alive
+        .as_ref()
+        .expect("old epoch")
+        .store(false, Ordering::Release);
+    assert!(
+        !replacement.is_cancelled(),
+        "late old-epoch revocation cannot reach replacement"
+    );
+    assert!(shared.peer_table.is_current(replacement.source(endpoint)));
     assert!(
         !shared.banned.is_discouraged(endpoint.address()),
         "local router loss is not remote misbehavior"
@@ -427,5 +466,10 @@ fn sam_session_recovery(invalid_id: bool) {
     for worker in workers {
         worker.join().expect("worker").expect("backend");
     }
+    assert!(
+        replacement.is_cancelled(),
+        "the new epoch retires at its own shutdown"
+    );
+    assert!(!independent.is_cancelled());
     fixture.join().expect("SAM fixture");
 }

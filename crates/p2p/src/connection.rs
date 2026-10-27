@@ -820,6 +820,9 @@ pub struct PeerLease {
     id: ConnectionId,
     outbound: Sender<QueuedFrame>,
     cancel: Arc<AtomicBool>,
+    /// Read-only reference to the transport owner's epoch marker. Local
+    /// connection cancellation and provider-epoch revocation are distinct;
+    /// `is_cancelled` is their single predicate for all connection consumers.
     transport_alive: Option<Arc<AtomicBool>>,
     close_tx: Sender<()>,
     close_rx: Receiver<()>,
@@ -1263,11 +1266,6 @@ impl PeerLease {
                 .transport_alive
                 .as_ref()
                 .is_some_and(|alive| !alive.load(Ordering::Acquire))
-    }
-
-    /// The flag [`Self::cancel`] sets, for a socket wrapper to observe.
-    pub(crate) fn cancellation(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancel)
     }
 }
 

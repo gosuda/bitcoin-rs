@@ -9,6 +9,11 @@ pub(super) struct Session {
     pub(super) alive: Arc<AtomicBool>,
     pub(super) local_address: PeerEndpoint,
 }
+// run_sam alone publishes/removes session records and starts replacements.
+// Each epoch has one irreversible alive marker, shared by streams and leases.
+// An INVALID_ID only revokes the marker observed by that request; it never
+// replaces a session or cancels peers by network. Ordinary lease teardown and
+// the sync reconciler consume that revocation through PeerLease::is_cancelled.
 fn hello(setup: &mut Setup<'_>) -> io::Result<()> {
     setup.write(b"HELLO VERSION MIN=3.1 MAX=3.3\n")?;
     let line = setup.line()?;

@@ -931,6 +931,7 @@ fn dial(
             "transport or network unavailable",
         ));
     };
+    let stream = stream.stop_reading_when(lease.clone());
     if let Err(error) = shared.check_destination(addr, manual) {
         shared.peer_table.remove_current(addr, &lease);
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1236,7 +1237,7 @@ fn run_handshake(
     // Eviction cancels the lease from the accept loop; reads then fail even
     // mid-payload, as Core closes an evicted connection at once.
     let stream = match crate::CountingStream::from_connected(stream, counters)
-        .map(|stream| stream.stop_reading_when(lease.cancellation()))
+        .map(|stream| stream.stop_reading_when(lease.clone()))
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,
