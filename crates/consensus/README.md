@@ -15,6 +15,14 @@ Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
 `compute_merkle_root` is the sole pairwise SHA-256d fold (AVX2 or spine) used by
 block rules, witness-commitment checks, and mining candidate assembly.
+`check_signet_block_solution` verifies a signet block's BIP325 solution; it is
+not part of `verify_block_rules`, so the caller that commits a block runs it
+and a proposal does not.
+`is_sixty_four_byte_mutation` names a body without a coinbase that holds a
+64-byte witness-stripped transaction, which `verify_block_rules` and `check_block_body_binding`
+report as `SixtyFourByteMutation`: the delivered body is mutated, the header is
+not proven invalid, and compact-block reconstruction takes its full-block
+fallback for it.
 `kernel::BlockParse` parses a serialized block exactly once — through the Rust
 layout parse under `validation.engine = "native"`, or `bitcoinkernel::Block::new`
 under `validation.engine = "kernel"` on `kernel`-feature builds — yielding the

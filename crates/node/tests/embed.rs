@@ -98,8 +98,13 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     );
     assert_eq!(
         node.mempool_info().txs,
-        0,
-        "the mempool starts empty after restart"
+        1,
+        "clean restart restores the admitted spend"
+    );
+    let spend = seed_coinbase_spend();
+    assert_eq!(
+        consensus_bytes(&block_on(node.tx_by_id(spend.txid()))?),
+        consensus_bytes(&spend)
     );
     block_on(node.shutdown())?;
     Ok(())

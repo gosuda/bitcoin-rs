@@ -33,7 +33,7 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
 ### 3.1 Adding Dependencies
 - All `[dependencies]` and `[build-dependencies]` of member crates (`crates/*`) must be defined centrally in `Cargo.toml` under `[workspace.dependencies]`.
 - Member crates must inherit those using `{ workspace = true }`.
-- `[dev-dependencies]` are exempt. They do not reach the shipped binary, so a version skew between two crates' test harnesses cannot produce a runtime conflict, and centralizing them buys nothing. Eight member manifests declare `tempfile = ">=3.20.0, <4"` directly under `[dev-dependencies]` and there is no workspace entry for it; that is intended, not drift.
+- `[dev-dependencies]` are exempt. They do not reach the shipped binary, so a version skew between two crates' test harnesses cannot produce a runtime conflict, and centralizing them buys nothing. Workspace members inherit `tempfile` via `tempfile.workspace = true` from the `[workspace.dependencies]` entry `tempfile = ">=3.20.0, <4"`; that inheritance is intended, not drift.
 - Centralize a dev-dependency anyway when two crates must agree on a type that crosses between them in tests.
 - Do not add dependencies for functionality available in the Rust standard library or existing workspace crates.
 - Prohibited dependencies: `tokio`, `async-std`, or any async runtime. The node architecture uses a synchronous crossbeam-channel event loop. The embedding API (`crates/node/src/embed.rs`) exposes `async fn` signatures whose bodies are synchronous; the node never creates, enters, or retains a runtime, and the embedder supplies its own executor (`docs/contracts/embedding.md`, EMB-02). That contract does not add a runtime dependency and is not an exception to this rule.

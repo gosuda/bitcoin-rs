@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
         let table = PeerTable::new();
-        let (sender, receiver) = crossbeam_channel::bounded(2);
+        let (sender, receiver) = crate::test_support::message_channel_bounded(2);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         table.register(source.addr, lease.clone());
@@ -166,7 +166,7 @@ mod tests {
         for witness in [false, true] {
             for wtxid_relay in [false, true] {
                 let table = PeerTable::new();
-                let (sender, receiver) = crossbeam_channel::bounded(1);
+                let (sender, receiver) = crate::test_support::message_channel_bounded(1);
                 let lease = PeerLease::new(sender);
                 let source = source(&lease);
                 table.register(source.addr, lease.clone());
@@ -241,11 +241,11 @@ mod tests {
     #[test]
     fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
         let table = PeerTable::new();
-        let (old_sender, old_receiver) = crossbeam_channel::bounded(1);
+        let (old_sender, old_receiver) = crate::test_support::message_channel_bounded(1);
         let old = PeerLease::new(old_sender);
         let stale_source = source(&old);
         table.register(stale_source.addr, old);
-        let (new_sender, new_receiver) = crossbeam_channel::bounded(1);
+        let (new_sender, new_receiver) = crate::test_support::message_channel_bounded(1);
         let current = PeerLease::new(new_sender);
         table.register(stale_source.addr, current.clone());
 
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn missing_parent_request_keeps_outbound_saturation_policy() {
         let table = PeerTable::new();
-        let (sender, _receiver) = crossbeam_channel::bounded(1);
+        let (sender, _receiver) = crate::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
         let table = PeerTable::new();
-        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let (sender, receiver) = crate::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         table.register(source.addr, lease.clone());

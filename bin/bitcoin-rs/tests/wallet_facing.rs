@@ -40,7 +40,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 const RPC_USER: &str = "bitcoin-rs";
-const RPC_PASSWORD: &str = "bitcoin-rs";
+const RPC_PASSWORD: &str = "wallet-facing-test";
 const FEE_SATS: u64 = 10_000;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const INDEX_TIMEOUT: Duration = Duration::from_mins(1);

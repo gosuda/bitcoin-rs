@@ -6,11 +6,29 @@
 
 use bitcoin_rs_primitives::{BlockBodyMetadata, BlockHash};
 
+/// A failed body read, distinct from an unavailable body (for example, pruned
+/// or not yet present in snapshot history). Storage errors stay behind this seam.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum BlockBodyReadError {
+    /// The stored representation is demonstrably malformed or truncated.
+    #[error("{0}")]
+    Corrupt(String),
+    /// The read could not complete, without establishing corruption.
+    #[error("{0}")]
+    Read(String),
+}
+
 /// Storage-backed block body reader used when headers and bodies are stored
 /// separately.
 pub trait BlockBodySource: Send + Sync {
     /// Returns serialized block bytes for `height` and `hash`, if available.
-    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>>;
+    /// `Ok(None)` does not certify corruption or successful verification.
+    /// Implementations must preserve read failures as `Err`.
+    fn block_body(
+        &self,
+        height: u32,
+        hash: BlockHash,
+    ) -> Result<Option<Vec<u8>>, BlockBodyReadError>;
 
     /// Returns indexed body facts. Implementations that cannot answer without
     /// I/O may leave this absent; header-only callers then remain header-only.

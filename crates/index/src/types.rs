@@ -221,40 +221,6 @@ impl TxidRow {
     }
 }
 
-/// A stable electrs header row containing the raw 80-byte block header.
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    Hash,
-    FromBytes,
-    IntoBytes,
-    KnownLayout,
-    Immutable,
-)]
-#[repr(C)]
-pub(crate) struct HeaderRow {
-    /// Raw Bitcoin block-header bytes in consensus order.
-    pub header: [u8; HEADER_ROW_SIZE],
-}
-
-impl HeaderRow {
-    /// Copies a header row from a byte slice.
-    pub(crate) fn from_header_bytes(bytes: &[u8]) -> Option<Self> {
-        let header = bytes.try_into().ok()?;
-        Some(Self { header })
-    }
-
-    /// Returns the serialized database row.
-    pub(crate) const fn to_db_row(self) -> [u8; HEADER_ROW_SIZE] {
-        self.header
-    }
-}
-
 /// Byte width of one live script-index row key: `scan-prefix || txid || vout_u24`.
 pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 

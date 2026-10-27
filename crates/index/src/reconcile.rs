@@ -6,7 +6,7 @@
 
 use bitcoin_rs_primitives::Hash256;
 
-use crate::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
+use crate::{IndexCapabilities, IndexCapability};
 
 /// Durable consumer-cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
 pub(crate) const CURSOR_BYTE_LEN: usize = 52;
@@ -146,38 +146,6 @@ impl ReconcilePhase {
             other => other,
         };
         Self(self.0.map(finish))
-    }
-}
-
-/// Whether a nonempty capability set has one exact durable watermark.
-///
-/// `Valid(None)` is an aligned, unindexed selection, not an empty selection
-/// and not proof that a query is ready.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SelectedWatermark {
-    /// Every selected capability has the same optional height and block hash.
-    Valid(Option<IndexWatermark>),
-    /// No capability was selected, or selected capabilities disagree.
-    Invalid,
-}
-
-/// Selects an exact common watermark without consulting or owning chainstate.
-#[must_use]
-pub(crate) fn selected_watermark(
-    watermarks: IndexWatermarks,
-    capabilities: IndexCapabilities,
-) -> SelectedWatermark {
-    let mut selected = IndexCapability::ALL
-        .into_iter()
-        .filter(|&capability| capabilities.contains(capability))
-        .map(|capability| watermarks.get(capability));
-    let Some(first) = selected.next() else {
-        return SelectedWatermark::Invalid;
-    };
-    if selected.all(|watermark| watermark == first) {
-        SelectedWatermark::Valid(first)
-    } else {
-        SelectedWatermark::Invalid
     }
 }
 

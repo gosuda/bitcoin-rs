@@ -15,8 +15,8 @@ use crate::{ApplyError, WindowApplyDisposition, classify_apply_error};
 fn apply_errors_classify_into_their_documented_dispositions() {
     use ApplyError::{Chain, Consensus, DurableHeadCommit, ProofOfWork};
     use ConsensusError::{
-        Kernel, MerkleRoot, PrevoutCount, PrevoutMatrixSize, PrevoutMismatch, Script,
-        UnsupportedEngine,
+        Kernel, MerkleRoot, MissingCoinbase, PrevoutCount, PrevoutMatrixSize, PrevoutMismatch,
+        Script, SignetSolution, SixtyFourByteMutation, UnsupportedEngine,
     };
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
 
@@ -28,6 +28,11 @@ fn apply_errors_classify_into_their_documented_dispositions() {
     // Wiring and backend failures (#618) stay retryable; a native verdict,
     // unmet work, and a contextual header rejection are proofs of invalidity;
     // a mutated body names only the delivered bytes; a torn head is fatal.
+    // A bad signet solution is permanent: the solution lives in the
+    // Merkle-bound coinbase, so no other body for this header can carry a
+    // valid one. A coinbase-less body is permanent too, unless a 64-byte
+    // transaction lets forged inner Merkle nodes stand in for the leaves:
+    // then only the delivered body is wrong and the header stays valid.
     let cases = [
         (
             Consensus(UnsupportedEngine {
@@ -53,6 +58,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         (Consensus(Kernel("parse failed".to_owned())), Operational),
         (Consensus(script(ScriptEngine::Kernel)), Operational),
         (Consensus(script(ScriptEngine::Native)), Permanent),
+        (Consensus(SignetSolution), Permanent),
         (
             ProofOfWork {
                 hash: Hash256::default(),
@@ -68,6 +74,8 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             Permanent,
         ),
         (Consensus(MerkleRoot), BodyMutated),
+        (Consensus(SixtyFourByteMutation), BodyMutated),
+        (Consensus(MissingCoinbase), Permanent),
         (
             DurableHeadCommit(StorageError::backend("head batch lost")),
             Fatal,

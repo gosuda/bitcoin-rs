@@ -165,6 +165,10 @@ fn unsupported_body_read_never_materializes_metadata_or_body() {
         UnsupportedBody.load_block_body_bounded(1, Hash256::default(), 4),
         Err(BoundedReadError::Unsupported)
     ));
+    assert!(matches!(
+        UnsupportedBody.load_block_body_for_verification_bounded(1, Hash256::default(), 4),
+        Err(BoundedReadError::Unsupported)
+    ));
 }
 
 #[cfg(feature = "fjall")]

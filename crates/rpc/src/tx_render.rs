@@ -61,13 +61,6 @@ fn btc_amount_parts(negative: bool, magnitude: u64) -> Value {
     }
 }
 
-/// Core transaction versions expose all 32 wire bits as an unsigned number.
-/// Native transaction and signed block-header representations stay unchanged.
-#[must_use]
-pub(crate) const fn wire_transaction_version(version: i32) -> u32 {
-    u32::from_le_bytes(version.to_le_bytes())
-}
-
 /// Render one transaction in Bitcoin Core's verbose object shape.
 ///
 /// PRE: `tx` is the transaction to project, `network` is the selected Bitcoin
@@ -105,7 +98,7 @@ pub(crate) fn transaction_json(
     let mut value = json!({
         "txid": txid,
         "hash": hash,
-        "version": wire_transaction_version(tx.version),
+        "version": tx.version,
         "size": size,
         "vsize": vsize,
         "weight": weight,
@@ -130,9 +123,10 @@ pub(crate) fn transaction_json(
 
 /// Extends the canonical transaction projection with certified block inputs.
 ///
-/// Core's unsigned transaction version remains owned by `transaction_json`;
-/// the pinned verbose transaction DTO cannot represent its full wire range.
-/// Header version semantics are independent and unchanged.
+/// The native unsigned transaction version remains owned by
+/// `transaction_json`; the pinned verbose transaction DTO cannot represent
+/// its full wire range. Header version semantics are independent and
+/// unchanged.
 pub(crate) fn transaction_json_with_spends(
     tx: &Tx,
     network: Network,
@@ -728,7 +722,7 @@ mod wire_value_tests {
     #[test]
     fn wire_integer_projection_does_not_change_native_representations() {
         let tx = Tx {
-            version: -1,
+            version: u32::MAX,
             lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
@@ -744,7 +738,7 @@ mod wire_value_tests {
             Some(u64::from(u32::MAX))
         );
         assert_eq!(value["vout"][0]["value"].to_string(), "-0.00000001");
-        assert_eq!(tx.version, -1);
+        assert_eq!(tx.version, u32::MAX);
         assert_eq!(tx.outputs[0].value.to_sat(), u64::MAX);
         assert_eq!(
             signed_btc_amount_json(i64::MIN).to_string(),

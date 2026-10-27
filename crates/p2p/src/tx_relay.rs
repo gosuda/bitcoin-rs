@@ -28,6 +28,8 @@
 //! The relay queue is bounded. When full, the newest announcement is
 //! **dropped** (the producer never blocks). Later inventory exchanges may
 //! advertise it again; relay stays best-effort and admission never stalls.
+//! Pending local initial broadcasts also retry through this worker in bounded
+//! batches until a successful getdata body response clears the live entry flag.
 //! Per-peer outbound saturation follows the existing
 //! p2p disconnect policy on [`crate::PeerLease::send`]: a peer whose
 //! outbound queue is full is disconnected (its lease is cancelled), never
@@ -45,7 +47,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 #[cfg(test)]
-use crate::{Message, PeerLease};
+use crate::PeerLease;
 use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
@@ -57,6 +59,8 @@ pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
 
 /// Drain poll interval when the relay queue is empty.
 const RELAY_POLL: Duration = Duration::from_millis(100);
+const INITIAL_BROADCAST_RETRY: Duration = Duration::from_secs(1);
+const INITIAL_BROADCAST_BATCH: usize = 1024;
 
 /// One accepted transaction awaiting `inv` announcement.
 #[derive(Clone, Copy, Debug)]
@@ -319,6 +323,32 @@ fn transaction_is_live(gateway: &MempoolGateway, request: &RelayRequest) -> bool
         .is_some()
 }
 
+// Pending state belongs to the live mempool entries, not a second relay queue.
+// Retry bounded batches so absent peers or queue saturation cannot consume the
+// only announcement. The existing sink applies peer, fee and inventory rules.
+fn retry_initial_broadcast(
+    gateway: &MempoolGateway,
+    sink: &dyn RelaySink,
+    cursor: &mut Option<Wtxid>,
+) {
+    let requests: Vec<_> = gateway
+        .read()
+        .unbroadcast_transactions_after(*cursor)
+        .take(INITIAL_BROADCAST_BATCH)
+        .map(|(txid, wtxid, sequence)| RelayRequest::new(txid, wtxid, None, sequence))
+        .collect();
+    *cursor = if requests.len() < INITIAL_BROADCAST_BATCH {
+        None
+    } else {
+        requests.last().map(|request| request.wtxid)
+    };
+    for request in requests {
+        if transaction_is_live(gateway, &request) {
+            sink.announce_inv(request.txid, request.wtxid, None, request.sequence);
+        }
+    }
+}
+
 /// Synchronously drains every currently-queued relay request into `sink`,
 /// announcing only transactions still resident in `gateway`.
 ///
@@ -380,12 +410,18 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {
+            let mut next_initial = std::time::Instant::now() + INITIAL_BROADCAST_RETRY;
+            let mut initial_cursor = None;
             while !shutdown.load() {
                 {
                     let Some(gateway) = gateway.upgrade() else {
                         break;
                     };
                     sink.poll(&gateway);
+                    if std::time::Instant::now() >= next_initial {
+                        retry_initial_broadcast(&gateway, &sink, &mut initial_cursor);
+                        next_initial = std::time::Instant::now() + INITIAL_BROADCAST_RETRY;
+                    }
                 }
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
@@ -489,7 +525,7 @@ mod tests {
 
     /// Allocates a fresh process-unique node id via a throwaway lease.
     fn fresh_node_id() -> u64 {
-        let (tx, _rx) = bounded::<Message>(1);
+        let (tx, _rx) = bounded::<crate::QueuedFrame>(1);
         PeerLease::new(tx).node_id()
     }
 
@@ -510,70 +546,102 @@ mod tests {
     }
 
     #[test]
-    fn announce_excludes_source_peer() {
-        let (peers, ids) = fake_peers(3);
-        let sink = FakeSink::new(peers);
-        let txid = dummy_txid(0xA1);
+    fn pending_local_broadcast_survives_absent_peers_and_saturation() {
+        let gateway = relay_identity_gateway();
+        let (local, _) = admit_live_tx(21, &gateway);
+        let mut peer_tx = (*local).clone();
+        peer_tx.inputs[0].previous_output.txid = dummy_txid(22);
+        gateway
+            .insert_entry(
+                relay_identity_peer(),
+                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(peer_tx), 100, 10_000, 1, 0, 0),
+            )
+            .expect("peer member");
+        let sink = FakeSink::new(Vec::new());
+        let mut cursor = None;
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log()[0].2.attempted, 0);
+        let (mut peers, _) = fake_peers(1);
+        peers[0].capacity = 0;
+        *sink.peers.lock() = peers;
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log()[1].2.saturated, 1);
+        sink.peers.lock()[0].capacity = 64;
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log()[2].2.attempted, 1);
+        assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
+        assert!(sink.log().iter().all(|row| row.0 == local.txid()));
+        gateway.mark_broadcast(local.wtxid());
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log().len(), 3);
+    }
 
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(ids[1]), 0);
-
-        assert_eq!(outcome.attempted, 3);
-        assert_eq!(outcome.excluded, 1);
-        assert_eq!(outcome.saturated, 0);
-        let locked = sink.peers.lock();
-        assert_eq!(locked[0].capacity, 63);
-        assert_eq!(
-            locked[1].capacity, 64,
-            "source peer must not be announced to"
+    #[test]
+    fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
+        let gateway = relay_identity_gateway();
+        for marker in 0_u32..1027 {
+            let mut tx = (*relay_identity_tx()).clone();
+            let mut hash = [0_u8; 32];
+            hash[..4].copy_from_slice(&marker.to_le_bytes());
+            tx.inputs[0].previous_output.txid = Txid(Hash256::from_le_bytes(&hash));
+            admit_entry(&Arc::new(tx), &gateway);
+        }
+        let sink = FakeSink::new(Vec::new());
+        let mut cursor = None;
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log().len(), INITIAL_BROADCAST_BATCH);
+        let mut first = gateway
+            .read()
+            .unbroadcast_transactions()
+            .take(INITIAL_BROADCAST_BATCH)
+            .collect::<Vec<_>>();
+        assert_eq!(cursor, first.last().map(|(_, wtxid, _)| *wtxid));
+        let (removed_id, _, _) = first.pop().expect("full batch");
+        let removed = gateway
+            .read()
+            .transaction_by_txid(&removed_id)
+            .expect("live cursor entry");
+        gateway.remove_for_block(
+            AdmissionOrigin::Block,
+            &[removed.as_ref()],
+            &[removed_id],
+            2,
+            2,
         );
-        assert_eq!(locked[2].capacity, 63);
-    }
-
-    #[test]
-    fn announce_to_all_when_source_is_none() {
-        let (peers, _ids) = fake_peers(3);
-        let sink = FakeSink::new(peers);
-        let txid = dummy_txid(0xB2);
-
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), None, 0);
-
-        assert_eq!(outcome.attempted, 3);
-        assert_eq!(outcome.excluded, 0);
-        assert_eq!(outcome.saturated, 0);
-        let locked = sink.peers.lock();
-        assert!(locked.iter().all(|p| p.capacity == 63));
-    }
-
-    #[test]
-    fn reconnect_uses_new_node_id_and_old_source_excludes_nothing() {
-        let stale_source = fresh_node_id();
-        let (peers, _ids) = fake_peers(2);
-        let sink = FakeSink::new(peers);
-        let txid = dummy_txid(0xC3);
-
-        let outcome = sink.announce_inv(txid, dummy_wtxid(0xF0), Some(stale_source), 0);
-
-        assert_eq!(outcome.attempted, 2);
-        assert_eq!(outcome.excluded, 0, "stale source id no longer connected");
-        assert_eq!(outcome.saturated, 0);
-        let locked = sink.peers.lock();
-        assert!(locked.iter().all(|p| p.capacity == 63));
-    }
-
-    #[test]
-    fn replacement_txid_is_announced_excluding_source() {
-        let (peers, ids) = fake_peers(3);
-        let sink = FakeSink::new(peers);
-        let replacement = dummy_txid(0xD4);
-
-        let outcome = sink.announce_inv(replacement, dummy_wtxid(0xF0), Some(ids[2]), 0);
-
-        assert_eq!(outcome.attempted, 3);
-        assert_eq!(outcome.excluded, 1);
-        assert_eq!(outcome.saturated, 0);
-        let entry = &sink.log()[0];
-        assert_eq!(entry.0, replacement);
-        assert_eq!(entry.1, Some(ids[2]));
+        for (_, wtxid, _) in first {
+            gateway.mark_broadcast(wtxid);
+        }
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(
+            sink.log().len(),
+            1027,
+            "completion must not shift an offset past pending entries"
+        );
+        assert!(cursor.is_none());
+        let remaining = gateway
+            .read()
+            .unbroadcast_transactions()
+            .collect::<Vec<_>>();
+        for (_, wtxid, _) in remaining {
+            gateway.mark_broadcast(wtxid);
+        }
+        // Reusing the removed transaction as a peer admission must not inherit
+        // its previous local pending flag or index membership.
+        gateway
+            .insert_entry(
+                relay_identity_peer(),
+                bitcoin_rs_mempool::MempoolEntry::new(removed, 100, 10_000, 1, 0, 0),
+            )
+            .expect("peer readmission");
+        retry_initial_broadcast(&gateway, &sink, &mut cursor);
+        assert_eq!(sink.log().len(), 1027);
+        assert_eq!(
+            gateway.read().len(),
+            1027,
+            "idle retry keeps ordinary membership"
+        );
+        gateway.clear(AdmissionOrigin::Block);
+        assert_eq!(gateway.read().unbroadcast_transactions().count(), 0);
     }
 
     #[test]
@@ -641,6 +709,65 @@ mod tests {
     }
 
     #[test]
+    fn drain_live_announcement_excludes_its_source() {
+        let gateway = relay_identity_gateway();
+        let (peers, ids) = fake_peers(3);
+        let (queue, rx) = TxRelayQueue::new(8);
+        let sink = FakeSink::new(peers);
+        let (tx, sequence) = admit_live_tx(0xA1, &gateway);
+
+        assert!(queue.announce(
+            tx.txid(),
+            live_wtxid(&tx.txid(), &gateway),
+            Some(ids[1]),
+            sequence
+        ));
+
+        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        assert_eq!(processed, 1);
+
+        let log = sink.log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].1, Some(ids[1]));
+        assert_eq!(log[0].2.attempted, 3);
+        assert_eq!(log[0].2.excluded, 1);
+        assert_eq!(log[0].2.saturated, 0);
+        let locked = sink.peers.lock();
+        assert_eq!(locked[0].capacity, 63);
+        assert_eq!(locked[1].capacity, 64);
+        assert_eq!(locked[2].capacity, 63);
+    }
+
+    #[test]
+    fn drain_announcement_with_stale_source_excludes_nothing() {
+        let gateway = relay_identity_gateway();
+        let stale_source = fresh_node_id();
+        let (peers, _ids) = fake_peers(2);
+        let (queue, rx) = TxRelayQueue::new(8);
+        let sink = FakeSink::new(peers);
+        let (tx, sequence) = admit_live_tx(0xC3, &gateway);
+
+        assert!(queue.announce(
+            tx.txid(),
+            live_wtxid(&tx.txid(), &gateway),
+            Some(stale_source),
+            sequence
+        ));
+
+        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        assert_eq!(processed, 1);
+
+        let log = sink.log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].1, Some(stale_source));
+        assert_eq!(log[0].2.attempted, 2);
+        assert_eq!(log[0].2.excluded, 0);
+        assert_eq!(log[0].2.saturated, 0);
+        let locked = sink.peers.lock();
+        assert!(locked.iter().all(|peer| peer.capacity == 63));
+    }
+
+    #[test]
     fn a_re_admitted_request_is_not_announced() {
         let (peers, _ids) = fake_peers(1);
         let sink = FakeSink::new(peers);
@@ -701,6 +828,7 @@ mod tests {
             AdmissionOrigin::Block,
             &[&*confirmed],
             &[confirmed.txid()],
+            1,
             1,
         );
 
@@ -824,6 +952,7 @@ mod tests {
             pool,
             Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
+            None,
         ));
         let (queue, rx) = TxRelayQueue::new(8);
         let observer = Arc::new(LocalTxRelayObserver::new(queue, Arc::downgrade(&gateway)));
@@ -836,6 +965,7 @@ mod tests {
             (2, AdmissionOrigin::Reorg, true),
             (4, AdmissionOrigin::Esplora, true),
             (5, AdmissionOrigin::Block, false),
+            (6, AdmissionOrigin::Snapshot, false),
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
@@ -977,6 +1107,7 @@ mod tests {
             ))),
             Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
+            None,
         ))
     }
 

@@ -20,6 +20,10 @@ pub enum StorageError {
     /// Persisted data belongs to an incompatible on-disk format.
     #[error("incompatible data: {0}")]
     IncompatibleData(String),
+    /// A referenced block frame is malformed or truncated. Verification reads
+    /// preserve this evidence; availability-only body reads still return `None`.
+    #[error("corrupt block frame: {0}")]
+    CorruptBlockFrame(&'static str),
 }
 
 impl StorageError {

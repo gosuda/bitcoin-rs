@@ -41,7 +41,6 @@ keep the original FileRef identity.
 ## Proven by
 
 - `crates/rpc/src/handlers/chain.rs` test `gettxoutsetinfo_rejects_trailing_parameters`
-- `crates/rpc/tests/handler_smoke.rs` test `gettxoutsetinfo_rejects_trailing_parameters`
 - `tools/benchmark-campaign/test_muhash_rpc.py` tests
   `test_rpc_does_not_send_credentials_to_a_foreign_peer`,
   `test_readiness_rejects_a_listener_the_child_does_not_own`,

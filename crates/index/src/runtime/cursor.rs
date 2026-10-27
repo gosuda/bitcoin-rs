@@ -43,11 +43,7 @@ impl Worker {
             height: snapshot.height,
             hash: snapshot.hash.to_le_bytes(),
         };
-        if self
-            .enabled
-            .iter()
-            .any(|capability| watermarks.get(capability) != Some(expected))
-        {
+        if !watermarks.is_aligned(self.enabled, Some(expected)) {
             return Ok(CursorCommit::NotAligned);
         }
         let bytes = snapshot.to_bytes();
@@ -82,6 +78,9 @@ impl Worker {
         }
         if let Some(store) = self.body_store.as_ref() {
             store.sync().map_err(DerivedIndexWorkerError::Storage)?;
+            store
+                .flush_index()
+                .map_err(DerivedIndexWorkerError::Storage)?;
         }
         if self.runtime.should_stop() {
             return Ok(None);
@@ -132,10 +131,7 @@ impl Worker {
         for capability in capabilities.iter() {
             watermarks.set(capability, Some(result));
         }
-        let aligned = self
-            .enabled
-            .iter()
-            .all(|capability| watermarks.get(capability) == Some(result));
+        let aligned = watermarks.is_aligned(self.enabled, Some(result));
         aligned.then(|| snapshot.to_bytes())
     }
 

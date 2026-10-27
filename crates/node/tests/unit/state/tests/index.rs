@@ -229,8 +229,8 @@ fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> 
 /// this test pins that both enabled modes converge to a concrete answer.
 #[test]
 fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
-    use bitcoin_rs_index::ScriptHash;
-    use bitcoin_rs_rpc::context::TxQueryError;
+    use bitcoin_rs_index::{IndexCapability, ScriptHash};
+    use bitcoin_rs_rpc::context::{TxQueryError, TxUnavailableCause};
 
     // Genesis is applied in each case so the index worker has a published
     // chain tip to anchor. The disabled case has no adapter; the enabled
@@ -273,12 +273,9 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
             Ok(records) => {
                 assert!(records.is_empty(), "an unfunded script has no outputs");
                 match query.history_snapshot(scripthash) {
-                    Err(TxQueryError::Unavailable(reason)) => {
-                        assert!(
-                            reason.contains("script history is disabled"),
-                            "utxo history must be disabled, not lagging: {reason}"
-                        );
-                    }
+                    Err(TxQueryError::Unavailable(TxUnavailableCause::CapabilityDisabled(
+                        IndexCapability::ScriptHistory,
+                    ))) => {}
                     other => panic!("utxo mode must fail history as disabled, got {other:?}"),
                 }
                 break;

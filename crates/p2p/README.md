@@ -18,7 +18,12 @@ burst of control messages into `write_ready_burst`'s vectored write pass; blocks
 stay one frame. Inbound traffic reaches the host through
 `dispatch_inbound_full`, which streams getdata responses behind the outbound
 budget's pre-load production headroom gate and reads the active chain through the
-`ChainQuery` trait. Served block bodies are the stored consensus bytes
+`ChainQuery` trait. Every queued message is a `QueuedFrame` that carries its own
+charge against the connection's budget and the node's strict 64 MiB aggregate of
+queued outbound bytes, and returns it when the frame drops. The aggregate's
+refusal is backpressure: it defers requests and parks unserved work but never
+cancels a lease (see [P2P compatibility](../../docs/policies/p2p-compatibility.md)).
+Served block bodies are the stored consensus bytes
 (`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
 `InboundBlock` and `InboundHeaders` with their wire bytes preserved. Manual bans exclude
 whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memory.

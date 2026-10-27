@@ -580,6 +580,20 @@ impl Network {
         }
     }
 
+    /// Returns the BIP325 signet challenge script, or `None` off signet.
+    ///
+    /// This is Core's default signet challenge, the 1-of-2 multisig that
+    /// `-signetchallenge` replaces; custom challenges are unsupported. It is
+    /// the one owner of the challenge: block validation and the mining
+    /// projections both read it here.
+    #[must_use]
+    pub const fn signet_challenge(self) -> Option<&'static [u8]> {
+        match self {
+            Self::Signet => Some(SIGNET_DEFAULT_CHALLENGE),
+            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Regtest => None,
+        }
+    }
+
     /// Returns the network's genesis block.
     ///
     /// Decoded from the fixed consensus serialization copied from Bitcoin Core's
@@ -605,6 +619,17 @@ impl Network {
         block
     }
 }
+
+/// Core's default signet challenge (`OP_1 <pubkey> <pubkey> OP_2 OP_CHECKMULTISIG`,
+/// `src/kernel/signet.h`).
+const SIGNET_DEFAULT_CHALLENGE: &[u8] = &[
+    0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3, 0xd4,
+    0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d, 0x1e, 0x08,
+    0x6b, 0xe4, 0x30, 0x21, 0x03, 0x59, 0xef, 0x50, 0x21, 0x96, 0x4f, 0xe2, 0x2d, 0x6f, 0x8e, 0x05,
+    0xb2, 0x46, 0x3c, 0x95, 0x40, 0xce, 0x96, 0x88, 0x3f, 0xe3, 0xb2, 0x78, 0x76, 0x0f, 0x04, 0x8f,
+    0x51, 0x89, 0xf2, 0xe6, 0xc4, 0x52, 0xae,
+];
+
 /// Bitcoin Core testnet3 genesis serialization.
 const TESTNET3_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae180101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 /// Bitcoin Core mainnet genesis serialization.

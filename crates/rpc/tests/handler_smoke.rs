@@ -275,7 +275,7 @@ fn network_and_wallet_expectations(
             json!({"complete": false, "psbt": psbt, "hex": null}),
         ),
         ("combinepsbt", json!([[psbt]]), json!(psbt)),
-        // No block verifier is wired, so the chain cannot be declared verified.
+        // This synthetic block does not satisfy its declared proof of work.
         ("verifychain", json!([]), json!(false)),
         ("getmininginfo", json!([]), json!({"chain": "regtest"})),
         (
@@ -384,6 +384,7 @@ fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), Box<dy
 struct RecordingChainControl {
     called: Arc<AtomicBool>,
     error: Option<ChainControlError>,
+    verify_error: Option<ChainControlError>,
 }
 
 impl ChainControl for RecordingChainControl {
@@ -394,6 +395,19 @@ impl ChainControl for RecordingChainControl {
             None => Ok(()),
         }
     }
+
+    // No block verifier is wired, so the chain cannot be declared verified.
+    fn verify_chain(
+        &self,
+        _check_level: u8,
+        _nblocks: u32,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<bool, ChainControlError> {
+        match &self.verify_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(false),
+        }
+    }
 }
 
 #[test]
@@ -402,6 +416,7 @@ fn invalidateblock_delegates_to_node_control_and_returns_null() -> Result<(), Rp
     let control = RecordingChainControl {
         called: Arc::clone(&called),
         error: None,
+        verify_error: None,
     };
     let mut ctx = Context::new().with_chain_control(Arc::new(control));
     ctx.chain.chain_network = Network::Regtest;
@@ -427,6 +442,7 @@ fn invalidateblock_maps_unknown_block_to_core_not_found() {
     let control = RecordingChainControl {
         called: Arc::clone(&called),
         error: Some(ChainControlError::UnknownBlock),
+        verify_error: None,
     };
     let mut ctx = Context::new().with_chain_control(Arc::new(control));
     ctx.chain.chain_network = Network::Regtest;
@@ -439,6 +455,44 @@ fn invalidateblock_maps_unknown_block_to_core_not_found() {
         .expect_err("unknown block should map to an error");
     // Core reports an unknown block as RPC_INVALID_ADDRESS_OR_KEY (-5).
     assert_eq!(err.code(), RpcError::CORE_NOT_FOUND);
+}
+
+#[test]
+fn verifychain_maps_control_interruptions_to_core_errors() {
+    // Cancellation is an operator stop and recovery closure is unavailable
+    // history: neither may answer as a corrupt chain (false) or pass.
+    for (error, message) in [
+        (
+            ChainControlError::Interrupted,
+            "Block verification interrupted",
+        ),
+        (
+            ChainControlError::Unavailable,
+            "Chainstate is unavailable for verification",
+        ),
+    ] {
+        let control = RecordingChainControl {
+            called: Arc::new(AtomicBool::new(false)),
+            error: None,
+            verify_error: Some(error),
+        };
+        let mut ctx = Context::new().with_chain_control(Arc::new(control));
+        ctx.chain.chain_network = Network::Regtest;
+        let tip = TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 42,
+            hash: Hash256::from_le_bytes(&[0xff; 32]),
+            chainwork: ChainWork::default(),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        };
+        ctx.chain.applied_tip.store(Some(Arc::new(tip)));
+        let handler = Handler::new(Arc::new(ctx));
+        let err = handler
+            .dispatch("verifychain", &json!([3, 6]))
+            .expect_err("control interruption must map to an error");
+        assert_eq!(err.code(), -1);
+        assert_eq!(err.to_string(), message);
+    }
 }
 
 #[test]
@@ -608,7 +662,7 @@ fn getindexinfo_named_request_returns_only_that_index() -> Result<(), Box<dyn st
             &self,
         ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
             Err(bitcoin_rs_index::TxQueryError::Unavailable(
-                "history unavailable".into(),
+                bitcoin_rs_index::TxUnavailableCause::Other("history unavailable".into()),
             ))
         }
     }
@@ -770,6 +824,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        transport: bitcoin_rs_p2p::TransportProtocol::V1,
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = PeerLease::new(tx);
@@ -961,8 +1016,12 @@ struct SingleBlockSource {
 }
 
 impl BlockBodySource for SingleBlockSource {
-    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        (height == self.height && hash == self.hash).then(|| self.body.clone())
+    fn block_body(
+        &self,
+        height: u32,
+        hash: BlockHash,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
     }
 }
 

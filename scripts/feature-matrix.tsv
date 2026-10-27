@@ -10,6 +10,7 @@ bin-usdt	bitcoin-rs	pure	--no-default-features --features fjall,usdt
 portable	bitcoin-rs	pure	--no-default-features --features fjall,zmq
 no-zmq	bitcoin-rs	pure	--no-default-features --features fjall,redb
 fjall-only	bitcoin-rs	pure	--no-default-features --features fjall
+silent-payments	bitcoin-rs	pure	--no-default-features --features fjall,silent-payments
 redb-only	bitcoin-rs	pure	--no-default-features --features redb
 portable-kernel	bitcoin-rs	native	--no-default-features --features fjall,zmq,kernel
 full-node	bitcoin-rs	native	--no-default-features --features rocksdb,fjall,redb,kernel

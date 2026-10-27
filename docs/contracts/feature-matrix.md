@@ -12,7 +12,8 @@ crates that do not own storage are not combinations.
 - **Scope**: operator-facing `bitcoin-rs` / `bitcoin-rs-node` backend and
   kernel flags, plus the storage and consensus crates those flags reach.
 - Each row is one combination CI must `cargo check` independently.
-  `lane=pure` is fjall/redb/zmq with the native interpreter.
+  `lane=pure` includes fjall/redb/zmq and the optional `silent-payments` service
+  with the native interpreter.
   `lane=native` needs cmake/libboost (kernel) and/or C storage engines.
   Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are
   capability builds — `kernel` compiled in — and engine selection stays

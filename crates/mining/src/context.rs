@@ -23,6 +23,13 @@ pub struct MiningChainContext {
     /// timestamp minus the timewarp allowance.
     pub(crate) min_time: u32,
     pub(crate) prev_median_time_past: u32,
+    /// Median-time-past of the block *before* the tip: the predecessor MTP
+    /// that relative time locks of tip-confirmed (staged) parents evaluate
+    /// against. Exact whenever the tip has a parent in the tree; at the
+    /// genesis edge it conservatively reads the tip MTP itself (MTP is
+    /// non-decreasing in height, so a boundary time lock refuses rather
+    /// than admits).
+    pub(crate) parent_median_time_past: u32,
     pub(crate) csv_active: bool,
     pub(crate) segwit_active: bool,
 }
@@ -57,6 +64,9 @@ impl MiningChainContext {
                 .ok_or(ChainError::UnknownNode {
                     id: previous_tip_id,
                 })?;
+        let parent_median_time_past = tree
+            .median_time_past_before_height(previous_tip_id, parent.height)
+            .unwrap_or(prev_median_time_past);
         let mut min_time = prev_median_time_past.saturating_add(1);
         // The chain owns the boundary predicate and its floor: the template
         // reads the same [`header_sync::minimum_candidate_time`] that
@@ -75,6 +85,7 @@ impl MiningChainContext {
             bits: header_sync::next_work_required(tree, previous_tip_id, candidate_time, network)?,
             min_time,
             prev_median_time_past,
+            parent_median_time_past,
             csv_active: softfork.csv_active,
             segwit_active: softfork.segwit_active,
         })
@@ -246,6 +257,47 @@ mod tests {
             Some(last.time.saturating_sub(600))
         );
         assert_eq!(regtest.min_time, last.time - 600);
+        Ok(())
+    }
+
+    #[test]
+    fn mining_context_resolves_staged_parent_predecessor_mtp()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let tip = append_chain_with_bits(&mut tree, 12, 1_000_000, |_| 0x2000_0000, 0x207f_ffff)?;
+        let tip_parent = tree.node(tip)?.parent;
+        let Some(predecessor) = tip_parent else {
+            panic!("twelve-header chain must have a tip parent");
+        };
+        let tip_time = 1_000_000 + 11 * 600;
+
+        let context = MiningChainContext::resolve(&tree, Network::Regtest, tip, tip_time + 600)?;
+        assert_eq!(context.prev_median_time_past, 1_000_000 + 6 * 600);
+
+        let Some(predecessor_oracle) = tree.median_time_past_at(predecessor) else {
+            panic!("tip parent must be in the tree");
+        };
+        assert_eq!(predecessor_oracle, 1_000_000 + 5 * 600);
+        assert_eq!(context.parent_median_time_past, predecessor_oracle);
+        assert_ne!(
+            context.parent_median_time_past,
+            context.prev_median_time_past
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mining_context_genesis_edge_falls_back_to_tip_mtp() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let tip = append_chain_with_bits(&mut tree, 1, 1_000_000, |_| 0x2000_0000, 0x207f_ffff)?;
+
+        let context = MiningChainContext::resolve(&tree, Network::Regtest, tip, 1_000_000 + 600)?;
+        assert_eq!(context.prev_median_time_past, 1_000_000);
+        assert_eq!(
+            context.parent_median_time_past,
+            context.prev_median_time_past
+        );
         Ok(())
     }
 

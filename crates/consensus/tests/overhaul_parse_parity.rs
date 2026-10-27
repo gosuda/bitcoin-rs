@@ -206,18 +206,21 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
     }
 }
 
-fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, materialized: &Block) {
-    let parsed_txids: Vec<Txid> = parsed
-        .txids()
-        .unwrap_or_else(|error| panic!("parse txids failed: {error:?}"));
-
+fn assert_parse_matches_oracle(
+    parsed: BlockParse,
+    oracle: &bitcoin::Block,
+    materialized: &Block,
+) -> BlockFacts {
     assert_eq!(parsed.transaction_count(), oracle.txdata.len());
+    let (_, facts) = parsed
+        .into_parts(&materialized.txs)
+        .unwrap_or_else(|error| panic!("parse facts failed: {error:?}"));
+    let parsed_txids = facts.txids();
     assert_eq!(parsed_txids.len(), oracle.txdata.len());
     for (ours, oracle_tx) in parsed_txids.iter().zip(&oracle.txdata) {
         assert_eq!(ours.to_string(), oracle_tx.compute_txid().to_string());
     }
 
-    let facts = parsed.derive_facts(&materialized.txs, &parsed_txids);
     assert_eq!(facts.tx_count(), oracle.txdata.len());
     assert_eq!(facts.weight(), oracle.weight().to_wu());
     assert_eq!(
@@ -233,6 +236,7 @@ fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, mat
         .expect("oracle merkle root")
         .to_string(),
     );
+    facts
 }
 
 fn fixture_parts(height: u32) -> (Vec<u8>, bitcoin::Block, Block) {
@@ -249,9 +253,7 @@ fn native_block_parse_matches_oracle_identities() {
     let (bytes, oracle, materialized) = fixture_parts(SEGWIT_HEIGHT);
     let parsed =
         BlockParse::parse(&bytes, ValidationEngine::Native).expect("one-pass native block parse");
-    assert_parse_matches_oracle(&parsed, &oracle, &materialized);
-
-    let facts = parsed.derive_facts(&materialized.txs, &parsed.txids().expect("native txids"));
+    let facts = assert_parse_matches_oracle(parsed, &oracle, &materialized);
     assert!(facts.wtxids().is_some());
     let mut padded = bytes;
     padded.push(0x00);
@@ -267,7 +269,7 @@ fn kernel_block_parse_matches_oracle_identities() {
     let (bytes, oracle, materialized) = fixture_parts(SEGWIT_HEIGHT);
     let parsed =
         BlockParse::parse(&bytes, ValidationEngine::Kernel).expect("one-pass kernel block parse");
-    assert_parse_matches_oracle(&parsed, &oracle, &materialized);
+    assert_parse_matches_oracle(parsed, &oracle, &materialized);
 }
 
 #[test]

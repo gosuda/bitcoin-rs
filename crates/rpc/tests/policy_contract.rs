@@ -15,7 +15,6 @@ use alloc::sync::Arc;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver, MutationEnvelope,
     MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
-    eviction::mempool_min_fee_sat_per_kvb,
 };
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot, regtest_fixture};
@@ -28,7 +27,7 @@ use bitcoin_rs_node::{
 
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes,
+    Txid, Witness, consensus_bytes, unix_time_secs,
 };
 use bitcoin_rs_script::push_int;
 
@@ -367,48 +366,127 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A pooled entry stamped as admitted now. After every admission the gateway
+/// expires entries older than the mempool expiry window, so a fixture staged
+/// straight into the pool needs a current insertion time to survive the
+/// `sendrawtransaction` calls that follow it.
+fn seeded_entry(tx: Arc<Tx>, vsize: u32, fee: u64) -> MempoolEntry {
+    MempoolEntry::new(tx, vsize, fee, unix_time_secs(), 1, 0)
+}
+
+/// An outpoint for entries staged straight into the pool, which never reach
+/// the UTXO set.
+fn staged_outpoint(label: u8) -> OutPoint {
+    OutPoint {
+        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
+        vout: 0,
+    }
+}
+
+/// `(mempoolminfee, minrelaytxfee)` as `getmempoolinfo` quotes them, in
+/// BTC/kvB.
+fn quoted_floors(handler: &Handler) -> Result<(f64, f64), Box<dyn Error>> {
+    let info = handler.dispatch("getmempoolinfo", &json!([]))?;
+    let floor = info
+        .get("mempoolminfee")
+        .and_then(JsonValueTrait::as_f64)
+        .ok_or("getmempoolinfo must quote mempoolminfee")?;
+    let relay = info
+        .get("minrelaytxfee")
+        .and_then(JsonValueTrait::as_f64)
+        .ok_or("getmempoolinfo must quote minrelaytxfee")?;
+    Ok((floor, relay))
+}
+
+/// Whether a BTC/kvB quote is `sat_per_kvb` to the satoshi.
+fn quotes_sat_per_kvb(quoted: f64, sat_per_kvb: u32) -> bool {
+    (quoted - f64::from(sat_per_kvb) / 100_000_000.0).abs() < 1e-9
+}
+
+/// `testmempoolaccept` for one transaction: whether it is allowed, and its
+/// reject reason.
+fn preview_verdict(
+    handler: &Handler,
+    transaction: &Tx,
+) -> Result<(bool, Option<String>), Box<dyn Error>> {
+    let result = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(transaction)]]))?;
+    let rows = result.as_array().ok_or("expected an array of results")?;
+    let row = rows.first().ok_or("expected one row")?;
+    let allowed = row
+        .get("allowed")
+        .and_then(JsonValueTrait::as_bool)
+        .ok_or("the row must carry allowed")?;
+    let reason = row
+        .get("reject-reason")
+        .and_then(JsonValueTrait::as_str)
+        .map(ToString::to_string);
+    Ok((allowed, reason))
+}
+
+/// A capacity eviction raises the floor every RPC outlet quotes to the rate
+/// of the package it evicted plus the incremental relay fee, and the floor
+/// holds until a block connects. A pool that is merely crowded keeps the
+/// configured floor: that is what separates this policy from the retired
+/// half-full heuristic, which raised the floor on occupancy alone.
 #[test]
-fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
+fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
+    // The pool is exactly full: 300 vB at 1 000 sat/kvB (the cheapest package
+    // and the largest), then 100 vB each at 2 000 and 4 000 sat/kvB.
+    let cheap = tx(staged_outpoint(0x85), 1_000, 0xffff_ffff);
+    let cheap_txid = rpc_txid(&cheap);
     {
         let mut pool = ctx.mempool.gateway.pool().write();
-        pool.limits.max_total_bytes = 400;
-        // Fill to exactly half of -maxmempool, the pressure threshold, with
-        // packages at 1 000 and 2 000 sat/kvB.
-        let first = tx(
-            OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[0x85; 32])),
-                vout: 0,
-            },
-            1_000,
-            0xffff_ffff,
-        );
-        pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 100, 0, 1, 0))?;
-        let second = tx(
-            OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[0x86; 32])),
-                vout: 0,
-            },
-            1_000,
-            0xffff_ffff,
-        );
-        pool.insert_entry(MempoolEntry::new(Arc::new(second), 100, 200, 0, 1, 0))?;
+        pool.limits.max_total_bytes = 500;
+        pool.insert_entry(seeded_entry(Arc::new(cheap), 300, 300))?;
+        let middle = tx(staged_outpoint(0x86), 1_000, 0xffff_ffff);
+        pool.insert_entry(seeded_entry(Arc::new(middle), 100, 200))?;
+        let dear = tx(staged_outpoint(0x89), 1_000, 0xffff_ffff);
+        pool.insert_entry(seeded_entry(Arc::new(dear), 100, 400))?;
+        assert_eq!(pool.total_vsize(), 500);
     }
     let handler = Handler::new(Arc::clone(&ctx));
-    // Effective floor = cheapest evictable (1 000) + incremental (1 000).
-    assert_eq!(
-        mempool_min_fee_sat_per_kvb(&ctx.mempool.gateway.read(), 1_000),
-        2_000
-    );
 
-    // 82 sat over 82 vB is exactly 1 000 sat/kvB: clears the configured
-    // floor, misses the pressure floor. Both outlets quote the pressure floor.
-    let lukewarm = tx(fund_utxo(&ctx, 0x87, 10_082), 10_000, 0xffff_ffff);
+    // Crowded is not evicted: nothing has left the pool, so the quoted floor
+    // is the configured minimum, and a spend at 1 987 sat/kvB (163 sat over
+    // 82 vB) is allowed. The retired heuristic refused it for occupancy
+    // alone.
+    let (floor, relay) = quoted_floors(&handler)?;
+    assert!(
+        (floor - relay).abs() < 1e-9,
+        "an unevicted pool quotes the configured floor: {floor} vs {relay}"
+    );
+    let early = funded_fee_tx(&ctx, 0x87, 163);
+    assert_eq!(preview_verdict(&handler, &early)?, (true, None));
+
+    // A real eviction: this 15 000 sat/kvB spend overflows the pool, so the
+    // cheapest package leaves whole.
+    let trigger = funded_fee_tx(&ctx, 0x88, 1_230);
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&trigger)]))?;
+    assert!(
+        pool_holds(&ctx, &trigger),
+        "the spend that overflowed stays"
+    );
+    assert!(
+        !ctx.mempool.gateway.read().contains_txid(&cheap_txid),
+        "the cheapest package must be the one evicted"
+    );
+    assert_eq!(ctx.mempool.gateway.read().len(), 3);
+
+    // The floor is now the evicted 1 000 sat/kvB plus the 1 000 sat/kvB
+    // incremental relay fee, as `getmempoolinfo` quotes it.
+    let (floor, _) = quoted_floors(&handler)?;
+    assert!(quotes_sat_per_kvb(floor, 2_000), "floor quoted {floor}");
+
+    // 163 sat over 82 vB clears the configured floor and misses the rolling
+    // floor by one satoshi. Both outlets quote the floor class, not the fee
+    // cap.
+    let lukewarm = funded_fee_tx(&ctx, 0x8a, 163);
     let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&lukewarm)]))
             .err()
-            .ok_or("expected the pressure floor to reject")?,
+            .ok_or("expected the rolling floor to reject")?,
     );
     assert!(
         message.contains("min relay fee not met"),
@@ -418,39 +496,35 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
         !message.contains("max-fee-exceeded"),
         "unexpected message: {message}"
     );
-    let rows = handler
-        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&lukewarm)]]))?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
     assert_eq!(
-        rows.first()
-            .ok_or("expected one row")?
-            .get("reject-reason")
-            .and_then(JsonValueTrait::as_str),
-        Some("min relay fee not met")
+        preview_verdict(&handler, &lukewarm)?,
+        (false, Some("min relay fee not met".to_owned()))
     );
 
-    // The raw insert gate checks only the configured floor, so the same tx
-    // admits there (deviation ledger, pressure-floor surface).
+    // Exactly at the floor (164 sat, 2 000 sat/kvB) admits, and the pool has
+    // room (282/500 vB), so the preview cannot evict anything by itself.
+    let at_floor = funded_fee_tx(&ctx, 0x8b, 164);
+    assert_eq!(preview_verdict(&handler, &at_floor)?, (true, None));
+
+    // The raw insert gate checks only the configured floor, so the refused
+    // spend admits there (deviation ledger, rolling-floor surface). At
+    // 364/500 vB this fits without a trim, which keeps the deviation clean.
     ctx.mempool
         .gateway
         .pool()
         .write()
-        .insert_entry(MempoolEntry::new(Arc::new(lukewarm), 82, 82, 0, 1, 0))?;
-    assert_eq!(ctx.mempool.gateway.read().len(), 3);
+        .insert_entry(seeded_entry(Arc::new(lukewarm), 82, 163))?;
+    assert_eq!(ctx.mempool.gateway.read().len(), 4);
 
-    // Control: with no pressure the same rate admits over the same outlets.
+    // Control: with nothing evicted the same 163 sat spend admits over the
+    // same outlets.
     let idle = Arc::new(Context::new());
-    let control = tx(fund_utxo(&idle, 0x88, 10_082), 10_000, 0xffff_ffff);
+    let control = funded_fee_tx(&idle, 0x8c, 163);
     Handler::new(Arc::clone(&idle))
         .dispatch("sendrawtransaction", &json!([raw_tx_hex(&control)]))?;
     assert!(
-        idle.mempool
-            .gateway
-            .read()
-            .contains_txid(&rpc_txid(&control)),
-        "unpressured control tx must be pooled"
+        pool_holds(&idle, &control),
+        "an unevicted control tx must be pooled"
     );
     Ok(())
 }
@@ -549,14 +623,7 @@ fn insert_original(
         .gateway
         .pool()
         .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(original.clone()),
-            vsize,
-            fee,
-            0,
-            1,
-            0,
-        ))?;
+        .insert_entry(seeded_entry(Arc::new(original.clone()), vsize, fee))?;
     Ok(original)
 }
 
@@ -650,13 +717,10 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
         .gateway
         .pool()
         .write()
-        .insert_entry(MempoolEntry::new(
+        .insert_entry(seeded_entry(
             Arc::new(child.clone()),
             u32::try_from(child.vsize()).unwrap_or(u32::MAX),
             1_000,
-            0,
-            1,
-            0,
         ))?;
     observer.changes.lock().clear();
 
@@ -701,14 +765,7 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
         .gateway
         .pool()
         .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(unrelated.clone()),
-            100,
-            1_000,
-            0,
-            1,
-            0,
-        ))?;
+        .insert_entry(seeded_entry(Arc::new(unrelated.clone()), 100, 1_000))?;
     let replacement = tx_spending(
         &[
             (confirmed_outpoint(0x98), 0xffff_ffff),
@@ -795,14 +852,7 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
         .gateway
         .pool()
         .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(original.clone()),
-            4_000,
-            8_000,
-            0,
-            1,
-            0,
-        ))?;
+        .insert_entry(seeded_entry(Arc::new(original.clone()), 4_000, 8_000))?;
 
     // Search the output count (500 sat each, never dust) for a candidate
     // that pays rules 3 and 4 (fee >= 8 000 + vsize, the 1 sat/vB
@@ -1014,17 +1064,10 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
     {
         let mut pool = ctx.mempool.gateway.pool().write();
         let mut prev = OutPoint::new(original_txid, 0);
-        for i in 0..100_u32 {
+        for _ in 0..100_u32 {
             let child = tx(prev, 400, 0xffff_ffff);
             prev = OutPoint::new(rpc_txid(&child), 0);
-            pool.insert_entry(MempoolEntry::new(
-                Arc::new(child),
-                50,
-                100,
-                u64::from(i),
-                1,
-                0,
-            ))?;
+            pool.insert_entry(seeded_entry(Arc::new(child), 50, 100))?;
         }
     }
     // Replacement spends the same confirmed outpoint, fee 20_000.
@@ -1064,14 +1107,7 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
         let mut next = tx(previous, 1_000, 0xffff_ffff);
         next.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
         previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(next.clone()),
-            4_000,
-            4_000,
-            0,
-            1,
-            0,
-        ))?;
+        pool.insert_entry(seeded_entry(Arc::new(next.clone()), 4_000, 4_000))?;
         txs.push(next);
     }
     Ok(txs)
@@ -1136,14 +1172,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
             50_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(root.clone()),
-            100,
-            10_000,
-            0,
-            1,
-            0,
-        ))?;
+        pool.insert_entry(seeded_entry(Arc::new(root.clone()), 100, 10_000))?;
         root
     };
     let follower = tx_multi_child(&fund_utxo(&ctx, 0xc2, 100_000), &root);
@@ -1212,14 +1241,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
             50_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(root.clone()),
-            200,
-            10_000,
-            0,
-            1,
-            0,
-        ))?;
+        pool.insert_entry(seeded_entry(Arc::new(root.clone()), 200, 10_000))?;
         root
     };
     let follower = tx_multi_child(&fund_utxo(&ctx, 0xc4, 100_000), &root);
@@ -1284,22 +1306,8 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
             )
         };
         let original = tx(OutPoint::new(rpc_txid(&root), 0), 40_000, 0xffff_fffd);
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(root.clone()),
-            100,
-            10_000,
-            0,
-            1,
-            0,
-        ))?;
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(original.clone()),
-            100,
-            10_000,
-            0,
-            1,
-            0,
-        ))?;
+        pool.insert_entry(seeded_entry(Arc::new(root.clone()), 100, 10_000))?;
+        pool.insert_entry(seeded_entry(Arc::new(original.clone()), 100, 10_000))?;
         (root, original)
     };
     let replacement = tx(OutPoint::new(rpc_txid(&root), 0), 30_000, 0xffff_ffff);
@@ -1396,19 +1404,20 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
         // Three independent packages at 3 000 / 1 000 / 2 000 sat/kvB.
         let high = tx(root(0x90), 1_000, 0xffff_ffff);
         let high_txid = high.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(high), 1_000, 3_000, 0, 1, 0))?;
+        pool.insert_entry(seeded_entry(Arc::new(high), 1_000, 3_000))?;
         let low = tx(root(0x91), 1_000, 0xffff_ffff);
         let low_txid = low.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low), 1_000, 1_000, 0, 1, 0))?;
+        pool.insert_entry(seeded_entry(Arc::new(low), 1_000, 1_000))?;
         let mid = tx(root(0x92), 1_000, 0xffff_ffff);
         let mid_txid = mid.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(mid), 1_000, 2_000, 0, 1, 0))?;
+        pool.insert_entry(seeded_entry(Arc::new(mid), 1_000, 2_000))?;
         // Shrink after filling: eviction runs only inside insert paths.
         pool.limits.max_total_bytes = 2_000;
         (high_txid, low_txid, mid_txid)
     };
-    // 6 000 sat over 82 vB clears the pressure floor the eviction candidate
-    // faces (cheapest evictable 1 000 + incremental 1 000 = 2 000 sat/kvB).
+    // Nothing has been evicted yet, so the candidate faces only the configured
+    // floor, and 6 000 sat over 82 vB clears it by a wide margin. Its own
+    // admission is what evicts.
     let overflow = tx(fund_utxo(&ctx, 0x93, 106_000), 100_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -1420,23 +1429,57 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
 
     // Post-submission membership IS the eviction order: the two lowest-rate
     // packages had to go, in rate order, before the pool fits again.
-    let pool = ctx.mempool.gateway.read();
-    assert!(
-        pool.contains_txid(&high_txid),
-        "the highest-rate package must survive"
+    {
+        let pool = ctx.mempool.gateway.read();
+        assert!(
+            pool.contains_txid(&high_txid),
+            "the highest-rate package must survive"
+        );
+        assert!(
+            !pool.contains_txid(&low_txid),
+            "the lowest-rate package must evict first"
+        );
+        assert!(
+            !pool.contains_txid(&mid_txid),
+            "the mid-rate package must evict next"
+        );
+        assert_eq!(pool.len(), 2);
+        assert!(
+            pool.total_vsize() <= 2_000,
+            "pool must fit the size bound again"
+        );
+    }
+
+    // The rolling floor remembers the dearest package that left, not the
+    // cheapest: the 2 000 sat/kvB package plus the 1 000 sat/kvB incremental
+    // relay fee.
+    let (floor, _) = quoted_floors(&handler)?;
+    assert!(quotes_sat_per_kvb(floor, 3_000), "floor quoted {floor}");
+
+    // So an evicted rate does not come straight back: a fresh spend at the
+    // evicted 2 000 sat/kvB (164 sat over 82 vB) is refused on both outlets,
+    // while one at the floor (246 sat) is admitted into the room the eviction
+    // left.
+    let evicted_rate = funded_fee_tx(&ctx, 0x94, 164);
+    let message = reject_message(
+        &handler
+            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&evicted_rate)]))
+            .err()
+            .ok_or("expected the evicted rate to be refused")?,
     );
     assert!(
-        !pool.contains_txid(&low_txid),
-        "the lowest-rate package must evict first"
+        message.contains("min relay fee not met"),
+        "unexpected message: {message}"
     );
-    assert!(
-        !pool.contains_txid(&mid_txid),
-        "the mid-rate package must evict next"
+    assert_eq!(
+        preview_verdict(&handler, &evicted_rate)?,
+        (false, Some("min relay fee not met".to_owned()))
     );
-    assert_eq!(pool.len(), 2);
+    let at_floor = funded_fee_tx(&ctx, 0x95, 246);
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&at_floor)]))?;
     assert!(
-        pool.total_vsize() <= 2_000,
-        "pool must fit the size bound again"
+        pool_holds(&ctx, &at_floor),
+        "an at-floor spend must be pooled"
     );
     Ok(())
 }
@@ -1515,6 +1558,17 @@ impl ChainControl for NodeInvalidator {
                 ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
                 other => ChainControlError::Failed(other.to_string()),
             })
+    }
+
+    // This fixture routes only invalidation through the node; with no block
+    // verifier wired, the chain cannot be declared verified.
+    fn verify_chain(
+        &self,
+        _check_level: u8,
+        _nblocks: u32,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<bool, ChainControlError> {
+        Ok(false)
     }
 }
 
@@ -1717,6 +1771,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
         ))),
         None,
         state.config().validation.engine,
+        None,
     ));
     let chainstate = state.chainstate();
     let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(

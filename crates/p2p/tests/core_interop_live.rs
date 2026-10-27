@@ -3,7 +3,9 @@
 //! NOT part of the default suite: requires a real `bitcoind` driven by
 //! `scripts/run-p2p-core-interop.sh`, which starts Bitcoin Core (regtest),
 //! brings up a bitcoin-rs node, syncs them over the P2P v1 transport, diffs
-//! observable chain-identity RPCs, and writes an evidence JSON.
+//! observable chain-identity RPCs, syncs two fresh bitcoin-rs nodes from Core
+//! over BIP324 v2 (one dials Core, Core dials the other), and writes an
+//! evidence JSON.
 //!
 //! Run via:
 //! ```text
@@ -20,7 +22,7 @@ use bitcoin_rs_primitives::USER_AGENT;
 use serde_json::Value;
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
-const SCHEMA: &str = "bitcoin-rs-core-differential-v3";
+const SCHEMA: &str = "bitcoin-rs-core-differential-v4";
 
 type LiveError = Box<dyn std::error::Error>;
 
@@ -189,6 +191,7 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), LiveError> {
     assert_chain_identity(&evidence)?;
     assert_bip152_relay(&evidence)?;
     assert_block_announcements(&evidence)?;
+    assert_transports(&evidence)?;
     Ok(())
 }
 
@@ -339,6 +342,117 @@ fn assert_block_announcements(evidence: &Value) -> Result<(), LiveError> {
         evidence_str(announcements, "first_tip")?,
         evidence_str(announcements, "reorg_tip")?,
         "the reorg must replace the first announced tip"
+    );
+    Ok(())
+}
+
+/// BIP324 against live Core: bitcoin-rs dialing Core and Core dialing
+/// bitcoin-rs both run v2, both ends report the same session id, and each v2
+/// connection answers a ping and carries a full header and block sync. The
+/// main node, with v2 off, stays on v1 with v2 Core.
+fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
+    let transports = evidence
+        .get("transports")
+        .ok_or_else(|| main_error("evidence missing `transports`"))?;
+    let core_tip = evidence_str(transports, "core_tip")?;
+    let leg = |name: &str| {
+        transports
+            .get(name)
+            .ok_or_else(|| main_error(format!("transports missing `{name}`")))
+    };
+
+    for (name, bitcoin_rs_dials) in [("rs_to_core_v2", true), ("core_to_rs_v2", false)] {
+        let leg = leg(name)?;
+        assert_eq!(
+            evidence_str(leg, "core_transport")?,
+            "v2",
+            "{name}: Core side"
+        );
+        assert_eq!(
+            evidence_str(leg, "bitcoin_rs_transport")?,
+            "v2",
+            "{name}: bitcoin-rs side"
+        );
+        let session_id = evidence_str(leg, "core_session_id")?;
+        assert!(
+            session_id.len() == 64
+                && session_id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "{name}: Core reports a 32-byte session id in lowercase hex, got {session_id:?}"
+        );
+        assert_eq!(
+            evidence_str(leg, "bitcoin_rs_session_id")?,
+            session_id,
+            "{name}: both ends derive the same session id"
+        );
+        assert_eq!(
+            evidence_bool(leg, "core_inbound")?,
+            bitcoin_rs_dials,
+            "{name}: Core sees the direction that was dialed"
+        );
+        assert_eq!(
+            evidence_bool(leg, "bitcoin_rs_inbound")?,
+            !bitcoin_rs_dials,
+            "{name}: bitcoin-rs sees the direction that was dialed"
+        );
+        assert!(
+            evidence_bool(leg, "ping_answered")?,
+            "{name}: bitcoin-rs answers Core's ping over the session"
+        );
+    }
+    assert_eq!(
+        evidence_u64(leg("core_to_rs_v2")?, "bitcoin_rs_peers")?,
+        1,
+        "the node Core dials has no other peer to sync from"
+    );
+
+    let v1 = leg("rs_to_core_v1")?;
+    for side in ["core_transport", "bitcoin_rs_transport"] {
+        assert_eq!(evidence_str(v1, side)?, "v1", "rs_to_core_v1: {side}");
+    }
+    for side in ["core_session_id", "bitcoin_rs_session_id"] {
+        assert_eq!(
+            evidence_str(v1, side)?,
+            "",
+            "rs_to_core_v1: {side} is empty"
+        );
+    }
+
+    for name in ["rs_to_core_v1", "rs_to_core_v2", "core_to_rs_v2"] {
+        assert_eq!(
+            evidence_str(leg(name)?, "bitcoin_rs_tip")?,
+            core_tip,
+            "{name}: the node syncs Core's chain over that connection"
+        );
+    }
+
+    // The byte counts are a recorded measurement, not a bound: only their
+    // presence and transports are checked.
+    let cost = transports
+        .get("ibd_cost")
+        .ok_or_else(|| main_error("transports missing `ibd_cost`"))?;
+    for transport in ["v1", "v2"] {
+        let run = cost
+            .get(transport)
+            .ok_or_else(|| main_error(format!("ibd_cost missing `{transport}`")))?;
+        assert_eq!(
+            evidence_str(run, "transport")?,
+            transport,
+            "ibd_cost.{transport}"
+        );
+        for key in ["bytes_core_to_rs", "bytes_rs_to_core"] {
+            assert!(evidence_u64(run, key)? > 0, "ibd_cost.{transport}.{key}");
+        }
+    }
+    // The v2 run is the rs_to_core_v2 dialer, whose tip is checked above.
+    let v1_cost = cost
+        .get("v1")
+        .ok_or_else(|| main_error("ibd_cost missing `v1`"))?;
+    assert_eq!(
+        evidence_str(v1_cost, "bitcoin_rs_tip")?,
+        core_tip,
+        "ibd_cost.v1: the v2-off node synced Core's chain"
     );
     Ok(())
 }

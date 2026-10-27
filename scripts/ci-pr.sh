@@ -59,7 +59,7 @@ clippy_profiles() {
   # row).
   profile "clippy: workspace (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --features bitcoin-rs-index/silent-payments \
+      --features bitcoin-rs/silent-payments \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
       --exclude bitcoin-rs-node \
       -- -D warnings
@@ -69,12 +69,21 @@ clippy_profiles() {
   profile "clippy: bitcoin-rs-chainstate (native,fjall)" \
     cargo clippy --locked -p bitcoin-rs-chainstate \
       --no-default-features --features fjall --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-node (fjall,zmq)" \
+  profile "clippy: bitcoin-rs-node (fjall,zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      --no-default-features --features fjall,zmq,silent-payments --all-targets -- -D warnings
+  # All-target builds unify test-seam features through dev-dependencies. Check
+  # the operator build separately so test-only capabilities cannot hide here.
+  profile "check: bitcoin-rs (production silent-payments)" \
+    cargo check --locked -p bitcoin-rs \
+      --no-default-features --features fjall,silent-payments
 }
 
 test_crates_profiles() {
+  profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
+    cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
+  profile "test: bitcoin-rs (silent-payments and certified inputs process)" \
+    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test silent_payments --test block_inputs
   profile "test: bitcoin-rs-index (silent-payments codec)" \
     cargo_test -p bitcoin-rs-index --features silent-payments --test silent_payments
   # Per-crate profiles may use checked-in fixtures but need no pinned Core

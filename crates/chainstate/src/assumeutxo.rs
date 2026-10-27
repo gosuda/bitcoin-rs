@@ -5,7 +5,7 @@
 //! Role restrictions are defined by [`ChainstateRole`]; commitment/count checks,
 //! finalization, and durable fail-closed behavior by [`AssumeUtxoManager::step_historical`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitcoin_rs_chain::TipSnapshot;
@@ -280,7 +280,7 @@ pub struct AssumeUtxoManager {
     active_chainstate: Arc<Chainstate>,
     historical_chainstate: RwLock<Option<Arc<Chainstate>>>,
     historical_undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
-    data_dir: Option<PathBuf>,
+    data_dir: PathBuf,
     historical_checkpoint_interval: u32,
 }
 
@@ -297,6 +297,10 @@ impl std::fmt::Debug for AssumeUtxoManager {
 impl AssumeUtxoManager {
     /// Initializes the `AssumeUTXO` manager, inspecting persistent state if available.
     ///
+    /// The `data_dir` argument is required. It guarantees a directory was
+    /// supplied, not that the filesystem is healthy; missing or corrupt files
+    /// still fail at use.
+    ///
     /// # Errors
     ///
     /// Returns [`AssumeUtxoError::PreviouslyFailed`] and closes active chainstate
@@ -304,7 +308,7 @@ impl AssumeUtxoManager {
     pub fn open(
         network: Network,
         active_chainstate: Arc<Chainstate>,
-        data_dir: Option<PathBuf>,
+        data_dir: PathBuf,
     ) -> Result<Self, AssumeUtxoError> {
         Self::open_with_historical_checkpoint_interval(
             network,
@@ -317,7 +321,7 @@ impl AssumeUtxoManager {
     fn open_with_historical_checkpoint_interval(
         network: Network,
         active_chainstate: Arc<Chainstate>,
-        data_dir: Option<PathBuf>,
+        data_dir: PathBuf,
         historical_checkpoint_interval: u32,
     ) -> Result<Self, AssumeUtxoError> {
         let loaded_status = active_chainstate
@@ -356,7 +360,7 @@ impl AssumeUtxoManager {
                 historical = Some(Self::open_historical_chainstate(
                     &active_chainstate,
                     network,
-                    data_dir.as_deref(),
+                    &data_dir,
                     base_height,
                     base_hash,
                     historical_height,
@@ -382,8 +386,8 @@ impl AssumeUtxoManager {
         manager.recover_pending().inspect_err(|_| {
             manager.active_chainstate.fail_closed_for_recovery();
         })?;
-        if let Some(data_dir) = manager.data_dir.as_deref()
-            && let Err(error) = crate::assumeutxo_snapshot::cleanup_reservations(data_dir, network)
+        if let Err(error) =
+            crate::assumeutxo_snapshot::cleanup_reservations(&manager.data_dir, network)
         {
             // Cleanup is not an activation authority. Failure retains extra
             // files for a later retry and never resets the accepted head.
@@ -407,7 +411,7 @@ impl AssumeUtxoManager {
     fn open_historical_chainstate(
         active: &Arc<Chainstate>,
         network: Network,
-        data_dir: Option<&std::path::Path>,
+        data_dir: &Path,
         base_height: u32,
         base_hash: Hash256,
         historical_height: u32,
@@ -418,11 +422,6 @@ impl AssumeUtxoManager {
         let Some(checkpoint) = checkpoint else {
             return active.create_historical_counterpart(base_height, base_hash, undo, None);
         };
-        let data_dir = data_dir.ok_or_else(|| {
-            anyhow::anyhow!(
-                "historical checkpoint is committed but no data directory is configured"
-            )
-        })?;
         if checkpoint.height > historical_height || checkpoint.height > base_height {
             return Err(anyhow::anyhow!(
                 "historical checkpoint is ahead of certified validation progress"
@@ -547,11 +546,7 @@ impl AssumeUtxoManager {
         if !matches!(self.status()?, AssumeUtxoDiskStatus::Uninitialized) {
             return Err(AssumeUtxoError::AlreadyActive);
         }
-        if self
-            .data_dir
-            .as_deref()
-            .is_some_and(crate::recovery::requires_full_revalidation)
-        {
+        if crate::recovery::requires_full_revalidation(&self.data_dir) {
             return Err(AssumeUtxoError::FullRevalidationRequired);
         }
         if pinned.block_hash != base_hash {
@@ -589,23 +584,15 @@ impl AssumeUtxoManager {
             checkpoint: None,
         };
 
-        if let Some(dir) = &self.data_dir {
-            crate::assumeutxo_snapshot::write_coins(dir, &set, pinned)?;
-        }
+        crate::assumeutxo_snapshot::write_coins(&self.data_dir, &set, pinned)?;
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 // Recheck under transition exclusion: disconnect/recovery may
                 // arm the sticky marker while the import is being verified.
-                if self
-                    .data_dir
-                    .as_deref()
-                    .is_some_and(crate::recovery::requires_full_revalidation)
-                {
+                if crate::recovery::requires_full_revalidation(&self.data_dir) {
                     return Err(AssumeUtxoError::FullRevalidationRequired);
                 }
-                if let Some(dir) = &self.data_dir {
-                    crate::assumeutxo_snapshot::write_headers(dir, tree, tip)?;
-                }
+                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)?;
                 let next = bitcoin_rs_storage::DurableHead {
                     assumeutxo: new_status,
                     commit_id: prior.map_or(1, |head| head.commit_id + 1),
@@ -1227,10 +1214,7 @@ impl AssumeUtxoManager {
         &self,
         retained: Option<bitcoin_rs_storage::checkpoint::CheckpointReference>,
     ) {
-        let Some(data_dir) = &self.data_dir else {
-            return;
-        };
-        let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
+        let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir)
             .map_err(bitcoin_rs_storage::checkpoint::CheckpointError::from)
             .and_then(|data| match retained {
                 Some(reference) => {
@@ -1270,9 +1254,6 @@ impl AssumeUtxoManager {
         if !due {
             return Ok(());
         }
-        let Some(data_dir) = &self.data_dir else {
-            return Ok(());
-        };
         let Some(historical) = historical else {
             return Err(anyhow::anyhow!(
                 "historical checkpoint is due without a historical chainstate"
@@ -1289,7 +1270,7 @@ impl AssumeUtxoManager {
             .into());
         }
         let data =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir).map_err(|error| {
+            bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir).map_err(|error| {
                 anyhow::anyhow!("open historical checkpoint data directory: {error}")
             })?;
         let config = crate::checkpoint::headers::HeaderCheckpointConfig {

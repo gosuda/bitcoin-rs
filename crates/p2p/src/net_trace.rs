@@ -124,19 +124,38 @@ mod tests {
     }
 
     #[test]
-    fn message_args_matches_core_abi_positions() {
+    fn message_args_serve_a_live_consumer_read() {
         let trace = NetTrace::inbound(7, loopback());
-        let payload: &[u8] = b"abc";
+        let payload: &[u8] = b"ping-payload";
+
+        inbound_message(Some(&trace), "ping", payload);
+        outbound_message(Some(&trace), &Message::Ping(42), payload);
+        inbound_message(None, "ping", payload);
 
         let (node_id, addr, conn_type, msg_type, size, pointer) =
             message_args(&trace, "ping", payload);
 
         assert_eq!(node_id, 7);
-        assert_eq!(addr, "127.0.0.1:8333");
+        let peer: SocketAddr = addr
+            .parse()
+            .unwrap_or_else(|error| panic!("a consumer parses the addr back: {error}"));
+        assert_eq!(peer, loopback());
         assert_eq!(conn_type, "inbound");
         assert_eq!(msg_type, "ping");
-        assert_eq!(size, 3);
+        assert_eq!(size, u64::try_from(payload.len()).unwrap_or(u64::MAX));
         assert_eq!(pointer, payload.as_ptr());
+        // SAFETY: `pointer` is `payload.as_ptr()` built above, so it carries
+        // the payload borrow's provenance; `size` is the payload length, so
+        // the range is in bounds; `u8` needs no alignment; the payload is
+        // initialized and borrowed immutably for the whole read, so no
+        // mutable alias exists while the shared slice below is alive.
+        let seen = unsafe {
+            std::slice::from_raw_parts(
+                pointer,
+                usize::try_from(size).unwrap_or_else(|error| panic!("size fits: {error}")),
+            )
+        };
+        assert_eq!(seen, payload);
     }
 
     #[test]

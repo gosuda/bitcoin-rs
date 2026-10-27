@@ -470,6 +470,24 @@ macro_rules! option_rows {
                     env["BITCOIN_RS_DATA_DIR", parse_path]
                     toml native("data_dir")
                 }
+                /// Save eligible mempool transactions on clean shutdown and revalidate them on startup.
+                persist_mempool: Option<bool> {
+                    cli[#[arg(long = "persist-mempool")]]
+                    env["BITCOIN_RS_PERSIST_MEMPOOL", parse_bool]
+                    toml native("persist_mempool")
+                }
+                /// Restart snapshot byte budget in MiB; raise to retain a larger pool.
+                mempool_snapshot_max_mb: Option<u64> {
+                    cli[#[arg(long = "mempool-snapshot-max-mb")]]
+                    env["BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB", str::parse]
+                    toml native("mempool_snapshot_max_mb")
+                }
+                /// Restart snapshot restore timeout in seconds; raise for large or complex mempools.
+                mempool_snapshot_restore_timeout_secs: Option<u64> {
+                    cli[#[arg(long = "mempool-snapshot-restore-timeout-secs")]]
+                    env["BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS", str::parse]
+                    toml native("mempool_snapshot_restore_timeout_secs")
+                }
                 /// External notification adapters. `None` means this layer does not
                 /// speak to them.
                 notifications: Option<NotificationConfig> {
@@ -557,6 +575,12 @@ macro_rules! option_rows {
                 }
                 /// User-supplied RPC overrides.
                 group rpc: RpcOverrides {
+                    /// Enable the experimental keyless getblocktweaks RPC (requires the silent-payments build feature).
+                    silent_payments as silent_payments: Option<bool> {
+                        cli[#[arg(long = "silent-payments", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_SILENT_PAYMENTS", parse_bool]
+                        toml native("silent_payments")
+                    }
                     /// JSON-RPC bind address.
                     bind as rpc_bind: Option<SocketAddr> {
                         cli[#[arg(long = "rpc-bind")]]

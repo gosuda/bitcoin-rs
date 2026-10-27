@@ -1,9 +1,6 @@
 //! Capability selection and the exact durable watermark representation.
 
 use super::error::IndexError;
-use crate::{
-    reconcile::SelectedWatermark, reconcile::selected_watermark as reconcile_selected_watermark,
-};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvSnapshot};
 
 pub(super) const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
@@ -286,6 +283,37 @@ impl IndexWatermarks {
             IndexCapability::CompactFilters => self.compact_filters = cursor,
         }
     }
+
+    /// Returns the single common watermark across `capabilities`, or
+    /// `Err(IndexError::NonContiguousPrepared)` if none was selected or they disagree.
+    pub(crate) fn selected(
+        self,
+        capabilities: IndexCapabilities,
+    ) -> Result<Option<IndexWatermark>, IndexError> {
+        let mut selected = IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| capabilities.contains(capability))
+            .map(|capability| self.get(capability));
+        let Some(first) = selected.next() else {
+            return Err(IndexError::NonContiguousPrepared { watermark: None });
+        };
+        if selected.all(|watermark| watermark == first) {
+            Ok(first)
+        } else {
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        }
+    }
+
+    /// Returns whether all `capabilities` are aligned at `target`.
+    pub(crate) fn is_aligned(
+        self,
+        capabilities: IndexCapabilities,
+        target: Option<IndexWatermark>,
+    ) -> bool {
+        capabilities
+            .iter()
+            .all(|capability| self.get(capability) == target)
+    }
 }
 
 impl IndexWatermark {
@@ -397,16 +425,6 @@ pub(super) fn put_selected_watermarks(
     }
 }
 
-pub(super) fn selected_watermark(
-    watermarks: IndexWatermarks,
-    capabilities: IndexCapabilities,
-) -> Result<Option<IndexWatermark>, IndexError> {
-    match reconcile_selected_watermark(watermarks, capabilities) {
-        SelectedWatermark::Valid(watermark) => Ok(watermark),
-        SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +527,48 @@ mod tests {
                 "mask {mask:#b} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn watermarks_selected_and_aligned() {
+        let mark_a = IndexWatermark {
+            height: 10,
+            hash: [1; 32],
+        };
+        let mark_b = IndexWatermark {
+            height: 11,
+            hash: [2; 32],
+        };
+        let mut watermarks = IndexWatermarks::default();
+
+        // Empty selection is invalid
+        assert!(matches!(
+            watermarks.selected(IndexCapabilities::NONE),
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        ));
+
+        // Unindexed selection matches Ok(None)
+        assert!(matches!(
+            watermarks.selected(IndexCapabilities::HISTORICAL),
+            Ok(None)
+        ));
+        assert!(watermarks.is_aligned(IndexCapabilities::HISTORICAL, None));
+
+        // Mixed watermarks reject
+        watermarks.tx_lookup = Some(mark_a);
+        assert!(matches!(
+            watermarks.selected(IndexCapabilities::HISTORICAL),
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        ));
+        assert!(!watermarks.is_aligned(IndexCapabilities::HISTORICAL, Some(mark_a)));
+
+        // Aligned watermarks succeed
+        watermarks.script_history = Some(mark_a);
+        assert!(matches!(
+            watermarks.selected(IndexCapabilities::HISTORICAL),
+            Ok(Some(mark)) if mark == mark_a
+        ));
+        assert!(watermarks.is_aligned(IndexCapabilities::HISTORICAL, Some(mark_a)));
+        assert!(!watermarks.is_aligned(IndexCapabilities::HISTORICAL, Some(mark_b)));
     }
 }

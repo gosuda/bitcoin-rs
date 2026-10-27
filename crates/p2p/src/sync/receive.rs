@@ -608,37 +608,31 @@ impl BlockSync {
             );
         }
 
-        // Resolve staged sources before taking the scheduler lock. Request
-        // sends hold PeerTable's read lock while marking the window, so no
-        // scheduler holder may acquire PeerTable in the opposite order.
-        //
-        // The source is the whole connection identity: a cancelled lease is
-        // not a schedulable peer, so deliveries from one carry no credit.
-        let staged_blocks: Vec<_> = staged_blocks
-            .into_iter()
-            .map(|(hash, source, staged)| {
-                let source_peer = source.filter(|source| self.peer_table.is_current(*source));
-                (hash, source_peer, staged)
-            })
-            .collect();
+        // Check liveness before acquiring the tree guard: waiting on the peer
+        // table must not retain a tree read lock. Credit publication below
+        // still revalidates the exact connection with `with_current`.
+        for (_, source, _) in &mut staged_blocks {
+            *source = source.filter(|source| self.peer_table.is_current(*source));
+        }
 
         // The block tree owns heights: bodies this insert count-evicts are
         // requeued at their tree-resolved heights, never at a stored sentinel
-        // (there is no stored height).
+        // (there is no stored height). The source is the whole connection
+        // identity: a cancelled lease carries no credit.
         let staged_blocks: Vec<_> = {
             let tree = self.chain.block_tree();
             staged_blocks
                 .into_iter()
                 .map(|(hash, source_peer, staged)| {
-                    let resolve = |hash: Hash256| {
-                        tree.lookup(hash)
-                            .and_then(|node_id| tree.node(node_id).ok())
-                            .map(|node| node.height)
-                    };
                     let dropped_heights = match &staged {
-                        StagedBlock::Memory { dropped, .. } => {
-                            dropped.iter().map(|entry| resolve(*entry)).collect()
-                        }
+                        StagedBlock::Memory { dropped, .. } => dropped
+                            .iter()
+                            .map(|entry| {
+                                tree.lookup(*entry)
+                                    .and_then(|node_id| tree.node(node_id).ok())
+                                    .map(|node| node.height)
+                            })
+                            .collect(),
                         _ => Vec::new(),
                     };
                     (hash, source_peer, staged, dropped_heights)
@@ -695,22 +689,35 @@ impl BlockSync {
         // window mutation, so a same-address replacement registering between
         // the liveness check above and this point voids the credit rather
         // than clearing stall or timeout state for a retired connection.
-        for (hash, source_peer, credit) in delivery_credits {
+        // Consecutive credits for the same connection are batched to avoid
+        // re-acquiring the table read lock and scheduler lock for each block.
+        let mut credit_idx = 0;
+        while credit_idx < delivery_credits.len() {
+            let source_peer = delivery_credits[credit_idx].1;
+            let start = credit_idx;
+            while credit_idx < delivery_credits.len()
+                && delivery_credits[credit_idx].1 == source_peer
+            {
+                credit_idx += 1;
+            }
+            let batch = &delivery_credits[start..credit_idx];
             self.peer_table.with_current(source_peer, || {
                 let mut scheduler = self.scheduler.lock();
-                match credit {
-                    DeliveryCredit::Duplicate => {
-                        scheduler
-                            .window
-                            .credit_duplicate_delivery(hash, source_peer);
-                    }
-                    DeliveryCredit::Delivery(pending_height) => {
-                        scheduler.window.credit_delivery_from(
-                            hash,
-                            source_peer,
-                            pending_height,
-                            now,
-                        );
+                for (hash, _, credit) in batch {
+                    match *credit {
+                        DeliveryCredit::Duplicate => {
+                            scheduler
+                                .window
+                                .credit_duplicate_delivery(*hash, source_peer);
+                        }
+                        DeliveryCredit::Delivery(pending_height) => {
+                            scheduler.window.credit_delivery_from(
+                                *hash,
+                                source_peer,
+                                pending_height,
+                                now,
+                            );
+                        }
                     }
                 }
             });

@@ -51,6 +51,17 @@ Clamping bounds: budgets land in
 `[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
 startup.
 
+## Store guard
+
+Every file-owning store (`FjallStore`, `RocksDbStore`, `RedbStore`, the redb
+transaction index, and `FlatFileBlockStore`) can keep one opaque `StoreGuard`
+through `guarded_by` (a builder method; the redb transaction index takes it
+as the `guard` argument of `open_redb_tx_index_store_with_cache`).
+The guard is the store's last field, so it drops only after the engine or file
+handle has closed. The node passes its data-directory lock this way: the lock
+lives exactly as long as the last handle that can still write the directory,
+however a consumer retains that handle. Storage never inspects the guard.
+
 ## Test isolation
 
 Persistence fault slots and injection APIs are compiled only for tests or the

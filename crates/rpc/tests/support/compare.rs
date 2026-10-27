@@ -477,7 +477,7 @@ fn check_tuple_content_length(
 
 /// Enforces the complete header classification: the union of pinned and
 /// live header names must each be classified exactly once, exact names must
-/// carry equal values, volatile names must be present on both sides (their
+/// carry equal values, volatile names must be present on the live side (their
 /// value is wall-clock or connection dependent), and gap names must diverge.
 fn compare_headers(
     fixture: &str,
@@ -492,9 +492,17 @@ fn compare_headers(
         why,
     };
     // Union of names, keyed case-insensitively, keeping the first wire
-    // spelling for display.
+    // spelling for display. Declared volatile names join the loop even when
+    // neither side carries one: the pinned Core capture may omit a
+    // transport header it never recorded, and the live reply must still be
+    // checked for it, or a missing header would pass by never being named.
     let mut names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (name, _) in expected.headers.iter().chain(live.headers.iter()) {
+        names
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| name.clone());
+    }
+    for name in &headers.volatile {
         names
             .entry(name.to_ascii_lowercase())
             .or_insert_with(|| name.clone());
@@ -534,13 +542,15 @@ fn compare_headers(
                 }
             }
             HeaderClass::Volatile => {
-                if expected_value.is_none() || live_value.is_none() {
+                // The pinned tuple may omit a volatile header: a Core capture
+                // keeps only the headers its probe recorded. The live reply
+                // must still carry it, so the classification is not vacuous.
+                if live_value.is_none() {
                     return Err(need(
                         &display,
                         format!(
-                            "volatile header must be present on both sides (pinned: {}, live: {})",
-                            expected_value.is_some(),
-                            live_value.is_some()
+                            "volatile header must be present on the live reply (pinned: {})",
+                            expected_value.is_some()
                         ),
                     ));
                 }

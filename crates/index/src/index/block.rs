@@ -3,19 +3,16 @@
 use super::{
     capability::{IndexCapabilities, IndexCapability},
     error::IndexError,
-    prepared::PreparedBlock,
     rows::LiveOp,
     rows::PendingRows,
     rows::{PositionedHistory, PositionedRow},
-    write::IndexWriter,
 };
 use crate::{
-    types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::ScriptHistoryOccurrence,
+    types::HashPrefixRow, types::ScriptHash, types::ScriptHistoryOccurrence,
     types::SpendingPrefixRow, types::TxidRow, types::U24_MAX, types::encode_height,
     types::encode_history_height,
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
-use bitcoin_rs_storage::KvStore;
 
 /// Source of exact scripts for coins an incoming block spends.
 ///
@@ -64,7 +61,7 @@ pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
     clippy::too_many_lines,
     reason = "one parse pass owns every correlated block row"
 )]
-fn pending_rows_for_block_with_header(
+pub(super) fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
     capabilities: IndexCapabilities,
@@ -74,11 +71,11 @@ fn pending_rows_for_block_with_header(
     let header_bytes = parsed
         .span_bytes(parsed.header_span())
         .unwrap_or_else(|| unreachable!("header span belongs to the parsed image"));
-    let header = HeaderRow::from_header_bytes(header_bytes)
-        .unwrap_or_else(|| unreachable!("the layout parser fixes the header at 80 bytes"));
+    let header_row: [u8; crate::types::HEADER_ROW_SIZE] = header_bytes
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("the layout parser fixes the header at 80 bytes"));
 
     let height_bytes = encode_height(height);
-    let header_row = header.to_db_row();
     let mut rows = PendingRows::default();
     rows.header_rows.push(header_row);
     let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
@@ -305,85 +302,4 @@ pub(super) fn is_op_return_script(script: &[u8]) -> bool {
 fn live_admission(script: &[u8]) -> Option<ScriptHash> {
     let admitted = !is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE;
     admitted.then(|| ScriptHash::from_script_bytes(script))
-}
-
-impl<S: KvStore> IndexWriter<S> {
-    /// Prepares historical rows with the exact scripts of external spent coins.
-    /// Same-block input scripts are resolved from the earlier body transactions.
-    pub fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        self.prepare_block_with_spent_scripts(
-            IndexCapabilities::HISTORICAL,
-            height,
-            hash,
-            body,
-            spent_scripts,
-        )
-    }
-
-    /// Prepares anchorless `TxLookup` rows from one serialized block scan.
-    /// `ScriptHistory` and `ScriptLive` return [`IndexError::MissingSpentScripts`];
-    /// use [`Self::prepare_block_with_spent_scripts`] for either capability.
-    pub fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        if capabilities.contains(IndexCapability::ScriptHistory)
-            || capabilities.contains(IndexCapability::ScriptLive)
-            || capabilities.contains(IndexCapability::CompactFilters)
-        {
-            return Err(IndexError::MissingSpentScripts);
-        }
-        self.prepare_block_with_spent_scripts(capabilities, height, hash, body, &NoSpentScripts)
-    }
-
-    /// Prepares capability-selected rows with the exact external spent scripts
-    /// required by `ScriptHistory` occurrences, `ScriptLive` deletes, and
-    /// `CompactFilters` construction.
-    pub fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        if capabilities.is_empty() {
-            return Err(IndexError::NonContiguousPrepared {
-                watermark: self.watermark()?,
-            });
-        }
-        let (mut rows, header) =
-            pending_rows_for_block_with_header(body, height, capabilities, spent_scripts)?;
-        let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
-        if actual_hash != hash {
-            return Err(IndexError::BlockIdentityMismatch {
-                height,
-                expected: hash,
-                actual: actual_hash,
-            });
-        }
-        let mut parent_hash = [0_u8; 32];
-        parent_hash.copy_from_slice(&header[4..36]);
-        rows.sort();
-        let row_count = rows.total();
-        let encoded_bytes = rows.encoded_bytes()?;
-        Ok(PreparedBlock {
-            height,
-            hash,
-            parent_hash,
-            row_count,
-            encoded_bytes,
-            capabilities,
-            rows,
-        })
-    }
 }

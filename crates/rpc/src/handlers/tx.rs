@@ -895,7 +895,7 @@ mod tests {
 
     use super::{getrawtransaction, gettxout};
     use crate::Handler;
-    use crate::context::{Context, DerivedIndexQuery, TxQueryError};
+    use crate::context::{Context, DerivedIndexQuery, TxQueryError, TxUnavailableCause};
     use crate::error::RpcError;
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_index::block_log::BlockRecord;
@@ -1003,7 +1003,7 @@ mod tests {
             .first()
             .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
             .clone();
-        coinbase.version = -1;
+        coinbase.version = u32::MAX;
         let txid = coinbase.txid();
         {
             let mut pool = ctx.mempool.gateway.pool().write();
@@ -1190,7 +1190,7 @@ mod tests {
         }
 
         let mut genesis = fixture_genesis();
-        genesis.txs[0].version = i32::MIN;
+        genesis.txs[0].version = 1_u32 << 31;
         genesis.header.merkle_root = genesis.txs[0].txid().0;
         let Some(coinbase) = genesis.txs.first().cloned() else {
             panic!("genesis has no transactions");
@@ -1537,9 +1537,13 @@ mod tests {
     }
 
     impl bitcoin_rs_chain::BlockBodySource for PanicUnlessBodySource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        fn block_body(
+            &self,
+            height: u32,
+            hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
             if height == self.height && hash == self.hash {
-                Some(self.body.clone())
+                Ok(Some(self.body.clone()))
             } else {
                 panic!("should not load unrelated body {height}:{hash}");
             }
@@ -1554,8 +1558,12 @@ mod tests {
     }
 
     impl bitcoin_rs_chain::BlockBodySource for ScriptedBodySource {
-        fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
-            self.responses.lock().pop_front().flatten()
+        fn block_body(
+            &self,
+            _height: u32,
+            _hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+            Ok(self.responses.lock().pop_front().flatten())
         }
     }
 
@@ -1776,7 +1784,7 @@ mod tests {
         // refuse a call the scan can answer today.
         for error in [
             TxQueryError::Retry,
-            TxQueryError::Unavailable("worker stopped".into()),
+            TxQueryError::Unavailable(TxUnavailableCause::Other("worker stopped".into())),
             TxQueryError::Storage("disk full".into()),
         ] {
             let blocks = [distinct_block(1), distinct_block(2)];
@@ -1932,15 +1940,20 @@ mod tests {
         }
 
         impl bitcoin_rs_chain::BlockBodySource for LockProbeSource {
-            fn block_body(&self, height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
+            fn block_body(
+                &self,
+                height: u32,
+                _hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
                 assert!(
                     self.blocks.raw_handle().try_write().is_some(),
                     "the block-record lock must not be held across a body load"
                 );
-                self.bodies
+                Ok(self
+                    .bodies
                     .iter()
                     .find(|(known, _)| *known == height)
-                    .map(|(_, bytes)| bytes.clone())
+                    .map(|(_, bytes)| bytes.clone()))
             }
         }
 
@@ -2102,7 +2115,14 @@ mod tests {
             .gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1, 0),
+                MempoolEntry::new(
+                    Arc::new(parent),
+                    parent_vsize,
+                    10_000,
+                    bitcoin_rs_primitives::unix_time_secs(),
+                    1,
+                    0,
+                ),
             )
             .expect("parent admitted to the mempool");
 

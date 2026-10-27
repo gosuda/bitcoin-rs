@@ -42,12 +42,12 @@ use std::time::Duration;
 use storage::NodeStorage;
 use storage::StoredBlockBodySource;
 
-#[path = "state_index.rs"]
+mod data_dir_lock;
 mod index;
-#[path = "state_open.rs"]
 mod open;
-#[path = "state_storage.rs"]
 mod storage;
+
+pub use data_dir_lock::DataDirLockError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
@@ -234,6 +234,22 @@ impl NodeState {
     #[must_use]
     pub(crate) fn mining_generation_signal(&self) -> Arc<crate::mining::MiningGenerationSignal> {
         Arc::clone(self.followers.mining())
+    }
+
+    /// Attaches a test-owned template coordinator to the mining generation
+    /// signal, so committed connects publish through the production wake path.
+    ///
+    /// Test seam: exercises the connect-time publication (`on_connect` wakes
+    /// the attached coordinator and its sequence leg) against a bench- or
+    /// test-owned coordinator instead of omitting it. The signal holds weak
+    /// references; the caller keeps the coordinator alive.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn attach_mining_coordinator(&self, coordinator: &Arc<crate::MiningCoordinator>) {
+        let signal = self.mining_generation_signal();
+        let control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator.clone();
+        signal.attach(&control);
+        let wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
+        signal.attach_sequence_wake(&wake);
     }
 
     /// Returns a read-only capability to observe the applied-block log.
@@ -495,6 +511,7 @@ fn build_derived_index_open_spec(
     config: &NodeConfig,
     txindex_cache_bytes: u64,
     epoch: u64,
+    guard: &bitcoin_rs_storage::StoreGuard,
 ) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
@@ -509,6 +526,9 @@ fn build_derived_index_open_spec(
         .unwrap_or_else(|_| config.data_dir.clone());
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
+    // The index store opens on the worker thread, possibly after the node
+    // that built this spec is gone: the spec carries the lock to that open.
+    let guard = Arc::clone(guard);
     Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
         data_dir: config.data_dir.clone(),
         namespace: "txindex",
@@ -522,6 +542,7 @@ fn build_derived_index_open_spec(
                 backend,
                 dir,
                 Some(cache_bytes),
+                &guard,
                 DerivedIndexComposer { backend, epoch },
             )
         }),
@@ -554,7 +575,6 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
 struct TxIndexSpawn {
     spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
     generation: bitcoin_rs_index::runtime::Generation,
-    block_source: bitcoin_rs_index::runtime::IndexBlockSource,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<storage::RecoveryReporter>,

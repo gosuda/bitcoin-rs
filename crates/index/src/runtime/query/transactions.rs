@@ -1,10 +1,11 @@
 //! Exact-identity block reads and transaction position verification.
 
 use super::{
-    Block, BlockHash, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES,
-    OutPoint, QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
-    TxQueryError, Txid, deserialize,
+    Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
+    QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError,
+    TxUnavailableCause, Txid, deserialize,
 };
+use bitcoin_rs_primitives::BlockHash;
 
 impl DerivedIndexQueryEngine {
     pub(super) fn resolve_hash_at_height(
@@ -25,16 +26,29 @@ impl DerivedIndexQueryEngine {
         tree.node(node_id).ok().map(|n| n.hash)
     }
 
+    /// Returns the verified block at `(height, hash)`, reusing the query's one
+    /// retained block on consecutive reads at the same identity: the first
+    /// fetch verifies and pins the block on the query budget, while later
+    /// reads at the same identity return the shared handle with no further
+    /// body read, byte charge, or deserialization. A read at any other
+    /// identity evicts the retained block before fetching, so older identities
+    /// are re-read and re-charged. Only successfully verified blocks are
+    /// pinned, so a failure leaves the memo empty and the next read
+    /// re-attempts the body fetch.
     pub(super) fn resolve_block(
         &self,
         budget: &mut QueryBudget,
         height: u32,
         hash: Hash256,
-    ) -> Result<Block, TxQueryError> {
+    ) -> Result<Arc<Block>, TxQueryError> {
+        if let Some(hit) = budget.memoized_block(height, hash) {
+            return Ok(hit);
+        }
         budget.reserve_body_read(MAX_SERIALIZED_BLOCK_BYTES)?;
         let bytes = self.resolve_block_body_bytes(height, BlockHash::from(hash))?;
         budget.charge_body_bytes(bytes.len())?;
-        Self::verify_block(&bytes, height, hash)
+        let block = Arc::new(Self::verify_block(&bytes, height, hash)?);
+        Ok(budget.memoize_block(height, hash, block))
     }
 
     fn resolve_block_body_bytes(
@@ -42,18 +56,20 @@ impl DerivedIndexQueryEngine {
         height: u32,
         hash: BlockHash,
     ) -> Result<Vec<u8>, TxQueryError> {
-        if let Some(body_source) = self.body_source.as_ref() {
-            if let Some(bytes) = body_source.block_body(height, hash) {
-                return Ok(bytes);
-            }
+        let Some(body_source) = self.body_source.as_ref() else {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::BlockBodyMissing { height },
+            ));
+        };
+        match body_source.block_body(height, hash) {
+            Ok(Some(bytes)) => Ok(bytes),
+            Ok(None) => Err(TxQueryError::Unavailable(
+                TxUnavailableCause::BlockBodyMissing { height },
+            )),
+            Err(error) => Err(TxQueryError::Storage(
+                format!("block body read failed at height {height}: {error}").into(),
+            )),
         }
-        self.block_source
-            .block_body_bytes_for(height, hash)
-            .ok_or_else(|| {
-                TxQueryError::Unavailable(
-                    format!("block body missing for txindex query at height {height}").into(),
-                )
-            })
     }
 
     fn verify_block(bytes: &[u8], height: u32, hash: Hash256) -> Result<Block, TxQueryError> {
@@ -90,12 +106,11 @@ impl DerivedIndexQueryEngine {
 
     pub(super) fn resolve_positioned_transaction(
         &self,
-        tip: &TipSnapshot,
         budget: &mut QueryBudget,
         height: u32,
+        hash: Hash256,
         position: TxPosition,
     ) -> Result<Option<Tx>, TxQueryError> {
-        let hash = self.resolve_hash_at_height(height, tip)?;
         let Some(body_source) = self.body_source.as_ref() else {
             return Ok(None);
         };
@@ -119,17 +134,17 @@ impl DerivedIndexQueryEngine {
 
     fn transaction_from_full_block(
         &self,
-        tip: &TipSnapshot,
         budget: &mut QueryBudget,
         height: u32,
+        hash: Hash256,
         txid: &Txid,
     ) -> Result<Option<Tx>, TxQueryError> {
-        let hash = self.resolve_hash_at_height(height, tip)?;
         let block = self.resolve_block(budget, height, hash)?;
         Ok(block
             .txs
-            .into_iter()
-            .find(|transaction| transaction.txid() == *txid))
+            .iter()
+            .find(|transaction| transaction.txid() == *txid)
+            .cloned())
     }
 
     pub(super) fn transaction_for(
@@ -173,21 +188,23 @@ impl DerivedIndexQueryEngine {
         for row in rows {
             let height = row.row.height();
             let Some(positions) = Self::validated_positions(&row.value) else {
+                let hash = self.resolve_hash_at_height(height, tip)?;
                 if let Some(transaction) =
-                    self.transaction_from_full_block(tip, budget, height, txid)?
+                    self.transaction_from_full_block(budget, height, hash, txid)?
                 {
                     return Ok(Some((height, transaction)));
                 }
                 continue;
             };
             let position = positions[0];
-            match self.resolve_positioned_transaction(tip, budget, height, position)? {
+            let hash = self.resolve_hash_at_height(height, tip)?;
+            match self.resolve_positioned_transaction(budget, height, hash, position)? {
                 Some(transaction) if transaction.txid() == *txid => {
                     return Ok(Some((height, transaction)));
                 }
                 _ => {
                     if let Some(transaction) =
-                        self.transaction_from_full_block(tip, budget, height, txid)?
+                        self.transaction_from_full_block(budget, height, hash, txid)?
                     {
                         return Ok(Some((height, transaction)));
                     }
@@ -199,13 +216,13 @@ impl DerivedIndexQueryEngine {
 
     /// A row's absence is only proven when the index covers the chain from
     /// genesis; below a pruned prefix, answer `Unavailable` instead.
-    pub(super) fn none_below_floor<T>(floor: u32, family: &str) -> Result<Option<T>, TxQueryError> {
+    pub(super) fn none_below_floor<T>(
+        floor: u32,
+        family: &'static str,
+    ) -> Result<Option<T>, TxQueryError> {
         if floor > 0 {
             Err(TxQueryError::Unavailable(
-                format!(
-                    "{family} coverage starts at height {floor}; the pruned prefix is unproven"
-                )
-                .into(),
+                TxUnavailableCause::PrunedPrefixUnproven { family, floor },
             ))
         } else {
             Ok(None)

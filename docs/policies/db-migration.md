@@ -31,6 +31,7 @@ Estimator, discovery, and index formats evolve outside `CURRENT_SCHEMA`. Each ca
 
 - Fee estimator state carries an estimator-owned version. A corrupt, missing, or unknown version degrades to insufficient-data status. The node starts. It never fabricates a rate or a default confidence.
 - Peer discovery state carries a discovery-owned version. A corrupt, missing, or unknown version degrades to seeded or empty discovery with a typed reseed or rebuild status. The node starts.
+- Mempool restart snapshots carry a mempool-owned version, genesis identity and checksum. Rejected candidates never prevent Chainstate startup. On clean save, a rejected ordinary snapshot is moved intact into a unique `mempool-snapshot-rejected-*` directory before publishing fresh candidates. Failure to read or quarantine it prevents replacement. The gateway revalidates candidates against recovered Chainstate; fee-estimator history remains independent.
 - Index layout carries one durable marker in `UtxoMeta`. The durability marker (`[0x00, b'V']`, currently row-format 5) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The marker covers key layout and row-value widths alike; format 5 changed both.
 
 In every case:
@@ -38,7 +39,7 @@ In every case:
 - Authoritative startup never fails because of an owner-local version.
 - Owner-local evolution keeps `CURRENT_SCHEMA` unchanged.
 - No translator, converter, or legacy reader exists for any owner-local format.
-- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exception: disposable derived index namespaces, which recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
+- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exceptions: mempool restart snapshots are quarantined intact as described above; disposable derived index namespaces recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
 - No backup or rotation framework exists. Recovery is reseed, rebuild, or re-admission from canonical data.
 
 ## Operator resync procedure
@@ -79,7 +80,7 @@ The marker covers the authoritative surfaces:
 - Flat block files use the current `BRSB` record format.
 - Undo records use only the current undo codec.
 - Block-body index rows must decode to 16-byte flat-file positions. That validation is lazy (per read, not a boot-time column-family scan): a non-decoding row is `IncompatibleData`, never a missing body.
-- Owner-local state (fee estimator, peer discovery, index capabilities) persists under its own version fields (see the owner-local section).
+- Owner-local state (fee estimator, peer discovery, mempool restart snapshots, index capabilities) persists under its own version fields (see the owner-local section).
 
 Current readers still validate magic values, versions, filenames, lengths, hashes, checksums, ancestry, tips, and semantic invariants. Those checks detect corruption in the current format. They are not compatibility or migration machinery.
 
@@ -87,7 +88,7 @@ Current readers still validate magic values, versions, filenames, lengths, hashe
 
 A change is breaking when a current binary cannot parse or safely interpret bytes written by another version. This includes column-family names or discriminants, key/value layouts, block-file records, undo records, and every authoritative surface that `CURRENT_SCHEMA` covers.
 
-`CURRENT_SCHEMA` covers only authoritative chainstate bytes. Estimator-only, discovery-only, and index-only format evolution keep `CURRENT_SCHEMA` unchanged: estimator state carries its own estimator-owned version, discovery state carries its own discovery-owned version, and index-only layouts bump only the index durability marker (`[0x00, b'V']`), which recovery full-resets for rebuild. A corrupt, missing, or unknown owner-local version never fails authoritative startup. The estimator degrades to insufficient-data. Discovery degrades to seeded or empty with reseed or rebuild. An affected index capability reports unavailable or rebuilding through the existing status vocabulary and rebuilds from retained canonical data. No legacy reader, converter, or translator exists. A rejected owner-local file stays in place until an explicit authorized rebuild and is never silently deleted. No backup or rotation framework is introduced. Explicit fresh replay for authoritative chainstate is unchanged.
+`CURRENT_SCHEMA` covers only authoritative chainstate bytes. Estimator-only, discovery-only, and index-only format evolution keep `CURRENT_SCHEMA` unchanged: estimator state carries its own estimator-owned version, discovery state carries its own discovery-owned version, and index-only layouts bump only the index durability marker (`[0x00, b'V']`), which recovery full-resets for rebuild. A corrupt, missing, or unknown owner-local version never fails authoritative startup. The estimator degrades to insufficient-data. Discovery degrades to seeded or empty with reseed or rebuild. An affected index capability reports unavailable or rebuilding through the existing status vocabulary and rebuilds from retained canonical data. No legacy reader, converter, or translator exists. Rejected owner-local artifacts follow the preservation and quarantine rules in the owner-local section above; none is silently deleted. No general backup or rotation framework is introduced. Explicit fresh replay for authoritative chainstate is unchanged.
 
 For every breaking change:
 

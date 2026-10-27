@@ -28,7 +28,6 @@ pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
 /// Node-owned effects around authoritative chainstate reorgs.
-#[path = "reorg_effects.rs"]
 pub mod reorg;
 /// Top-level node runner.
 mod run;
@@ -53,7 +52,6 @@ mod state;
 pub mod state;
 mod storage_backend;
 /// Adapter between the P2P block-download executor and Chainstate.
-#[path = "p2p_chain_adapter.rs"]
 pub mod sync;
 /// Internal P2P transaction ingress wiring.
 #[cfg(not(feature = "test-seam"))]
@@ -84,7 +82,14 @@ pub use options::{
     P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
+mod chain_feed;
+pub use chain_feed::{
+    BlockHeaderInfo, ChainReplay, ChainSnapshot, ChainStep, ChainSubscription, ChainTarget,
+    ChainUpdate,
+};
 pub use embed::{Node, NodeError};
+
+pub use state::DataDirLockError;
 
 pub use mining::MiningCoordinator;
 

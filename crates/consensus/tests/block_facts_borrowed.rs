@@ -164,7 +164,7 @@ fn noncanonical_script_lengths_still_fail_at_the_layout_boundary() {
 fn version_and_lock_time_bytes_remain_in_the_transaction_id() {
     let mut block = fixtures::fixture(3, 1, 1, 0, 2);
     let original = facts(&block);
-    block.txs[1].version = -1;
+    block.txs[1].version = u32::MAX;
     block.txs[1].lock_time = LockTime::from_consensus(u32::MAX);
     let changed = facts(&block);
     assert_ne!(original.txids()[1], changed.txids()[1]);

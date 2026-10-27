@@ -67,8 +67,7 @@ fn activate(
             .map(|block| block.header)
             .collect::<Vec<_>>(),
     )?;
-    let manager =
-        AssumeUtxoManager::open(Network::Regtest, active.clone(), Some(dir.to_path_buf()))?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
     {
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
@@ -95,7 +94,11 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
         // The unequal-work header fixture intentionally bypasses regtest's
         // contextual difficulty rule. Test the real durable commit/reopen
         // boundary only; do not claim these headers pass node recovery.
-        let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+        let manager = AssumeUtxoManager::open(
+            Network::Regtest,
+            fixture.active.clone(),
+            dir.path().to_path_buf(),
+        )?;
         fixture.activate(&manager)?;
         let next = head.load()?.ok_or("snapshot commit missing")?;
         assert!(next.height < prior.height);
@@ -146,11 +149,8 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     drop(active);
 
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
     assert_eq!(
         active
@@ -196,11 +196,8 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     drop(active);
 
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -233,11 +230,8 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     drop(manager);
     drop(active);
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(manager.chainstates_summary()?.active_chainstate.validated);
     let recovered_stats = active.coin_stats.snapshot();
     // Rollback and fresh replay can retain different MuHash fractions for
@@ -291,7 +285,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active.clone(),
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
         1,
     )?;
     {
@@ -385,7 +379,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active,
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
         1,
     )?;
     let historical = manager
@@ -444,7 +438,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active.clone(),
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
         1,
     )?;
     for block in &fixture.blocks[..2] {
@@ -479,11 +473,8 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     // Startup remains available while cleanup still fails, and retries after
     // the obstruction is removed without another durable-head update.
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(active.role().is_ordinary());
     assert!(manager.historical_chainstate().is_none());
     assert_eq!(active.durable_head.load()?, finalized_head);
@@ -492,11 +483,8 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     drop(active);
     std::fs::remove_dir(&blocker)?;
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(active.role().is_ordinary());
     assert!(manager.historical_chainstate().is_none());
     assert_eq!(active.durable_head.load()?, finalized_head);
@@ -516,11 +504,8 @@ fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
             .map(|block| block.header)
             .collect::<Vec<_>>(),
     )?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     let journal = dir.path().join(crate::recovery::CHAINSTATE_JOURNAL_DIR);
     std::fs::create_dir_all(&journal)?;
     let marker = journal.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
@@ -780,7 +765,7 @@ fn crash_writer() -> TestResult {
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active.clone(),
-        Some(dir.clone()),
+        dir.clone(),
         if checkpoint_phase || phase == "finalized" {
             1
         } else {
@@ -883,11 +868,8 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
             assert!(active.applied_tip_snapshot().is_none());
             continue;
         }
-        let manager = AssumeUtxoManager::open(
-            Network::Regtest,
-            active.clone(),
-            Some(dir.path().to_path_buf()),
-        )?;
+        let manager =
+            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
         assert_eq!(
             active
                 .applied_tip_snapshot()
@@ -912,7 +894,7 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
             drop(active);
             let active = open_persistent(dir.path(), &fixture.pinned)?;
             let manager =
-                AssumeUtxoManager::open(Network::Regtest, active, Some(dir.path().to_path_buf()))?;
+                AssumeUtxoManager::open(Network::Regtest, active, dir.path().to_path_buf())?;
             assert_eq!(
                 manager
                     .historical_chainstate()
@@ -974,11 +956,8 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
     store.write_durable(batch)?;
     drop(store);
     let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -1032,11 +1011,8 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
             .map(|block| block.header)
             .collect::<Vec<_>>(),
     )?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        active.clone(),
-        Some(dir.path().to_path_buf()),
-    )?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     {
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
@@ -1053,12 +1029,8 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     drop(active);
     let active = open_persistent(dir.path(), &fixture.pinned)?;
     assert!(
-        AssumeUtxoManager::open(
-            Network::Regtest,
-            active.clone(),
-            Some(dir.path().to_path_buf())
-        )
-        .is_err()
+        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())
+            .is_err()
     );
     assert!(active.is_closed_for_recovery());
     assert!(matches!(
@@ -1089,11 +1061,8 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
                 .map(|block| block.header)
                 .collect::<Vec<_>>(),
         )?;
-        let manager = AssumeUtxoManager::open(
-            Network::Regtest,
-            active.clone(),
-            Some(dir.path().to_path_buf()),
-        )?;
+        let manager =
+            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
         {
             let loaded = fixture.load()?;
             manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
@@ -1135,11 +1104,8 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
         drop(manager);
         drop(active);
         let active = open_persistent(dir.path(), &fixture.pinned)?;
-        let reopened = AssumeUtxoManager::open(
-            Network::Regtest,
-            active.clone(),
-            Some(dir.path().to_path_buf()),
-        );
+        let reopened =
+            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf());
         if mismatch {
             assert!(reopened.is_err());
             assert!(active.is_closed_for_recovery());

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message};
 use bitcoin_rs_primitives::{Network, unix_time_secs};
 use crossbeam_channel::{SendTimeoutError, Sender};
 use thiserror::Error;
@@ -146,9 +147,9 @@ pub struct ConnectionShared {
     /// Block announcer for outbound block announcements and peer capability tracking.
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
-    /// the outbound slot counts. The listener refuses inbound admission at
-    /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
-    /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
+    /// the outbound slot counts. At this count an inbound newcomer evicts an
+    /// inbound connection or is refused (Core `m_max_inbound`, `net.h:1118`,
+    /// applied at `net.cpp:1819-1826`).
     pub max_inbound: usize,
     /// The services this node advertises in every `version`, inbound or
     /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
@@ -159,6 +160,12 @@ pub struct ConnectionShared {
     /// `NODE_P2P_V2`, falling back to v1 once when unanswered. `false` keeps
     /// every connection on v1.
     pub v2_transport: bool,
+    /// Aggregate outbound queued-byte budget every connection of this start
+    /// epoch counts against. The P2P service owns the `Arc`; clones of this
+    /// struct share it, so inbound, outbound, and manual connections of one
+    /// node draw from one aggregate while independent services stay
+    /// independent.
+    pub(crate) shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
 }
 
 impl ConnectionShared {
@@ -222,7 +229,20 @@ impl ConnectionShared {
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
+            shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
         }
+    }
+
+    /// Installs the owning service's aggregate outbound budget, replacing
+    /// the fresh per-epoch default so all of the service's connections draw
+    /// from one aggregate.
+    #[must_use]
+    pub(crate) fn with_shared_outbound(
+        mut self,
+        shared: &Arc<crate::connection::SharedOutboundBudget>,
+    ) -> Self {
+        self.shared_outbound = Arc::clone(shared);
+        self
     }
 
     fn check_destination(&self, addr: SocketAddr, manual: bool) -> Result<(), crate::PeerError> {
@@ -617,18 +637,26 @@ fn accept_connections(
                     continue;
                 }
                 // Reserve the inbound slot atomically with the capacity
-                // test before any thread exists: a separate count followed
-                // by an unconstrained spawn races concurrent accepts.
-                // Registration stays identity-checked, so the reservation
-                // itself is the handshaking-peer accounting Core's connman
-                // performs (`net.cpp:1838-1845`, eviction cut to refusal).
-                let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
+                // test and any eviction before any thread exists: a separate
+                // count followed by an unconstrained spawn races concurrent
+                // accepts. Registration stays identity-checked, so the
+                // reservation itself is the handshaking-peer accounting
+                // Core's connman performs (`net.cpp:1819-1826`).
+                let (outbound_tx, outbound_rx) =
+                    crossbeam_channel::unbounded::<crate::QueuedFrame>();
                 let lease = crate::PeerLease::new_inbound(outbound_tx)
+                    .with_shared_budget(&shared.shared_outbound)
                     .with_no_ban(shared.banned.is_noban(peer_addr.ip()));
+                let netgroup = shared.address_book.as_ref().map_or_else(
+                    || crate::netgroup::NetGroups::default().group(peer_addr.ip()),
+                    |book| book.netgroup(peer_addr.ip()),
+                );
                 let Some(lease) = shared.peer_table.try_register_inbound(
                     peer_addr,
                     lease,
+                    &netgroup,
                     shared.max_inbound,
+                    approximate_best_block_depth(shared.chain_query.as_deref()),
                     &shared.activity,
                 ) else {
                     drop(stream);
@@ -815,7 +843,7 @@ fn dial(
 
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
-    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::QueuedFrame>();
     let lease = match (role, manual) {
         (crate::peer_info::PeerRole::FullRelay, false) => crate::PeerLease::new(outbound_tx),
         (crate::peer_info::PeerRole::BlockRelayOnly, false) => {
@@ -823,6 +851,7 @@ fn dial(
         }
         (_, true) => crate::PeerLease::new_manual(outbound_tx, role),
     }
+    .with_shared_budget(&shared.shared_outbound)
     .with_no_ban(shared.banned.is_noban(addr.ip()));
     let Some(lease) = shared
         .peer_table
@@ -1061,7 +1090,7 @@ fn spawn_handshake_thread(
     peer_addr: SocketAddr,
     shared: ConnectionShared,
     lease: crate::PeerLease,
-    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+    outbound_rx: crossbeam_channel::Receiver<crate::QueuedFrame>,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let peer_table = Arc::clone(&shared.peer_table);
@@ -1114,7 +1143,7 @@ fn run_handshake(
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
     lease: crate::PeerLease,
-    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+    outbound_rx: crossbeam_channel::Receiver<crate::QueuedFrame>,
 ) -> Result<(), crate::wire::PeerError> {
     if let Err(error) = shared.check_destination(peer_addr, lease.is_manual()) {
         shared.peer_table.remove_current(peer_addr, &lease);
@@ -1129,7 +1158,10 @@ fn run_handshake(
     }
 
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    // Eviction cancels the lease from the accept loop; reads then fail even
+    // mid-payload, as Core closes an evicted connection at once.
     let stream = match crate::CountingStream::from_connected(stream, counters)
+        .map(|stream| stream.stop_reading_when(lease.cancellation()))
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,
@@ -1243,7 +1275,7 @@ fn run_connected_session(
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
     lease: crate::PeerLease,
-    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+    outbound_rx: crossbeam_channel::Receiver<crate::QueuedFrame>,
     mut info: crate::PeerInfo,
 ) -> Result<(), crate::wire::PeerError> {
     // BIP339 announcement preference is the peer's received wtxidrelay,
@@ -1251,6 +1283,7 @@ fn run_connected_session(
     // completed handshake so relay never chooses a type during negotiation.
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
     info.send_headers = peer.capabilities.send_headers;
+    info.transport = peer.transport();
     let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
         #[cfg(test)]
         if WRITER_SETUP_FAIL.swap(false, Ordering::Relaxed) {
@@ -1291,7 +1324,7 @@ fn run_connected_session(
     let ready = shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
-    let transport = match peer.transport() {
+    let transport = match info.transport {
         crate::TransportProtocol::V1 => "v1",
         crate::TransportProtocol::V2 { .. } => "v2",
     };
@@ -1418,19 +1451,46 @@ enum KeepaliveAction {
 ///   folds in via [`Keepalive::observe_send`].
 /// POST: [`Keepalive::next_action`] orders a `ping` once [`PING_INTERVAL`]
 ///   of quiet has passed since the previous probe, and an `Expired` end
-///   once either direction has been silent past [`TIMEOUT_INTERVAL`].
-/// INVARIANT: the decision is a pure function of the recorded instants and
-///   the caller's `now`, and one ledger belongs to one connection thread,
-///   so a peer is never judged on another connection's traffic. Durations
-///   come from the monotonic clock, so a wall-clock adjustment cannot
-///   shorten or lengthen a timeout.
+///   once either direction has been silent past [`TIMEOUT_INTERVAL`]; while
+///   the loop has a `getdata` parked it reads nothing, so only the send
+///   direction can expire.
+/// INVARIANT: the decision is a pure function of the recorded instants, the
+///   open shared stall, and the caller's `now`, and one ledger belongs to one
+///   connection thread, so a peer is never judged on another connection's
+///   traffic. Durations come from the monotonic clock, so a wall-clock
+///   adjustment cannot shorten or lengthen a timeout.
+///
+/// # Shared stalls
+///
+/// While the node's aggregate outbound budget refuses this session's work
+/// (a deferred request, a parked `getdata` tail, a probe, the one-message
+/// read hold) the session reads nothing and sends nothing through no fault
+/// of the peer. The aggregate counts this session's own queued bytes with
+/// everyone else's: one slow peer can hold close to the bulk limit while
+/// others pause, with no fairness quota. The interval of such a refusal is
+/// a stall: it is not counted as silence in either direction, nor as the
+/// age of a parked tail. Local saturation, a dead writer and genuine
+/// silence outside a stall keep their rules.
 struct Keepalive {
     /// The instant the loop last read a message from the peer.
     last_recv: Instant,
     /// The instant the loop last queued a message for the peer.
     last_send: Instant,
-    /// The instant of the last probe this ledger ordered.
+    /// The instant of the last probe this ledger ordered. Never shifted by a
+    /// stall: the probe cadence is wall-clock.
     last_ping: Option<Instant>,
+    /// Start of the open stall; `None` outside one.
+    stall: Option<Instant>,
+    /// Set by a pass whose work the aggregate budget refused; consumed by
+    /// [`Keepalive::settle_pass`].
+    shared_refused: bool,
+}
+
+/// `last` moved forward by the part of the stall `[since, now]` that lies
+/// after it, so the time measured from `last` to `now` leaves the stalled
+/// time out.
+fn past_stall(last: Instant, since: Instant, now: Instant) -> Instant {
+    last + now.saturating_duration_since(last.max(since))
 }
 
 impl Keepalive {
@@ -1440,6 +1500,48 @@ impl Keepalive {
             last_recv: now,
             last_send: now,
             last_ping: None,
+            stall: None,
+            shared_refused: false,
+        }
+    }
+
+    /// Records that this pass's work was refused by `refusal`. Only an
+    /// aggregate refusal is a stall; a local one is the connection's own
+    /// queue state and keeps its rules.
+    fn note_refusal(&mut self, refusal: crate::connection::Refusal) {
+        if refusal == crate::connection::Refusal::Shared {
+            self.shared_refused = true;
+        }
+    }
+
+    /// `last` as the ledger judges it at `now`: with the open stall left out.
+    fn excluding_stall(&self, last: Instant, now: Instant) -> Instant {
+        self.stall
+            .map_or(last, |since| past_stall(last, since, now))
+    }
+
+    /// Closes one loop pass at `now`: opens a stall when the pass was
+    /// refused by the aggregate and none is open, and closes the open one
+    /// when it was not, moving the ledger's instants and the parked marker
+    /// past it.
+    ///
+    /// PRE: every refusal of the pass was reported through
+    /// [`Keepalive::note_refusal`] before this call.
+    /// POST: `last_recv`, `last_send` and `parked_since` exclude the closed
+    /// stall; the pass flag is clear.
+    fn settle_pass(&mut self, now: Instant, parked_since: &mut Option<Instant>) {
+        let blocked = std::mem::take(&mut self.shared_refused);
+        match (self.stall, blocked) {
+            (None, true) => self.stall = Some(now),
+            (Some(since), false) => {
+                self.stall = None;
+                self.last_recv = past_stall(self.last_recv, since, now);
+                self.last_send = past_stall(self.last_send, since, now);
+                if let Some(parked) = parked_since {
+                    *parked = past_stall(*parked, since, now);
+                }
+            }
+            (None, false) | (Some(_), true) => {}
         }
     }
 
@@ -1482,13 +1584,32 @@ impl Keepalive {
     /// minute, so this branch only covers a peer that takes our writes and
     /// never answers them.
     fn next_action(&self, now: Instant) -> KeepaliveAction {
-        if now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL
-            || now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL
-        {
+        self.decide(now, true)
+    }
+
+    /// [`Keepalive::next_action`] for a loop that holds an unserved `getdata`
+    /// and so reads nothing: the peer's silence is then the loop's own doing,
+    /// and receive silence does not expire the connection. Send silence
+    /// still does, and the parked tail has its own lifetime bound in the
+    /// loop.
+    fn next_action_while_parked(&self, now: Instant) -> KeepaliveAction {
+        self.decide(now, false)
+    }
+
+    /// The one decision behind both entry points. `receive_silence_expires`
+    /// is false only for [`Keepalive::next_action_while_parked`]; the probe
+    /// rule does not depend on it.
+    fn decide(&self, now: Instant, receive_silence_expires: bool) -> KeepaliveAction {
+        let last_recv = self.excluding_stall(self.last_recv, now);
+        let last_send = self.excluding_stall(self.last_send, now);
+        let receive_expired =
+            receive_silence_expires && now.saturating_duration_since(last_recv) > TIMEOUT_INTERVAL;
+        let send_expired = now.saturating_duration_since(last_send) > TIMEOUT_INTERVAL;
+        if receive_expired || send_expired {
             return KeepaliveAction::Expired;
         }
-        let idle = now.saturating_duration_since(self.last_recv) >= PING_INTERVAL
-            || now.saturating_duration_since(self.last_send) >= PING_INTERVAL;
+        let idle = now.saturating_duration_since(last_recv) >= PING_INTERVAL
+            || now.saturating_duration_since(last_send) >= PING_INTERVAL;
         let probe_owed = self
             .last_ping
             .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
@@ -1556,6 +1677,44 @@ mod keepalive_tests {
         );
     }
 
+    /// A loop that stopped reading to hold a `getdata` tail cannot hear the
+    /// peer, so the peer's silence is not its fault.
+    #[test]
+    fn parked_loop_does_not_expire_on_receive_silence() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        let now = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        assert_eq!(keepalive.next_action(now), KeepaliveAction::Expired);
+        assert_ne!(
+            keepalive.next_action_while_parked(now),
+            KeepaliveAction::Expired,
+            "the same ledger, parked, is not judged on receive silence"
+        );
+    }
+
+    #[test]
+    fn parked_loop_still_expires_on_send_silence() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_recv(t0 + TIMEOUT_INTERVAL);
+        assert_eq!(
+            keepalive.next_action_while_parked(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            KeepaliveAction::Expired
+        );
+    }
+
+    #[test]
+    fn parked_loop_orders_the_same_probe_as_an_unparked_one() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_send(t0);
+        assert_eq!(
+            keepalive.next_action_while_parked(t0 + PING_INTERVAL),
+            keepalive.next_action(t0 + PING_INTERVAL)
+        );
+    }
+
     #[test]
     fn fresh_activity_defers_the_timeout() {
         let t0 = Instant::now();
@@ -1575,6 +1734,229 @@ mod keepalive_tests {
     }
 }
 
+/// Pays for one pass's outbound messages out of reservations taken before
+/// the messages exist, so a body is loaded, and a reply is built, only while
+/// the queue space it will occupy is already owned.
+///
+/// The sink holds at most one production credit (a worst-case frame,
+/// reserved by [`ProductionSink::headroom`]) and at most one reply credit
+/// (reserved by the loop before it dispatched a request-scoped message).
+/// [`ProductionSink::send`] spends the production credit first, then the
+/// reply credit; the spent credit shrinks to the exact wire length and
+/// travels with the queued frame. A credit the pass never spends (a lookup
+/// that found nothing, a request that needed no reply) is returned when the
+/// sink drops.
+///
+/// INVARIANT: `headroom` is idempotent: a held production credit is reused,
+/// never replaced, so a run of misses charges the aggregate once.
+struct ProductionSink<'a> {
+    lease: &'a crate::PeerLease,
+    /// At most one live production credit.
+    production: std::cell::Cell<Option<crate::connection::OutboundCredit>>,
+    /// The request-scoped reply credit, if the loop reserved one.
+    reply: std::cell::Cell<Option<crate::connection::OutboundCredit>>,
+    /// The kind of the last refusal [`ProductionSink::headroom`] returned.
+    refused: std::cell::Cell<Option<crate::connection::Refusal>>,
+}
+
+impl<'a> ProductionSink<'a> {
+    fn new(lease: &'a crate::PeerLease, reply: Option<crate::connection::OutboundCredit>) -> Self {
+        Self {
+            lease,
+            production: std::cell::Cell::new(None),
+            reply: std::cell::Cell::new(reply),
+            refused: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Reserves, or reuses, the worst-case frame the next body will occupy.
+    ///
+    /// POST: `true` when a production credit is held; `false` when the
+    /// connection or the node cannot take one (the kind is recorded for
+    /// [`ProductionSink::refusal`]) or the lease is cancelled.
+    fn headroom(&self) -> bool {
+        if self.lease.is_cancelled() {
+            return false;
+        }
+        let reserved = match self.production.take().or_else(|| self.reply.take()) {
+            Some(held) => Ok(held),
+            None => self.lease.try_reserve_production(),
+        };
+        match reserved {
+            Ok(credit) => {
+                self.production.set(Some(credit));
+                true
+            }
+            Err(refusal) => {
+                self.refused.set(Some(refusal));
+                false
+            }
+        }
+    }
+
+    /// Queues `message` under the held reservation.
+    ///
+    /// PRE: the pass reserved a credit that covers `message`.
+    /// POST: the credit is spent. An unreserved send is a caller bug and is
+    /// refused rather than queued uncharged.
+    fn send(&self, message: crate::Message) -> Result<(), crate::wire::PeerError> {
+        let Some(credit) = self.production.take().or_else(|| self.reply.take()) else {
+            debug_assert!(false, "an outbound message was sent without a reservation");
+            return Err(crate::wire::PeerError::Protocol(
+                "unreserved outbound message",
+            ));
+        };
+        self.lease
+            .send_with(credit, message)
+            .map_err(|_| closed_queue())
+    }
+
+    /// Takes the kind of the last refusal [`ProductionSink::headroom`] saw.
+    fn refusal(&self) -> Option<crate::connection::Refusal> {
+        self.refused.take()
+    }
+}
+
+/// The lease is gone: the session ends without a peer fault.
+const fn closed_queue() -> crate::wire::PeerError {
+    crate::wire::PeerError::Protocol("outbound queue closed")
+}
+
+/// Full wire bytes the reply to `message` can occupy, or `None` when the
+/// message is answered with nothing the loop must reserve for.
+///
+/// The bound covers the largest reply the loop can build for the message,
+/// so the reservation is taken before the request is dispatched and the
+/// spent credit shrinks to the actual frame.
+fn reply_bound(message: &crate::Message, getaddr_answerable: bool) -> Option<usize> {
+    let payload = match message {
+        crate::Message::Ping(_) => 8,
+        crate::Message::GetHeaders(_) => 3 + crate::wire::MAX_HEADERS_MESSAGE_COUNT * 81,
+        crate::Message::GetAddr if getaddr_answerable => {
+            3 + crate::wire::MAX_ADDR_MESSAGE_COUNT * 33
+        }
+        // `getblocktxn`: hash, count, one index per short id; or a one-item
+        // `getdata` fallback.
+        crate::Message::CmpctBlock(cmpct) => {
+            (32 + 9 + 5 * cmpct.compact_block.short_ids.len()).max(1 + 36)
+        }
+        crate::Message::BlockTxn(_) => 1 + 36,
+        // A shallow answer is blocktxn; a deep answer may be the full block.
+        crate::Message::GetBlockTxn(_) => crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE,
+        _ => return None,
+    };
+    Some(crate::wire::HEADER_LEN + payload.min(crate::wire::MAX_MESSAGE_PAYLOAD))
+}
+
+/// Compact-block reconstruction messages (`CmpctBlock`, `BlockTxn`, `GetBlockTxn`)
+/// defer on local queue saturation rather than disconnecting.
+fn defers_on_local(message: &crate::Message) -> bool {
+    matches!(
+        message,
+        crate::Message::CmpctBlock(_)
+            | crate::Message::BlockTxn(_)
+            | crate::Message::GetBlockTxn(_)
+    )
+}
+
+/// Whether the loop answers `getaddr` from the address book on this
+/// connection now.
+fn getaddr_answerable(
+    lease: &crate::PeerLease,
+    shared: &ConnectionShared,
+    answered_getaddr: bool,
+) -> bool {
+    lease.is_inbound()
+        && !answered_getaddr
+        && lease.role().relays_transactions()
+        && shared.address_book.is_some()
+}
+
+/// What one retry of a deferred request left for the session loop to do.
+enum DeferredStep {
+    /// No request is deferred.
+    NoneHeld,
+    /// The request still waits for its reply reservation.
+    Waiting,
+    /// The session ends: the request outlived [`TIMEOUT_INTERVAL`] outside a
+    /// shared stall, or the writer has returned.
+    Ended,
+    /// The reply is reserved: dispatch the request once under it.
+    Ready(crate::Message, Option<crate::connection::OutboundCredit>),
+}
+
+/// Retries the one request whose reply could not be reserved when it was
+/// read.
+///
+/// PRE: nothing else is parked on `peer`: reading stops while a request is
+/// deferred, so a `getdata` tail cannot be parked beside it. `now` is the
+/// loop's clock reading for this pass.
+/// POST: `Ready` carries the request and its reservation, and the pause
+/// marker is cleared; otherwise the request stays deferred and this pass
+/// waited at most [`STREAM_POLL_INTERVAL`] on the budget.
+/// INVARIANT: only the aggregate's refusal feeds the stall. A
+/// local refusal keeps the existing per-peer high-water policy for
+/// unconditional replies and closes the connection. A conditional compact
+/// reply (`CmpctBlock`/`BlockTxn`) with a live writer defers instead: it
+/// waits without opening a stall, so its local wait counts toward the
+/// timeout, and a dead writer still ends the session.
+fn retry_deferred_request<S>(
+    peer: &mut Peer<S>,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    parked_since: &mut Option<Instant>,
+    getaddr_answerable: bool,
+    now: Instant,
+) -> DeferredStep {
+    let Some(message) = peer.deferred_inbound.take() else {
+        return DeferredStep::NoneHeld;
+    };
+    let since = *parked_since.get_or_insert(now);
+    let budget = lease.budget_handle();
+    if parked_tail_expired(keepalive.excluding_stall(since, now), now) || budget.writer_dead() {
+        return DeferredStep::Ended;
+    }
+    let Some(bound) = reply_bound(&message, getaddr_answerable) else {
+        *parked_since = None;
+        return DeferredStep::Ready(message, None);
+    };
+    let bulk = matches!(message, crate::Message::GetBlockTxn(_));
+    let reservation = if bulk {
+        lease.try_reserve_production()
+    } else {
+        lease.try_reserve_reply(bound)
+    };
+    let may_reserve = || {
+        if bulk {
+            budget.may_reserve_production()
+        } else {
+            budget.may_charge(bound)
+        }
+    };
+    match reservation {
+        Ok(credit) => {
+            *parked_since = None;
+            DeferredStep::Ready(message, Some(credit))
+        }
+        Err(crate::connection::Refusal::Local) => {
+            if defers_on_local(&message) && !budget.writer_dead() {
+                peer.deferred_inbound = Some(message);
+                budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
+                DeferredStep::Waiting
+            } else {
+                lease.cancel();
+                DeferredStep::Ended
+            }
+        }
+        Err(refusal) => {
+            keepalive.note_refusal(refusal);
+            peer.deferred_inbound = Some(message);
+            budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
+            DeferredStep::Waiting
+        }
+    }
+}
+
 /// Dispatches one Ready connection's inbound messages until it ends.
 ///
 /// PRE: `lease` is the registered lease of the connection `peer` wraps, and
@@ -1584,6 +1966,14 @@ mod keepalive_tests {
 /// error that ended the connection otherwise.
 /// INVARIANT: Every sink write goes through `shared`, so sinks observe the
 /// start epoch's cancellation token.
+///
+/// Every outbound message is paid for before it exists. A body is served
+/// only while the pass holds a worst-case reservation, and a request-scoped
+/// reply (`pong`, `headers`, `addr`, a compact-block follow-up) only under a
+/// reservation taken before the request is dispatched. When the node's
+/// aggregate budget refuses that reservation the request is deferred, the
+/// loop reads nothing until it is reserved, and the refused time is not
+/// counted as silence ([`Keepalive`]). The aggregate never ends a session.
 ///
 /// `ibd` is the transaction-relay gate, read lazily per relevant message.
 /// PRE: use the node-owned IBD decision. POST: a closed gate requests no
@@ -1608,19 +1998,21 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 
     let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
+    // When the current pause (a `getdata` tail, the one-message read hold,
+    // or a deferred request) first began; `None` while nothing is paused.
+    let mut parked_since: Option<Instant> = None;
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
     let mut address_budget = 32_u64;
     let mut last_address_refill = crate::addrman::now();
     let mut answered_getaddr = false;
-    if !lease.is_inbound()
+    // The one `getaddr` an outbound relay connection asks for. It stays owed
+    // while the node's aggregate budget is full and is sent on a later pass.
+    let mut getaddr_owed = !lease.is_inbound()
         && lease.role().relays_transactions()
         && shared
             .address_book
             .as_ref()
-            .is_some_and(|book| book.len() < 1024)
-    {
-        let _ = lease.send(crate::Message::GetAddr);
-    }
+            .is_some_and(|book| book.len() < 1024);
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
@@ -1632,20 +2024,30 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
 
         keepalive.observe_send(lease.last_send());
-        match keepalive.next_action(Instant::now()) {
+        let paused =
+            peer.has_parked_getdata() || parked_since.is_some() || peer.deferred_inbound.is_some();
+        let action = if paused {
+            keepalive.next_action_while_parked(Instant::now())
+        } else {
+            keepalive.next_action(Instant::now())
+        };
+        match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
-                // A probe queued behind a saturated outbound queue would
-                // cancel the lease for our own queue state, not for the
-                // peer's silence; skip it while the queue has no production
+                // A probe the connection's own queue cannot take would close
+                // the lease for our own queue state, not for the peer's
+                // silence; skip it while the local queue has no production
                 // headroom and let the timeout rule judge the connection on
-                // its next due probe.
-                if budget.has_block_production_headroom() {
-                    let nonce = generate_nonce(peer_addr);
-                    lease.send(crate::Message::Ping(nonce)).map_err(|_| {
-                        crate::wire::PeerError::Protocol("outbound queue closed or saturated")
-                    })?;
-                    keepalive.record_probe(Instant::now());
+                // its next due probe. The node aggregate is different: its
+                // refusal keeps the probe owed and closes nothing.
+                if budget.local_production_headroom() {
+                    match lease.send(crate::Message::Ping(generate_nonce(peer_addr))) {
+                        Ok(()) => keepalive.record_probe(Instant::now()),
+                        Err(crate::OutboundRefusal::Saturated(_)) => {
+                            keepalive.note_refusal(crate::connection::Refusal::Shared);
+                        }
+                        Err(crate::OutboundRefusal::Closed(_)) => return Err(closed_queue()),
+                    }
                 }
             }
             KeepaliveAction::Expired => {
@@ -1657,233 +2059,583 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
+        if getaddr_owed {
+            match lease.send(crate::Message::GetAddr) {
+                // The aggregate is full: the request stays owed.
+                Err(crate::OutboundRefusal::Saturated(_)) => {}
+                // The lease is cancelled; the loop ends at its top.
+                Ok(()) | Err(crate::OutboundRefusal::Closed(_)) => getaddr_owed = false,
+            }
+        }
+
         compact_reconstruction.prune(Instant::now());
 
         // Retry publication on the existing socket poll, keeping ping, inbound
         // traffic and lease cancellation responsive while the index catches up.
-        if let Some((request, deadline)) = peer.pending_filter_request.take()
-            && let Some(chain) = shared.chain_query.as_deref()
+        // The request waits its allowance out for publication or for this
+        // connection's own queue; time the node aggregate refused it is not
+        // charged.
+        if let Some(chain) = shared.chain_query.as_deref()
+            && let Some(mut parked) = peer.pending_filter_request.take()
         {
-            if Instant::now() >= deadline {
+            if parked.charge(Instant::now()) {
                 return Err(crate::wire::PeerError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "compact filter index publication timed out",
                 )));
             }
-            if !chain.serve_compact_filters(
-                &request,
-                &|| !lease.is_cancelled() && budget.has_block_production_headroom(),
+            let sink = ProductionSink::new(lease, None);
+            let serving = chain.serve_compact_filters(
+                &parked.pending,
+                &|| sink.headroom(),
                 &mut |response| {
-                    lease
-                        .send(response)
+                    sink.send(response)
                         .map(|()| keepalive.record_send(Instant::now()))
-                        .map_err(|_| {
-                            crate::wire::PeerError::Protocol("outbound queue closed or saturated")
-                        })
                 },
-            )? {
-                peer.pending_filter_request = Some((request, deadline));
+            )?;
+            parked.last = crate::peer::FilterHalt::from_refusal(sink.refusal());
+            if let crate::FilterServing::Pending(remainder) = serving {
+                parked.pending = remainder;
+                peer.pending_filter_request = Some(parked);
             }
         }
 
-        let read_result = peer.read_message();
-        if lease.is_cancelled() {
-            tracing::debug!(peer_addr = %peer_addr, "p2p peer lease revoked during read; closing");
-            return Ok(());
-        }
-        match read_result {
-            Ok((message, raw)) => {
-                keepalive.record_recv(Instant::now());
-                let Some(message) = enforce_relay_role(lease.role(), message)? else {
-                    continue;
-                };
-                tracing::trace!(
+        // A request whose reply could not be reserved is retried before the
+        // peer is heard again; so is a parked `getdata`, which is answered
+        // before anything else is read: the loop reads nothing until the
+        // tail is served, so a peer cannot queue more work behind one it is
+        // not draining.
+        let mut resumed = None;
+        let step = match retry_deferred_request(
+            peer,
+            lease,
+            &mut keepalive,
+            &mut parked_since,
+            getaddr_answerable(lease, shared, answered_getaddr),
+            Instant::now(),
+        ) {
+            DeferredStep::NoneHeld => {
+                step_parked_getdata(peer, shared, lease, &mut keepalive, &mut parked_since)?
+            }
+            DeferredStep::Waiting => ParkedStep::StillParked,
+            DeferredStep::Ended => ParkedStep::Ended,
+            DeferredStep::Ready(message, reply) => {
+                resumed = Some((message, reply));
+                ParkedStep::NotParked
+            }
+        };
+        keepalive.settle_pass(Instant::now(), &mut parked_since);
+        match step {
+            ParkedStep::NotParked => {}
+            ParkedStep::StillParked => continue,
+            ParkedStep::Ended => {
+                tracing::debug!(
                     peer_addr = %peer_addr,
-                    command = ?std::mem::discriminant(&message),
-                    "p2p message received",
+                    "p2p parked request cannot be served; closing"
                 );
-                // Publish announced identities before dispatch can consult the
-                // gateway or invoke callbacks while the relay worker runs.
-                if let crate::Message::Inv(items) = &message {
-                    shared
-                        .peer_table
-                        .note_transaction_inventory(lease.source(peer_addr), items);
-                }
-                let dispatched = crate::dispatch::dispatch_inbound_full(
-                    peer,
-                    &message,
-                    shared.chain_query.as_deref(),
-                    shared.tx_inventory.as_deref(),
-                    &tx_relay_open,
-                    &|| budget.has_block_production_headroom(),
-                    &mut |response| {
-                        lease
-                            .send(response)
-                            .map(|()| keepalive.record_send(Instant::now()))
-                            .map_err(|_| {
-                                crate::wire::PeerError::Protocol(
-                                    "outbound queue closed or saturated",
-                                )
-                            })
-                    },
-                    &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
-                    &mut |items| {
-                        shared
-                            .peer_table
-                            .announce_transactions(lease.source(peer_addr), &items);
-                    },
+                return Ok(());
+            }
+        }
+
+        let (message, raw, reply) = if let Some((message, reply)) = resumed {
+            // Already read, role-checked and counted as received; no body of
+            // its own, so there are no wire bytes to carry.
+            (message, bytes::Bytes::new(), reply)
+        } else {
+            let read_result = peer.read_message();
+            if lease.is_cancelled() {
+                tracing::debug!(
+                    peer_addr = %peer_addr,
+                    "p2p peer lease revoked during read; closing"
                 );
-                if let Err(error) = dispatched {
-                    if lease.ignores_protocol_error(&error) {
-                        shared.note_misbehavior(peer_addr, lease, &error);
+                return Ok(());
+            }
+            match read_result {
+                // A v2 decoy or an undefined short id is not receive activity:
+                // no recv credit, no trace, and the idle checks above still run.
+                Ok(None) => continue,
+                Ok(Some((message, raw))) => {
+                    keepalive.record_recv(Instant::now());
+                    let Some(message) = enforce_relay_role(lease.role(), message)? else {
                         continue;
-                    }
-                    return Err(error);
-                }
-                match &message {
-                    crate::Message::FeeFilter(rate) => shared
-                        .peer_table
-                        .receive_fee_filter(lease.source(peer_addr), *rate),
-                    crate::Message::Tx(tx) => {
-                        use bitcoin::hashes::Hash as _;
-                        shared.peer_table.note_transaction_inventory(
-                            lease.source(peer_addr),
-                            &[
-                                bitcoin::p2p::message_blockdata::Inventory::Transaction(
-                                    bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()),
-                                ),
-                                bitcoin::p2p::message_blockdata::Inventory::WTx(
-                                    bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()),
-                                ),
-                            ],
-                        );
-                    }
-                    _ => {}
-                }
-                if tx_relay_open() {
-                    shared.update_transaction_requests(lease.source(peer_addr), &message);
-                }
-                match message {
-                    crate::Message::Addr(addresses) => {
-                        let addresses: Vec<_> = addresses
-                            .iter()
-                            .filter_map(|(seen, addr)| {
-                                addr.socket_addr().ok().map(|socket| {
-                                    (socket, addr.services.to_u64(), u64::from(*seen))
-                                })
-                            })
-                            .collect();
-                        learn_addresses(
-                            shared,
-                            lease,
-                            peer_addr,
-                            &addresses,
-                            &mut address_budget,
-                            &mut last_address_refill,
-                        );
-                    }
-                    crate::Message::AddrV2(addresses) => {
-                        let addresses: Vec<_> = addresses
-                            .iter()
-                            .filter_map(|addr| {
-                                let ip: std::net::IpAddr = match addr.addr {
-                                    bitcoin::p2p::address::AddrV2::Ipv4(ip) => ip.into(),
-                                    bitcoin::p2p::address::AddrV2::Ipv6(ip) => ip.into(),
-                                    _ => return None,
-                                };
-                                Some((
-                                    SocketAddr::new(ip, addr.port),
-                                    addr.services.to_u64(),
-                                    u64::from(addr.time),
-                                ))
-                            })
-                            .collect();
-                        learn_addresses(
-                            shared,
-                            lease,
-                            peer_addr,
-                            &addresses,
-                            &mut address_budget,
-                            &mut last_address_refill,
-                        );
-                    }
-                    crate::Message::GetAddr
-                        if lease.is_inbound()
-                            && !answered_getaddr
-                            && lease.role().relays_transactions() =>
-                    {
-                        answered_getaddr = true;
-                        if let Some(book) = &shared.address_book {
-                            let _ = lease
-                                .send(crate::Message::Addr(book.gossip(crate::addrman::now())));
+                    };
+                    // Reserve the reply before the request is dispatched:
+                    // nothing is built, and nothing is queued uncharged, for
+                    // a reply the queue cannot take. A refusal defers the
+                    // request; it is dispatched once, after the reservation.
+                    let bound = reply_bound(
+                        &message,
+                        getaddr_answerable(lease, shared, answered_getaddr),
+                    );
+                    let reply = match bound.map(|bound| {
+                        if matches!(message, crate::Message::GetBlockTxn(_)) {
+                            lease.try_reserve_production()
+                        } else {
+                            lease.try_reserve_reply(bound)
                         }
-                    }
-                    crate::Message::Headers(headers) => {
-                        shared.send_headers(lease.source(peer_addr), headers, true, false);
-                    }
-                    crate::Message::Block(block) => {
-                        shared.send_block(lease, peer_addr, block, raw);
-                    }
-                    crate::Message::Tx(tx) => forward_tx_if_relay_open(
-                        shared,
-                        lease.source(peer_addr),
-                        tx,
-                        peer_addr,
-                        tx_relay_open(),
-                    ),
-                    crate::Message::SendHeaders => {
-                        shared.peer_table.note_send_headers(lease.source(peer_addr));
-                    }
-                    crate::Message::SendCmpct(send_cmpct)
-                        if peer
-                            .compact_blocks
-                            .remote_preference()
-                            .is_some_and(|preference| preference.version == send_cmpct.version) =>
-                    {
-                        // Only a version we advertise negotiates BIP152 relay.
-                        // The high-bandwidth push preference is a separate
-                        // per-peer choice and must not gate compact-fetch
-                        // eligibility.
-                        shared
-                            .peer_table
-                            .note_compact_relay(lease.source(peer_addr));
-                        shared.peer_table.note_compact_announcement(
-                            lease.source(peer_addr),
-                            &peer.compact_blocks,
-                        );
-                        if let Some(announcer) = &shared.block_announcer {
-                            announcer.reconcile_high_bandwidth_peers();
+                    }) {
+                        None => None,
+                        Some(Ok(credit)) => Some(credit),
+                        Some(Err(crate::connection::Refusal::Local)) => {
+                            if defers_on_local(&message) && !budget.writer_dead() {
+                                peer.deferred_inbound = Some(message);
+                                parked_since.get_or_insert_with(Instant::now);
+                                keepalive.settle_pass(Instant::now(), &mut parked_since);
+                                continue;
+                            }
+                            lease.cancel();
+                            return Err(closed_queue());
                         }
-                    }
-                    crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
-                        process_compact_wire_message(
-                            &message,
-                            &mut compact_reconstruction,
-                            peer.compact_blocks.local_version(),
-                            shared.compact_hints.as_deref(),
-                            lease,
-                            peer_addr,
-                            shared,
-                        );
-                    }
-                    _ => {}
+                        Some(Err(refusal)) => {
+                            keepalive.note_refusal(refusal);
+                            peer.deferred_inbound = Some(message);
+                            parked_since.get_or_insert_with(Instant::now);
+                            keepalive.settle_pass(Instant::now(), &mut parked_since);
+                            continue;
+                        }
+                    };
+                    (message, raw, reply)
                 }
+                Err(crate::wire::PeerError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) if lease.ignores_protocol_error(&error) => {
+                    shared.note_misbehavior(peer_addr, lease, &error);
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
-            Err(crate::wire::PeerError::Io(error))
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                continue;
-            }
-            Err(error) if lease.ignores_protocol_error(&error) => {
+        };
+
+        tracing::trace!(
+            peer_addr = %peer_addr,
+            command = ?std::mem::discriminant(&message),
+            "p2p message received",
+        );
+        // Publish announced identities before dispatch can consult the
+        // gateway or invoke callbacks while the relay worker runs.
+        if let crate::Message::Inv(items) = &message {
+            shared
+                .peer_table
+                .note_transaction_inventory(lease.source(peer_addr), items);
+        }
+        let sink = ProductionSink::new(lease, reply);
+        let dispatched = crate::dispatch::dispatch_inbound_full(
+            peer,
+            &message,
+            shared.chain_query.as_deref(),
+            shared.tx_inventory.as_deref(),
+            &tx_relay_open,
+            &|| sink.headroom(),
+            &mut |response| {
+                sink.send(response)
+                    .map(|()| keepalive.record_send(Instant::now()))
+            },
+            &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
+            &mut |items| {
+                shared
+                    .peer_table
+                    .announce_transactions(lease.source(peer_addr), &items);
+            },
+        );
+        if let Err(error) = dispatched {
+            if lease.ignores_protocol_error(&error) {
                 shared.note_misbehavior(peer_addr, lease, &error);
                 continue;
             }
-            Err(error) => return Err(error),
+            return Err(error);
+        }
+        // A first filter attempt that stopped records why, so the retry
+        // charges its deadline only for publication or the local queue.
+        if matches!(
+            message,
+            crate::Message::GetCFilters(_)
+                | crate::Message::GetCFHeaders(_)
+                | crate::Message::GetCFCheckpt(_)
+        ) && let Some(parked) = peer.pending_filter_request.as_mut()
+        {
+            parked.last = crate::peer::FilterHalt::from_refusal(sink.refusal());
+        }
+        // A `getdata` that filled the queue to its last slot leaves no room
+        // for the reply to the next request. Hold reads until the queue can
+        // take one message.
+        if matches!(message, crate::Message::GetData(_))
+            && !budget.may_charge(crate::wire::HEADER_LEN)
+        {
+            parked_since.get_or_insert_with(Instant::now);
+        }
+        match &message {
+            crate::Message::FeeFilter(rate) => shared
+                .peer_table
+                .receive_fee_filter(lease.source(peer_addr), *rate),
+            crate::Message::Tx(tx) => {
+                use bitcoin::hashes::Hash as _;
+                shared.peer_table.note_transaction_inventory(
+                    lease.source(peer_addr),
+                    &[
+                        bitcoin::p2p::message_blockdata::Inventory::Transaction(
+                            bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()),
+                        ),
+                        bitcoin::p2p::message_blockdata::Inventory::WTx(
+                            bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()),
+                        ),
+                    ],
+                );
+            }
+            _ => {}
+        }
+        if tx_relay_open() {
+            shared.update_transaction_requests(lease.source(peer_addr), &message);
+        }
+        match message {
+            crate::Message::Addr(addresses) => {
+                let addresses: Vec<_> = addresses
+                    .iter()
+                    .filter_map(|(seen, addr)| {
+                        addr.socket_addr()
+                            .ok()
+                            .map(|socket| (socket, addr.services.to_u64(), u64::from(*seen)))
+                    })
+                    .collect();
+                learn_addresses(
+                    shared,
+                    lease,
+                    peer_addr,
+                    &addresses,
+                    &mut address_budget,
+                    &mut last_address_refill,
+                );
+            }
+            crate::Message::AddrV2(addresses) => {
+                let addresses: Vec<_> = addresses
+                    .iter()
+                    .filter_map(|addr| {
+                        let ip: std::net::IpAddr = match addr.addr {
+                            bitcoin::p2p::address::AddrV2::Ipv4(ip) => ip.into(),
+                            bitcoin::p2p::address::AddrV2::Ipv6(ip) => ip.into(),
+                            _ => return None,
+                        };
+                        Some((
+                            SocketAddr::new(ip, addr.port),
+                            addr.services.to_u64(),
+                            u64::from(addr.time),
+                        ))
+                    })
+                    .collect();
+                learn_addresses(
+                    shared,
+                    lease,
+                    peer_addr,
+                    &addresses,
+                    &mut address_budget,
+                    &mut last_address_refill,
+                );
+            }
+            crate::Message::GetAddr
+                if lease.is_inbound()
+                    && !answered_getaddr
+                    && lease.role().relays_transactions() =>
+            {
+                answered_getaddr = true;
+                if let Some(book) = &shared.address_book {
+                    let rows = book.gossip(crate::addrman::now());
+                    // BIP155: a peer that negotiated `sendaddrv2`
+                    // answers in `addrv2`. The rows are socket
+                    // addresses, so every entry is IPv4/IPv6 either
+                    // way and both replies carry the same entries.
+                    let reply = if peer.capabilities.addr_v2 {
+                        crate::Message::AddrV2(addr_v2_rows(&rows))
+                    } else {
+                        crate::Message::Addr(rows)
+                    };
+                    // Sent under the reservation taken before dispatch; a
+                    // closed lease ends the loop at its top.
+                    let _ = sink.send(reply);
+                }
+            }
+            crate::Message::Headers(headers) => {
+                shared.send_headers(lease.source(peer_addr), headers, true, false);
+            }
+            crate::Message::Block(block) => {
+                shared.send_block(lease, peer_addr, block, raw);
+            }
+            crate::Message::Tx(tx) => forward_tx_if_relay_open(
+                shared,
+                lease.source(peer_addr),
+                tx,
+                peer_addr,
+                tx_relay_open(),
+            ),
+            crate::Message::SendHeaders => {
+                shared.peer_table.note_send_headers(lease.source(peer_addr));
+            }
+            crate::Message::SendCmpct(send_cmpct)
+                if peer
+                    .compact_blocks
+                    .remote_preference()
+                    .is_some_and(|preference| preference.version == send_cmpct.version) =>
+            {
+                // Only a version we advertise negotiates BIP152 relay.
+                // The high-bandwidth push preference is a separate
+                // per-peer choice and must not gate compact-fetch
+                // eligibility.
+                shared
+                    .peer_table
+                    .note_compact_relay(lease.source(peer_addr));
+                shared
+                    .peer_table
+                    .note_compact_announcement(lease.source(peer_addr), &peer.compact_blocks);
+                if let Some(announcer) = &shared.block_announcer {
+                    announcer.reconcile_high_bandwidth_peers();
+                }
+            }
+            crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
+                process_compact_wire_message(
+                    &message,
+                    &mut compact_reconstruction,
+                    peer.compact_blocks.local_version(),
+                    shared.compact_hints.as_deref(),
+                    &sink,
+                    peer_addr,
+                    shared,
+                );
+            }
+            _ => {}
         }
     }
+}
+
+/// What one pass over a parked `getdata` left for the session loop to do.
+#[derive(Debug, PartialEq, Eq)]
+enum ParkedStep {
+    /// Nothing is parked or held: the loop reads the peer.
+    NotParked,
+    /// A tail is still parked, or reads are held until the queue can take
+    /// the reply to the peer's next request: the loop repeats its checks
+    /// without reading.
+    StillParked,
+    /// The session ends: the tail outlived [`TIMEOUT_INTERVAL`], the writer
+    /// has returned, or the lease was cancelled while serving.
+    Ended,
+}
+
+/// Advances a parked `getdata` by one pass without blocking longer than
+/// [`STREAM_POLL_INTERVAL`].
+///
+/// PRE: `lease` is the connection `peer` wraps and `parked_since` is the
+/// loop's own marker: set while a `getdata` is parked and after one that
+/// answered into a queue with no send capacity left.
+/// POST: With nothing parked and no marker, returns `NotParked`. Otherwise
+/// the marker records when the pause began, and an old pause (past
+/// [`TIMEOUT_INTERVAL`], not counting time the node aggregate refused it) or
+/// a dead writer ends the session. With a tail or parked misses, the pass is
+/// one [`advance_parked_getdata`]. With neither, the answer is complete but
+/// the queue may still be full of it, and the pass holds reads until a
+/// one-message charge succeeds: the reply to the peer's next request is
+/// reserved before it is dispatched, so reading it first would only defer
+/// it. Once the probe charge is accepted it is returned at once, the marker
+/// clears and the loop reads.
+/// INVARIANT: this reads nothing from the peer and holds no pool, table, or
+/// socket lock while it waits; the wait is bounded, so lease cancellation,
+/// the keepalive's send check, and the pause's age are rechecked at least
+/// once per [`STREAM_POLL_INTERVAL`]. Every message is queued under a
+/// reservation, so the pause itself never cancels the lease, and the
+/// aggregate's refusal is reported to `keepalive` as a stall, never as an
+/// error. Only a `getdata` establishes the hold; a connection that never
+/// sent one keeps the plain saturation policy.
+fn step_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    parked_since: &mut Option<Instant>,
+) -> Result<ParkedStep, crate::wire::PeerError> {
+    let parked = peer.has_parked_getdata();
+    if !parked && parked_since.is_none() {
+        return Ok(ParkedStep::NotParked);
+    }
+    let now = Instant::now();
+    let since = *parked_since.get_or_insert(now);
+    let budget = lease.budget_handle();
+    if parked_tail_expired(keepalive.excluding_stall(since, now), now) || budget.writer_dead() {
+        return Ok(ParkedStep::Ended);
+    }
+    if !parked {
+        // A one-message probe that matches this hold's predicate. The probe
+        // credit is returned at once; nothing is sent.
+        return match budget.try_charge(crate::wire::HEADER_LEN) {
+            Ok(probe) => {
+                drop(probe);
+                *parked_since = None;
+                Ok(ParkedStep::NotParked)
+            }
+            Err(refusal) => {
+                keepalive.note_refusal(refusal);
+                budget.wait_for(STREAM_POLL_INTERVAL, || {
+                    budget.may_charge(crate::wire::HEADER_LEN)
+                });
+                Ok(ParkedStep::StillParked)
+            }
+        };
+    }
+    match advance_parked_getdata(peer, shared, lease, keepalive, &budget) {
+        Err(_) if lease.is_cancelled() => Ok(ParkedStep::Ended),
+        advanced => advanced.map(|()| ParkedStep::StillParked),
+    }
+}
+
+/// One pass over a parked `getdata` that neither reads nor sleeps past
+/// [`STREAM_POLL_INTERVAL`].
+///
+/// PRE: something is parked on `peer`, and `budget` is `lease`'s.
+/// POST: the misses found before the halt are sent in one `notfound` on the
+/// first pass that can reserve exactly that message; a refusal keeps them.
+/// The tail resumes only once the misses are out, and then only while a
+/// worst-case reservation is held for each body; the pass waits on the
+/// budget when either is refused. Passes recur on every wake and at least
+/// once per [`STREAM_POLL_INTERVAL`], so capacity that returns is noticed
+/// within one interval. The peer hears the misses before any later item of
+/// its request.
+/// INVARIANT: nothing is queued without a reservation, so the pause is
+/// never a disconnect of this connection for its own queue state or for the
+/// node's. A send that finds the lease cancelled propagates; the caller
+/// ([`step_parked_getdata`]) maps a cancelled lease to a plain session end.
+fn advance_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &Arc<crate::connection::OutboundBudget>,
+) -> Result<(), crate::wire::PeerError> {
+    if !report_parked_misses(peer, lease, keepalive, budget)? {
+        return Ok(());
+    }
+    resume_parked_getdata(peer, shared, lease, keepalive, budget)
+}
+
+/// Full wire bytes of a `notfound` that lists `items` inventory vectors.
+fn notfound_wire_bound(items: usize) -> usize {
+    let count = u64::try_from(items).unwrap_or(u64::MAX);
+    crate::wire::HEADER_LEN + bitcoin_rs_primitives::varint::encode(count).len() + 36 * items
+}
+
+/// Sends the misses parked with a tail as one `notfound`.
+///
+/// PRE: nothing; the reservation happens here, so no state can change
+/// between a check and the send.
+/// POST: `true` when no misses remain parked (none were, or the one
+/// `notfound` that lists them was queued under an exact reservation made
+/// before it was built). `false` when the reservation was refused: nothing
+/// was sent, the misses stay parked, the refusal kind was reported to
+/// `keepalive`, and the pass waited on the budget.
+/// INVARIANT: the list is taken only after its reservation succeeded, so a
+/// refusal loses nothing and builds nothing.
+fn report_parked_misses<S>(
+    peer: &mut Peer<S>,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &Arc<crate::connection::OutboundBudget>,
+) -> Result<bool, crate::wire::PeerError> {
+    if peer.pending_notfound.is_empty() {
+        return Ok(true);
+    }
+    let bound = notfound_wire_bound(peer.pending_notfound.len());
+    let credit = match lease.try_reserve_reply(bound) {
+        Ok(credit) => credit,
+        Err(refusal) => {
+            keepalive.note_refusal(refusal);
+            budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_charge(bound));
+            return Ok(false);
+        }
+    };
+    let misses = std::mem::take(&mut peer.pending_notfound);
+    lease
+        .send_with(credit, crate::Message::NotFound(misses))
+        .map(|()| keepalive.record_send(Instant::now()))
+        .map_err(|_| closed_queue())?;
+    Ok(true)
+}
+
+/// Whether a tail parked at `since` has outlived [`TIMEOUT_INTERVAL`], the
+/// longest a connection may owe the peer answers it cannot queue. Callers
+/// pass `since` with any open shared stall already excluded.
+fn parked_tail_expired(since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(since) > TIMEOUT_INTERVAL
+}
+
+/// Serves the parked tail from its first item. The new tail and the misses
+/// that follow are stored back on `peer`.
+///
+/// PRE: `peer` has a parked tail, and the misses parked before the halt
+/// have been sent.
+/// POST: everything the gate does not stop again is answered in request
+/// order; whatever the gate stops is the stored tail and misses. When the
+/// gate stopped it, the refusal kind is reported to `keepalive` and the pass
+/// waited on the budget for production room.
+/// INVARIANT: every body is loaded while the sink holds a worst-case
+/// reservation, so a refused reservation materializes nothing and sends
+/// nothing, and a halt neither disconnects nor loses an item: `serve_getdata`
+/// returns the refused item as the head of the tail. The reservation is
+/// reused across lookups that send nothing.
+fn resume_parked_getdata<S>(
+    peer: &mut Peer<S>,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+    keepalive: &mut Keepalive,
+    budget: &Arc<crate::connection::OutboundBudget>,
+) -> Result<(), crate::wire::PeerError> {
+    let sink = ProductionSink::new(lease, None);
+    let mut send = |response: crate::Message| {
+        sink.send(response)
+            .map(|()| keepalive.record_send(Instant::now()))
+    };
+    let compact_version = peer.compact_blocks.servable_version();
+    let mut not_found = Vec::new();
+    let tail = crate::dispatch::serve_getdata(
+        shared.chain_query.as_deref(),
+        shared.tx_inventory.as_deref(),
+        compact_version,
+        &peer.pending_getdata,
+        &mut not_found,
+        &|| sink.headroom(),
+        &mut send,
+    )?;
+    peer.pending_getdata = tail;
+    peer.pending_notfound = not_found;
+    if let Some(refusal) = sink.refusal() {
+        keepalive.note_refusal(refusal);
+        budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_reserve_production());
+    }
+    Ok(())
+}
+
+/// Renders one gossip round as BIP155 `addrv2` rows.
+///
+/// Only IPv4 and IPv6 addresses exist in the book: every row comes from a
+/// real socket address (`Address::socket_addr`), so the conversion is total
+/// over what `gossip` returns. Tor and I2P networks are never served, and the
+/// 32-entry cap is the book's own (`MAX_GOSSIP`), unchanged by the encoding.
+fn addr_v2_rows(rows: &[(u32, bitcoin::p2p::address::Address)]) -> Vec<AddrV2Message> {
+    rows.iter()
+        .filter_map(|(time, address)| {
+            let socket = address.socket_addr().ok()?;
+            let (addr, port) = match socket.ip() {
+                std::net::IpAddr::V4(ip) => (AddrV2::Ipv4(ip), socket.port()),
+                std::net::IpAddr::V6(ip) => (AddrV2::Ipv6(ip), socket.port()),
+            };
+            Some(AddrV2Message {
+                time: *time,
+                services: address.services,
+                addr,
+                port,
+            })
+        })
+        .collect()
 }
 
 /// Consume a bounded, replenishing per-connection gossip allowance before
@@ -1916,9 +2668,11 @@ fn learn_addresses(
 /// so the announced tip reaches the tree and the ordinary window
 /// machinery can fetch the body.
 ///
-/// PRE: `message` came from the connection that `lease` identifies.
+/// PRE: `message` came from the connection that `sink`'s lease identifies,
+/// and the loop reserved `sink`'s reply credit for it ([`reply_bound`]).
 /// POST: Forward the outcome through `shared`: a finished block to the
-/// block sink, a follow-up request to the same connection.
+/// block sink, a follow-up request to the same connection under the reply
+/// credit.
 /// INVARIANT: A header forward marks `body_fetch_owned` exactly when the
 /// outcome itself fetches the body, and is never a `headers` response.
 fn process_compact_wire_message(
@@ -1926,12 +2680,30 @@ fn process_compact_wire_message(
     compact_reconstruction: &mut crate::compact_blocks::Reconstruction,
     local_compact_version: Option<u64>,
     compact_hints: Option<&dyn crate::compact_blocks::CompactBlockHints>,
-    lease: &crate::PeerLease,
+    sink: &ProductionSink<'_>,
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
 ) {
-    let identity_version =
-        local_compact_version.unwrap_or(crate::compact_blocks::COMPACT_BLOCK_VERSION);
+    let lease = sink.lease;
+    // Reconstruction scans the whole mempool, so a compact block must first
+    // earn it with its header; anything else is only a header announcement.
+    // Without a chain view nothing qualifies.
+    if let crate::Message::CmpctBlock(cmpct) = message
+        && let Some(header) = crate::compact_blocks::native_header(&cmpct.compact_block.header)
+        && !shared.block_sync.as_ref().is_some_and(|sync| {
+            sync.compact_reconstruction_admissible(lease.source(peer_addr), &header)
+        })
+    {
+        tracing::debug!(
+            peer_addr = %peer_addr,
+            hash = %header.compute_hash(),
+            "p2p compact block header does not earn reconstruction"
+        );
+        shared.send_headers(lease.source(peer_addr), vec![header], false, false);
+        return;
+    }
+
+    let identity_version = local_compact_version.unwrap_or(crate::peer::COMPACT_BLOCK_VERSION);
     let outcome = process_compact_message(
         compact_reconstruction,
         message,
@@ -1963,7 +2735,7 @@ fn process_compact_wire_message(
     // left on the connection: a failed send enqueues nothing, and marking
     // either path anyway would suppress recovery of that block from
     // another peer.
-    let fetch_issued = handle_compact_outcome(outcome, lease, peer_addr, shared);
+    let fetch_issued = handle_compact_outcome(outcome, sink, peer_addr, shared);
     if let Some(header) = announced_header {
         let fetch_owned = body_fetch_owned && fetch_issued;
         shared.send_headers(lease.source(peer_addr), vec![header], false, fetch_owned);
@@ -1983,19 +2755,21 @@ fn process_compact_wire_message(
 /// the node's download window resolves both by hash on arrival, so no
 /// request ownership is lost or duplicated.
 ///
-/// PRE: `outcome` came from a message of the connection `lease` identifies.
+/// PRE: `outcome` came from a message of the connection `sink`'s lease
+/// identifies, and `sink` holds the reply reservation taken for it.
 /// POST: A finished block reaches `shared`'s block sink; a follow-up goes to
-/// the same connection.
+/// the same connection, queued under that reservation.
 /// INVARIANT: A refused follow-up is dropped with a debug log; it never
 /// ends the connection here.
 fn handle_compact_outcome(
     outcome: crate::compact_blocks::Outcome,
-    lease: &crate::PeerLease,
+    sink: &ProductionSink<'_>,
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
 ) -> bool {
+    let lease = sink.lease;
     let mut fetch_issued = false;
-    let mut follow_up = |message: crate::Message| match lease.send(message) {
+    let mut follow_up = |message: crate::Message| match sink.send(message) {
         Ok(()) => fetch_issued = true,
         Err(error) => {
             tracing::debug!(peer_addr = %peer_addr, %error, "p2p compact-block follow-up dropped");
@@ -2061,7 +2835,7 @@ fn process_compact_message(
 fn spawn_connection_writer(
     mut stream: crate::CountingStream<TcpStream>,
     mut transport: crate::transport::SendTransport,
-    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+    outbound_rx: crossbeam_channel::Receiver<crate::QueuedFrame>,
     close_rx: crossbeam_channel::Receiver<()>,
     budget: Arc<crate::connection::OutboundBudget>,
     peer_addr: SocketAddr,
@@ -2070,10 +2844,17 @@ fn spawn_connection_writer(
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
+            // A session parked on this queue waits for releases that can no
+            // longer come; the guard tells it however the writer ends,
+            // including a panic, and returns the charge of every frame the
+            // writer never wrote.
+            let _exit = WriterExit {
+                budget: Arc::clone(&budget),
+                outbound_rx: &outbound_rx,
+            };
             run_writer_loop(
                 &outbound_rx,
                 close_rx,
-                &budget,
                 &mut stream,
                 &mut transport,
                 net_trace.as_ref(),
@@ -2082,23 +2863,44 @@ fn spawn_connection_writer(
         })
 }
 
+/// Ends a connection's writer: marks the budget's writer dead so a parked
+/// session wakes, then drops every frame still queued. Runs whether the
+/// writer returned or unwound.
+///
+/// A queued frame owns its charge, so dropping it here returns the bytes to
+/// the connection and to the node aggregate at once. Nothing is reclaimed
+/// by counting: a frame is either written (and dropped by the burst) or
+/// dropped here or with the channel, and each drop releases exactly its own
+/// charge.
+struct WriterExit<'a> {
+    budget: Arc<crate::connection::OutboundBudget>,
+    outbound_rx: &'a crossbeam_channel::Receiver<crate::QueuedFrame>,
+}
+
+impl Drop for WriterExit<'_> {
+    fn drop(&mut self) {
+        self.budget.mark_writer_dead();
+        while self.outbound_rx.try_recv().is_ok() {}
+    }
+}
+
 /// Drains ready control messages behind `first` into one writev burst.
 ///
 /// A bulk payload is never coalesced: it returns as a leftover so the writer
 /// emits it as its own frame after the control burst (or immediately when it
-/// is `first`).
+/// is `first`). Each frame keeps its charge while it is in the burst.
 fn collect_write_burst(
-    first: crate::Message,
-    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
-) -> (Vec<crate::Message>, Option<crate::Message>) {
-    if first.is_bulk_payload() {
+    first: crate::QueuedFrame,
+    outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
+) -> (Vec<crate::QueuedFrame>, Option<crate::QueuedFrame>) {
+    if first.message().is_bulk_payload() {
         return (vec![first], None);
     }
     let mut burst = Vec::with_capacity(crate::wire::MAX_WRITE_BURST);
     burst.push(first);
     while burst.len() < crate::wire::MAX_WRITE_BURST {
         match outbound_rx.try_recv() {
-            Ok(next) if next.is_bulk_payload() => return (burst, Some(next)),
+            Ok(next) if next.message().is_bulk_payload() => return (burst, Some(next)),
             Ok(next) => burst.push(next),
             Err(_) => break,
         }
@@ -2106,33 +2908,20 @@ fn collect_write_burst(
     (burst, None)
 }
 
-/// Releases the outbound budget for each successfully written frame.
-///
-/// PRE: `sizes` holds the full wire length of each written frame, as
-/// `write_frames` returned it.
-/// POST: The budget releases exactly those byte counts.
-/// INVARIANT: This function counts no bytes; the counted stream owns byte
-/// accounting.
-fn account_written(sizes: &[usize], budget: &Arc<crate::connection::OutboundBudget>) {
-    for &bytes in sizes {
-        budget.release(bytes);
-    }
-}
-
 /// Writes `first` and any immediately ready follow-up control messages.
 ///
 /// Returns `false` when a write fails so the caller can exit the writer loop.
 ///
-/// PRE: `budget` admitted `first` and every message queued behind it.
-/// POST: Each written frame releases its budget charge; a failed write
-/// returns `false` and releases nothing.
+/// PRE: `first` and every frame queued behind it carry their own charge.
+/// POST: the burst's frames drop, and so release their charges, as soon as
+/// the write returned, whether it succeeded or failed; a leftover bulk
+/// frame drops with this call if the write failed.
 /// INVARIANT: A bulk payload is never coalesced into a control burst.
 fn write_ready_burst(
-    first: crate::Message,
-    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+    first: crate::QueuedFrame,
+    outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
-    budget: &Arc<crate::connection::OutboundBudget>,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) -> bool {
     let mut pending = Some(first);
@@ -2140,7 +2929,7 @@ fn write_ready_burst(
         let (burst, leftover) = collect_write_burst(head, outbound_rx);
         let encoded: Result<Vec<_>, _> = burst
             .iter()
-            .map(|message| transport.encode(message))
+            .map(|queued| transport.encode(queued.message()))
             .collect();
         let frames = match encoded {
             Ok(frames) => frames,
@@ -2149,14 +2938,13 @@ fn write_ready_burst(
                 return false;
             }
         };
-        for (message, frame) in burst.iter().zip(&frames) {
-            crate::net_trace::outbound_message(net_trace, message, frame.payload());
+        for (queued, frame) in burst.iter().zip(&frames) {
+            crate::net_trace::outbound_message(net_trace, queued.message(), frame.payload());
         }
-        match crate::wire::write_frames(writer, &frames) {
-            Ok(sizes) => {
-                account_written(&sizes, budget);
-                pending = leftover;
-            }
+        let written = crate::wire::write_frames(writer, &frames);
+        drop(burst);
+        match written {
+            Ok(()) => pending = leftover,
             Err(error) => {
                 tracing::debug!(%error, "p2p writer thread exiting");
                 return false;
@@ -2167,21 +2955,19 @@ fn write_ready_burst(
 }
 
 /// Writer loop body shared by the spawned writer thread and deterministic
-/// tests: receives one message or the close signal, coalesces a ready burst
-/// of control messages into one writev, and releases the admitted full wire
-/// byte count after a successful burst. Exits on the close signal, sender
-/// drop, or write error — never by polling. On a write error the budget is
-/// deliberately not released (the connection is dying).
+/// tests: receives one frame or the close signal, coalesces a ready burst
+/// of control messages into one writev, and drops the burst after the write,
+/// which releases each frame's charge. Exits on the close signal, sender
+/// drop, or write error — never by polling.
 ///
-/// PRE: `outbound_rx`, `close_rx`, and `budget` belong to one lease.
+/// PRE: `outbound_rx` and `close_rx` belong to one lease.
 /// POST: Return after the close signal, the last sender drop, or a write
-/// error.
+/// error. Frames still queued are the caller's to drop ([`WriterExit`]).
 /// INVARIANT: The writer counts no bytes; the stream it writes to owns byte
 /// accounting.
 fn run_writer_loop(
-    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+    outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
     mut close_rx: crossbeam_channel::Receiver<()>,
-    budget: &Arc<crate::connection::OutboundBudget>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
     net_trace: Option<&crate::net_trace::NetTrace>,
@@ -2190,7 +2976,7 @@ fn run_writer_loop(
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(first, outbound_rx, writer, transport, budget, net_trace) {
+                if !write_ready_burst(first, outbound_rx, writer, transport, net_trace) {
                     break;
                 }
             }
@@ -2344,7 +3130,7 @@ mod transaction_poll_tests {
             "one background and one pre-send identity check"
         );
         assert!(matches!(
-            receiver.try_recv(),
+            receiver.try_recv().map(crate::QueuedFrame::into_message),
             Ok(crate::Message::GetData(_))
         ));
     }
@@ -2676,6 +3462,7 @@ mod writer_setup_cleanup_tests {
             addr_bind: addr,
             time_offset: 0,
             counters: Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 
@@ -2774,7 +3561,7 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new_inbound(outbound_tx);
         let lease = shared
             .peer_table
-            .try_register_inbound(peer_addr, lease, 1, &shared.activity)
+            .try_register_inbound(peer_addr, lease, &[], 1, 0, &shared.activity)
             .expect("the test lease reserves its inbound slot");
         let result = crate::listener::run_handshake(server, peer_addr, &shared, lease, outbound_rx);
         let Err(error) = result else {
@@ -2830,6 +3617,7 @@ mod writer_shutdown_tests {
             addr_bind: addr,
             time_offset: 0,
             counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 
@@ -3030,6 +3818,7 @@ mod writer_shutdown_tests {
                 addr_bind: addr,
                 time_offset: 0,
                 counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
             },
         ));
         let mut peer = Peer::new(ScriptedEof(io::Cursor::new(wire)), Magic::BITCOIN);
@@ -3311,7 +4100,6 @@ mod writer_shutdown_tests {
             blocked: blocked_tx,
         };
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
-        let budget = lease.budget_handle();
         let close_rx = lease.close_signal();
         let net_trace = crate::net_trace::NetTrace::outbound(
             9,
@@ -3323,7 +4111,6 @@ mod writer_shutdown_tests {
             run_writer_loop(
                 &outbound_rx,
                 close_rx,
-                &budget,
                 &mut writer,
                 &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
                 Some(&net_trace),
@@ -3333,14 +4120,14 @@ mod writer_shutdown_tests {
 
         // Five pings are queued as one control burst. Two full frames (64 B)
         // succeed; the third header exceeds the remaining budget and the
-        // burst fails as a unit, so nothing is released.
+        // write blocks with the whole burst still owned by the writer.
         blocked_rx
             .recv_timeout(FAILSAFE)
             .expect("writer must exhaust its byte budget");
         assert_eq!(
             lease.budget_handle().pending(),
             (5, 5 * frame),
-            "a failed burst releases nothing"
+            "a burst in flight keeps its charge"
         );
 
         lease.cancel();
@@ -3350,7 +4137,11 @@ mod writer_shutdown_tests {
             .expect("unblock must release the blocked writer");
         worker.join().expect("worker join");
 
-        assert_eq!(lease.budget_handle().pending(), (5, 5 * frame));
+        assert_eq!(
+            lease.budget_handle().pending(),
+            (0, 0),
+            "a failed write drops its burst, and each frame returns its own charge"
+        );
     }
 
     #[test]
@@ -3371,13 +4162,11 @@ mod writer_shutdown_tests {
         let mut writer = EventWriter { events: event_tx };
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let budget = lease.budget_handle();
-        let worker_budget = Arc::clone(&budget);
         let close_rx = lease.close_signal();
         let worker = std::thread::spawn(move || {
             run_writer_loop(
                 &outbound_rx,
                 close_rx,
-                &worker_budget,
                 &mut writer,
                 &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
                 None,
@@ -3471,6 +4260,7 @@ mod writer_shutdown_tests {
                 addr_bind: peer_addr,
                 time_offset: 0,
                 counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
             };
 
             let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -3556,6 +4346,7 @@ mod writer_shutdown_tests {
                 addr_bind: peer_addr,
                 time_offset: 0,
                 counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
             };
 
             let mut peer = Peer::new(
@@ -3637,6 +4428,7 @@ mod writer_shutdown_tests {
                 ))),
                 None,
                 bitcoin_rs_consensus::ValidationEngine::Native,
+                None,
             ));
             let tx = Arc::new(bitcoin_rs_primitives::Tx::default());
             let sequence = gateway
@@ -3697,7 +4489,7 @@ mod writer_shutdown_tests {
             assert_eq!(inventory.calls.load(Ordering::Relaxed), 1);
             let echoed = outbound_rx
                 .try_iter()
-                .any(|message| matches!(message, crate::Message::Inv(_)));
+                .any(|frame| matches!(frame.message(), crate::Message::Inv(_)));
             assert_eq!(
                 echoed, !announces_pending,
                 "only the announced identity suppresses the pending relay"
@@ -3742,37 +4534,136 @@ mod writer_shutdown_tests {
         assert!(lease.is_cancelled());
     }
 
+    /// Queues `messages` through a real lease, in order, and returns the lease
+    /// (which owns the charges' budget) with the writer's receiver.
+    fn queued(
+        messages: &[crate::Message],
+    ) -> (
+        crate::PeerLease,
+        crossbeam_channel::Receiver<crate::QueuedFrame>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        for message in messages {
+            lease
+                .send(message.clone())
+                .expect("a fresh queue admits the message");
+        }
+        (lease, rx)
+    }
+
     #[test]
     fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        tx.send(crate::Message::Pong(1)).expect("pong");
-        tx.send(crate::Message::Block(
-            bitcoin_rs_primitives::Block::default(),
-        ))
-        .expect("block");
-        tx.send(crate::Message::Ping(2))
-            .expect("later ping stays queued");
+        let (lease, rx) = queued(&[
+            crate::Message::Ping(0),
+            crate::Message::Pong(1),
+            crate::Message::Block(bitcoin_rs_primitives::Block::default()),
+            crate::Message::Ping(2),
+        ]);
+        let first = rx.try_recv().expect("the first queued frame");
 
-        let (burst, leftover) = collect_write_burst(crate::Message::Ping(0), &rx);
+        let (burst, leftover) = collect_write_burst(first, &rx);
+
+        let messages: Vec<_> = burst.iter().map(|frame| frame.message().clone()).collect();
         assert_eq!(
-            burst,
+            messages,
             vec![crate::Message::Ping(0), crate::Message::Pong(1)]
         );
-        assert!(matches!(leftover, Some(crate::Message::Block(_))));
-        assert!(matches!(rx.try_recv(), Ok(crate::Message::Ping(2))));
+        assert!(matches!(
+            leftover.as_ref().map(crate::QueuedFrame::message),
+            Some(crate::Message::Block(_))
+        ));
+        assert_eq!(
+            lease.budget_handle().pending().0,
+            4,
+            "every frame keeps its charge while it is in the burst or the leftover"
+        );
+        drop((burst, leftover));
+        assert_eq!(
+            lease.budget_handle().pending().0,
+            1,
+            "dropping the burst returns exactly its frames' charges"
+        );
+        assert!(matches!(
+            rx.try_recv().map(crate::QueuedFrame::into_message),
+            Ok(crate::Message::Ping(2))
+        ));
     }
 
     #[test]
     fn collect_write_burst_emits_a_bulk_payload_alone() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        tx.send(crate::Message::Ping(1)).expect("ping");
-        let (burst, leftover) = collect_write_burst(
+        let (_lease, rx) = queued(&[
             crate::Message::Block(bitcoin_rs_primitives::Block::default()),
-            &rx,
-        );
+            crate::Message::Ping(1),
+        ]);
+        let first = rx.try_recv().expect("the bulk frame");
+        let (burst, leftover) = collect_write_burst(first, &rx);
         assert_eq!(burst.len(), 1);
         assert!(leftover.is_none());
-        assert!(matches!(rx.try_recv(), Ok(crate::Message::Ping(1))));
+        assert!(matches!(
+            rx.try_recv().map(crate::QueuedFrame::into_message),
+            Ok(crate::Message::Ping(1))
+        ));
+    }
+
+    /// Frames still queued when the writer ends return their own charge and
+    /// nothing else: a live reservation of the same connection and another
+    /// connection's bytes stay charged, the dead writer refuses new work,
+    /// and the reservation returns exactly when its owner drops it.
+    #[test]
+    fn queued_frames_release_on_writer_exit() {
+        use crate::connection::{OutboundBudget, SharedOutboundBudget};
+
+        let shared = Arc::new(SharedOutboundBudget::with_limits(10_000, 500));
+        let (bystander_tx, _bystander_rx) = crossbeam_channel::unbounded();
+        let bystander = crate::PeerLease::new(bystander_tx).with_shared_budget(&shared);
+        let bystander_credit = bystander
+            .budget_handle()
+            .try_charge(100)
+            .expect("bystander charge");
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_with_budget(
+            tx,
+            false,
+            OutboundBudget::with_block_reserve(100, 1_000_000, 500),
+        )
+        .with_shared_budget(&shared);
+        let frame = ping_len();
+        for nonce in 0..3 {
+            lease
+                .send(crate::Message::Ping(nonce))
+                .expect("queue admits a ping");
+        }
+        let reservation = lease
+            .try_reserve_production()
+            .expect("the session's live reservation");
+        assert_eq!(shared.pending(), 100 + 3 * frame + 500);
+
+        let exit = super::WriterExit {
+            budget: lease.budget_handle(),
+            outbound_rx: &rx,
+        };
+        drop(exit);
+
+        assert!(lease.budget_handle().writer_dead());
+        assert_eq!(
+            shared.pending(),
+            100 + 500,
+            "the three queued frames returned their own charge, nothing more"
+        );
+        assert_eq!(lease.budget_handle().pending(), (1, 500));
+        assert!(rx.is_empty());
+        assert!(matches!(
+            lease.send(crate::Message::Ping(9)),
+            Err(crate::OutboundRefusal::Closed(_))
+        ));
+        assert!(lease.is_cancelled());
+
+        drop(reservation);
+        assert_eq!(shared.pending(), 100);
+        assert_eq!(lease.budget_handle().pending(), (0, 0));
+        drop(bystander_credit);
+        assert_eq!(shared.pending(), 0);
     }
 }
 
@@ -3801,6 +4692,7 @@ mod ready_notify_tests {
             addr_bind: addr,
             time_offset: 0,
             counters: Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
         }
     }
 
@@ -3892,8 +4784,11 @@ mod ready_notify_tests {
 mod block_forward_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arc_swap::ArcSwapOption;
+    use bitcoin::bip152::HeaderAndShortIds;
+    use bitcoin::p2p::message_compact_blocks::CmpctBlock;
     use bitcoin_rs_primitives::{Hash256, consensus_bytes};
     use parking_lot::RwLock;
 
@@ -3943,8 +4838,7 @@ mod block_forward_tests {
         sync.tick();
 
         let flooded = test_addr(9780, 0)?;
-        let _rx: crossbeam_channel::Receiver<crate::Message> =
-            connect_peer(&peers, synthetic_peer(flooded, 3));
+        let _rx = connect_peer(&peers, synthetic_peer(flooded, 3));
         let source = current_source(&peers, flooded);
         let block2 = regtest_fixture::mined_block_with_prev_hash(
             blocks[0].block_hash(),
@@ -3996,8 +4890,7 @@ mod block_forward_tests {
         );
 
         let other: SocketAddr = test_addr(9781, 0)?;
-        let _other_rx: crossbeam_channel::Receiver<crate::Message> =
-            connect_peer(&peers, synthetic_peer(other, 3));
+        let _other_rx = connect_peer(&peers, synthetic_peer(other, 3));
         let other_lease = peers
             .lease(other)
             .ok_or("second connection must be registered")?;
@@ -4022,12 +4915,163 @@ mod block_forward_tests {
         );
         Ok(())
     }
+
+    /// An empty mempool that counts its identity scans.
+    struct ScanCounter(std::sync::atomic::AtomicUsize);
+
+    impl crate::compact_blocks::CompactBlockHints for ScanCounter {
+        fn for_each_identity(
+            &self,
+            _f: &mut dyn FnMut(bitcoin_rs_primitives::Txid, bitcoin_rs_primitives::Wtxid),
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn get_tx_by_txid(
+            &self,
+            _txid: bitcoin_rs_primitives::Txid,
+        ) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+
+        fn get_tx_by_wtxid(
+            &self,
+            _wtxid: bitcoin_rs_primitives::Wtxid,
+        ) -> Option<bitcoin_rs_primitives::Tx> {
+            None
+        }
+    }
+
+    /// A compact block reconstructs only when its header earns the mempool
+    /// scan: valid proof of work, a known parent, and more work than the
+    /// applied chain or a body fetch this connection owns. Anything else is a
+    /// header announcement only, and repeating an admitted hash never rescans.
+    #[test]
+    fn compact_reconstruction_requires_an_earning_header() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Genesis plus two blocks, all applied: the applied tip is block 2.
+        let (mut tree, blocks) = mined_chain(2, 0)?;
+        let chain_tip = tree.tip_handle();
+        let applied_tip = Arc::new(ArcSwapOption::new(chain_tip.load_full()));
+        let peers = Arc::new(crate::PeerTable::new());
+        let chain: Arc<dyn SyncChain> = Arc::new(TestChain::new(
+            chain_tip,
+            applied_tip,
+            Arc::new(RwLock::new(tree)),
+        ));
+        let sync = Arc::new(BlockSync::new(
+            chain,
+            Arc::clone(&peers),
+            crossbeam_channel::unbounded().1,
+            crossbeam_channel::unbounded().1,
+            crate::sync::syncing_ibd_latch(),
+        ));
+        let addr = test_addr(9782, 0)?;
+        let _outbound = connect_peer(&peers, synthetic_peer(addr, 3));
+        let lease = peers.lease(addr).ok_or("peer must be registered")?;
+        let source = lease.source(addr);
+        let other_addr = test_addr(9783, 0)?;
+        let _other = connect_peer(&peers, synthetic_peer(other_addr, 3));
+        let other_source = peers
+            .lease(other_addr)
+            .ok_or("second peer must be registered")?
+            .source(other_addr);
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(peers, headers_tx, blocks_tx);
+        shared.block_sync = Some(Arc::clone(&sync));
+
+        let hints = ScanCounter(AtomicUsize::new(0));
+        let mut reconstruction = crate::compact_blocks::Reconstruction::new();
+        let mut deliver =
+            |block: &bitcoin_rs_primitives::Block| -> Result<(), Box<dyn std::error::Error>> {
+                let block: bitcoin::Block =
+                    bitcoin::consensus::encode::deserialize(&consensus_bytes(block))?;
+                let message = crate::Message::CmpctBlock(CmpctBlock {
+                    compact_block: HeaderAndShortIds::from_block(&block, 7, 2, &[])
+                        .expect("compact block"),
+                });
+                // The loop reserves the follow-up's reply before dispatch.
+                let reply = super::reply_bound(&message, false)
+                    .and_then(|bound| lease.try_reserve_reply(bound).ok());
+                let sink = super::ProductionSink::new(&lease, reply);
+                super::process_compact_wire_message(
+                    &message,
+                    &mut reconstruction,
+                    Some(2),
+                    Some(&hints),
+                    &sink,
+                    addr,
+                    &shared,
+                );
+                Ok(())
+            };
+        let scans = || hints.0.load(Ordering::Relaxed);
+        // An earning header both reaches the mempool and forwards its body.
+        let assert_reconstructed =
+            |expected_scans: usize, expected_blocks: usize, message: &str| {
+                assert_eq!(scans(), expected_scans, "{message}");
+                assert_eq!(blocks_rx.len(), expected_blocks, "{message}");
+            };
+        let tip = blocks.last().ok_or("chain has a tip")?;
+        let next = |height| {
+            regtest_fixture::mined_block_with_prev_hash(
+                tip.block_hash(),
+                height,
+                vec![regtest_fixture::coinbase(height)],
+            )
+        };
+
+        // No proof of work: the right parent, but a target the hash misses.
+        let mut no_work = next(3)?;
+        no_work.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
+        deliver(&no_work)?;
+        // Unknown parent.
+        let orphan = regtest_fixture::mined_block_with_prev_hash(
+            no_work.header.compute_hash(),
+            4,
+            vec![regtest_fixture::coinbase(4)],
+        )?;
+        deliver(&orphan)?;
+        // A replayed applied block: known parent, but no more work than the
+        // applied tip.
+        let replayed = blocks.first().ok_or("chain has block 1")?;
+        deliver(replayed)?;
+        assert_reconstructed(0, 0, "no rejected header reaches the mempool");
+        for _ in 0..3 {
+            let announced = headers_rx.try_recv()?;
+            assert_eq!(announced.headers.len(), 1, "each header is still announced");
+            assert!(!announced.body_fetch_owned);
+        }
+
+        // Another connection owning its body fetch does not count for this one.
+        sync.record_owned_body_fetch(other_source, Hash256::from(replayed.block_hash()));
+        deliver(replayed)?;
+        assert_reconstructed(0, 0, "ownership is by exact connection");
+        assert_eq!(headers_rx.try_recv()?.headers.len(), 1);
+
+        // The replayed block once this connection owns its body fetch.
+        sync.record_owned_body_fetch(source, Hash256::from(replayed.block_hash()));
+        deliver(replayed)?;
+        assert_reconstructed(1, 1, "this connection owns the replayed body fetch");
+
+        // A new block extending the applied tip needs no request.
+        let extending = next(3)?;
+        deliver(&extending)?;
+        assert_reconstructed(2, 2, "an extending block reconstructs without a request");
+
+        // Repeating it never rescans the mempool.
+        deliver(&extending)?;
+        assert_reconstructed(2, 2, "a repeat never rescans the mempool");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod address_tests {
     use super::*;
+    use crate::test_support::QueuedMessages as _;
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 
@@ -4090,7 +5134,7 @@ mod address_tests {
         assert!(
             !receiver
                 .try_iter()
-                .any(|message| matches!(message, Message::Addr(_) | Message::AddrV2(_))),
+                .any(|frame| matches!(frame.message(), Message::Addr(_) | Message::AddrV2(_))),
             "an outbound peer cannot query our address book"
         );
     }
@@ -4128,12 +5172,57 @@ mod address_tests {
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
         assert_eq!(book.len(), 1);
-        let replies: Vec<_> = receiver.try_iter().collect();
+        let replies = receiver.drain_messages();
         let [Message::Addr(addresses)] = replies.as_slice() else {
             panic!("expected exactly one addr response: {replies:?}");
         };
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].1.socket_addr().expect("socket"), candidate);
+    }
+
+    #[test]
+    fn negotiated_sendaddrv2_answers_getaddr_with_addrv2_once() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _) = crossbeam_channel::unbounded();
+        let (blocks_tx, _) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+        shared.address_book = Some(Arc::clone(&book));
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let candidate = SocketAddr::from(([127, 0, 0, 2], 8333));
+        let lease = crate::PeerLease::new_inbound(sender);
+        table.register(source, lease.clone());
+        let timestamp = u32::try_from(crate::addrman::now()).expect("timestamp");
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let mut input = Vec::new();
+        for message in [
+            Message::Addr(vec![(timestamp, Address::new(&candidate, services))]),
+            Message::SendAddrV2,
+            Message::GetAddr,
+            Message::GetAddr,
+        ] {
+            crate::wire::write_message(&mut input, shared.magic, &message).expect("frame");
+        }
+        let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+        peer.state = PeerState::Ready;
+        let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
+        let replies = receiver.drain_messages();
+        let [Message::AddrV2(rows)] = replies.as_slice() else {
+            panic!("expected exactly one addrv2 response: {replies:?}");
+        };
+        assert_eq!(
+            rows.as_slice(),
+            &[AddrV2Message {
+                // The book stores the advertised time minus its 2 h
+                // re-learn penalty for a non-self source.
+                time: timestamp - 2 * 60 * 60,
+                services,
+                addr: AddrV2::Ipv4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                port: 8333,
+            }],
+            "the reply renders the same learned row in BIP155 form"
+        );
     }
 }
 
@@ -4199,10 +5288,11 @@ mod feeler_tests {
                     .set_write_timeout(Some(Duration::from_secs(3)))
                     .expect("timeout");
                 let mut peer = Peer::new(stream, magic);
-                assert!(matches!(
-                    peer.read_message().expect("initial version").0,
-                    crate::Message::Version(_)
-                ));
+                let (initial, _) = peer
+                    .read_message()
+                    .expect("initial version")
+                    .expect("a v1 frame");
+                assert!(matches!(initial, crate::Message::Version(_)));
                 assert!(
                     remote_table
                         .sessions()
@@ -4225,7 +5315,7 @@ mod feeler_tests {
                     sent.expect("VERSION only");
                 }
                 // No VERACK is sent; a feeler closes after native VERSION acceptance.
-                while let Ok((message, _)) = peer.read_message() {
+                while let Ok(Some((message, _))) = peer.read_message() {
                     assert!(
                         !matches!(message, crate::Message::GetAddr | crate::Message::Verack),
                         "no ready/post-verack publication: {message:?}"
@@ -4559,12 +5649,17 @@ mod discouragement_tests {
         shared.note_misbehavior(address, &stale, &fault);
         assert!(!shared.banned.is_discouraged(address.ip()));
         for error in [
-            PeerError::Protocol("outbound queue closed or saturated"),
+            PeerError::Protocol("outbound queue closed"),
             PeerError::Protocol("network inactive"),
             PeerError::Protocol("p2p startup cancelled"),
             PeerError::Protocol("outbound peer lacks desirable services"),
             PeerError::PayloadTooLarge(usize::MAX),
             PeerError::Io(io::Error::from(io::ErrorKind::TimedOut)),
+            // A v2 key read with v2 off; Core only disconnects.
+            PeerError::inbound(PeerError::WrongNetwork {
+                expected: Magic::BITCOIN,
+                actual: Magic::from_bytes([0x2f, 0x1a, 0x7c, 0x05]),
+            }),
         ] {
             shared.note_misbehavior(address, &current, &error);
         }
@@ -4671,12 +5766,10 @@ mod discouragement_tests {
             assert!(!shared.banned.is_discouraged(address.ip()), "{ip}");
             assert_eq!(lease.ignores_protocol_error(&error), manual || noban);
             assert!(
-                !lease.ignores_protocol_error(&PeerError::Incoming(Box::new(
-                    PeerError::WrongNetwork {
-                        expected: Magic::BITCOIN,
-                        actual: Magic::REGTEST
-                    }
-                ))),
+                !lease.ignores_protocol_error(&PeerError::inbound(PeerError::WrongNetwork {
+                    expected: Magic::BITCOIN,
+                    actual: Magic::REGTEST
+                })),
                 "unread framing cannot be safely resumed"
             );
         }
@@ -4724,3 +5817,15 @@ mod discouragement_tests {
 
 #[cfg(test)]
 mod v2_transport_tests;
+
+#[cfg(test)]
+mod getdata_pause_tests;
+
+#[cfg(test)]
+mod aggregate_budget_tests;
+
+#[cfg(test)]
+mod aggregate_filter_tests;
+
+#[cfg(test)]
+mod loopback_serving_tests;

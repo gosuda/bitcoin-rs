@@ -43,8 +43,10 @@ pub struct MempoolEntry {
     pub descendant_fee: u64,
     /// Total signed fee adjustment of this entry and all unconfirmed descendants.
     pub descendant_fee_delta: i128,
-    /// Mempool acceptance time in monotonically increasing seconds.
+    /// Mempool acceptance time in wall-clock seconds since the Unix epoch.
     pub time: u64,
+    /// Locally submitted body still awaiting a successful peer getdata response.
+    pub unbroadcast: bool,
     /// Chain height at acceptance.
     pub height: u32,
     /// BIP141 sigop cost, counted against the resolved prevouts.
@@ -53,7 +55,17 @@ pub struct MempoolEntry {
 }
 
 impl MempoolEntry {
-    pub(crate) fn policy_weight(&self) -> u64 {
+    /// Policy-charged weight in weight units: the larger of the consensus
+    /// weight and the sigop-adjusted weight, kept exact only while its vbyte
+    /// rounding equals `vsize` and otherwise `vsize * 4`.
+    ///
+    /// This is the weight that chunk feerates and cluster limits charge. It
+    /// stays unrounded so that a caller summing several entries rounds the sum
+    /// to vbytes once: summing each entry's `vsize` instead can overstate it,
+    /// since two 41 WU entries round to 11 vB each, while together they round
+    /// to `ceil(82 / 4)` = 21 vB.
+    #[must_use]
+    pub fn policy_weight(&self) -> u64 {
         crate::accounting::charged_weight(self.weight, self.vsize, self.sigop_cost)
     }
 
@@ -91,6 +103,7 @@ impl MempoolEntry {
             descendant_fee: fee,
             descendant_fee_delta: 0,
             time,
+            unbroadcast: false,
             height,
         }
     }
@@ -99,21 +112,6 @@ impl MempoolEntry {
     #[must_use]
     pub fn modified_fee(&self) -> i128 {
         i128::from(self.fee) + i128::from(self.fee_delta)
-    }
-
-    /// Modified transaction fee rate in sat/kvB.
-    #[must_use]
-    pub(crate) fn modified_fee_rate(&self) -> i128 {
-        signed_fee_rate(self.modified_fee(), u64::from(self.vsize))
-    }
-
-    /// Modified ancestor package fee rate in sat/kvB.
-    #[must_use]
-    pub(crate) fn modified_ancestor_fee_rate(&self) -> i128 {
-        signed_fee_rate(
-            i128::from(self.ancestor_fee) + self.ancestor_fee_delta,
-            self.ancestor_size,
-        )
     }
 
     /// Returns whether this transaction signals BIP-125 replaceability.
@@ -134,12 +132,6 @@ pub(crate) const fn fee_rate(fee: u64, vsize: u64) -> u64 {
     fee.saturating_mul(1_000) / vsize
 }
 
-fn signed_fee_rate(fee: i128, vsize: u64) -> i128 {
-    if vsize == 0 {
-        return 0;
-    }
-    fee.saturating_mul(1_000) / i128::from(vsize)
-}
 #[cfg(test)]
 mod is_replaceable_tests {
     use super::*;
@@ -211,15 +203,36 @@ mod mining_metadata_tests {
         let mut entry = bare_entry();
         assert_eq!(entry.fee_delta, 0);
         assert_eq!(entry.modified_fee(), 1_000);
-        assert_eq!(entry.modified_fee_rate(), 10_000);
         assert_eq!(entry.ancestor_fee_delta, 0);
 
         entry.fee_delta = -3_000;
         assert_eq!(entry.modified_fee(), -2_000);
-        assert_eq!(entry.modified_fee_rate(), -20_000);
+        assert_eq!(entry.fee, 1_000, "an overlay never changes the actual fee");
+    }
 
-        entry.ancestor_fee_delta = 4_000;
-        assert_eq!(entry.modified_ancestor_fee_rate(), 50_000);
+    fn weighted_entry(weight: u64, vsize: u32, sigop_cost: u32) -> MempoolEntry {
+        let mut entry = MempoolEntry::new(Arc::new(Tx::default()), vsize, 1_000, 1, 7, sigop_cost);
+        entry.weight = weight;
+        entry
+    }
+
+    /// Two 41 WU entries round to 11 vB each but 21 vB together, so a caller
+    /// that sums `policy_weight` rounds once and gets the smaller figure.
+    #[test]
+    fn policy_weight_is_exact_so_a_sum_rounds_once() {
+        let pair = [weighted_entry(41, 11, 0), weighted_entry(41, 11, 0)];
+        let exact: u64 = pair.iter().map(MempoolEntry::policy_weight).sum();
+        let rounded: u64 = pair.iter().map(|entry| u64::from(entry.vsize)).sum();
+        assert_eq!((exact, rounded), (82, 22));
+        assert_eq!(exact.div_ceil(4), 21);
+    }
+
+    #[test]
+    fn policy_weight_follows_sigops_and_trusts_a_mismatched_vsize() {
+        // Three sigops charge 60 WU, which rounds to the 15 vB the entry carries.
+        assert_eq!(weighted_entry(41, 15, 3).policy_weight(), 60);
+        // A vsize that is not the rounded exact weight wins: 20 vB is 80 WU.
+        assert_eq!(weighted_entry(41, 20, 0).policy_weight(), 80);
     }
 }
 

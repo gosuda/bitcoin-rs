@@ -5,11 +5,17 @@
 //! constructs the narrow capability its caller needs. The visitor is not a
 //! second storage facade: all reads, writes, batches, and durability remain
 //! owned by [`bitcoin_rs_storage::KvStore`].
+//!
+//! Every store leaves this module carrying the caller's [`StoreGuard`] (the
+//! node's data-directory lock). The lock therefore lives exactly as long as
+//! the last handle to any store that can still write the directory, whoever
+//! retains that handle: a detached RPC connection, an index worker, or an
+//! embedder's clone.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use bitcoin_rs_storage::{KvStore, StorageBackend, StorageError};
+use bitcoin_rs_storage::{KvStore, StorageBackend, StorageError, StoreGuard};
 
 /// Consumes one freshly opened concrete store without exposing its type to the
 /// runtime caller.
@@ -27,6 +33,7 @@ pub(crate) fn open_generic<C>(
     backend: StorageBackend,
     path: &Path,
     cache_bytes: Option<u64>,
+    guard: &StoreGuard,
     consumer: C,
 ) -> Result<C::Output, C::Error>
 where
@@ -37,20 +44,29 @@ where
     let _ = namespace;
     match backend {
         #[cfg(feature = "rocksdb")]
-        StorageBackend::RocksDb => consumer.consume(Arc::new(match cache_bytes {
-            Some(bytes) => bitcoin_rs_storage::RocksDbStore::open_with_cache(path, bytes)?,
-            None => bitcoin_rs_storage::RocksDbStore::open(path)?,
-        })),
+        StorageBackend::RocksDb => consumer.consume(Arc::new(
+            match cache_bytes {
+                Some(bytes) => bitcoin_rs_storage::RocksDbStore::open_with_cache(path, bytes)?,
+                None => bitcoin_rs_storage::RocksDbStore::open(path)?,
+            }
+            .guarded_by(Arc::clone(guard)),
+        )),
         #[cfg(feature = "fjall")]
-        StorageBackend::Fjall => consumer.consume(Arc::new(match cache_bytes {
-            Some(bytes) => bitcoin_rs_storage::FjallStore::open_with_cache(path, bytes)?,
-            None => bitcoin_rs_storage::FjallStore::open(path)?,
-        })),
+        StorageBackend::Fjall => consumer.consume(Arc::new(
+            match cache_bytes {
+                Some(bytes) => bitcoin_rs_storage::FjallStore::open_with_cache(path, bytes)?,
+                None => bitcoin_rs_storage::FjallStore::open(path)?,
+            }
+            .guarded_by(Arc::clone(guard)),
+        )),
         #[cfg(feature = "redb")]
-        StorageBackend::Redb => consumer.consume(Arc::new(match cache_bytes {
-            Some(bytes) => bitcoin_rs_storage::RedbStore::open_with_cache(path, bytes)?,
-            None => bitcoin_rs_storage::RedbStore::open(path)?,
-        })),
+        StorageBackend::Redb => consumer.consume(Arc::new(
+            match cache_bytes {
+                Some(bytes) => bitcoin_rs_storage::RedbStore::open_with_cache(path, bytes)?,
+                None => bitcoin_rs_storage::RedbStore::open(path)?,
+            }
+            .guarded_by(Arc::clone(guard)),
+        )),
         #[cfg(any(
             not(feature = "rocksdb"),
             not(feature = "fjall"),
@@ -66,6 +82,7 @@ pub(crate) fn open_txindex<C>(
     backend: StorageBackend,
     path: &Path,
     cache_bytes: Option<u64>,
+    guard: &StoreGuard,
     consumer: C,
 ) -> Result<C::Output, C::Error>
 where
@@ -73,15 +90,15 @@ where
 {
     match backend {
         #[cfg(feature = "redb")]
-        StorageBackend::Redb => match cache_bytes {
-            Some(bytes) => consumer.consume(Arc::new(
-                bitcoin_rs_storage::open_redb_tx_index_store_with_cache(path, bytes)?,
-            )),
-            None => consumer.consume(Arc::new(bitcoin_rs_storage::open_redb_tx_index_store(
+        // Zero selects the engine default, exactly as `open_with_cache` does.
+        StorageBackend::Redb => consumer.consume(Arc::new(
+            bitcoin_rs_storage::open_redb_tx_index_store_with_cache(
                 path,
-            )?)),
-        },
-        other => open_generic("txindex", other, path, cache_bytes, consumer),
+                cache_bytes.unwrap_or(0),
+                Some(Arc::clone(guard)),
+            )?,
+        )),
+        other => open_generic("txindex", other, path, cache_bytes, guard, consumer),
     }
 }
 

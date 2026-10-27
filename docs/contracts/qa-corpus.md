@@ -141,4 +141,4 @@ nonzero-status propagation; they are not stable public status-code assignments.
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
-QA corpus, fuzz target.
+native protocol primitives, native Rust interpreter.

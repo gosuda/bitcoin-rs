@@ -11,7 +11,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::{BlockSync, Network};
-use bitcoin_rs_p2p::{Message, PeerInfo, PeerLease, PeerTable};
+use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
@@ -64,6 +64,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         inbound: true,
+        transport: bitcoin_rs_p2p::TransportProtocol::V1,
     }
 }
 
@@ -71,7 +72,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
 fn peer_table_owns_handshake_publication_and_replacement() {
     let table = Arc::new(PeerTable::new());
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
-    let (old_tx, _old_rx) = unbounded::<Message>();
+    let (old_tx, _old_rx) = unbounded::<QueuedFrame>();
     let old = PeerLease::new(old_tx);
     assert!(!table.register(addr, old.clone()));
     assert!(table.publish_info(addr, &old, info(addr)));
@@ -79,7 +80,7 @@ fn peer_table_owns_handshake_publication_and_replacement() {
     assert_eq!(table.len(), 1);
     assert_eq!(table.infos().len(), 1);
 
-    let (new_tx, _new_rx) = unbounded::<Message>();
+    let (new_tx, _new_rx) = unbounded::<QueuedFrame>();
     let new = PeerLease::new(new_tx);
     assert!(table.register(addr, new.clone()));
     assert!(old.is_cancelled());

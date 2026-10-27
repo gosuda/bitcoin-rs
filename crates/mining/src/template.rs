@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
-use bitcoin_rs_mempool::MempoolMiningSnapshot;
+use bitcoin_rs_mempool::{BlockRemovalPlan, Mempool, MempoolMiningSnapshot};
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
-    encode::double_sha256, varint,
+    encode::{consensus_bytes, double_sha256, hex_encode},
+    varint,
 };
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashMap;
@@ -32,6 +33,13 @@ pub struct CandidateContext {
     pub current_time: u32,
     /// BIP113 locktime cutoff already resolved by the caller.
     pub locktime_cutoff: u32,
+    /// Predecessor MTP for parents the tip block confirms (staged
+    /// confirmations in projection): the MTP of the block before the
+    /// candidate's parent tip, copied from the resolved chain context.
+    /// Relative time locks of staged-confirmation parents evaluate against
+    /// this actual value, never against `locktime_cutoff`. Exact except at
+    /// the genesis edge, where it conservatively reads the tip MTP itself.
+    pub staged_parent_mtp: u32,
     pub network: Network,
     pub csv_active: bool,
     pub segwit_active: bool,
@@ -43,21 +51,100 @@ pub struct CandidateContext {
     pub max_sigops: u64,
 }
 
-/// Deterministic generation identity for a captured tip and mempool sequence.
+/// Extra coinbase capacity a template consumer adds after assembly, such as the
+/// outputs a Stratum V2 pool puts in its own coinbase.
 ///
-/// Matches Bitcoin Core's `longpollid` encoding: tip hash as big-endian hex
-/// concatenated with the decimal mempool sequence.
+/// A per-request value, never persisted. The consumer declares only what it
+/// adds; the owner derives the rest of the room from the coinbase it built:
+/// the consumer's scriptSig may grow to the 100-byte consensus limit, and the
+/// output count may need a wider `CompactSize`. Selecting under a budget holds
+/// that room back before any transaction is chosen, and
+/// [`Candidate::admits`] is the rule a finished candidate is checked against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct CoinbaseBudget {
+    /// Serialized bytes of the additional coinbase outputs.
+    pub additional_size: u32,
+    /// BIP141 sigop cost of the additional coinbase outputs, already in cost
+    /// units: it is never scaled again.
+    pub additional_sigops: u16,
+}
+
+impl CoinbaseBudget {
+    /// Splits a template identity into its ordinary part and the budget
+    /// qualifier [`TemplateId::qualified`] appends, if any.
+    ///
+    /// `None` rejects a malformed qualifier. Only canonical decimals parse (no
+    /// sign, no leading zero, no overflow), so every accepted qualifier is the
+    /// exact text `qualified` writes. Callers validate the ordinary part
+    /// themselves.
+    pub(crate) fn split_qualifier(id: &str) -> Option<(&str, Option<Self>)> {
+        let Some((ordinary, qualifier)) = id.split_once('@') else {
+            return Some((id, None));
+        };
+        let (size, sigops) = qualifier.strip_prefix("cb")?.split_once('.')?;
+        let budget = Self {
+            additional_size: canonical_decimal(size)?,
+            additional_sigops: canonical_decimal(sigops)?,
+        };
+        Some((ordinary, Some(budget)))
+    }
+}
+
+/// Parses `text` only when it is the canonical decimal of an unsigned value.
+fn canonical_decimal<T: std::str::FromStr>(text: &str) -> Option<T> {
+    let canonical = match text.as_bytes() {
+        [b'0'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    if canonical { text.parse().ok() } else { None }
+}
+
+/// Deterministic generation identity for a tip, membership and fee revision.
+///
+/// At fee revision zero, retains Core's hash + decimal membership sequence.
+/// Later fee revisions append `:<revision>` to keep both tokens unambiguous.
+/// A template selected under a [`CoinbaseBudget`] appends `@cb<size>.<sigops>`,
+/// so it never shares an identity with the ordinary template of its generation.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TemplateId(String);
 
 impl TemplateId {
-    /// Builds the identity for `previous_block_hash` and `mempool_sequence`.
+    /// Builds the identity for `previous_block_hash` and `mempool_sequence`,
+    /// implying fee revision zero.
     #[must_use]
     pub fn new(previous_block_hash: &Hash256, mempool_sequence: u64) -> Self {
-        Self(format!(
-            "{}{mempool_sequence}",
-            previous_block_hash.to_string_be()
-        ))
+        Self::with_fee_revision(previous_block_hash, mempool_sequence, 0)
+    }
+
+    /// Builds an identity including the pool-owned fee-priority revision.
+    #[must_use]
+    pub fn with_fee_revision(
+        previous_block_hash: &Hash256,
+        mempool_sequence: u64,
+        fee_delta_sequence: u64,
+    ) -> Self {
+        let mut id = format!("{}{mempool_sequence}", previous_block_hash.to_string_be());
+        if fee_delta_sequence != 0 {
+            use std::fmt::Write as _;
+            let _ = write!(id, ":{fee_delta_sequence}");
+        }
+        Self(id)
+    }
+
+    /// Qualifies this identity with the budget its template was selected
+    /// under. `None` returns the ordinary identity unchanged, byte for byte.
+    #[must_use]
+    pub(crate) fn qualified(mut self, budget: Option<CoinbaseBudget>) -> Self {
+        if let Some(budget) = budget {
+            use std::fmt::Write as _;
+            let _ = write!(
+                self.0,
+                "@cb{}.{}",
+                budget.additional_size, budget.additional_sigops
+            );
+        }
+        self
     }
 
     /// Returns the opaque identity string.
@@ -84,12 +171,21 @@ pub struct CandidateTransaction {
     pub weight: u64,
     /// One-based indexes of in-candidate ancestors.
     pub depends: Vec<u32>,
+    /// Canonical consensus serialization as lowercase hex, precomputed once in
+    /// `finish_candidate` after the pool read guard is released and reused by
+    /// RPC rendering so a cache hit never re-serializes. `Arc<Tx>` is retained
+    /// for block submission.
+    pub data_hex: String,
 }
 
 /// Transport-neutral assembled block candidate.
 #[derive(Debug)]
 pub struct Candidate {
-    /// Generation identity for this tip and mempool sequence.
+    /// Generation identity for this tip, mempool sequence, and fee-delta
+    /// sequence, qualified by the [`CoinbaseBudget`] the body was selected
+    /// under. This id is authoritative for what the candidate is: a budgeted
+    /// request may be answered by the generation's ordinary candidate when
+    /// that candidate already admits the budget.
     pub template_id: TemplateId,
     /// Parent tip hash.
     pub previous_block_hash: Hash256,
@@ -158,6 +254,50 @@ impl Candidate {
             txs,
         })
     }
+
+    /// Whether a consumer may add `budget` to this candidate's coinbase and
+    /// still build a block inside the limits this candidate was assembled under.
+    ///
+    /// The rule measures what the candidate holds: its reported block weight,
+    /// the serialized size of its coinbase and transactions, and the BIP141
+    /// sigop cost of both. It adds the room the owner derives from `budget` and
+    /// this candidate's own coinbase, the same room budgeted selection holds
+    /// back. The header, transaction count, and coinbase are counted once, and
+    /// [`Self::weight`] never includes the growth.
+    ///
+    /// # Errors
+    ///
+    /// [`MiningError::CapacityExhausted`] names the first of weight, size, and
+    /// sigops that the growth would push past its limit.
+    pub fn admits(&self, budget: CoinbaseBudget) -> Result<(), MiningError> {
+        self.block_costs()?
+            .checked_add(coinbase_growth(&self.coinbase, budget)?)?
+            .check(self.max_weight, self.max_size, self.max_sigops)
+    }
+
+    /// Weight, serialized size, and sigop cost of the whole block as assembled.
+    fn block_costs(&self) -> Result<FixedReservation, MiningError> {
+        let mut size = checked_sum(
+            widen(Header::LEN),
+            transaction_count_size(self.transactions.len())?,
+            "size",
+        )?;
+        size = checked_sum(size, widen(self.coinbase.total_size()), "size")?;
+        let mut sigops = u64::from(transaction_sigop_cost(
+            &self.coinbase,
+            &[],
+            VerifyFlags::NONE,
+        ));
+        for transaction in &self.transactions {
+            size = checked_sum(size, widen(transaction.tx.total_size()), "size")?;
+            sigops = checked_sum(sigops, u64::from(transaction.sigop_cost), "sigop cost")?;
+        }
+        Ok(FixedReservation {
+            weight: self.weight,
+            size,
+            sigops,
+        })
+    }
 }
 
 /// Searches `block.header.nonce` until the compact target is met.
@@ -172,19 +312,84 @@ pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError>
     Err(MiningError::Unsolved { tries: max_tries })
 }
 
-/// Assembles one transport-neutral candidate from a chain context and snapshot.
+/// Assembles one transport-neutral candidate from a chain context and the live
+/// pool.
 ///
-/// Selection is package-atomic, topologically ordered, final under
+/// Selection walks the pool's maintained chunk index under the caller's read
+/// guard and copies only the selected transactions; the reservation, coinbase,
+/// Merkle roots, and witness commitment finish from the owned body. Selection
+/// is package-atomic, topologically ordered, final under
 /// `context.locktime_cutoff`, and bounded by weight, serialized size, and
 /// sigop cost. Modified fees rank packages; actual fees fund the coinbase.
 pub fn assemble_candidate(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
+    pool: &Mempool,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
-    let reservation = fixed_reservation(context, payout)?;
-    let body = select_packages(context, snapshot, reservation)?;
-    finish_candidate(context, snapshot, payout, &body, reservation)
+    let body = select_template_body(pool, context, payout, None)?;
+    finish_candidate(context, &body, payout)
+}
+
+/// Selects the template body from the live pool under the caller's read guard.
+///
+/// Reserves the header and coinbase, walks the maintained chunk index, and
+/// copies only the selected transactions into the returned body. With a
+/// `budget`, the room a consumer's coinbase may add is held back as well, so
+/// the walk itself chooses a body that leaves it; the returned body then
+/// qualifies its candidate's identity with that budget.
+///
+/// # Errors
+///
+/// [`MiningError::CapacityExhausted`] names the dimension in which the header,
+/// coinbase, and any budgeted growth already exceed the context's limit, before
+/// any transaction is considered.
+pub fn select_template_body(
+    pool: &Mempool,
+    context: &CandidateContext,
+    payout: &[u8],
+    budget: Option<CoinbaseBudget>,
+) -> Result<SelectedBody, MiningError> {
+    let reservation = reserve(context, payout, budget)?;
+    let sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
+    let body = select_packages(
+        context,
+        pool,
+        pool.chunks_by_feerate(),
+        sequences,
+        reservation,
+    )?;
+    Ok(body)
+}
+
+/// Selects the template body as if `plan` had applied, without mutating the pool.
+///
+/// Builds the projection owner for `plan`, walks its borrowed iteration
+/// through the same selection engine the live path uses, and returns the owned
+/// body. The body carries the predicted post-removal generation: the source
+/// membership sequence wrapping past exactly the planned removals, and the
+/// source fee-delta sequence wrapping past the fee overlays the block lifecycle
+/// clears. Unrelated prioritisation still invalidates the prediction at
+/// install. The projection owner lives only for the selection; the returned
+/// body owns its transactions. A preparation is never budgeted: it is the
+/// ordinary template of the generation it predicts.
+pub fn select_template_body_after(
+    pool: &Mempool,
+    plan: &BlockRemovalPlan,
+    context: &CandidateContext,
+    payout: &[u8],
+) -> Result<SelectedBody, MiningError> {
+    let reservation = reserve(context, payout, None)?;
+    let projected = pool.chunks_after(plan);
+    let removals =
+        u64::try_from(plan.removals.len()).map_err(|_| MiningError::CandidateScalarOverflow {
+            field: "transaction count",
+        })?;
+    let sequences = (
+        pool.sequence_number().wrapping_add(removals),
+        pool.fee_delta_sequence_number()
+            .wrapping_add(plan.fee_deltas_cleared),
+    );
+    select_packages(context, pool, projected.iter(), sequences, reservation)
 }
 
 /// Assembles a candidate whose non-coinbase body is `snapshot.entries` in order.
@@ -196,34 +401,123 @@ pub fn assemble_ordered_candidate(
     snapshot: &MempoolMiningSnapshot,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
-    let reservation = fixed_reservation(context, payout)?;
+    let reservation = reserve(context, payout, None)?.fixed;
     let body = exact_order(context, snapshot, reservation)?;
-    finish_candidate(context, snapshot, payout, &body, reservation)
+    finish_candidate(context, &body, payout)
 }
 
-// The fixed block header and coinbase are reserved before selecting the body.
-#[derive(Clone, Copy)]
+/// Weight, serialized size, and sigop cost of one part of a block. The fixed
+/// block header and coinbase are reserved before selecting the body.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct FixedReservation {
     pub(crate) weight: u64,
     pub(crate) size: u64,
     pub(crate) sigops: u64,
 }
 
-#[cfg(test)]
 impl FixedReservation {
-    /// Zero reservation for callers that select without a header or coinbase.
-    pub(crate) const EMPTY: Self = Self {
+    /// Nothing reserved.
+    pub(crate) const ZERO: Self = Self {
         weight: 0,
         size: 0,
         sigops: 0,
     };
+
+    /// Sum of two parts of one block, or the dimension that overflows.
+    pub(crate) fn checked_add(self, other: Self) -> Result<Self, MiningError> {
+        Ok(Self {
+            weight: checked_sum(self.weight, other.weight, "weight")?,
+            size: checked_sum(self.size, other.size, "size")?,
+            sigops: checked_sum(self.sigops, other.sigops, "sigop cost")?,
+        })
+    }
+
+    /// Refuses the first of weight, size, and sigops, in that order, that
+    /// exceeds its limit. The one fit rule: selection checks the empty block
+    /// with it and [`Candidate::admits`] checks a finished one.
+    pub(crate) fn check(
+        self,
+        max_weight: u64,
+        max_size: u64,
+        max_sigops: u64,
+    ) -> Result<(), MiningError> {
+        if self.weight > max_weight {
+            return Err(MiningError::CapacityExhausted { field: "weight" });
+        }
+        if self.size > max_size {
+            return Err(MiningError::CapacityExhausted { field: "size" });
+        }
+        if self.sigops > max_sigops {
+            return Err(MiningError::CapacityExhausted { field: "sigops" });
+        }
+        Ok(())
+    }
 }
 
-pub(crate) struct SelectedBody {
-    pub(crate) ordered: Vec<usize>,
-    pub(crate) fees: u64,
+/// What one selection holds back from the block before it picks transactions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reservation {
+    /// Header and coinbase, counted once.
+    pub(crate) fixed: FixedReservation,
+    /// Room the consumer's coinbase may add to `fixed`; zero without a budget.
+    /// Selection counts it against the limits but never in the block's weight.
+    pub(crate) growth: FixedReservation,
+    /// The budget `growth` was derived from.
+    pub(crate) budget: Option<CoinbaseBudget>,
+}
+
+/// One non-coinbase transaction copied out of the pool under the read guard.
+#[derive(Debug)]
+pub struct SelectedTx {
+    /// Transaction payload shared with the pool entry by `Arc`.
+    pub tx: Arc<Tx>,
+    /// Transaction id.
+    pub txid: Txid,
+    /// Witness transaction id.
+    pub wtxid: Wtxid,
+    /// Actual fee in satoshis.
+    pub fee: u64,
+    /// Consensus sigop cost.
+    pub sigop_cost: u32,
+    /// Consensus transaction weight.
+    pub weight: u64,
+}
+
+/// Dependency-closed body selected under the pool read guard.
+///
+/// Holds the selected transactions in topological order, with both pool
+/// sequences they were read at and the reservation they were checked against.
+/// The guard is released before the candidate finishes from this owned body.
+#[derive(Debug)]
+pub struct SelectedBody {
+    /// Pool mempool sequence captured with the selection.
+    pub sequence: u64,
+    /// Pool fee-delta sequence captured with the selection, under the same
+    /// read guard as `sequence`.
+    pub fee_delta_sequence: u64,
+    /// Selected transactions in topological order.
+    pub transactions: Vec<SelectedTx>,
+    /// Sum of actual fees funding the coinbase.
+    pub fees: u64,
     // Include the exact CompactSize transaction count as well as body transactions.
-    pub(crate) weight: u64,
+    pub weight: u64,
+    /// Header and coinbase reservation the selection was checked against.
+    /// Excludes any budgeted growth: the block never contains it.
+    pub(crate) reservation: FixedReservation,
+    /// Budget the selection held room back for; qualifies the candidate's identity.
+    pub(crate) budget: Option<CoinbaseBudget>,
+}
+
+/// `left + right`, or the dimension that overflows.
+fn checked_sum(left: u64, right: u64, field: &'static str) -> Result<u64, MiningError> {
+    left.checked_add(right)
+        .ok_or(MiningError::CandidateScalarOverflow { field })
+}
+
+/// Widens a length. An impossible overflow saturates, so the caller's checked
+/// arithmetic reports it.
+fn widen(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 /// Size of the block transaction count, including its reserved coinbase.
@@ -238,11 +532,13 @@ pub(crate) fn transaction_count_size(body_count: usize) -> Result<u64, MiningErr
     Ok(u64::try_from(varint::encoded_len(count)).unwrap_or(u64::MAX))
 }
 
-/// Reserves the header and a coinbase with the final witness-commitment shape.
-fn fixed_reservation(
+/// Reserves the header and a coinbase with the final witness-commitment shape,
+/// plus the room `budget` lets a consumer's coinbase add to it.
+fn reserve(
     context: &CandidateContext,
     payout: &[u8],
-) -> Result<FixedReservation, MiningError> {
+    budget: Option<CoinbaseBudget>,
+) -> Result<Reservation, MiningError> {
     let dummy_commitment = Hash256::from_le_bytes(&[0_u8; 32]);
     let reservation = build_coinbase(
         context.height,
@@ -257,7 +553,7 @@ fn fixed_reservation(
         }
     })?;
     let header_size = u64::try_from(Header::LEN).unwrap_or(u64::MAX);
-    Ok(FixedReservation {
+    let fixed = FixedReservation {
         weight: reservation
             .weight()
             .checked_add(header_size * 4)
@@ -266,6 +562,62 @@ fn fixed_reservation(
             .checked_add(header_size)
             .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
         sigops: u64::from(transaction_sigop_cost(&reservation, &[], VerifyFlags::NONE)),
+    };
+    let growth = budget
+        .map(|budget| coinbase_growth(&reservation, budget))
+        .transpose()?
+        .unwrap_or(FixedReservation::ZERO);
+    Ok(Reservation {
+        fixed,
+        growth,
+        budget,
+    })
+}
+
+/// Consensus limit on a coinbase scriptSig length (`bad-cb-length`).
+const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
+/// Smallest serialized `TxOut`: an 8-byte value and a one-byte empty-script length.
+const MIN_TXOUT_SIZE: u32 = 9;
+
+/// Room a consumer's coinbase can add to `coinbase` under `budget`.
+///
+/// Derived from the coinbase the owner built, so fixed overhead is never
+/// counted twice. The consumer's scriptSig may grow to the consensus maximum,
+/// its declared outputs are added whole, and the output count may need a wider
+/// `CompactSize`. Every output serializes to at least 9 bytes, which bounds how
+/// many outputs `additional_size` can buy, so the count width is derived from
+/// that bound instead of assumed at its 9-byte maximum. All of this is
+/// non-witness data, hence weight is four times size. The sigop allowance is
+/// already in BIP141 cost units and carries over unscaled. Input growth can
+/// contain CHECKMULTISIG, costing 20 legacy operations (80 cost units) per
+/// added byte; coinbase input scripts are counted even though never executed.
+fn coinbase_growth(coinbase: &Tx, budget: CoinbaseBudget) -> Result<FixedReservation, MiningError> {
+    let script_sig_len = coinbase
+        .inputs
+        .first()
+        .map_or(0, |input| input.script_sig.len());
+    let script_growth = widen(MAX_COINBASE_SCRIPT_SIG_LEN.saturating_sub(script_sig_len));
+    let outputs = widen(coinbase.outputs.len());
+    let added_outputs = u64::from(budget.additional_size / MIN_TXOUT_SIZE);
+    let count_growth = widen(
+        varint::encoded_len(outputs.saturating_add(added_outputs)) - varint::encoded_len(outputs),
+    );
+    let size = checked_sum(
+        checked_sum(u64::from(budget.additional_size), script_growth, "size")?,
+        count_growth,
+        "size",
+    )?;
+    let weight = size
+        .checked_mul(4)
+        .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
+    Ok(FixedReservation {
+        weight,
+        size,
+        sigops: checked_sum(
+            script_growth * 80,
+            u64::from(budget.additional_sigops),
+            "sigops",
+        )?,
     })
 }
 
@@ -320,23 +672,37 @@ fn exact_order(
     if reservation.sigops.saturating_add(sigops) > context.max_sigops {
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
+    let transactions = snapshot
+        .entries
+        .iter()
+        .map(|entry| SelectedTx {
+            tx: Arc::clone(&entry.tx),
+            txid: entry.txid,
+            wtxid: entry.wtxid,
+            fee: entry.fee,
+            sigop_cost: entry.sigop_cost,
+            weight: entry.weight,
+        })
+        .collect();
     Ok(SelectedBody {
-        ordered: (0..snapshot.entries.len()).collect(),
+        sequence: snapshot.sequence,
+        fee_delta_sequence: snapshot.fee_delta_sequence,
+        transactions,
         fees: 0,
         weight,
+        reservation,
+        budget: None,
     })
 }
 
 /// Builds commitments and adds the fixed reservation to the selected body totals.
-fn finish_candidate(
+pub(crate) fn finish_candidate(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
-    payout: &[u8],
     body: &SelectedBody,
-    reservation: FixedReservation,
+    payout: &[u8],
 ) -> Result<Candidate, MiningError> {
     let witness_commitment = if context.segwit_active {
-        let root = witness_merkle_root(snapshot, &body.ordered)?;
+        let root = witness_merkle_root(&body.transactions)?;
         Some(witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE))
     } else {
         None
@@ -354,15 +720,21 @@ fn finish_candidate(
     // fixed-width hash, so the reserved and final coinbase have the same
     // weight, serialized size, and sigop cost.
 
-    let transactions = candidate_transactions(snapshot, &body.ordered)?;
+    let transactions = candidate_transactions(&body.transactions)?;
 
-    let weight = reservation
+    let weight = body
+        .reservation
         .weight
         .checked_add(body.weight)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
 
     Ok(Candidate {
-        template_id: TemplateId::new(&context.previous_block_hash, snapshot.sequence),
+        template_id: TemplateId::with_fee_revision(
+            &context.previous_block_hash,
+            body.sequence,
+            body.fee_delta_sequence,
+        )
+        .qualified(body.budget),
         previous_block_hash: context.previous_block_hash,
         height: context.height,
         version: context.version,
@@ -374,7 +746,7 @@ fn finish_candidate(
         max_weight: context.max_weight,
         max_size: context.max_size,
         max_sigops: context.max_sigops,
-        mempool_sequence: snapshot.sequence,
+        mempool_sequence: body.sequence,
         coinbase,
         coinbase_value,
         weight,
@@ -384,22 +756,21 @@ fn finish_candidate(
 }
 
 fn candidate_transactions(
-    snapshot: &MempoolMiningSnapshot,
-    ordered: &[usize],
+    selected: &[SelectedTx],
 ) -> Result<Vec<CandidateTransaction>, MiningError> {
-    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(ordered.len());
-    for (offset, &index) in ordered.iter().enumerate() {
+    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(selected.len());
+    for (offset, entry) in selected.iter().enumerate() {
         let position = u32::try_from(offset.saturating_add(1)).map_err(|_| {
             MiningError::CandidateScalarOverflow {
                 field: "transaction index",
             }
         })?;
-        tx_positions.insert(snapshot.entries[index].txid, position);
+        tx_positions.insert(entry.txid, position);
     }
 
-    let mut transactions = Vec::with_capacity(ordered.len());
-    for &index in ordered {
-        let entry = &snapshot.entries[index];
+    let mut transactions = Vec::with_capacity(selected.len());
+    for entry in selected {
+        let data_hex = hex_encode(&consensus_bytes(entry.tx.as_ref()));
         transactions.push(CandidateTransaction {
             tx: Arc::clone(&entry.tx),
             txid: entry.txid,
@@ -408,6 +779,7 @@ fn candidate_transactions(
             sigop_cost: entry.sigop_cost,
             weight: entry.weight,
             depends: depends(&entry.tx, &tx_positions),
+            data_hex,
         });
     }
     Ok(transactions)
@@ -425,15 +797,12 @@ fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
 }
 
 /// BIP141 witness merkle root. The coinbase contributes the all-zero wtxid leaf.
-fn witness_merkle_root(
-    snapshot: &MempoolMiningSnapshot,
-    ordered: &[usize],
-) -> Result<Hash256, MiningError> {
-    let mut leaves = Vec::with_capacity(ordered.len().saturating_add(1));
+fn witness_merkle_root(selected: &[SelectedTx]) -> Result<Hash256, MiningError> {
+    let mut leaves = Vec::with_capacity(selected.len().saturating_add(1));
     // BIP141: the coinbase wtxid leaf is the all-zero hash, not the real wtxid.
     leaves.push([0_u8; 32]);
-    for &index in ordered {
-        leaves.push(*snapshot.entries[index].wtxid.as_bytes());
+    for entry in selected {
+        leaves.push(*entry.wtxid.as_bytes());
     }
     merkle_root_from_leaves(&mut leaves)
 }
@@ -452,3 +821,6 @@ fn witness_commitment_hash(witness_merkle_root: &Hash256, reserved: &[u8; 32]) -
     pair[32..].copy_from_slice(reserved);
     double_sha256(&pair)
 }
+
+#[cfg(test)]
+mod tests;

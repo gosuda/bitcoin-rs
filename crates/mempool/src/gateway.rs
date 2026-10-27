@@ -18,11 +18,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::entry::MempoolEntry;
-use crate::pool::Mempool;
+use crate::pool::{Mempool, transaction_heap_usage};
 use bitcoin_rs_consensus::{
-    ConsensusError, UtxoView, ValidationEngine, transaction_sigop_cost, verify_transaction,
+    ConsensusError, ScriptExecutionCache, UtxoView, ValidationEngine, transaction_sigop_cost,
+    verify_transaction,
 };
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::HashSet;
@@ -115,6 +116,10 @@ pub struct AdmissionRequest {
     pub locktime_cutoff: u32,
     /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
+    /// Script flags the next block will verify under. The script stage
+    /// re-verifies the transaction under these flags after the `STANDARD`
+    /// pass to fill the script-execution cache.
+    pub next_block_script_flags: VerifyFlags,
     /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
     /// Wall-clock seconds for the mempool entry timestamp.
@@ -175,18 +180,28 @@ pub enum AdmitError {
 pub(crate) struct PreparedAdmission {
     pub(crate) fact: crate::standardness::TxAcceptanceFact,
     prevouts: Vec<(OutPoint, TxOut)>,
-    rejection: Option<(AdmitError, RejectScope)>,
+    pub(crate) rejection: Option<(AdmitError, RejectScope)>,
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
+    /// Floor bump a refused size trim earned, applied only in the stamped
+    /// commit closure. The reported rejection is unchanged.
+    pub(crate) refused_bump: Option<crate::rbf::TrimBump>,
     replacement: ReplacementStage,
     /// Engine for this attempt's script checks; set by the gateway that
     /// prepared it, so the deferred `verify` phase cannot run under another.
     engine: ValidationEngine,
+    /// Validated script-cache key from the second verification pass. Set only
+    /// when that pass succeeds with no rejection pending; the commit outcome
+    /// below decides whether it is inserted, so rejected admissions and
+    /// failed packages never fill.
+    pub(crate) script_cache_key: Option<(Wtxid, VerifyFlags)>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AdmissionMode {
     Single,
+    SingleSubmit,
     PackageTest,
+    PackageSubmit,
 }
 
 #[allow(
@@ -195,7 +210,7 @@ pub(crate) enum AdmissionMode {
 )]
 enum ReplacementStage {
     Rejected,
-    PackageTest,
+    Package,
     Captured(crate::rbf::ReplacementInputs),
     Verified(crate::rbf::PreparedPoolChange),
 }
@@ -213,9 +228,15 @@ impl PreparedAdmission {
 
     /// Both preview and submission execute precisely this verification over
     /// the copied input outputs, never over a changing pool or chain reader.
-    pub(crate) fn verify(&mut self, request: &AdmissionRequest) {
+    /// A successful script stage records the cache key; the commit outcome
+    /// decides insertion. Previews pass `None` and stay dry.
+    pub(crate) fn verify(
+        &mut self,
+        request: &AdmissionRequest,
+        script_cache: Option<&ScriptExecutionCache>,
+    ) {
         self.verify_policy(request);
-        self.verify_scripts(request);
+        self.verify_scripts(request, script_cache);
     }
 
     pub(crate) fn verify_policy(&mut self, request: &AdmissionRequest) {
@@ -270,25 +291,48 @@ impl PreparedAdmission {
         if let ReplacementStage::Captured(inputs) = replacement {
             match inputs.verify() {
                 Ok(plan) => self.replacement = ReplacementStage::Verified(plan),
-                Err(error) => {
+                Err(refusal) => {
+                    let (error, bump) = refusal.into_parts();
+                    self.refused_bump = bump;
                     self.reject(replacement_rejection(error), default_scope);
                 }
             }
-        } else if matches!(replacement, ReplacementStage::PackageTest) {
-            self.replacement = ReplacementStage::PackageTest;
+        } else if matches!(replacement, ReplacementStage::Package) {
+            self.replacement = ReplacementStage::Package;
         } else {
             self.reject(AdmitError::MempoolChanged, default_scope);
         }
     }
 
-    pub(crate) fn verify_scripts(&mut self, request: &AdmissionRequest) {
-        if self.rejection.is_some() {
+    /// Runs the `STANDARD` script pass, then re-verifies under the request's
+    /// next-block flags. A successful second pass with no rejection pending
+    /// records the cache key for the commit outcome to insert; a failed
+    /// second pass after a `STANDARD` pass is logged and records nothing, and
+    /// a rejected transaction never fills.
+    ///
+    /// A size-trim refusal (`refused_bump`) still runs the `STANDARD` pass
+    /// and the caller's max-feerate check: Core trims only script-valid,
+    /// under-cap transactions, so an invalid script or a breached cap
+    /// clears the bump while the reported `Full` rejection is kept either
+    /// way. The next-block pass and the cache fill are skipped on this
+    /// path — a refused transaction never fills.
+    pub(crate) fn verify_scripts(
+        &mut self,
+        request: &AdmissionRequest,
+        script_cache: Option<&ScriptExecutionCache>,
+    ) {
+        // A refused trim earns its floor bump only with valid scripts, but
+        // the refusal itself is reported before scripts ever run.
+        let verifying_refusal = self.refused_bump.is_some();
+        if self.rejection.is_some() && !verifying_refusal {
             return;
         }
         let Some(height) = request.height.checked_add(1) else {
+            self.refused_bump = None;
             return;
         };
         let default_scope = rejection_scope(&request.tx);
+        let signature_cache = bitcoin_rs_script::SignatureCache::new();
         if let Err(error) = verify_transaction(
             &request.tx,
             &PrevoutMap(&self.prevouts),
@@ -296,7 +340,12 @@ impl PreparedAdmission {
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
             self.engine,
+            Some(&signature_cache),
         ) {
+            if verifying_refusal {
+                self.refused_bump = None;
+                return;
+            }
             let possibly_stripped = witness_strippable_failure(&error, &self.prevouts);
             self.reject(
                 AdmitError::Consensus,
@@ -308,18 +357,51 @@ impl PreparedAdmission {
             );
             return;
         }
-        // Core v31.1 BroadcastTransaction and testmempoolaccept apply the
-        // caller's maximum only after a successful admission verdict.
+        // The caller's cap gates the bump like scripts do — Core applies
+        // `client_maxfeerate` in PreChecks, before any trim can touch the
+        // floor. A capped candidate keeps its Full report but earns nothing.
         if crate::standardness::exceeds_max_feerate(
             self.fact.base_fee.unwrap_or(0),
             self.fact.vsize,
             request.max_feerate_sat_per_kvb,
         ) {
+            self.refused_bump = None;
+            if verifying_refusal {
+                return;
+            }
             self.reject(
                 AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MaxFeeExceeded),
                 default_scope,
             );
         }
+        if verifying_refusal {
+            return;
+        }
+        if self.rejection.is_some() {
+            return;
+        }
+        let Some(_) = script_cache.filter(|_| self.engine == ValidationEngine::Native) else {
+            return;
+        };
+        let flags = request.next_block_script_flags;
+        if let Err(error) = verify_transaction(
+            &request.tx,
+            &PrevoutMap(&self.prevouts),
+            height,
+            request.locktime_cutoff,
+            flags,
+            self.engine,
+            Some(&signature_cache),
+        ) {
+            tracing::warn!(
+                txid = %request.tx.txid(),
+                flags = flags.bits(),
+                error = %error,
+                "script cache second pass failed after a STANDARD pass; not caching",
+            );
+            return;
+        }
+        self.script_cache_key = Some((request.tx.wtxid(), flags));
     }
 }
 
@@ -445,6 +527,89 @@ impl MempoolObserver for CompositeObserver {
     }
 }
 
+/// Transactions kept beyond pool residency for BIP152 reconstruction: Core's
+/// `DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN` (`net_processing.h:47-48`).
+pub(crate) const BLOCK_RECONSTRUCTION_EXTRA_TXN: usize = 100;
+/// A policy-rejected transaction whose retained heap reaches this bound is
+/// not kept for reconstruction; Core's `RecursiveDynamicUsage(*ptx) < 100000`
+/// gate (`net_processing.cpp:3139`), measured here with the pool's own
+/// `transaction_heap_usage` accounting rather than the consensus
+/// serialization.
+pub(crate) const EXTRA_TXN_MAX_MEMORY_BYTES: usize = 100_000;
+
+/// One retained body with the identities its reconstruction match needs.
+struct ExtraTxn {
+    txid: Txid,
+    wtxid: Wtxid,
+    tx: Arc<Tx>,
+}
+
+/// Bounded FIFO of transactions a compact block may still name after the pool
+/// dropped or never admitted them: replaced bodies, peer orphans and peer
+/// policy rejects (Core's `vExtraTxnForCompact`).
+///
+/// Identity is the witness hash, so two witness variants of one txid are two
+/// entries. Re-inserting a resident wtxid changes nothing: the entry keeps its
+/// place, so a repeated body can neither grow the ring nor postpone its own
+/// eviction. A coinbase is never retained. Entry count is bounded by
+/// [`BLOCK_RECONSTRUCTION_EXTRA_TXN`]. Bodies that reached the ring through
+/// the pool or the orphan pool are already bounded by the standardness rules
+/// that admitted them there; a policy reject is additionally bounded by the
+/// [`EXTRA_TXN_MAX_MEMORY_BYTES`] retained-memory gate.
+///
+/// The ring is reconstruction-hint state only. It is never consulted for
+/// inventory, `getdata`, relay, admission or any pool query.
+#[derive(Default)]
+pub(crate) struct ExtraTxnRing {
+    entries: VecDeque<ExtraTxn>,
+}
+
+impl ExtraTxnRing {
+    fn insert(&mut self, txid: Txid, wtxid: Wtxid, tx: &Arc<Tx>) {
+        if tx.is_coinbase() || self.entries.iter().any(|held| held.wtxid == wtxid) {
+            return;
+        }
+        if self.entries.len() == BLOCK_RECONSTRUCTION_EXTRA_TXN {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(ExtraTxn {
+            txid,
+            wtxid,
+            tx: Arc::clone(tx),
+        });
+    }
+
+    fn by_txid(&self, txid: Txid) -> Option<&Arc<Tx>> {
+        self.entries
+            .iter()
+            .find(|held| held.txid == txid)
+            .map(|held| &held.tx)
+    }
+
+    fn by_wtxid(&self, wtxid: Wtxid) -> Option<&Arc<Tx>> {
+        self.entries
+            .iter()
+            .find(|held| held.wtxid == wtxid)
+            .map(|held| &held.tx)
+    }
+}
+
+/// Whether a peer-origin refusal is a policy verdict whose body a block may
+/// still contain: only the typed policy class, below the retained-memory gate,
+/// and not a transaction that spends a null or out-of-range outpoint (which no
+/// block can carry). Consensus failures and stale-state retries are never
+/// retained.
+fn retains_rejected_body(pool: &Mempool, tx: &Tx, error: AdmitError) -> bool {
+    let AdmitError::Policy(reason) = error else {
+        return false;
+    };
+    transaction_heap_usage(tx) < u64::try_from(EXTRA_TXN_MAX_MEMORY_BYTES).unwrap_or(u64::MAX)
+        && !(matches!(
+            reason,
+            crate::standardness::AcceptanceRejectReason::MissingInputs
+        ) && crate::admission::has_unspendable_input(pool, tx))
+}
+
 /// The mutation publication queue state, protected by the `publish` mutex.
 struct PublishState {
     /// Committed, non-empty envelopes awaiting their observer callback, in
@@ -492,6 +657,11 @@ pub struct MempoolGateway {
     /// means nobody is listening and the publish path stays allocation-free.
     observer: Option<Arc<CompositeObserver>>,
     publish: Mutex<PublishState>,
+    /// BIP152 reconstruction extras: replaced bodies, peer orphans and peer
+    /// policy rejects. A leaf lock: pool guards precede it, and nothing else
+    /// is acquired while it is held. Written only under the pool write lock,
+    /// so a walk under the pool read guard sees pool and ring at one instant.
+    pub(crate) extra_txn: Mutex<ExtraTxnRing>,
     /// Even means stable; odd means a chain change is active or a failed
     /// chain change has closed admission. Initialized to `0` (even/stable)
     /// in [`Self::new`]. Compare only for exact equality — never order or
@@ -501,6 +671,11 @@ pub struct MempoolGateway {
     /// resolved once from node configuration (`validation.engine`). The
     /// admission pipeline is shared; only the script backend dispatches on it.
     engine: ValidationEngine,
+    /// Native-only script-execution cache filled after admission and
+    /// consulted by block connect. `None` without a node composition that
+    /// installed one (including every kernel-engine node, so the kernel
+    /// oracle stays authoritative).
+    script_cache: Option<Arc<ScriptExecutionCache>>,
 }
 
 impl core::fmt::Debug for MempoolGateway {
@@ -520,11 +695,17 @@ impl MempoolGateway {
     ///
     /// Pass `None` — or use the node's no-op publisher behind its observer —
     /// when no `--zmq-pub-sequence` endpoint is configured.
+    ///
+    /// `script_cache` is the node-owned script-execution cache this gateway
+    /// fills after admission; the node passes `Some` only when the validation
+    /// engine is native, `None` otherwise (including every test seam that
+    /// does not exercise the fill).
     #[must_use]
     pub fn new(
         pool: Arc<RwLock<Mempool>>,
         observer: Option<Arc<dyn MempoolObserver>>,
         engine: ValidationEngine,
+        script_cache: Option<Arc<ScriptExecutionCache>>,
     ) -> Self {
         let composite = observer.map(|observer| {
             let composite = CompositeObserver::new();
@@ -539,8 +720,10 @@ impl MempoolGateway {
                 queue: VecDeque::new(),
                 draining: false,
             }),
+            extra_txn: Mutex::new(ExtraTxnRing::default()),
             chain_generation: AtomicU64::new(0),
             engine,
+            script_cache,
         }
     }
 
@@ -548,6 +731,12 @@ impl MempoolGateway {
     #[must_use]
     pub const fn engine(&self) -> ValidationEngine {
         self.engine
+    }
+
+    /// The node-owned script-execution cache this gateway fills, if any.
+    #[must_use]
+    pub(crate) fn script_cache(&self) -> Option<&ScriptExecutionCache> {
+        self.script_cache.as_deref()
     }
 
     /// Attaches another named leg to this gateway's observer slot.
@@ -649,7 +838,26 @@ impl MempoolGateway {
                     crate::rbf::LimitEnforcement::Full,
                 )
                 .map_err(RbfError::into_pool_error)?;
-            let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
+            let plan = match inputs.verify() {
+                Ok(plan) => plan,
+                Err(refusal) => {
+                    // Raises serialize under the write guard with every other
+                    // pool transition, so the floor cannot move between a
+                    // read-guard capture and its stamp check.
+                    let mut pool = self.pool.write();
+                    let (error, bump) = refusal.into_parts();
+                    let error = match bump {
+                        Some(bump) if pool.track_refused_trim(bump).is_err() => {
+                            MempoolError::StalePolicy
+                        }
+                        _ => error.into_pool_error(),
+                    };
+                    if matches!(error, MempoolError::StalePolicy) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             let result = self.commit(
                 origin,
                 move |pool| {
@@ -682,7 +890,22 @@ impl MempoolGateway {
                 height,
                 crate::rbf::FeeEstimation::Estimate,
             )?;
-            let plan = inputs.verify()?;
+            let plan = match inputs.verify() {
+                Ok(plan) => plan,
+                Err(refusal) => {
+                    // See above: raises take the write guard.
+                    let mut pool = self.pool.write();
+                    let (error, bump) = refusal.into_parts();
+                    let error = match bump {
+                        Some(bump) if pool.track_refused_trim(bump).is_err() => RbfError::StalePlan,
+                        _ => error,
+                    };
+                    if matches!(error, RbfError::StalePlan) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             let result = self.commit(
                 origin,
                 move |pool| pool.commit_pool_change(plan),
@@ -730,14 +953,25 @@ impl MempoolGateway {
                 fence,
                 None,
             )?;
-            Self::prepare_admission(&pool, request, AdmissionMode::Single, fence, self.engine())
+            Self::prepare_admission(
+                &pool,
+                request,
+                AdmissionMode::SingleSubmit,
+                fence,
+                self.engine(),
+            )
         };
-        prepared.verify(request);
+        prepared.verify(request, self.script_cache());
 
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        self.commit(
+        // The validated key is copied out before the writer runs; the commit
+        // outcome below decides whether it is inserted, outside the pool
+        // write lock, with no re-verification and no cloning.
+        let cache_key = prepared.script_cache_key;
+
+        let outcome = self.commit(
             request.origin,
             |pool| {
                 self.check_admission_state(
@@ -761,6 +995,11 @@ impl MempoolGateway {
                     return Ok(AdmitOutcome::AlreadyKnown);
                 }
                 if let Some((error, scope)) = prepared.rejection {
+                    if let Some(bump) = prepared.refused_bump {
+                        if pool.track_refused_trim(bump).is_err() {
+                            return Err(AdmitError::MempoolChanged);
+                        }
+                    }
                     self.record_peer_failure(pool, request, error, scope);
                     return Err(error);
                 }
@@ -771,8 +1010,18 @@ impl MempoolGateway {
                 let ReplacementStage::Verified(plan) = prepared.replacement else {
                     return Err(AdmitError::MempoolChanged);
                 };
+                // Replaced bodies leave the pool in the commit below, so they
+                // are captured first and retained in the same writer interval:
+                // a reader never sees them gone from both pool and ring.
+                let replaced: Vec<_> = plan
+                    .replaced_entries(pool)
+                    .map(|entry| (entry.txid, entry.wtxid, Arc::clone(&entry.tx)))
+                    .collect();
                 pool.commit_pool_change(plan)
-                    .map(AdmitOutcome::Committed)
+                    .map(|result| {
+                        self.retain_replaced(&replaced);
+                        AdmitOutcome::Committed(result)
+                    })
                     .map_err(|error| {
                         let error = replacement_rejection(error);
                         self.record_peer_failure(pool, request, error, default_reject_scope);
@@ -783,7 +1032,16 @@ impl MempoolGateway {
                 AdmitOutcome::AlreadyKnown => None,
                 AdmitOutcome::Committed(result) => Some(result),
             },
-        )
+        )?;
+        // Only an accepted mutation fills, after the commit released the
+        // pool write lock. Rejections, holds, and already-known outcomes
+        // record nothing.
+        if matches!(outcome, AdmitOutcome::Committed(_)) {
+            if let (Some((wtxid, flags)), Some(cache)) = (cache_key, self.script_cache()) {
+                cache.insert(wtxid, flags);
+            }
+        }
+        Ok(outcome)
     }
 
     /// Rejects an attempt whose captured admittance facts no longer hold.
@@ -861,16 +1119,19 @@ impl MempoolGateway {
             (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
                 LimitEnforcement::Deferred
             }
+            (_, crate::admission::AdmissionFence::Stable)
+                if mode == AdmissionMode::SingleSubmit
+                    && !matches!(request.origin, AdmissionOrigin::Reorg) =>
+            {
+                LimitEnforcement::ExpireBeforeTrim(request.time)
+            }
             _ => LimitEnforcement::Full,
         };
         let deferred = enforcement == LimitEnforcement::Deferred;
-        let floor = if deferred {
+        let floor = if deferred || mode == AdmissionMode::PackageSubmit {
             None
         } else {
-            Some(crate::eviction::mempool_min_fee_sat_per_kvb(
-                pool,
-                policy.incremental_relay_fee_sat_per_kvb,
-            ))
+            Some(pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs()))
         };
         // BIP68 is evaluated at the next block. A resolved input that is not
         // present in the confirmed metadata is an unconfirmed (mempool/package)
@@ -902,8 +1163,10 @@ impl MempoolGateway {
             prevouts,
             rejection,
             stamp: pool.policy_stamp(),
+            refused_bump: None,
             replacement: ReplacementStage::Rejected,
             engine,
+            script_cache_key: None,
         };
         if !pool.contains_txid(&request.tx.txid()) {
             if standard
@@ -918,9 +1181,12 @@ impl MempoolGateway {
                 );
             }
         }
-        if mode == AdmissionMode::PackageTest {
-            // Core PackageTestAccept forbids replacement before fee/script
-            // checks; an already resident tx retains its duplicate result.
+        if matches!(
+            mode,
+            AdmissionMode::PackageTest | AdmissionMode::PackageSubmit
+        ) {
+            // Package previews and native submissions forbid replacement;
+            // an already resident tx retains its duplicate result here.
             if !pool.contains_txid(&request.tx.txid())
                 && !pool.conflicts_for(&request.tx).is_empty()
             {
@@ -933,7 +1199,7 @@ impl MempoolGateway {
             }
             if prepared.rejection.is_none() {
                 match pool.truc_conflicts(&request.tx, prepared.fact.vsize, false) {
-                    Ok(_) => prepared.replacement = ReplacementStage::PackageTest,
+                    Ok(_) => prepared.replacement = ReplacementStage::Package,
                     Err(error) => {
                         prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
                     }
@@ -1075,17 +1341,29 @@ impl MempoolGateway {
         )
     }
 
-    /// Commits `pool.remove_for_block` and publishes its result.
+    /// Commits `pool.remove_for_block` and publishes its result. `now` stamps
+    /// the rolling floor for decay, even when the block removes nothing.
     pub fn remove_for_block(
         &self,
         origin: AdmissionOrigin,
         block_txs: &[&Tx],
         block_txids: &[Txid],
         height: u32,
+        now: u64,
     ) -> MutationResult {
         self.commit_infallible(origin, |pool| {
-            pool.remove_for_block(block_txs, block_txids, height)
+            pool.remove_for_block(block_txs, block_txids, height, now)
         })
+    }
+
+    /// Commits `pool.expire` when the acceptance-time index shows stale
+    /// entries, and publishes its result. Returns `None` without taking the
+    /// write lock when nothing is stale.
+    pub fn expire(&self, origin: AdmissionOrigin, now: u64) -> Option<MutationResult> {
+        if !self.pool.read().has_expired_entries(now) {
+            return None;
+        }
+        Some(self.commit_infallible(origin, |pool| pool.expire(now)))
     }
 
     /// Commits `pool.evict_below_fee_rate` and publishes its result.
@@ -1116,7 +1394,7 @@ impl MempoolGateway {
         max_bytes: u64,
     ) -> Result<MutationResult, MempoolError> {
         let inputs = self.pool.read().capture_eviction(max_bytes)?;
-        let plan = inputs.verify()?;
+        let plan = inputs.verify();
         self.commit(
             origin,
             move |pool| {
@@ -1140,6 +1418,16 @@ impl MempoolGateway {
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
         self.apply_prioritise(&mut pool, txid, fee_delta)
+    }
+
+    /// A successful P2P getdata response completes initial broadcast of this
+    /// exact witness body. Membership and its public sequence do not change.
+    pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().set_unbroadcast(wtxid, false);
+    }
+
+    pub(crate) fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().set_unbroadcast(wtxid, true);
     }
 
     /// Atomically rejects pooled dust before applying a fee overlay.
@@ -1186,7 +1474,7 @@ impl MempoolGateway {
     /// every accepted/removed change from its prevalidated plan.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<T, E>(
+    pub(crate) fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
@@ -1197,6 +1485,17 @@ impl MempoolGateway {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
             if let Some(result) = mutation(&outcome) {
+                if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Esplora) {
+                    for change in &result.changes {
+                        if matches!(change.outcome, crate::MutationOutcome::Accepted)
+                            && let Some(wtxid) = pool
+                                .entry_by_txid(&Txid(change.txid))
+                                .map(|entry| entry.wtxid)
+                        {
+                            pool.set_unbroadcast(wtxid, true);
+                        }
+                    }
+                }
                 self.update_admission_lifecycle(&pool, result);
                 if !result.changes.is_empty() && self.observer.is_some() {
                     let mut publish = self.publish.lock();
@@ -1241,9 +1540,81 @@ impl MempoolGateway {
             lifecycle
                 .orphans
                 .insert(Arc::clone(&request.tx), source, request.time);
+            self.retain_for_reconstruction(&request.tx);
         } else {
             lifecycle.reject(&request.tx, scope);
+            if retains_rejected_body(pool, &request.tx, error) {
+                self.retain_for_reconstruction(&request.tx);
+            }
         }
+    }
+
+    /// Retains `tx` in the reconstruction ring. PRE: the caller holds the pool
+    /// write lock, which is what makes the ring consistent with the pool.
+    fn retain_for_reconstruction(&self, tx: &Arc<Tx>) {
+        let (txid, wtxid) = (tx.txid(), tx.wtxid());
+        self.extra_txn.lock().insert(txid, wtxid, tx);
+    }
+
+    /// Retains the bodies one committed replacement removed, with the
+    /// identities the pool already computed. PRE: the caller holds the pool
+    /// write lock.
+    fn retain_replaced(&self, replaced: &[(Txid, Wtxid, Arc<Tx>)]) {
+        if replaced.is_empty() {
+            return;
+        }
+        let mut ring = self.extra_txn.lock();
+        for (txid, wtxid, tx) in replaced {
+            ring.insert(*txid, *wtxid, tx);
+        }
+    }
+
+    /// Invokes `f` for every transaction a BIP152 reconstruction may match:
+    /// each pool entry, then each retained extra not already in the pool.
+    ///
+    /// Hint-only: the extras are never admitted, relayed, served as inventory,
+    /// or visible to [`Self::get_tx`], [`Self::get_tx_by_wtxid`] or
+    /// [`Self::have_tx`]. Pool read guard, then the ring's leaf lock, are held
+    /// across `f`, so `f` must not call back into this gateway; fetch bodies
+    /// with [`Self::reconstruction_tx_by_txid`] or
+    /// [`Self::reconstruction_tx_by_wtxid`] after the walk returns. The orphan
+    /// lock is never taken.
+    pub fn for_each_reconstruction_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
+        let pool = self.pool.read();
+        for entry in pool.iter_entries() {
+            f(entry.txid, entry.wtxid);
+        }
+        let ring = self.extra_txn.lock();
+        for held in &ring.entries {
+            if !pool.contains_wtxid(&held.wtxid) {
+                f(held.txid, held.wtxid);
+            }
+        }
+    }
+
+    /// The pool body for `txid`, else a retained reconstruction extra. Hint
+    /// use only; see [`Self::for_each_reconstruction_identity`].
+    #[must_use]
+    pub fn reconstruction_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+        let pool = self.pool.read();
+        if let Some(tx) = pool.transaction_by_txid(&txid) {
+            return Some((*tx).clone());
+        }
+        self.extra_txn.lock().by_txid(txid).map(|tx| (**tx).clone())
+    }
+
+    /// The pool body for `wtxid`, else a retained reconstruction extra. Hint
+    /// use only; see [`Self::for_each_reconstruction_identity`].
+    #[must_use]
+    pub fn reconstruction_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        let pool = self.pool.read();
+        if let Some(entry) = pool.entry_by_wtxid(&wtxid) {
+            return Some((*entry.tx).clone());
+        }
+        self.extra_txn
+            .lock()
+            .by_wtxid(wtxid)
+            .map(|tx| (**tx).clone())
     }
 
     /// Required internal lifecycle work is independent of fallible observers.
@@ -1443,8 +1814,9 @@ pub fn reset_admission_park() {
 #[expect(clippy::expect_used)]
 mod tests {
     use super::{
-        AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
-        CompositeObserver, MempoolGateway, MempoolObserver, ValidationEngine,
+        AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, BLOCK_RECONSTRUCTION_EXTRA_TXN,
+        ChainChangeError, CompositeObserver, ExtraTxnRing, MempoolGateway, MempoolObserver,
+        ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
@@ -1574,6 +1946,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             observer,
             ValidationEngine::Native,
+            None,
         ))
     }
 
@@ -1655,6 +2028,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -1680,7 +2054,7 @@ mod tests {
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&child))
             .expect("child in");
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
 
         let seen = observer.seen.lock();
         assert_eq!(
@@ -1715,7 +2089,7 @@ mod tests {
             .insert_entry(AdmissionOrigin::Rpc, entry(&mined))
             .expect("in");
         observer.seen.lock().clear();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8, 1);
 
         let seen = observer.seen.lock();
         assert_eq!(
@@ -1742,7 +2116,8 @@ mod tests {
             .expect("child in");
         observer.seen.lock().clear();
 
-        let result = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
+        let result =
+            gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
 
         assert_eq!(result.changes.len(), 1);
         assert_eq!(
@@ -1763,7 +2138,7 @@ mod tests {
         assert!(gateway.insert_entry(AdmissionOrigin::Rpc, poor).is_err());
         let stranger = tx(5);
         let stranger_txid = stranger.txid();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&stranger], &[stranger_txid], 8);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&stranger], &[stranger_txid], 8, 1);
         gateway.clear(AdmissionOrigin::Rpc);
 
         assert!(observer.seen.lock().is_empty());
@@ -1874,7 +2249,8 @@ mod tests {
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&child))
             .expect("in");
-        let removed = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
+        let removed =
+            gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
 
         assert_eq!(removed.changes.len(), 1);
         assert_eq!(removed.sequence_base, 3);
@@ -1893,6 +2269,7 @@ mod tests {
             }))),
             Some(dyn_observer(&observer)),
             ValidationEngine::Native,
+            None,
         );
 
         let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7, 0);
@@ -2133,6 +2510,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(dyn_observer(&observer)),
             ValidationEngine::Native,
+            None,
         ));
         *observer.gateway.lock() = Some(Arc::clone(&gateway));
 
@@ -2232,6 +2610,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(dyn_observer(&observer)),
             ValidationEngine::Native,
+            None,
         ));
         *observer.gateway.lock() = Some(Arc::clone(&gateway));
 
@@ -2325,6 +2704,7 @@ mod tests {
                             &[&member],
                             &[member_txid],
                             8,
+                            1,
                         );
                     }
                 })
@@ -2357,6 +2737,7 @@ mod tests {
             }))),
             Some(dyn_observer(&observer)),
             ValidationEngine::Native,
+            None,
         );
 
         let filler = tx(70);
@@ -2383,6 +2764,8 @@ mod tests {
             .expect_err("entry cannot survive trimming");
         assert_eq!(error, crate::MempoolError::Full);
         assert!(!gateway.read().contains_txid(&shed_txid));
+        // Shed chunk rate floor(100 * 1_000 / 100) = 1_000, plus 1_000.
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 2_000);
         assert!(gateway.read().contains_txid(&filler_txid));
         assert_eq!(gateway.read().sequence_number(), before.0);
         assert_eq!(gateway.read().estimator_history(), before.1);
@@ -2402,6 +2785,7 @@ mod tests {
             }))),
             Some(dyn_observer(&observer)),
             ValidationEngine::Native,
+            None,
         );
 
         let prev = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x73; 32])), 0);
@@ -2455,7 +2839,11 @@ mod tests {
         assert_eq!(pool.mining_snapshot().entries, before.0);
         assert_eq!(pool.estimator_history(), before.1);
         assert_eq!(pool.prioritised_transactions(), before.2);
-        assert_eq!(pool.policy_stamp(), before.3);
+        // Membership, history, and publication are preserved, but the refused
+        // trim's floor raise revisions the stamp: a concurrent admission
+        // prepared before it must retry against the newer floor.
+        assert_ne!(pool.policy_stamp(), before.3);
+        assert!(pool.min_fee_sat_per_kvb(9) > 0);
         assert!(
             observer.seen.lock().is_empty(),
             "failed replacement cannot publish"
@@ -2568,7 +2956,7 @@ mod tests {
         let captured_sequence = request.expected_sequence;
 
         let other_txid = other.txid();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&other], &[other_txid], 8);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&other], &[other_txid], 8, 1);
 
         request.expected_sequence = captured_sequence;
 
@@ -2727,6 +3115,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -2779,6 +3168,155 @@ mod tests {
             gateway.read().contains_txid(&replacement_txid),
             "replacement must be in the pool"
         );
+    }
+
+    /// Every identity the reconstruction walk offers, in visit order.
+    fn reconstruction_identities(
+        gateway: &MempoolGateway,
+    ) -> Vec<(Txid, bitcoin_rs_primitives::Wtxid)> {
+        let mut seen = Vec::new();
+        gateway.for_each_reconstruction_identity(|txid, wtxid| seen.push((txid, wtxid)));
+        seen
+    }
+
+    fn retain(ring: &mut ExtraTxnRing, tx: &Arc<Tx>) {
+        ring.insert(tx.txid(), tx.wtxid(), tx);
+    }
+
+    // BIP152 extras: FIFO of 100, a repeated body neither grows the ring nor
+    // postpones its own eviction, a coinbase is never held, and two witness
+    // variants of one txid are two entries.
+    #[test]
+    fn extra_txn_ring_is_fifo_bounded_and_ignores_repeats() {
+        let bodies: Vec<Arc<Tx>> = (0..=100_u8).map(|label| Arc::new(tx(label))).collect();
+        assert_eq!(bodies.len(), BLOCK_RECONSTRUCTION_EXTRA_TXN + 1);
+        let mut ring = ExtraTxnRing::default();
+        for body in &bodies[..BLOCK_RECONSTRUCTION_EXTRA_TXN] {
+            retain(&mut ring, body);
+        }
+        retain(&mut ring, &bodies[0]);
+        assert_eq!(ring.entries.len(), BLOCK_RECONSTRUCTION_EXTRA_TXN);
+
+        retain(&mut ring, &bodies[BLOCK_RECONSTRUCTION_EXTRA_TXN]);
+        assert_eq!(ring.entries.len(), BLOCK_RECONSTRUCTION_EXTRA_TXN);
+        assert!(
+            ring.by_wtxid(bodies[0].wtxid()).is_none(),
+            "the repeat did not postpone the oldest body's eviction"
+        );
+        let held: Vec<_> = ring.entries.iter().map(|entry| entry.wtxid).collect();
+        let expected: Vec<_> = bodies[1..].iter().map(|body| body.wtxid()).collect();
+        assert_eq!(held, expected, "the newest 100 remain, oldest first");
+
+        let mut coinbase = tx(200);
+        coinbase.inputs[0].previous_output = OutPoint::new(Txid::default(), u32::MAX);
+        assert!(coinbase.is_coinbase());
+        retain(&mut ring, &Arc::new(coinbase));
+        assert_eq!(ring.entries.len(), BLOCK_RECONSTRUCTION_EXTRA_TXN);
+        assert_eq!(
+            ring.entries
+                .iter()
+                .map(|entry| entry.wtxid)
+                .collect::<Vec<_>>(),
+            expected,
+            "a coinbase changes nothing, not even by evicting"
+        );
+
+        let mut variant = (*bodies[1]).clone();
+        variant.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+        let variant = Arc::new(variant);
+        assert_eq!(variant.txid(), bodies[1].txid());
+        assert_ne!(variant.wtxid(), bodies[1].wtxid());
+        let mut siblings = ExtraTxnRing::default();
+        retain(&mut siblings, &bodies[1]);
+        retain(&mut siblings, &variant);
+        assert_eq!(siblings.entries.len(), 2);
+        assert_eq!(siblings.by_wtxid(bodies[1].wtxid()), Some(&bodies[1]));
+        assert_eq!(siblings.by_wtxid(variant.wtxid()), Some(&variant));
+        assert_eq!(
+            siblings.by_txid(variant.txid()),
+            Some(&bodies[1]),
+            "a txid lookup answers the oldest variant"
+        );
+    }
+
+    // BIP152 extras: a replacement retains the replaced bodies, descendants
+    // included, for reconstruction only.
+    #[test]
+    fn replaced_bodies_are_retained_for_reconstruction_and_stay_hint_only() {
+        let gateway = gateway_with(None);
+        let mut original = standard_tx(46);
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        let child = prevout_spend(OutPoint::new(original.txid(), 0), 5_000, 9);
+        let mut replacement = standard_tx(47);
+        replacement.inputs[0].previous_output = original.inputs[0].previous_output;
+        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
+        replacement.outputs[0].value = Amount::from_sat(6_000);
+        for resident in [&original, &child] {
+            gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(resident))
+                .expect("resident admitted");
+        }
+        let mut request = admit_request(&gateway, &replacement, AdmissionOrigin::Rpc);
+        request.context.fee = 5_000;
+        let outcome = gateway.admit_transaction(request);
+        assert!(
+            matches!(outcome, Ok(AdmitOutcome::Committed(_))),
+            "replacement must commit, got {outcome:?}"
+        );
+        assert!(!gateway.read().contains_txid(&original.txid()));
+        assert!(!gateway.read().contains_txid(&child.txid()));
+
+        for replaced in [&original, &child] {
+            assert_eq!(
+                gateway.reconstruction_tx_by_wtxid(replaced.wtxid()),
+                Some(replaced.clone())
+            );
+            assert_eq!(
+                gateway.reconstruction_tx_by_txid(replaced.txid()),
+                Some(replaced.clone())
+            );
+            assert_eq!(gateway.get_tx(replaced.txid()), None);
+            assert_eq!(gateway.get_tx_by_wtxid(replaced.wtxid()), None);
+            assert!(!gateway.have_tx(hash(&replaced.txid()), false));
+        }
+        let identities = reconstruction_identities(&gateway);
+        assert_eq!(identities.len(), 3, "replacement once, then both extras");
+        assert_eq!(
+            identities
+                .iter()
+                .filter(|(txid, _)| *txid == replacement.txid())
+                .count(),
+            1
+        );
+    }
+
+    // BIP152 extras: block inclusion and size-limit eviction are not retained.
+    #[test]
+    fn block_and_size_limit_removals_are_not_retained() {
+        let gateway = gateway_with(None);
+        let mined = tx(60);
+        let first = tx(61);
+        let second = tx(62);
+        for resident in [&mined, &first, &second] {
+            gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(resident))
+                .expect("resident admitted");
+        }
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined.txid()], 8, 1);
+        assert_eq!(gateway.reconstruction_tx_by_wtxid(mined.wtxid()), None);
+
+        let trimmed = gateway
+            .enforce_size_limit(AdmissionOrigin::Rpc, 100)
+            .expect("size trim");
+        assert_eq!(trimmed.removed_txids().len(), 1);
+        for resident in [&first, &second] {
+            assert_eq!(
+                gateway.reconstruction_tx_by_wtxid(resident.wtxid()),
+                gateway.get_tx_by_wtxid(resident.wtxid()),
+                "an evicted body is not kept as a reconstruction extra"
+            );
+        }
+        assert_eq!(reconstruction_identities(&gateway).len(), 1);
     }
 
     #[test]
@@ -3017,6 +3555,7 @@ mod tests {
             &[&mined, &double_spend],
             &[mined_txid, double_spend_txid],
             8,
+            1,
         );
 
         let seen = observer.seen.lock();
@@ -3085,6 +3624,7 @@ mod tests {
             }))),
             None,
             ValidationEngine::Native,
+            None,
         );
         let tx = standard_tx(0x44);
         let generation = gateway.stable_generation().expect("generation is even");
@@ -3100,6 +3640,7 @@ mod tests {
             prevouts: Vec::new(),
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3130,6 +3671,7 @@ mod tests {
             }))),
             None,
             ValidationEngine::Native,
+            None,
         );
         let mut tx = standard_tx(0x45);
         tx.inputs.push(tx.inputs[0].clone());
@@ -3152,6 +3694,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3237,13 +3780,121 @@ mod tests {
         }
     }
 
+    /// A cache-backed gateway inserts the admitted transaction under the
+    /// request's next-block flags once the `STANDARD` pass succeeds and the
+    /// admission commits, keyed exactly: the same wtxid under other flags
+    /// still misses.
+    #[test]
+    fn admission_fills_script_cache_under_next_block_flags() {
+        let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+            Some(Arc::clone(&cache)),
+        ));
+        let candidate = standard_tx(0x60);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+        let outcome = gateway
+            .admit_transaction(request)
+            .expect("standard-shaped spend must admit");
+        assert!(matches!(outcome, AdmitOutcome::Committed(_)));
+        assert!(cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+        assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::STANDARD));
+    }
+
+    /// A transaction the `STANDARD` pass rejects fills nothing, under any
+    /// flags: rejected bodies never enter the script-execution cache.
+    #[test]
+    fn rejected_admission_fills_no_script_cache_entry() {
+        let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+            Some(Arc::clone(&cache)),
+        ));
+        let candidate = standard_tx(0x61);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        request.prevouts = vec![(request.prevouts[0].0, p2sh_prevout())];
+        request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+        let result = gateway.admit_transaction(request);
+        assert!(matches!(result, Err(AdmitError::Consensus)));
+        assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    }
+
+    /// A transaction the fee-cap policy rejects after the `STANDARD` pass
+    /// fills nothing either: only fully admitted transactions warm the
+    /// script-execution cache. (A failed second pass is unreachable with
+    /// real flags — `STANDARD` is a superset of every consensus flag the
+    /// next-block derivation can emit, and policy enforces the one script
+    /// check outside it, push-only — so that branch stays defensive.)
+    #[test]
+    fn fee_capped_admission_fills_no_script_cache_entry() {
+        let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+            Some(Arc::clone(&cache)),
+        ));
+        let candidate = standard_tx(0x62);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        request.max_feerate_sat_per_kvb = Some(1);
+        request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+        let result = gateway.admit_transaction(request);
+        assert!(matches!(
+            result,
+            Err(AdmitError::Policy(
+                crate::standardness::AcceptanceRejectReason::MaxFeeExceeded
+            ))
+        ));
+        assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    }
+
+    /// Verification alone never fills: both script stages can pass and only
+    /// the key is recorded; the commit outcome inserts it. (Under
+    /// insert-at-verify the first assertion takes true and fails, so this
+    /// pins the commit gate.)
+    #[test]
+    fn verify_without_commit_fills_nothing() {
+        let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+            Some(Arc::clone(&cache)),
+        ));
+        let candidate = standard_tx(0x63);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+        {
+            let pool = gateway.read();
+            let mut prepared = MempoolGateway::prepare_admission(
+                &pool,
+                &request,
+                AdmissionMode::Single,
+                crate::admission::AdmissionFence::Stable,
+                gateway.engine(),
+            );
+            prepared.verify(&request, gateway.script_cache());
+        }
+        assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+        let outcome = gateway
+            .admit_transaction(request)
+            .expect("standard-shaped spend must admit");
+        assert!(matches!(outcome, AdmitOutcome::Committed(_)));
+        assert!(cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    }
+
     /// Runs one prepared admission's script stage against a P2SH prevout.
     fn script_stage_rejection(engine: ValidationEngine) -> Option<(AdmitError, RejectScope)> {
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         })));
-        let gateway = MempoolGateway::new(Arc::clone(&pool), None, engine);
+        let gateway = MempoolGateway::new(Arc::clone(&pool), None, engine, None);
         let candidate = standard_tx(0x51);
         let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
         request.prevouts = vec![(request.prevouts[0].0, p2sh_prevout())];
@@ -3255,7 +3906,7 @@ mod tests {
             crate::admission::AdmissionFence::Stable,
             engine,
         );
-        prepared.verify(&request);
+        prepared.verify(&request, None);
         prepared.rejection
     }
 
@@ -3307,5 +3958,248 @@ mod tests {
             &ConsensusError::Kernel("kernel parse failed".to_owned()),
             &prevouts,
         ));
+    }
+
+    /// Shared floor-trim fixture: a 150-vbyte pool holding one standard
+    /// filler. Both filler and candidates use `standard_tx` so the standardness
+    /// stage passes and the size trim decides. The request vsize floor (100)
+    /// covers both bodies, so each occupies vsize 100; the filler admits,
+    /// and a subsequent candidate overflows the pool and is refused with `Full`.
+    fn floor_trim_gateway_with_filler() -> MempoolGateway {
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes: 150,
+                ..MempoolLimits::default()
+            }))),
+            None,
+            ValidationEngine::Native,
+            None,
+        );
+        let filler = standard_tx(70);
+        let outcome =
+            gateway.admit_transaction(admit_request(&gateway, &filler, AdmissionOrigin::Rpc));
+        assert!(
+            matches!(outcome, Ok(AdmitOutcome::Committed(_))),
+            "filler must commit: {outcome:?}"
+        );
+        gateway
+    }
+
+    /// The refused candidate for the floor-trim fixture: `standard_tx(71)`
+    /// with valid prevouts so value checks pass and only the trim decides.
+    fn floor_trim_candidate(gateway: &MempoolGateway) -> AdmissionRequest {
+        let shed = standard_tx(71);
+        let mut request = admit_request(gateway, &shed, AdmissionOrigin::Rpc);
+        request.context.fee = 100;
+        request.prevouts[0].1.value = Amount::from_sat(10_100);
+        request
+    }
+
+    #[test]
+    fn admit_transaction_full_refusal_bumps_the_floor() {
+        let gateway = floor_trim_gateway_with_filler();
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 0);
+
+        let request = floor_trim_candidate(&gateway);
+        let error = gateway
+            .admit_transaction(request)
+            .expect_err("candidate cannot survive trimming");
+        assert!(
+            matches!(
+                error,
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
+                    crate::RbfError::Mempool(crate::MempoolError::Full)
+                ))
+            ),
+            "refusal keeps the mempool-full report: {error:?}"
+        );
+        // Candidate chunk rate floor(100 * 1_000 / 100) = 1_000, plus 1_000.
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 2_000);
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    #[test]
+    fn admit_transaction_invalid_script_refusal_leaves_the_floor() {
+        let gateway = floor_trim_gateway_with_filler();
+
+        // Same trim shape as the valid-script refusal, but an unspendable
+        // prevout fails the `STANDARD` pass: the report stays `Full`, yet
+        // the floor bump is dropped.
+        let mut request = floor_trim_candidate(&gateway);
+        request.prevouts[0].1.script_pubkey = vec![0x00].into();
+        let error = gateway
+            .admit_transaction(request)
+            .expect_err("candidate cannot survive trimming");
+        assert!(
+            matches!(
+                error,
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
+                    crate::RbfError::Mempool(crate::MempoolError::Full)
+                ))
+            ),
+            "refusal keeps the mempool-full report: {error:?}"
+        );
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 0);
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    #[test]
+    fn admit_transaction_overcap_refusal_earns_no_bump() {
+        let gateway = floor_trim_gateway_with_filler();
+
+        // Same trim shape as the bumping refusal, but the candidate breaches
+        // its caller cap: the report stays `Full`, yet no bump is earned.
+        let mut request = floor_trim_candidate(&gateway);
+        request.max_feerate_sat_per_kvb = Some(500);
+        let error = gateway
+            .admit_transaction(request)
+            .expect_err("candidate cannot survive trimming");
+        assert!(
+            matches!(
+                error,
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
+                    crate::RbfError::Mempool(crate::MempoolError::Full)
+                ))
+            ),
+            "refusal keeps the mempool-full report: {error:?}"
+        );
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 0);
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    #[test]
+    fn admission_prepared_before_a_floor_raise_is_retried() {
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes: 1_000,
+                ..MempoolLimits::default()
+            }))),
+            None,
+            ValidationEngine::Native,
+            None,
+        );
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(tx(90)), 100, 9_000, 1, 7, 0),
+            )
+            .expect("seat");
+        // Capture the victim's stamp against the unraised floor.
+        let (generation, sequence, stamp) = {
+            let pool = gateway.read();
+            (
+                gateway.stable_generation().expect("even"),
+                pool.sequence_number(),
+                pool.policy_stamp(),
+            )
+        };
+        // A concurrent oversized admission is refused, but its trim raises
+        // the floor — and the raise revisions the stamp.
+        let error = gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(tx(92)), 950, 100, 1, 7, 0),
+            )
+            .expect_err("oversized");
+        assert_eq!(error, crate::MempoolError::Full);
+        assert!(gateway.read().min_fee_sat_per_kvb(1) > 0);
+        // The victim no longer matches: its submission retries against the
+        // newer floor instead of committing below it.
+        {
+            let pool = gateway.read();
+            assert!(!stamp.matches(&pool));
+            assert_eq!(
+                gateway.check_admission_state(
+                    &pool,
+                    generation,
+                    sequence,
+                    crate::admission::AdmissionFence::Stable,
+                    Some(stamp),
+                ),
+                Err(AdmitError::MempoolChanged)
+            );
+        }
+    }
+
+    #[test]
+    fn remove_for_block_stamps_the_floor_for_decay() {
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 1_000,
+                max_total_bytes: 400,
+                ..MempoolLimits::default()
+            }))),
+            None,
+            ValidationEngine::Native,
+            None,
+        );
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0),
+            )
+            .expect("low");
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(tx(2)), 200, 800, 1, 1, 0),
+            )
+            .expect("high");
+        gateway
+            .enforce_size_limit(AdmissionOrigin::Rpc, 200)
+            .expect("eviction");
+        assert_eq!(gateway.read().min_fee_sat_per_kvb(1_000), 3_000);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[], &[], 8, 1_000);
+        // Usage 200 of 400 is exactly half: full 12 h halflife, 3_000 -> 1_500.
+        assert_eq!(
+            gateway.read().min_fee_sat_per_kvb(1_000 + 12 * 60 * 60),
+            1_500
+        );
+    }
+
+    #[test]
+    fn expire_returns_none_when_fresh_and_some_when_stale() {
+        use crate::policy::MEMPOOL_EXPIRY_SECS;
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
+            None,
+        );
+        let now = MEMPOOL_EXPIRY_SECS + 1;
+        let fresh = tx(80);
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(fresh), 100, 1_000, now, 1, 0),
+            )
+            .expect("fresh");
+        assert!(!gateway.read().has_expired_entries(now));
+        let sequence = gateway.read().sequence_number();
+        assert!(gateway.expire(AdmissionOrigin::Rpc, now).is_none());
+        assert_eq!(gateway.read().sequence_number(), sequence);
+
+        let stale = tx(81);
+        let stale_txid = stale.txid();
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(stale), 100, 1_000, 0, 1, 0),
+            )
+            .expect("stale");
+        observer.seen.lock().clear();
+        let expired = gateway
+            .expire(AdmissionOrigin::Rpc, now)
+            .expect("stale entries expire");
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            *observer.seen.lock(),
+            vec![(hash(&stale_txid), removed(RemovalReason::Expiry))],
+            "expiry publishes exactly one Expiry change"
+        );
+        assert!(gateway.expire(AdmissionOrigin::Rpc, now).is_none());
     }
 }

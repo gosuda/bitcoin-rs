@@ -10,6 +10,27 @@ signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
 `scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
 signer can drive a PSBT workflow without giving key custody to the node.
 
+### Authentication before body
+The JSON-RPC listener checks the `Authorization` header as soon as the
+request head is parsed, before any body byte is read
+(`crates/rpc/src/server.rs`). A missing header is answered with Core's 401
+tuple at once; present but wrong credentials are slowed by 250 ms first, so
+a 16 MiB declared body costs the attacker the connection, not the server.
+Core differs: Core reads the whole body (up to 32 MiB) before it checks
+credentials and keeps the connection open after a 401; btcrs decides from
+the head alone, then discards at most the declared body (bounded: 64 KiB
+within 1 s) before it closes the connection.
+
+### Long-poll admission
+A `getblocktemplate` call that waits — a template-mode request with a
+string `longpollid` — holds one of the node's bounded blocking-request
+workers, exactly like an active-tip wait, so a fleet of long-polls cannot
+starve ordinary RPC such as the miner's own `submitblock`. Proposal,
+non-template, and absent-or-null-id shapes answer without waiting and hold
+no worker; any other non-string id fails with InvalidType before waiting.
+Core differs: Core runs a long-poll on one of its `-rpcworkqueue` threads
+with no separate quota; btcrs counts it against the blocking-request quota.
+
 ### Watch-only mining payout
 An operator-configured address whose `scriptPubKey` is the candidate coinbase
 payout. The node decodes it at config resolve time and never holds keys. Empty
@@ -17,8 +38,11 @@ configuration keeps transport-only GBT assembly: miners supply their own
 coinbase.
 
 ### Mining generation
-The `(applied_tip_hash, mempool_sequence)` key that identifies one block
-template. The node-owned coordinator is the single cache and long-poll waiter
+The `(applied_tip_hash, mempool_sequence, fee_delta_sequence)` triple that
+authoritatively identifies and invalidates one block template. An advance of
+the applied tip, a mempool membership change, or a prioritisation fee-delta
+update advances the key, invalidating cached templates and waking long-poll
+waiters. The node-owned coordinator is the single cache and long-poll waiter
 for that key. RPC does not keep a second template cache.
 
 ### Wallet-facing public surface
@@ -77,12 +101,34 @@ the stream so handshake, reader, and writer-clone I/O all count into one
 `PeerCounters`. Vectored writes go through the same wrapper, so a framed message
 stays one `writev` instead of a header syscall plus a payload syscall.
 
+### BIP324 decoy packet
+A v2 frame whose header marks it a decoy, or a message-less frame of an empty
+or undefined type. It returns control to the session loop one packet at a time
+and is not receive activity, so a decoy-only peer expires on receive silence at
+20 minutes while our pings keep the send side fresh; the handshake driver also
+hands control back after each consumed decoy so it can recheck its lease and
+deadline. "Core differs: Core counts every received byte as activity; btcrs
+counts only frames that carry a message."
+
+### Paused getdata tail
+The unserved remainder of one `getdata` that stopped because the session could not reserve send credit before building the next reply — either against the connection's own bound or against the node's aggregate outbound budget (see "Outbound queue accounting" in `docs/policies/p2p-compatibility.md`) — kept in request order with the misses found before it. The connection reads nothing from the peer while it holds them. The misses go out in one `notfound` once a reservation for its exact length succeeds, and never without one; the remaining items resume once a fresh production reservation succeeds, and reads stay held until they do, so the peer's next reply has a slot. A dead writer, a cancelled lease, or a pause past 20 minutes ends the session. Time the aggregate budget refused the connection counts toward neither the 20 minutes nor the request and receive ages, and shared saturation defers without cancelling; only the connection's own bound keeps cancel-on-refusal. Every reply is built under a reservation taken before it exists, so no check-then-send race remains. "Core differs: Core keeps receiving into its buffer while paused and pauses processing of every message while its send buffer is full; btcrs stops reading the socket until the tail is served and holds reads only after a `getdata`, so any other message keeps the plain saturation policy."
+
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
 metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
 address, cancels predecessors atomically on replacement, prevents stale
 connection handles from evicting newer sessions via connection-identity checks,
 and ties handshake metadata strictly to the live connection identity.
+
+### Early compact announce
+A commit-intent block that passes block rules as a tip child is relayed to
+high-bandwidth peers as `cmpctblock` before the durable commit, and its body
+is held so compact `getdata` and `getblocktxn` answer before the store
+carries it. The send never publishes a tip and never advances the mining
+generation; a later connect failure is not retracted, it just sends nothing
+more. Core differs: Core announces from the validation signal it fires for
+every accepted block; btcrs fires one hook from connect and skips any block
+connected during a branch switch.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same
@@ -96,6 +142,19 @@ or retains one, so the embedder supplies whatever executor it owns
 (`crates/node/src/embed.rs`, EMB-02 in `docs/contracts/embedding.md`).
 No second lifecycle exists: the daemon's `run()` is a signal wrapper around
 the identical start and shutdown path.
+
+### Data-dir lock
+The process-exclusive lock a node takes on its data directory before the
+schema check or process epoch runs
+(`crates/node/src/state/data_dir_lock.rs`). The lock file is
+`{datadir}/.lock`; ownership is the open-file lock, never the file's
+existence, so a stale file after a crash opens normally. The lock has no
+owner of its own: every store the node opens carries it and drops it after
+its own handle closes, so the directory stays locked until the last handle
+that can write it is gone, and an open meanwhile fails as in use, never with
+a storage-backend lock error.
+Core differs: Core lets the same process lock a directory again; btcrs holds
+an open-file lock, so a second open fails even inside one process.
 
 ## Initial Block Download
 
@@ -162,6 +221,10 @@ Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on
 
 ### Script-flag exceptions (BIP16Exception)
 Blocks Core hardcodes in `consensus.script_flag_exceptions` to validate under a reduced flag set. As of Core v29: mainnet 170060 (P2SH) and 692261 (Taproot); testnet3 394. The P2SH waivers are reproduced by `Network::is_bip16_p2sh_exception` (by block hash); missing them wedges full-validation sync. The Taproot override needs no exception because `is_taproot_active` already height-gates TAPROOT. Compare *effective* flag sets, not raw overrides.
+
+### Signet block solution
+The BIP325 signature a signet block carries after a 4-byte header inside its coinbase witness-commitment output; it proves the block's signers approved it, and signet proof of work alone is trivial. Connect checks it against the default signet challenge after the Merkle and witness bindings pass, only when a block commits (a proposal skips it, as Core does when it is not checking proof of work), and exempts the signet genesis. Custom challenges are unsupported.
+Core differs: Core checks the solution before the Merkle root and the rest of `CheckBlock`, so it reports `bad-signet-blksig` first; btcrs checks it after the block rules, so a body that fails both reports the earlier block-rule error here instead of `bad-signet-blksig`.
 
 ### Difficulty-1 target
 The network-independent reference target in Core's difficulty calculation:
@@ -295,7 +358,7 @@ Index row values carry transaction byte positions without a block tag. The reade
 The node accepts only complete native version-4 snapshots: exact magic and version, validated v4 records, the declared record count, a 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 fail startup with a remove-and-resync instruction; there is no legacy reader.
 
 ### Deferred block-body index durability
-`KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next checkpoint flush. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide.
+`KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next successful durable write or explicit flush on the same store. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide.
 
 ### Directory-layout record
 `UtxoRecord` v5: `txid || output_count || inline_len || widths || vout_dir || len_dir || payloads`, with per-item keys and lengths in fixed-width arrays ahead of the items so `find_output(vout)` touches about two bytes per output instead of walking every earlier script. Each directory entry uses the narrowest width the record needs; the script is whatever remains of its payload, so no length is stored twice. See `docs/benchmarks/utxo-memory.md`.
@@ -347,8 +410,42 @@ generic extension registry or lifecycle abstraction.
 
 ## Mempool
 
+### Maintained cluster order
+The mempool keeps every cluster's exact linearization current at the moment
+of each insert, removal, or fee-delta change, and one global index orders all
+fee chunks by feerate, then the equal-feerate prefix weight, then the greatest
+member txid. The prefix weight is the summed charged weight of the
+component's equal-feerate chunks up to and including the chunk, so an
+equal-rate parent always precedes its child; weighing the chunk alone would
+let a lighter child jump its parent. Template selection walks that index
+under the pool read guard and copies only the selected transactions, and
+eviction walks it from the cheapest end. Core differs: Core linearizes
+clusters within a work budget and can serve a non-optimal order until the
+budget completes; btcrs relinearizes each changed cluster exactly at the
+mutation, so every template and every eviction reads an optimal order.
+
 ### Resolution-time sampling
 Recording a statistic when its outcome is known rather than when the subject arrives. The fee estimator samples numerator and denominator together at the moment a confirmation target resolves, so both decay from the same block. A transaction leaving for an unrelated reason (eviction) is untracked without being sampled.
+
+### Rolling minimum fee
+The admission and relay floor that rises to the highest removed chunk's modified feerate plus the incremental relay fee whenever capacity eviction or replacement trim removes transactions, holding decay until a block connects. Once a block has connected, it decays exponentially using an occupancy-scaled half-life — twelve hours at or above half capacity, six hours below half, and three hours below a quarter — resetting to zero once the decayed rate falls below half the incremental relay fee. btcrs keeps Core's state machine (`GetMinFee`, `trackPackageRemoved`, the `removeForBlock` stamp) behind one pool-owned mutex and reads it through `Mempool::min_fee_sat_per_kvb`. Core differs: Core measures capacity as allocator usage with a 100 sat/kvB incremental fee; btcrs measures total virtual size with 1000 sat/kvB, so its floor rises in larger steps.
+
+### Mempool expiry
+Automatic removal of transactions strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`), evicted alongside all their in-pool descendants under reason `Expiry`. Expiry runs immediately after each committed single transaction or package admission and during reorg trim before any early return; read-only preview never mutates or expires entries. If an admitted transaction or package member is swept by the post-commit expiry pass, the admission fails with a mempool-full error.
+
+## Mining
+
+### Template tail fill
+Template tail fill is the second selection pass that reuses block space left after the main chunk walk. It scans chunks skipped only for weight, size, or sigop limits in index order and appends the longest fitting prefix whose aggregate modified-fee rate meets the 1 sat/kvB floor. Prefixes respect ancestor closure, finality, and exact count growth, so total fees never fall. Core differs: Core skips a chunk that does not fit and drops the rest of its cluster; btcrs fills the space left at the end with ordered prefixes of skipped chunks.
+
+### Prepared template
+A candidate selected for a staged tip while that block's files synchronize.
+Its projected mempool excludes the planned block removals without changing
+the live pool. It enters the template cache only after the committed tip,
+actual removals, and full generation key match the projection.
+Core differs: Core selects against the active chain tip when it assembles a
+template; btcrs can prepare against a staged tip during durable sync, but
+exposes the candidate only after commit.
 
 ## Measurement
 
@@ -393,4 +490,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against `scripts/ci-pr.sh`, which `.github/workflows/ci.yml` invokes — never a local approximation. The required PR jobs are `fmt`, `deny`, `clippy`, `test-crates`, `test-binary`, and `test-workspace`: the format check, the full-graph `cargo deny` audit, and four parallel fail-fast kernel-free lanes — clippy (per-crate `-p` invocations because a virtual workspace drops `--workspace --features`) plus the three test lanes — with the pinned Core and Apalache fixtures backing the binary and workspace lanes. `.github/workflows/main.yml` runs on `main` pushes and manual dispatch only: the full-node feature set with the C++ kernel, `--include-ignored` for the consensus fixture corpus, the `kernel-oracle` parity tests (not `#[ignore]`; skipped if `--ignored` is passed), bench-smoke compilation, the Python comparator tests, the MSRV compile, and native-script evidence. `cargo deny` failures are bug reports, not lint noise.
+A branch is green only against [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which [`.github/workflows/ci.yml`](.github/workflows/ci.yml) invokes — never a local approximation. Pull requests run the fast `fmt`, `deny`, `clippy`, and `test-crates` jobs; merge-group requests add `test-binary` and `test-workspace` (backed by the pinned Core fixture) alongside [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) (`kernel-consensus` and `full-node-compile`). [`.github/workflows/main.yml`](.github/workflows/main.yml) runs on `main` pushes and manual dispatch for the full-node feature set with the C++ kernel, `--include-ignored` consensus vectors, `kernel-oracle` parity tests (not `#[ignore]`; skipped if `--ignored` is passed), `bench-smoke` compilation, Python comparator tests, `core-differential`, and `native-script` evidence. MSRV, dependency-range, and feature-matrix lanes run in [`.github/workflows/compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml), and Apalache model checks run in [`.github/workflows/model-check-manual.yml`](.github/workflows/model-check-manual.yml). `cargo deny` failures are bug reports, not lint noise. See [`CONTRIBUTING.md`](CONTRIBUTING.md#pull-request-verification).

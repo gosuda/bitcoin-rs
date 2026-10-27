@@ -151,10 +151,6 @@ pub(crate) fn read_u32_le(reader: &mut &[u8]) -> Result<u32, DecodeError> {
     Ok(u32::from_le_bytes(read_array::<4>(reader)?))
 }
 
-pub(crate) fn read_i32_le(reader: &mut &[u8]) -> Result<i32, DecodeError> {
-    Ok(i32::from_le_bytes(read_array::<4>(reader)?))
-}
-
 pub(crate) fn read_u64_le(reader: &mut &[u8]) -> Result<u64, DecodeError> {
     Ok(u64::from_le_bytes(read_array::<8>(reader)?))
 }

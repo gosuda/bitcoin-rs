@@ -144,9 +144,9 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         assert_typed_chaininfo(fixture, &response)?;
     }
 
-    // Wrong credentials must be rejected outright by the live server, while
-    // the 401 response tuple itself stays a recorded production gap (the
-    // known-gap fixtures above pin both sides of it).
+    // Wrong credentials must be rejected outright by the live server; the
+    // exact-relation 401 fixtures above pin that both nodes answer with
+    // Core's challenge, content type, and empty body.
     let rejected = server.replay(
         RequestAuth::Invalid,
         r#"{"jsonrpc":"2.0","id":18,"method":"getblockchaininfo","params":[]}"#,
@@ -161,14 +161,15 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
     }
 
     // Classification discipline: every fixture carries exactly one relation
-    // and each known gap names one concrete identifier. Every probe in this
-    // vertical slice is a known gap by construction: the probe evidence
-    // recorded Core response bodies but not the transport headers of the
-    // JSON probes, and the live error wording genuinely diverges from
-    // Core's — so no row can honestly claim the `exact` relation yet. A
-    // future capture that records Core's full header tuple and equal
-    // messages may reclassify rows as `exact`; the comparator already
-    // enforces full equality on that relation.
+    // and each known gap names one concrete identifier. The two auth cases
+    // are exact: both nodes answer an unauthenticated JSON-RPC request with
+    // Core's challenge, content type, and empty body. The remaining rows are
+    // known gaps by construction: the probe evidence recorded Core response
+    // bodies but not the transport headers of the JSON probes, and the live
+    // error wording genuinely diverges from Core's. A future capture that
+    // records Core's full header tuple and equal messages may reclassify
+    // those rows as `exact`; the comparator already enforces full equality
+    // on that relation.
     let mut gaps = Vec::new();
     for fixture in corpus.values() {
         match fixture.relation {

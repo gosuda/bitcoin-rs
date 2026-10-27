@@ -144,12 +144,18 @@ in each issue:
   models stay out of scope by default: they hold wallet secrets, a materially
   worse privacy boundary.
 - **#1503 BIP324 v2 transport.** Opportunistic encryption without peer
-  authentication; do not claim it stops an active MITM or eclipsing peer.
-  Class: P2P transport. Stage: Experimental — the implementation is in the
-  tree behind `v2transport`, off by default, with in-tree vector and
-  negotiation tests; a live bidirectional Core 31.1 run recording v2 in both
-  directions is the promotion evidence, and the P2P policy still records
-  v1-only as the shipped transport default.
+  authentication; do not claim it stops an active MITM or eclipsing peer. Class:
+  P2P transport. Stage: Shipped — on by default, as Core's `-v2transport` is,
+  with live interop with an unmodified Core 31.1 recorded in both connection
+  directions ([api/ecosystem-compat.toml](../api/ecosystem-compat.toml),
+  CORE-06). Measured cost, recorded with that run in
+  https://github.com/gosuda/bitcoin-rs/pull/1612: a fresh node syncing the same
+  250-block regtest chain received 119,945 bytes over v2 against 119,120 over
+  v1, and sent 11,166 against 9,626 (the runner's `ibd_cost`); BIP324 allows up
+  to 4,095 bytes of handshake garbage in each direction once per connection. An
+  ad hoc measurement, not reproducible from the tree, timed sealing and opening
+  one packet at 3.5-4 µs for 32-250 byte messages and 510-550 MB/s for 1-4 MB
+  payloads (one 2.1 GHz Xeon core, release build).
 - **#1501 BIP330 Erlay.** Class: P2P relay. Stage: Deferred (backlog watch per
   policy #1501). Bitcoin Core's implementation is incomplete (`DO NOT MERGE`),
   and a moving upstream design makes a parallel reconciliation policy pure

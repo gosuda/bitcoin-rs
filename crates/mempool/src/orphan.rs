@@ -666,7 +666,6 @@ mod tests {
         pool.insert(Arc::clone(&child), source(1), 0);
         pool.parent_ready(parent);
         pool.parent_ready(parent);
-        assert_eq!(pool.ready.len(), 1);
         let ready = pool.take_ready();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].1, source(1));
@@ -676,10 +675,17 @@ mod tests {
         assert!(pool.get(child.wtxid()).is_some());
         assert_eq!(pool.take_ready().len(), 1);
         pool.mark_ready(child.wtxid(), source(1));
-        assert!(pool.ready_ids.contains(&child.wtxid()));
+        assert_eq!(pool.take_ready().len(), 1);
+        pool.mark_ready(child.wtxid(), source(1));
         pool.remove(child.wtxid());
-        assert!(pool.ready.is_empty());
+        assert!(pool.get(child.wtxid()).is_none());
+        // `take_ready` drops claims for absent bodies and clears
+        // `ready_ids`, so the public surface cannot observe stale
+        // readiness. Assert both owner-local indexes the way
+        // `clear_rejects` is probed below.
         assert!(pool.ready_ids.is_empty());
+        assert!(pool.ready.is_empty());
+        assert!(pool.take_ready().is_empty());
     }
     // MPL-04: aggregate orphan weight is bounded independently of count.
     #[test]
@@ -811,14 +817,16 @@ mod tests {
             ..AdmissionLifecycle::default()
         };
         let first = tx(1, Txid::default());
+        let second = tx(2, Txid::default());
         state.reject(&first, RejectScope::Transaction);
-        state.reject(&tx(2, Txid::default()), RejectScope::Transaction);
+        state.reject(&second, RejectScope::Transaction);
         state.reject(&tx(3, Txid::default()), RejectScope::Transaction);
         assert_eq!(state.rejects_len(), 2);
         assert!(!state.is_rejected(Hash256::from(first.txid())));
         state.clear_rejects();
-        assert!(state.rejects.is_empty());
+        assert_eq!(state.rejects_len(), 0);
         assert!(state.reject_order.is_empty());
+        assert!(!state.is_rejected(Hash256::from(second.txid())));
     }
 
     /// MPL-04 exact-body residency: rejecting a different witness body with

@@ -7,7 +7,6 @@ use super::DerivedIndexRuntime;
 use super::DerivedIndexWorkerError;
 use super::FORWARD_BATCH_DELAY;
 use super::Generation;
-use super::IndexBlockSource;
 use super::OpenDerivedIndex;
 use super::QueryEngineLive;
 use super::REVISION_QUIET_PERIOD;
@@ -77,7 +76,6 @@ pub(super) fn run_worker_with_open(
     block_tree: BlockTreeReader,
     body_store: Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
-    block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
@@ -119,7 +117,6 @@ pub(super) fn run_worker_with_open(
         &block_tree,
         &body_store,
         history,
-        &block_source,
         &body_source,
         chain_events,
         reporter,
@@ -213,7 +210,6 @@ pub(super) fn open_and_run(
     block_tree: &BlockTreeReader,
     body_store: &Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
-    block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
@@ -239,7 +235,6 @@ pub(super) fn open_and_run(
     let query_engine = Arc::new(DerivedIndexQueryEngine::new(
         Arc::clone(runtime),
         open.reader,
-        block_source.clone(),
         block_tree.clone(),
         applied_tip.clone(),
         body_source.clone(),

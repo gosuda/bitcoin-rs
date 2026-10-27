@@ -1,0 +1,192 @@
+2026-10-16T09:40:22.351131Z  INFO mining_device: start
+2026-10-16T09:40:22.351341Z  INFO mining_device: Using 2 worker threads out of 20 logical CPUs
+2026-10-16T09:40:22.352251Z  INFO integration_tests_sv2::mining_device: Connecting to pool at 172.19.0.3:34255
+2026-10-16T09:40:22.352481Z  INFO integration_tests_sv2::mining_device: Pool tcp connection established at 172.19.0.3:34255
+2026-10-16T09:40:22.848281Z  INFO integration_tests_sv2::mining_device: Pool noise connection established at 172.19.0.3:34255
+2026-10-16T09:40:22.848349Z  INFO integration_tests_sv2::mining_device: Creating SetupConnection message with device id: "device-direct-2"
+2026-10-16T09:40:22.848359Z  INFO integration_tests_sv2::mining_device: Setup connection sent to 172.19.0.3:34255
+2026-10-16T09:40:22.848707Z  INFO integration_tests_sv2::mining_device: Received `SetupConnectionSuccess`: version=2, flags=0
+2026-10-16T09:40:22.848733Z  INFO integration_tests_sv2::mining_device: Pool sv2 connection established at 172.19.0.3:34255
+2026-10-16T09:40:22.848738Z  INFO integration_tests_sv2::mining_device: Measuring CPU hashrate
+2026-10-16T09:40:22.848925Z  INFO integration_tests_sv2::mining_device: Set target to 0000000000000000000000000000000000000000000000000000000000000000
+2026-10-16T09:40:27.849329Z  INFO integration_tests_sv2::mining_device: Measured CPU hashrate ≈ 16 MH/s
+2026-10-16T09:40:27.849379Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: send open channel with request id 10
+2026-10-16T09:40:27.850172Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: channel opened with: group id 1, channel id 2, request id 10
+2026-10-16T09:40:27.850197Z  INFO integration_tests_sv2::mining_device: Set target to 095a19164ecb814047ab4b326e7f059393018351fe9c273cf7cb2d0f1b000000
+2026-10-16T09:40:27.850212Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 1 is future: true
+2026-10-16T09:40:27.850342Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 1
+2026-10-16T09:40:28.643328Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 2 is future: true
+2026-10-16T09:40:28.643819Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 2
+2026-10-16T09:40:29.485904Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 7694210, for target: Some(729517084074707598955316772878325089321199686150393341719347587537417), with hash: [169, 26, 212, 167, 77, 95, 119, 108, 163, 244, 72, 0, 53, 248, 102, 23, 96, 128, 33, 44, 180, 105, 153, 129, 227, 218, 20, 52, 1, 0, 0, 0]
+2026-10-16T09:40:29.486768Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:40:29.504251Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 3 is future: true
+2026-10-16T09:40:29.504561Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 3
+2026-10-16T09:40:39.636617Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 4 is future: true
+2026-10-16T09:40:39.637006Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 4
+2026-10-16T09:40:42.626893Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 31446182, for target: Some(729517084074707598955316772878325089321199686150393341719347587537417), with hash: [15, 80, 129, 90, 128, 250, 14, 44, 86, 93, 252, 76, 97, 6, 15, 55, 124, 119, 235, 44, 36, 55, 245, 106, 48, 160, 91, 77, 4, 0, 0, 0]
+2026-10-16T09:40:42.627693Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:40:42.643322Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 5 is future: true
+2026-10-16T09:40:42.643442Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 5
+2026-10-16T09:40:47.925899Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 6 is future: true
+2026-10-16T09:40:47.926267Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 6
+2026-10-16T09:40:50.188525Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 7 is future: true
+2026-10-16T09:40:50.188781Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 7
+2026-10-16T09:40:50.309761Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 8 is future: true
+2026-10-16T09:40:50.309937Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 8
+2026-10-16T09:40:51.972983Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2162715445, for target: Some(729517084074707598955316772878325089321199686150393341719347587537417), with hash: [76, 130, 45, 13, 158, 15, 210, 138, 17, 43, 55, 204, 170, 239, 141, 166, 31, 48, 34, 224, 87, 122, 211, 78, 116, 193, 105, 90, 13, 0, 0, 0]
+2026-10-16T09:40:51.973685Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:40:51.993031Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 9 is future: true
+2026-10-16T09:40:51.993357Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 9
+2026-10-16T09:40:53.126884Z ERROR stratum_apps::network_helpers::noise_connection: Reader: error while reading frame: SocketClosed
+System.Management.Automation.RemoteException
+thread 'main' panicked at /src/integration-tests/lib/mining_device/mod.rs:394:69:
+called `Result::unwrap()` on an `Err` value: RecvError
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-10-16T09:40:54.440036Z  INFO mining_device: start
+2026-10-16T09:40:54.441519Z  INFO mining_device: Using 2 worker threads out of 20 logical CPUs
+2026-10-16T09:40:54.444604Z  INFO integration_tests_sv2::mining_device: Connecting to pool at 172.19.0.3:34255
+2026-10-16T09:40:54.781475Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:40:55.783170Z  INFO integration_tests_sv2::mining_device: Pool tcp connection established at 172.19.0.3:34255
+2026-10-16T09:40:55.787173Z  INFO integration_tests_sv2::mining_device: Pool noise connection established at 172.19.0.3:34255
+2026-10-16T09:40:55.787198Z  INFO integration_tests_sv2::mining_device: Creating SetupConnection message with device id: "device-direct-2"
+2026-10-16T09:40:55.787210Z  INFO integration_tests_sv2::mining_device: Setup connection sent to 172.19.0.3:34255
+2026-10-16T09:40:55.787459Z  INFO integration_tests_sv2::mining_device: Received `SetupConnectionSuccess`: version=2, flags=0
+2026-10-16T09:40:55.787478Z  INFO integration_tests_sv2::mining_device: Pool sv2 connection established at 172.19.0.3:34255
+2026-10-16T09:40:55.787485Z  INFO integration_tests_sv2::mining_device: Measuring CPU hashrate
+2026-10-16T09:40:55.787661Z  INFO integration_tests_sv2::mining_device: Set target to 0000000000000000000000000000000000000000000000000000000000000000
+2026-10-16T09:41:00.788334Z  INFO integration_tests_sv2::mining_device: Measured CPU hashrate ≈ 15 MH/s
+2026-10-16T09:41:00.788399Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: send open channel with request id 10
+2026-10-16T09:41:00.789184Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: channel opened with: group id 1, channel id 2, request id 10
+2026-10-16T09:41:00.789214Z  INFO integration_tests_sv2::mining_device: Set target to 35baf9caccec3944848047c6c17c3fda454e8feb3c0c700a57f24ee01c000000
+2026-10-16T09:41:00.789238Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 1 is future: true
+2026-10-16T09:41:00.789354Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 1
+2026-10-16T09:41:02.709003Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 2 is future: true
+2026-10-16T09:41:02.709252Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 2
+2026-10-16T09:41:01.900686Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2154823160, for target: Some(778500936778212980577212530361260393694313905705037966847038096783925), with hash: [105, 49, 64, 181, 109, 233, 78, 46, 109, 22, 171, 128, 153, 32, 173, 92, 55, 175, 27, 113, 136, 76, 149, 45, 142, 134, 90, 213, 25, 0, 0, 0]
+2026-10-16T09:41:01.901401Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:41:01.915495Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 3 is future: true
+2026-10-16T09:41:01.915752Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 3
+2026-10-16T09:41:05.447750Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 32345533, for target: Some(778500936778212980577212530361260393694313905705037966847038096783925), with hash: [112, 6, 213, 198, 188, 40, 39, 151, 78, 170, 146, 250, 114, 193, 233, 204, 123, 43, 11, 147, 170, 14, 52, 109, 104, 163, 218, 68, 3, 0, 0, 0]
+2026-10-16T09:41:05.448411Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:41:05.464014Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 4 is future: true
+2026-10-16T09:41:05.464372Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 4
+2026-10-16T09:41:06.575574Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 5 is future: true
+2026-10-16T09:41:06.575808Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 5
+2026-10-16T09:41:07.840865Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 6 is future: true
+2026-10-16T09:41:07.841247Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 6
+2026-10-16T09:41:09.222301Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 13177834, for target: Some(778500936778212980577212530361260393694313905705037966847038096783925), with hash: [207, 205, 48, 147, 200, 254, 201, 124, 73, 126, 99, 24, 198, 72, 92, 151, 75, 119, 104, 169, 49, 2, 209, 209, 2, 142, 95, 197, 27, 0, 0, 0]
+2026-10-16T09:41:09.222962Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:41:09.240096Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 7 is future: true
+System.Management.Automation.RemoteException
+2026-10-16T09:41:09.240380Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 7
+2026-10-16T09:41:20.204210Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 8 is future: true
+thread 'main' panicked at /src/integration-tests/lib/mining_device/mod.rs:394:69:
+called `Result::unwrap()` on an `Err` value: RecvError
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-10-16T09:41:20.204519Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 8
+2026-10-16T09:41:23.418895Z ERROR stratum_apps::network_helpers::noise_connection: Reader: error while reading frame: SocketClosed
+2026-10-16T09:41:25.274213Z  INFO mining_device: start
+2026-10-16T09:41:25.274411Z  INFO mining_device: Using 2 worker threads out of 20 logical CPUs
+2026-10-16T09:41:25.275384Z  INFO integration_tests_sv2::mining_device: Connecting to pool at 172.19.0.3:34255
+2026-10-16T09:41:25.533240Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:26.537404Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:27.539290Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:28.541462Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:29.545867Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:32.083969Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:33.086537Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:34.087685Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:35.088817Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:36.091530Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:37.094265Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:38.096565Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:39.099354Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:40.104010Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:41.106631Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:42.108380Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:43.110491Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:44.113598Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:45.114220Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:46.116636Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:47.118303Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:48.121361Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:49.126221Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:50.128795Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:51.131579Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:52.136793Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:53.141958Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:54.144690Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:55.152357Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:56.156984Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:57.160679Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:58.162541Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:59.167166Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:58.497742Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:41:59.500546Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:00.506881Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:01.510192Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:02.511555Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:03.515568Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:04.521665Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:05.524676Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:06.541644Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:07.546636Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:08.550720Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:09.554020Z ERROR integration_tests_sv2::mining_device: Failed to connect to Upstream role at 172.19.0.3:34255, retrying: Connection refused (os error 111)
+2026-10-16T09:42:11.318582Z  INFO mining_device: start
+2026-10-16T09:42:11.319620Z  INFO mining_device: Using 2 worker threads out of 20 logical CPUs
+2026-10-16T09:42:11.322962Z  INFO integration_tests_sv2::mining_device: Connecting to pool at 172.19.0.2:34255
+2026-10-16T09:42:11.323777Z  INFO integration_tests_sv2::mining_device: Pool tcp connection established at 172.19.0.2:34255
+2026-10-16T09:42:11.326053Z  INFO integration_tests_sv2::mining_device: Pool noise connection established at 172.19.0.2:34255
+2026-10-16T09:42:11.326140Z  INFO integration_tests_sv2::mining_device: Creating SetupConnection message with device id: "device-direct-2"
+2026-10-16T09:42:11.326159Z  INFO integration_tests_sv2::mining_device: Setup connection sent to 172.19.0.2:34255
+2026-10-16T09:42:11.326521Z  INFO integration_tests_sv2::mining_device: Received `SetupConnectionSuccess`: version=2, flags=0
+2026-10-16T09:42:11.326547Z  INFO integration_tests_sv2::mining_device: Pool sv2 connection established at 172.19.0.2:34255
+2026-10-16T09:42:11.326555Z  INFO integration_tests_sv2::mining_device: Measuring CPU hashrate
+2026-10-16T09:42:11.326745Z  INFO integration_tests_sv2::mining_device: Set target to 0000000000000000000000000000000000000000000000000000000000000000
+2026-10-16T09:42:16.327112Z  INFO integration_tests_sv2::mining_device: Measured CPU hashrate ≈ 17 MH/s
+2026-10-16T09:42:16.327145Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: send open channel with request id 10
+2026-10-16T09:42:16.327618Z  INFO integration_tests_sv2::mining_device: MINING DEVICE: channel opened with: group id 1, channel id 2, request id 10
+2026-10-16T09:42:16.327645Z  INFO integration_tests_sv2::mining_device: Set target to 84063ca778f580c6a65025d081069de0de813415c1e1a7793122305e19000000
+2026-10-16T09:42:16.327664Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 1 is future: true
+2026-10-16T09:42:16.327787Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 1
+2026-10-16T09:42:16.481755Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 2 is future: true
+2026-10-16T09:42:16.481991Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 2
+2026-10-16T09:42:17.078840Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 3 is future: true
+2026-10-16T09:42:17.078989Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 3
+2026-10-16T09:42:20.555540Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 36983767, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [240, 89, 60, 245, 147, 226, 192, 72, 136, 165, 217, 97, 206, 125, 185, 224, 143, 155, 2, 226, 72, 47, 182, 90, 23, 248, 81, 4, 18, 0, 0, 0]
+2026-10-16T09:42:20.556411Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:20.569704Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 4 is future: true
+2026-10-16T09:42:20.569853Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 4
+2026-10-16T09:42:22.343790Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 5 is future: true
+2026-10-16T09:42:22.344209Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 5
+2026-10-16T09:42:25.969337Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2184425329, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [76, 109, 39, 163, 175, 56, 195, 171, 175, 88, 64, 91, 73, 164, 87, 93, 54, 11, 149, 130, 220, 130, 113, 163, 82, 24, 42, 190, 18, 0, 0, 0]
+2026-10-16T09:42:25.970056Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:25.984469Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 6 is future: true
+2026-10-16T09:42:25.984749Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 6
+2026-10-16T09:42:27.988700Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2167360546, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [83, 210, 38, 185, 215, 186, 90, 20, 120, 210, 57, 255, 205, 244, 91, 106, 174, 212, 6, 114, 71, 42, 125, 229, 52, 147, 72, 11, 21, 0, 0, 0]
+2026-10-16T09:42:27.989404Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:28.008631Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 7 is future: true
+2026-10-16T09:42:28.008927Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 7
+2026-10-16T09:42:27.649152Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2159920210, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [138, 2, 126, 78, 26, 168, 37, 214, 161, 167, 234, 134, 18, 21, 27, 80, 48, 55, 169, 150, 123, 250, 208, 111, 85, 107, 143, 202, 3, 0, 0, 0]
+2026-10-16T09:42:27.649745Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:27.662718Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 8 is future: true
+2026-10-16T09:42:27.662935Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 8
+2026-10-16T09:42:29.834023Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2170027439, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [181, 35, 191, 169, 47, 84, 125, 120, 191, 210, 245, 89, 251, 164, 131, 122, 20, 184, 203, 83, 79, 4, 197, 78, 99, 85, 8, 4, 6, 0, 0, 0]
+2026-10-16T09:42:29.834809Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:29.850320Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 9 is future: true
+2026-10-16T09:42:29.850586Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 9
+2026-10-16T09:42:31.532648Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 17849410, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [231, 30, 32, 179, 11, 108, 87, 50, 33, 72, 114, 29, 204, 51, 24, 109, 2, 69, 235, 36, 175, 28, 53, 219, 141, 221, 12, 175, 21, 0, 0, 0]
+2026-10-16T09:42:31.533449Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:31.550019Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 10 is future: true
+2026-10-16T09:42:31.550321Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 10
+2026-10-16T09:42:32.910370Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 11 is future: true
+2026-10-16T09:42:32.910711Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 11
+2026-10-16T09:42:38.846857Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 60084299, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [180, 123, 36, 2, 181, 182, 190, 26, 21, 125, 242, 205, 181, 221, 237, 21, 109, 206, 235, 62, 220, 208, 180, 152, 180, 72, 126, 42, 24, 0, 0, 0]
+2026-10-16T09:42:38.847540Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:38.864287Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 12 is future: true
+2026-10-16T09:42:38.864518Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 12
+2026-10-16T09:42:38.894776Z  INFO integration_tests_sv2::mining_device: Found share with nonce: 2147803908, for target: Some(683917823096752705982411591830488281128459431494223526852188746548868), with hash: [213, 120, 80, 145, 207, 240, 108, 177, 160, 129, 77, 24, 100, 140, 229, 153, 214, 58, 109, 67, 221, 91, 47, 100, 240, 244, 72, 229, 11, 0, 0, 0]
+2026-10-16T09:42:38.895555Z  INFO integration_tests_sv2::mining_device: Received SubmitSharesSuccess
+2026-10-16T09:42:38.945820Z  INFO integration_tests_sv2::mining_device: Received new mining job for channel id: 2 with job id: 13 is future: true
+2026-10-16T09:42:38.954596Z  INFO integration_tests_sv2::mining_device: Received SetNewPrevHash channel id: 2, job id: 13

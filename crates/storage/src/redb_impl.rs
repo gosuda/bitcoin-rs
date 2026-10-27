@@ -159,9 +159,27 @@ pub struct RedbStore {
     db: Database,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
+    /// Last field: drops after the database handle above has closed.
+    guard: Option<crate::StoreGuard>,
 }
 
 impl RedbStore {
+    /// Keeps `guard` alive until this store's database handle is closed.
+    ///
+    /// Panics when a guard is already installed: replacing it would release
+    /// the first guard while the database handle it protects is still open.
+    #[must_use]
+    pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
+        assert!(
+            self.guard.is_none(),
+            "a redb store takes exactly one lifetime guard"
+        );
+        Self {
+            guard: Some(guard),
+            ..self
+        }
+    }
+
     /// Opens or creates a redb store at `path` with one table per column family.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, REDB_DEFAULT_CACHE_BYTES)
@@ -197,6 +215,7 @@ impl RedbStore {
             db,
             #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
+            guard: None,
         })
     }
 
@@ -343,6 +362,8 @@ struct RedbTxIndexStore {
     db: Database,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
+    /// Last field: drops after the database handle above has closed.
+    _guard: Option<crate::StoreGuard>,
 }
 
 impl RedbTxIndexStore {
@@ -427,6 +448,7 @@ impl RedbTxIndexStore {
             db,
             #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
+            _guard: None,
         })
     }
 
@@ -564,10 +586,12 @@ pub fn open_redb_tx_index_store(path: &Path) -> Result<impl KvStore, StorageErro
 }
 
 /// Opens the fixed-width redb transaction-index store with an explicit
-/// page-cache capacity.
+/// page-cache capacity. `guard`, when given, is kept alive until the
+/// returned store's database handle is closed.
 pub fn open_redb_tx_index_store_with_cache(
     path: &Path,
     cache_bytes: u64,
+    guard: Option<crate::StoreGuard>,
 ) -> Result<impl KvStore, StorageError> {
     let cache_bytes = if cache_bytes == 0 {
         REDB_TXINDEX_DEFAULT_CACHE_BYTES
@@ -576,7 +600,11 @@ pub fn open_redb_tx_index_store_with_cache(
     };
     metrics::gauge!("storage.cache_capacity_bytes", "backend" => "redb-txindex")
         .set(bitcoin_rs_primitives::u64_to_f64(cache_bytes));
-    RedbTxIndexStore::open_with_cache(path, cache_bytes)
+    let store = RedbTxIndexStore::open_with_cache(path, cache_bytes)?;
+    Ok(RedbTxIndexStore {
+        _guard: guard,
+        ..store
+    })
 }
 
 impl BatchOp {

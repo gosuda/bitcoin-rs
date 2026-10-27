@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 default = []
+silent-payments = ["bitcoin-rs-index/silent-payments"]
 # Synthetic capability worlds for tests, not production composition.
 test-seam = ["bitcoin-rs-index/test-seam"]
 zmq = ["dep:zmq"]

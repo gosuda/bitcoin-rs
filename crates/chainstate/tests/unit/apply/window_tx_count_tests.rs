@@ -22,8 +22,9 @@ use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_primitives::{Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoSet;
+use parking_lot::Mutex;
 
-use crate::test_fixtures::{handles, seed_genesis};
+use crate::test_fixtures::{StagedFire, handles, seed_genesis, staging_recorder};
 
 #[test]
 fn a_grouped_window_publishes_each_blocks_own_prefix_count()
@@ -113,5 +114,84 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
             .all(|outcome| outcome.commit_id == head.commit_id),
         "one receipt certifies the whole committed prefix"
     );
+    Ok(())
+}
+
+/// A fully successful group hands exactly its newest block to the staged-tip
+/// hook, before the group's durable sync: the published tip observed inside
+/// the hook is still the pre-window tip, so no consumer could have seen the
+/// staged tip early. A hook that fired per staged block, or after publish,
+/// fails this test.
+#[test]
+fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
+-> Result<(), Box<dyn std::error::Error>> {
+    let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    seed_genesis(&handles)?;
+    handles.durable_head.commit(
+        None,
+        &DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: genesis_hash,
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+        &CommitRecords::default(),
+    )?;
+
+    let first = mined_child(genesis.block_hash(), 1)?;
+    let second = mined_child(first.block_hash(), 2)?;
+    let third = mined_child(second.block_hash(), 3)?;
+    let third_hash = Hash256::from(third.block_hash());
+    {
+        let mut tree = handles.block_tree.write();
+        bitcoin_rs_chain::accept_headers(
+            &mut tree,
+            &[first.header, second.header, third.header],
+            Network::Regtest,
+            bitcoin_rs_chain::current_unix_seconds(),
+            bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+        )?;
+    }
+    let blocks = [&first, &second, &third];
+    let serialized: Vec<bytes::Bytes> = blocks
+        .iter()
+        .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
+        .collect();
+
+    let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
+    handles
+        .set_tip_staged(staging_recorder(&handles, &fires))
+        .map_err(|_| "the staged-tip hook installs once")?;
+
+    let outcomes = handles.apply_window(&blocks, &serialized)?;
+    assert_eq!(outcomes.len(), 3, "one drained outcome per staged block");
+
+    let fires = fires.lock();
+    assert_eq!(fires.len(), 1, "one group commits, so one staging handoff");
+    assert_eq!(
+        fires[0].staged_hash, third_hash,
+        "the handoff names the newest staged block, not an ancestor"
+    );
+    assert_eq!(fires[0].staged_height, 3);
+    assert_eq!(
+        fires[0].block_hash, third_hash,
+        "the borrowed body is the caller's newest block"
+    );
+    assert_eq!(
+        fires[0].published,
+        Some((genesis_hash, 0)),
+        "the applied tip is still the pre-window tip at fire time: \
+         the staged tip publishes only with the group's durable receipt"
+    );
+
+    let applied = handles
+        .applied_tip_snapshot()
+        .ok_or("the group must publish an applied tip")?;
+    assert_eq!(applied.hash, third_hash);
     Ok(())
 }

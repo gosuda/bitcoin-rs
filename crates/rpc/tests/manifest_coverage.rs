@@ -34,6 +34,15 @@ fn handler() -> Handler {
     Handler::new(Arc::new(Context::new()))
 }
 
+#[test]
+fn silent_payments_requires_build_and_runtime_opt_in() {
+    let result = handler().dispatch("getblocktweaks", &json!([0]));
+    #[cfg(feature = "silent-payments")]
+    assert!(matches!(result, Err(RpcError::MethodDisabled(_))));
+    #[cfg(not(feature = "silent-payments"))]
+    assert!(matches!(result, Err(RpcError::MethodNotFound(_))));
+}
+
 fn shipped(kind: SurfaceKind) -> impl Iterator<Item = &'static Entry> {
     manifest::entries_of_kind(kind).filter(|entry| entry.shipped())
 }

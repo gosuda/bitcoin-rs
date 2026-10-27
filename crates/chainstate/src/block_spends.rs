@@ -14,10 +14,8 @@ use crate::{AssumeUtxoDiskStatus, Chainstate};
 
 /// Limit the owned raw record before copying and decoding. Engine-internal
 /// pages/cache/decompression are outside the storage method's copy bound.
-const MAX_UNDO_QUERY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_BLOCK_QUERY_BYTES: usize = 4_000_000;
-/// Conservative upper bound on verbose script/transaction expansion.
-const MAX_PROJECTED_QUERY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_UNDO_QUERY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_BLOCK_QUERY_BYTES: usize = 4_000_000;
 
 impl BlockUndoSource for Chainstate {
     fn block_spends(
@@ -174,7 +172,6 @@ impl Chainstate {
             });
         }
         if let Err(reason) = availability {
-            ensure_projection_budget(&block, std::iter::empty())?;
             return Ok(BlockSpends {
                 block,
                 spent: Err(reason),
@@ -187,13 +184,9 @@ impl Chainstate {
         let undo = decode_undo_record_for_block(&record, &block)
             .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
         drop(record);
-        // Bound map/output allocation before copying each restored script.
-        ensure_projection_budget(
-            &block,
-            undo.restores()
-                .iter()
-                .map(|coin| coin.txout.script_pubkey.len()),
-        )?;
+        // Counts derive from the authenticated body and bounded undo decode.
+        // Each spent script is copied once; response formatting belongs to
+        // the consumer, not this format-independent input source.
         let spent = block_spent_outputs(&block, height, &undo)?;
         Ok(BlockSpends {
             block,
@@ -253,37 +246,6 @@ fn certified(
         }
         _ => Ok(false),
     }
-}
-
-fn ensure_projection_budget(
-    block: &Block,
-    restore_scripts: impl Iterator<Item = usize>,
-) -> Result<(), BlockSpendsError> {
-    // Hex/witness duplication, bounded fixed JSON fields per element, and a
-    // conservative 64x expansion for script asm/hex/descriptor strings. Same-
-    // block scripts occur in the body and at most once as a valid input.
-    let mut estimate = block.total_size().saturating_mul(4);
-    let mut scripts = restore_scripts.fold(0_usize, usize::saturating_add);
-    for tx in &block.txs {
-        estimate =
-            estimate.saturating_add((tx.inputs.len() + tx.outputs.len() + 1).saturating_mul(1024));
-        scripts = scripts.saturating_add(
-            tx.inputs
-                .iter()
-                .map(|input| input.script_sig.len())
-                .sum::<usize>(),
-        );
-        scripts = scripts.saturating_add(
-            tx.outputs
-                .iter()
-                .map(|output| output.script_pubkey.len().saturating_mul(2))
-                .sum::<usize>(),
-        );
-    }
-    if estimate.saturating_add(scripts.saturating_mul(64)) > MAX_PROJECTED_QUERY_BYTES {
-        return Err(BlockSpendsError::ResourceLimit);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

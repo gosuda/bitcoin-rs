@@ -579,3 +579,30 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
     }
     Ok(())
 }
+
+#[test]
+fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::error::Error>> {
+    // Only the lock file initializes.
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    {
+        let mut lock = data.create(super::fs::DATA_DIR_LOCK_FILE)?;
+        lock.write_all(b"locked")?;
+        lock.sync_all()?;
+    }
+    ensure_current_schema(&data)?;
+    // The lock plus any other entry still errors.
+    {
+        let mut other = data.create("other")?;
+        other.write_all(b"data")?;
+        other.sync_all()?;
+    }
+    data.remove_file(CURRENT_SCHEMA_FILE)?;
+    assert!(ensure_current_schema(&data).is_err());
+    // A lock directory does not exempt.
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    data.create_dir(super::fs::DATA_DIR_LOCK_FILE)?;
+    assert!(ensure_current_schema(&data).is_err());
+    Ok(())
+}

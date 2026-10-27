@@ -458,7 +458,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
         },
     );
     let staller = test_addr(9810, 0)?;
-    let (tx, rx) = unbounded::<Message>();
+    let (tx, rx) = crate::test_support::message_channel();
     let conn1 = PeerLease::new(tx);
     peers.register(staller, conn1.clone());
     peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
@@ -518,7 +518,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
             now + super::super::BLOCK_STALLING_TIMEOUT,
         )
     };
-    let (tx2, rx2) = unbounded::<Message>();
+    let (tx2, rx2) = crate::test_support::message_channel();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());
     peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));

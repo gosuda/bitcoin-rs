@@ -38,7 +38,7 @@ use crate::capabilities::{
 };
 use crate::query_api::{
     DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
-    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 
 use bitcoin_rs_storage::{
@@ -414,14 +414,14 @@ impl DerivedIndexQueryAdapter {
         let snapshot = self.lifecycle.load_full();
         match &*snapshot {
             DerivedIndexLifecycle::Serving(engine) => Ok(Arc::clone(engine)),
-            DerivedIndexLifecycle::Opening => {
-                Err(TxQueryError::Unavailable("txindex is opening".into()))
-            }
-            DerivedIndexLifecycle::Failed(_) => {
-                Err(TxQueryError::Unavailable("txindex is unavailable".into()))
-            }
+            DerivedIndexLifecycle::Opening => Err(TxQueryError::Unavailable(
+                TxUnavailableCause::Other("txindex is opening".into()),
+            )),
+            DerivedIndexLifecycle::Failed(_) => Err(TxQueryError::Unavailable(
+                TxUnavailableCause::WorkerFailed("txindex is unavailable".into()),
+            )),
             DerivedIndexLifecycle::ShutdownAbandoned => Err(TxQueryError::Unavailable(
-                "txindex was abandoned at shutdown".into(),
+                TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
             )),
         }
     }
@@ -672,8 +672,23 @@ struct BlockIdentity {
 /// Outcome of one sub-chunk prepare-and-admit step.
 enum ChunkAction {
     Continue,
+    /// Shutdown, a revoked history pin, a rejected or stale commit, or an
+    /// anchor-class reset: the pass must end, never move to another group.
     Stalled,
     Progressed,
+    /// A body in the next window is absent. Only this outcome lets the
+    /// forward pass look at another capability group.
+    MissingBody,
+}
+
+/// How one forward catch-up leg ended.
+enum ForwardLeg {
+    /// The leg ended with a scheduler answer.
+    Settled(ReconcileAction),
+    /// The leg's next body is absent and the leg retained no rows, so the
+    /// pass may try the next capability group with the same fence and
+    /// watermarks: nothing was written.
+    BodyAbsent,
 }
 
 enum CursorCommit {
@@ -777,7 +792,7 @@ impl DerivedIndexWorkerError {
 mod query_tests;
 
 #[cfg(all(test, feature = "fjall"))]
-mod integration_tests;
+mod supervisor_tests;
 
 #[cfg(all(test, feature = "fjall"))]
 #[expect(clippy::expect_used, clippy::panic)]

@@ -4,243 +4,178 @@
 
 # bitcoin-rs
 
-## Build on Bitcoin. Inside Rust.
-
-A Bitcoin full-node project for developers exploring typed Rust integration,
-node-owned indexing, and familiar Bitcoin interfaces.
+**Build on Bitcoin. Inside Rust.**
 
 [Getting started](docs/getting-started.md) ·
 [Documentation](docs/README.md) ·
+[Compatibility matrix](docs/api/ecosystem-compat.toml) ·
 [Contributing](CONTRIBUTING.md) ·
 [Benchmarks and limitations](docs/benchmarks/end-to-end-sync.md)
 
-[![CI](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
+---
 
-## Why bitcoin-rs
+## What is this
 
-[Bitcoin Core](https://github.com/bitcoin/bitcoin) is the most successful
-implementation of Bitcoin. Its conservatism, stability, and compatibility
-discipline are major reasons for
-that success. Over time, however, those safeguards also shape which changes are
-practical: existing boundaries accumulate dependencies, and implementation
-choices harden into assumptions that Bitcoin consensus does not require.
+`bitcoin-rs` is an independent Bitcoin full-node daemon and embeddable Rust workspace. Developers run a node from source or attach typed components directly to node state, with Core-compatible P2P, JSON-RPC, REST, ZMQ, and Esplora HTTP on the outside.
 
-bitcoin-rs asks a simple question:
+Unlike the `rust-bitcoin` library crates it builds on, `bitcoin-rs` owns chainstate, storage, sync, mempool, mining templates, and servers.
 
-> **If a Bitcoin full node were designed again today, what would we keep, and
-> what would we change?**
+- **Embeddable core**. `bitcoin_rs_node::Node` boots the daemon's service graph in-process (`start`, `snapshot`, `broadcast`, `shutdown`) ([embedding](docs/contracts/embedding.md)).
+- **Owned indexes**. `txindex`, `blockfilterindex`, and `scriptindex` power Esplora `/api` plus key-free descriptor and PSBT helpers; keys stay outside the node ([wallet surface](docs/contracts/wallet-facing.md)).
+- **Selectable verification**. Native Rust interpreter by default; `libbitcoinkernel` via `--features kernel` plus `--validation-engine kernel`.
+- **Checked compatibility**. External behavior verified against Bitcoin Core 31.1, vectors, and differentials ([validation](docs/validation-tooling.md)); no parity, production, or mainnet claims ([limits](#compatibility-and-limitations)).
 
-### Why now?
+Licensed [Apache-2.0](LICENSE); Rust 2024 edition, MSRV `1.99.0`.
 
-Bitcoin is unusually well suited to independent implementation because its
-behavior can be checked against Bitcoin Core, `libbitcoinkernel`, historical
-chain data, consensus test vectors, fuzzing, and differential tests.
+```sh
+curl -s --user "$(cat .bitcoin-rs-regtest/.cookie)" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":"1","method":"getbestblockhash","params":[]}' \
+  http://127.0.0.1:18443/
+# {"jsonrpc":"2.0","result":"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206","id":"1"}
 
-However, Bitcoin Core prioritizes stability, compatibility, and minimizing
-change risk. While essential for the reference implementation, these priorities
-make large architectural changes difficult to explore within the same codebase.
+curl -s http://127.0.0.1:18443/api/blocks/tip/height
+# 0
+```
 
-**That is why we built `bitcoin-rs`: to preserve Bitcoin's consensus while
-making architectural experimentation practical—build alternatives, verify them
-against reproducible evidence, and keep iterating on the implementation.**
+Contents: [Install](#install) · [Quick start](#quick-start) · [Why an independent architecture](#why-an-independent-architecture) · [Architecture](#architecture) · [Compatibility and limitations](#compatibility-and-limitations) · [Development](#development) · [License](#license)
 
-### What can be improved
+---
 
-- **Performance is a first-class requirement.** `bitcoin-rs` is not aiming for
-  parity with Bitcoin Core simply by changing languages. Synchronization,
-  storage, memory ownership, concurrency, caching, I/O, and indexing can all be
-  reconsidered. Improvements must be demonstrated with matched whole-node
-  benchmarks against Core.
-- **The UTXO set is the node's authoritative coin state.** Much of the Bitcoin
-  application ecosystem grew by rebuilding or duplicating wallet-, Electrum-,
-  and explorer-specific views around the same chain data. `bitcoin-rs`
-  simplifies that boundary: the node owns the canonical UTXO set used for
-  validation and an integrated script index exposed through Esplora-compatible
-  APIs. Wallet-specific keys, policies, and metadata remain outside the node.
-- **Modularity keeps the core isolated and components composable.** Clear
-  dependency and failure boundaries keep extensions from destabilizing
-  validation or chainstate while allowing components to be reused independently.
-- **Rust-native integration is a primary path.** Applications and extensions in
-  the Rust Bitcoin ecosystem can attach to the node as typed, in-process
-  components instead of routing through serialized RPC or separate processes.
+## Install
 
-Bitcoin is not defined by the continued preservation of one codebase. **The code
-can change; consensus is what must remain.** `bitcoin-rs` aims to provide an
-independently designed implementation that can be compared against Bitcoin Core
-and other implementations through reproducible evidence.
+`bitcoin-rs` is built from source. No GitHub Release binary is published, so source checkout is the path below.
+
+### Prerequisites
+
+| Requirement | Details |
+| --- | --- |
+| Rust toolchain | `stable` with Rust 2024 edition support and workspace MSRV `1.99.0` ([`rust-toolchain.toml`](rust-toolchain.toml), [source compatibility policy](docs/policies/source-compatibility.md)) |
+| Default build (`fjall`, `redb`, `zmq`) | C and C++ compilers plus `ar` (`build-essential` on Debian/Ubuntu); ZeroMQ is compiled from bundled sources, so no system ZeroMQ headers, `pkg-config`, `cmake`, or `libsodium` are needed |
+| Minimal lane (`--no-default-features --features fjall`) | Drops the bundled-ZeroMQ C++ build; a C compiler is still required for vendored secp256k1 and mimalloc |
+| Optional `--features kernel` | `cmake`, `libboost-dev`, and a C++ compiler for `libbitcoinkernel` |
+| Optional `--features rocksdb` | `clang` and `libclang-dev` |
+
+### Build from source
+
+Clone the repository and compile the `bitcoin-rs` binary:
+
+```sh
+git clone https://github.com/gosuda/bitcoin-rs.git
+cd bitcoin-rs
+
+# Local exploration profile (inherits release, disables fat LTO, raises codegen-units)
+cargo build --locked --profile quickstart -p bitcoin-rs
+
+# Or minimal native build without the ZeroMQ C library
+cargo build --locked --profile quickstart -p bitcoin-rs --no-default-features --features fjall
+```
+
+For sustained synchronization or benchmarking, compile with `--release` (`cargo build --locked --release -p bitcoin-rs`) and record the exact profile and feature flags with any measurement. See [Getting started](docs/getting-started.md) for Docker and optional `kernel` build lanes.
+
+---
 
 ## Quick start
 
-Build and run the kernel-free default binary with the quick-start profile.
-Consult [Getting started](docs/getting-started.md) for build lanes and
-prerequisites before choosing features:
+Start a local `regtest` node bound to loopback first. The bare `bitcoin-rs` command defaults to `mainnet` (`127.0.0.1:8332`, `0.0.0.0:8333`, data directory `.bitcoin-rs`); passing `--network regtest`, `--p2p-listen 127.0.0.1:18444`, and `--dns-seeds-enabled=false` keeps the first run isolated without dialing public peers.
+
+### 1. Start a local regtest node
 
 ```sh
-cargo build --profile quickstart -p bitcoin-rs
-./target/quickstart/bitcoin-rs --data-dir .bitcoin-rs
+./target/quickstart/bitcoin-rs \
+  --network regtest \
+  --data-dir .bitcoin-rs-regtest \
+  --p2p-listen 127.0.0.1:18444 \
+  --dns-seeds-enabled=false \
+  --rpc-bind 127.0.0.1:18443 \
+  --scriptindex=utxo &
+NODE_PID=$!
 ```
 
-Use the `quickstart` profile for initial exploration. For sustained IBD or
-benchmarking, use `cargo build --release -p bitcoin-rs` and record the exact
-profile and feature set with the result. No build-time ratio is claimed here.
+On startup, `bitcoin-rs` initializes the regtest genesis block, writes a fresh per-start Basic-auth cookie (`__cookie__:<random>`) to `.bitcoin-rs-regtest/.cookie` (mode `0600` on Unix), and binds the HTTP listener on `127.0.0.1:18443`.
 
-This starts a mainnet node using `fjall` storage and native Rust script
-verification, storing state in `.bitcoin-rs` and listening for JSON-RPC on
-`127.0.0.1:8332`. The shipped Docker image instead selects kernel verification
-through its default configuration.
-
-Mainnet skips historical script verification up to the pinned assume-valid
-anchor by default. Add `--assume-valid-height 0` to verify all scripts from
-genesis. See [Getting started](docs/getting-started.md) for configuration,
-cache, indexing, and pruning options.
-
-Verify the node is responding and syncing:
+### 2. Query JSON-RPC and Esplora HTTP
 
 ```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
+curl -s --user "$(cat .bitcoin-rs-regtest/.cookie)" \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' \
-  http://127.0.0.1:8332/
+  -d '{"jsonrpc":"2.0","id":"1","method":"getblockcount","params":[]}' \
+  http://127.0.0.1:18443/
+# {"jsonrpc":"2.0","result":0,"id":"1"}
+
+curl -s http://127.0.0.1:18443/api/blocks/tip/hash
+# 0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206
 ```
 
-### Kernel oracle build
+### 3. Stop the node cleanly
 
-To route script verification through `libbitcoinkernel` instead of the native
-interpreter, install C++ dependencies (`cmake` and `libboost-dev` on
-Debian/Ubuntu), build with `--features kernel` (compiles kernel support in),
-and select the engine at runtime with `--validation-engine kernel`:
+Lifecycle control is handled by process signals (`SIGINT` or `SIGTERM`), not a `stop` JSON-RPC method (`stop` is unimplemented over RPC):
 
 ```sh
-cargo build --release -p bitcoin-rs --features kernel
-./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
+kill -INT "$NODE_PID"
+wait "$NODE_PID"
 ```
 
-## Benchmark status
+### Mainnet, assume-valid, and kernel verification
 
-[End-to-end synchronization evidence](docs/benchmarks/end-to-end-sync.md) is the
-owner of methodology, measurements, artifact custody, and limitations. It
-retains historical bounded results from superseded engines, including both
-faster local replays and slower daemon IBD results. Those figures are not
-current end-state proof or a general speed comparison with Bitcoin Core.
+Running `./target/release/bitcoin-rs --data-dir .bitcoin-rs` without `--network` starts on `mainnet` using `fjall` storage, native Rust script verification, BIP324 v2 P2P transport, and loopback JSON-RPC on `127.0.0.1:8332`. Mainnet defaults to `--validation-mode assume-valid`, skipping historical script execution through the pinned assume-valid anchor (`938343`) while the active chain contains that anchor; pass `--validation-mode full` or `--assume-valid-height 0` to verify every script from genesis.
 
-The owner's end-state cells are marked `planned_not_executed`. Historical raw
-JSON was retired by #224; retained digests can identify an external copy, but
-are not a replacement for the raw evidence. This README makes no current
-performance-superiority claim. Consult the owner document for the status of
-each workload before quoting a result.
+Consult [docs/getting-started.md](docs/getting-started.md) for layered configuration precedence (defaults, `--config` TOML, `--bitcoin-conf`, `BITCOIN_RS_*` environment variables, and CLI flags), storage backends (`fjall`, `redb`, `rocksdb`), pruning, REST (`--rest=true`), ZMQ, and optional `--features kernel` / `--validation-engine kernel` builds.
+
+---
+
+## Why an independent architecture
+
+[Bitcoin Core](https://github.com/bitcoin/bitcoin) is the reference implementation of Bitcoin, and its conservatism and compatibility discipline are central to network stability. Those same priorities make large internal redesigns costly to explore inside one codebase.
+
+`bitcoin-rs` tests what a Bitcoin full node looks like when designed from scratch in Rust around explicit ownership boundaries:
+
+- **Consensus and wire compatibility at the boundary, replaceable internals.** External protocol behavior is checked against Bitcoin Core, `libbitcoinkernel`, test vectors, and external consumers, while internal data structures, concurrency, and storage engines remain free to evolve ([ecosystem compatibility contract](docs/contracts/ecosystem-compatibility.md)).
+- **Canonical coin state and integrated indexing.** Instead of requiring separate Electrum or explorer indexers to duplicate chain state for common queries, the node owns the UTXO set and optional `txindex`, `blockfilterindex`, and `scriptindex` (`utxo` or `full`) consumers with explicit readiness gating ([indexing contract](docs/contracts/indexing.md)).
+- **In-process composition without an async runtime mandate.** Core services run on a synchronous crossbeam event loop and bounded worker threads. Embedders call `bitcoin_rs_node::Node` from their own executor without the node spawning a private Tokio runtime ([embedding contract](docs/contracts/embedding.md)).
+
+---
 
 ## Architecture
 
-```
-Surfaces:      bin/bitcoin-rs, crates/rpc
-Capabilities:  crates/index, crates/mining, crates/mempool
-Node services: crates/node, crates/p2p, crates/storage
-Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crates/primitives
-```
+The workspace is a five-layer, one-way dependency graph: `bin/bitcoin-rs` and `crates/node` compose the runtime; `crates/rpc` owns the external protocols; `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, and `mining` own domain state; `crates/storage` confines every storage engine (`fjall`, `redb`, `rocksdb`); `primitives`, `script`, and `consensus` stay free of I/O. The daemon and `Node::start` share one lifecycle, and `libbitcoinkernel` FFI stays behind the optional `kernel` feature. Details live in the [architecture contract](docs/contracts/architecture.md) and [embedding contract](docs/contracts/embedding.md).
 
-- Validation: script execution runs in parallel across rayon workers, with
-  sighash midstate reuse per transaction. The native interpreter covers every
-  consensus spend class. With the `kernel` feature, `libbitcoinkernel` support
-  is compiled in and `validation.engine` selects the verifier at runtime
-  (`native` by default, `kernel` to route script checks through
-  `libbitcoinkernel`).
-- Kernel boundary: `crates/consensus/src/kernel.rs` contains all
-  `libbitcoinkernel` types behind `#[cfg(feature = "kernel")]`. Kernel types
-  never leak into node state or apply logic. The `kernel` feature is a
-  capability; `validation.engine` is the selection.
-- Storage: `crates/storage` provides backend abstraction. The active engine is
-  configured at startup (`fjall`, `redb`, or `rocksdb`).
-- Indexing: `txindex` runs as an independent consumer, advancing its cursor and
-  rollback metadata atomically.
+---
 
-## Build and test
+## Compatibility and limitations
+
+External interoperability is tracked per surface in [`docs/api/ecosystem-compat.toml`](docs/api/ecosystem-compat.toml) ([contract](docs/contracts/ecosystem-compatibility.md)); per-method RPC status in [`docs/rpc-reference.md`](docs/rpc-reference.md); evidence lanes in [`docs/validation-tooling.md`](docs/validation-tooling.md).
+
+Externally verified on regtest against unmodified Bitcoin Core 31.1: P2P v1 wire, BIP152 compact blocks, BIP324 v2 transport, and BIP157/158 filters. Proactive block announcements still await a retained qualification run. JSON-RPC, REST, ZMQ, Esplora, and mining templates are implemented with in-tree suites. BIP352 Silent Payments and the Stratum V2 adapter are experimental. Wallet RPCs and Core IPC are intentionally unsupported; `stop` is unimplemented over RPC ([rpc-reference](docs/rpc-reference.md)), so shutdown uses process signals.
+
+No claim is made of full Core parity, production safety, or mainnet qualification. [Synchronization evidence](docs/benchmarks/end-to-end-sync.md) owns all benchmark methodology; its target end-state cells are `planned_not_executed`, so quote no speed comparison from historical runs.
+
+Maps: [docs index](docs/README.md), [contracts](docs/contracts/README.md), [BIP support](docs/bip-support.md), [concepts](CONCEPTS.md).
+
+---
+
+## Development
+
+[`scripts/ci-pr.sh`](scripts/ci-pr.sh) is the canonical local and CI gate runner ([`CONTRIBUTING.md`](CONTRIBUTING.md)):
 
 ```sh
-# Build default binary (kernel-free)
-cargo build --release -p bitcoin-rs
+# Format, dependency policy, lint, and fast per-crate tests (PR gate)
+./scripts/ci-pr.sh fmt
+./scripts/ci-pr.sh deny
+./scripts/ci-pr.sh clippy
+./scripts/ci-pr.sh test-crates
 
-# Run workspace unit and integration tests
-cargo test --workspace
-
-# Lint all targets
-cargo clippy --workspace --all-targets -- -D warnings
+# Or run individual workspace Cargo commands (kernel-free by default)
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-## Validation and verification
+Heavy binary and workspace test lanes (`./scripts/ci-pr.sh test-binary` and `./scripts/ci-pr.sh test-workspace`) first provision pinned Bitcoin Core reference fixtures via `bash scripts/provision-ci-reference-fixtures.sh core`.
 
-bitcoin-rs verifies consensus, networking, and storage through multiple independent
-evidence lanes rather than relying on in-tree unit tests alone. Evidence is
-separated into real external-consumer evidence (unmodified external software
-exercising the public boundary) and in-tree reference/differential suites.
+Contributions, bug reports, and opt-in BIP prototypes are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for commit conventions, merge-queue requirements, crate-layer rules, and how to [propose and implement BIPs](CONTRIBUTING.md#proposing-and-implementing-bips).
 
-For reproduction commands, prerequisites, and artifact custody for each lane, see
-the [validation tooling index](docs/validation-tooling.md).
-
-Implemented and tested lanes:
-
-- [Core vectors](docs/validation-tooling.md#3-bitcoin-core-script-and-transaction-vectors):
-  native script evaluation with pinned skips; consensus transaction tests cover
-  loading and deserialization, not validity.
-- [Sighash differentials](docs/validation-tooling.md#4-native-sighash-checks-against-independent-implementation):
-  legacy, SegWit v0, and Taproot checks against independent implementations.
-- [Kernel oracle and scoped parity](docs/validation-tooling.md#5-libbitcoinkernel-oracle-and-scoped-native-parity):
-  Core script-vector verdicts and selected native/kernel fixture comparisons,
-  not a full-corpus differential.
-- [Contextual consensus rules](docs/validation-tooling.md#6-contextual-consensus-rule-tests):
-  difficulty, activation rules, and undo persistence.
-- [Fuzzing and corpus regression](docs/validation-tooling.md#7-daily-fuzz-targets-and-qa-assets-corpus-provenance):
-  five targets, pinned reference seeds, and codec invariants.
-- [Crash recovery and reorgs](docs/validation-tooling.md#8-chainstate-crash-recovery-and-reorg-evidence):
-  durable commits, process-death boundaries, and restart consistency.
-- [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
-  curated block/transaction cases compared by an in-tree harness against pinned live Bitcoin Core.
-
-External evidence and remaining work:
-
-- [Live Core P2P](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential):
-  externally verified handshake, sync, compact blocks, and chain identity.
-- [bitcoinfuzz integration](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662):
-  integration effort in progress to add bitcoin-rs as a differential fuzzing module.
-- [Offline full-validation comparator](docs/validation-tooling.md#9-offline-full-validation-comparator):
-  harness tested; full-mainnet campaigns not yet executed.
-- [Ecosystem compatibility](docs/validation-tooling.md#10-external-ecosystem-compatibility-matrix):
-  P2P externally verified; other surfaces tracked separately.
-- [USDT observability](docs/validation-tooling.md#11-usdt--bpftrace-observability-validation):
-  probe ABI tested; live tracing remains planned.
-
-## Independent architecture, Bitcoin compatibility
-
-bitcoin-rs explores new architectures behind Bitcoin's established consensus,
-protocol, and supported API boundaries. Internal designs are replaceable:
-changes must earn their place through reproducible evidence, not resemblance
-to Bitcoin Core.
-
-We check compatibility against real ecosystem consumers and reference
-implementations. See the [validation tooling index](docs/validation-tooling.md)
-for tested scope, the [compatibility matrix](docs/api/ecosystem-compat.toml)
-for per-interface status, and the [BIP support matrix](docs/bip-support.md)
-with its [adoption policy](docs/policies/bip-adoption.md) for BIP-based
-capabilities.
-
-## Contributing
-
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
-verification commands, CI workflows, crate architecture conventions, and how
-to [propose and implement BIPs](CONTRIBUTING.md#proposing-and-implementing-bips).
-
-## Documentation
-
-- [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
-- [docs/README.md](docs/README.md) — Documentation index
-- [docs/bip-support.md](docs/bip-support.md) — BIP support matrix
-- [docs/validation-tooling.md](docs/validation-tooling.md) — Validation tooling and evidence index
-- [docs/contracts/](docs/contracts/) — Normative architecture and protocol contracts
-- [docs/contracts/ecosystem-compatibility.md](docs/contracts/ecosystem-compatibility.md) — External ecosystem compatibility strategy
-- [docs/api/ecosystem-compat.toml](docs/api/ecosystem-compat.toml) — External compatibility evidence matrix
-- [CONCEPTS.md](CONCEPTS.md) — Domain terminology and concepts
+---
 
 ## License
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE).

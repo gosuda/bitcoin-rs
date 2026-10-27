@@ -5,16 +5,24 @@
 | Need | Owner |
 | --- | --- |
 | Build, configure, and run a node | [Getting started](getting-started.md) |
-| Explore Bitcoin one module at a time | [Architecture contract](contracts/architecture.md) and each crate's `README.md` |
+| Explore Bitcoin one module at a time | [Architecture contract](contracts/architecture.md), then the per-layer crate guides below |
+| Trace validation from byte types to consensus | [primitives](../crates/primitives/README.md), [script](../crates/script/README.md), [consensus](../crates/consensus/README.md) |
+| Trace state from storage to the node runtime | [storage](../crates/storage/README.md), [utxo](../crates/utxo/README.md), [chain](../crates/chain/README.md), [node](../crates/node/README.md) |
+| Trace services from wire to API | [p2p](../crates/p2p/README.md), [mempool](../crates/mempool/README.md), [mining](../crates/mining/README.md), [index](../crates/index/README.md), [rpc](../crates/rpc/README.md) |
 | Find a normative clause and its tests | [Contract index](contracts/README.md) |
 | Discover and run validation evidence | [Validation tooling](validation-tooling.md) |
 | Understand project vocabulary | [Concepts](../CONCEPTS.md) |
 | Read repository-wide invariants | [Project invariants](../CONSTRAINTS.md) |
 | Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
+| Organize source modules, tests, and fixtures | [Source and test organization policy](policies/source-organization.md) |
 | Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
 | Evaluate the experimental keyless BIP352 codec | [Silent Payments feasibility](silent-payments.md) |
 | Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 | Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
+| Mine regtest blocks and inspect templates | [Solo-mining generate path](contracts/external-api.md#api-05-solo-mining-generate-path) and [template extras](contracts/external-api.md#api-11-bip22bip23-template-extras) |
+| Inspect a Core snapshot file without starting a node | [Snapshot inspector](../tools/snapshot/README.md) |
+| Watch a running node for stalls | [Runtime stall watchdog](operations/runtime-stall.md) |
+| Review unselected index-design options (historical) | [Index ideation record](ideation/better-tasting-and-efficient-index-design-and-abstractions.md): brainstorm only, not a plan |
 
 The contract index owns the clause/proof map; this page does not maintain a
 second inventory. Contracts take precedence over local source comments,
@@ -59,7 +67,8 @@ target design, and this index does not duplicate gate verdicts.
 The default binary is kernel-free; library defaults are governed separately by
 [validation-default.md](contracts/validation-default.md). The optional
 `kernel` lane is not a claim that native-default promotion has passed.
-BIP324 v2 is in the tree behind `v2transport` (off by default); the live
-bidirectional Core evidence and the shipped-default promotion stay open work
+The node runs BIP324 v2 transport by default (`--v2transport=false` keeps
+every connection on v1; `P2pServiceConfig::default()` leaves it off), with
+live bidirectional Core 31.1 interop recorded
 ([BIP adoption](policies/bip-adoption.md), BIP 324 row in
 [bip-support.md](bip-support.md)).

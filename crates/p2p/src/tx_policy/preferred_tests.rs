@@ -1,4 +1,4 @@
-use super::tests::{CountingInventory, item, registered_source, select, source};
+use super::tests::{CountingInventory, item, register_ready, registered_source, select, source};
 use super::*;
 use std::sync::{
     Arc,
@@ -396,11 +396,60 @@ fn callback_time_eviction_invalidates_an_unsent_plan_without_claiming_new_work()
     consistent(&table.tx_policy.lock());
 }
 
+/// A `getdata` the node aggregate refuses leaves the request exactly as it
+/// was before the claim, whether its source is preferred or not: unowned, the
+/// announcement and its eviction reference kept, nobody penalized, and a later
+/// poll sends the same request.
+#[test]
+fn tx_getdata_saturated_unclaims() {
+    let now = Instant::now();
+    for preferred in [true, false] {
+        let table = PeerTable::new();
+        let aggregate = Arc::new(crate::connection::SharedOutboundBudget::with_limits(128, 0));
+        let (sender, receiver) = crate::test_support::message_channel();
+        let lease = crate::PeerLease::new(sender).with_shared_budget(&aggregate);
+        let source = register_ready(&table, 7, &lease);
+        let hold = crate::test_support::hog(&aggregate, 128);
+        assert!(
+            table
+                .tx_policy
+                .lock()
+                .announce(candidate(source, 1, now, preferred, 5))
+        );
+        let key = identity(item(1));
+
+        table.send_transaction_requests(now, None, Some(&[key]), || now);
+
+        assert!(receiver.try_recv().is_err(), "preferred={preferred}");
+        assert!(!lease.is_cancelled(), "preferred={preferred}");
+        {
+            let policy = table.tx_policy.lock();
+            assert_eq!(
+                policy.requests[&key].owner, None,
+                "preferred={preferred}: the claim was reversed"
+            );
+            assert_eq!(
+                policy.counts[&source], 1,
+                "preferred={preferred}: the announcement is kept"
+            );
+            consistent(&policy);
+        }
+
+        drop(hold);
+        table.send_transaction_requests(now, None, Some(&[key]), || now);
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::GetData(items)) if items == vec![item(1)]),
+            "preferred={preferred}: the same request goes out once room returns"
+        );
+        consistent(&table.tx_policy.lock());
+    }
+}
+
 fn registered_inbound(
     table: &PeerTable,
     port: u16,
-) -> (PeerSource, crossbeam_channel::Receiver<Message>) {
-    let (sender, receiver) = crossbeam_channel::bounded(32);
+) -> (PeerSource, crate::test_support::MessageReceiver) {
+    let (sender, receiver) = crate::test_support::message_channel_bounded(32);
     let lease = crate::PeerLease::new_inbound(sender);
     let addr = ([127, 0, 0, 1], port).into();
     table.register(addr, lease.clone());

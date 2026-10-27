@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.2** (2026-10-13)
+**Contract version: 1.3** (2026-10-18)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
@@ -16,8 +16,9 @@ Owners:
 - `DerivedIndexQueryEngine` in `crates/index/src/runtime/query.rs` owns the shared
   snapshot gate and public query entrypoints. Its `query/transactions.rs` and
   `query/scripts.rs` modules own exact transaction resolution and script
-  traversal; `query.rs` itself owns block identity (`IndexBlockSource`) and
-  aggregate work accounting (`QueryBudget`).
+  traversal; the engine's body source owns block body access and `query.rs`
+  owns aggregate work accounting (`QueryBudget`). Active-chain block identity
+  comes from the engine's block tree.
 - Worker supervision and backend opening in `runtime/lifecycle.rs` and
   `runtime/startup.rs`; startup owns generation-checked publication.
 - Durable mutation: `IndexWriter` in `crates/index/src/index/write.rs`;
@@ -136,7 +137,8 @@ history transition closed; no secondary coin set is introduced.
   across a reorg, or experiences a concurrent tip advance during read assembly,
   the query engine refuses the request with `TxQueryError::Retry` or
   `TxQueryError::Unavailable`. Stale, unconfirmed, or torn rows are never
-  returned to callers.
+  returned to callers. A body-store read failure is `TxQueryError::Storage`,
+  not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only. The query holds
   chain-transition authority across watermark validation, live locator scan,
   and authoritative UTXO resolution. Apply mutates the UTXO set before
@@ -147,6 +149,21 @@ history transition closed; no secondary coin set is introduced.
 - A required capability that is not in the configured selection is
   `Unavailable` with a distinct disabled reason. A configured capability
   whose watermark lags is `Retry` (backfilling), never "disabled".
+- A query MUST retain at most one decoded block in its memo. Consecutive
+  full-block reads at the same `(height, hash)` reuse it. An identity miss
+  MUST evict the retained block before fetching another one. Evicted
+  identities are read and charged again.
+
+Proof: these tests establish the memo-retention rule:
+- `crates/index/src/runtime/query.rs`:
+  `block_memo_retains_only_the_latest_identity` proves release on a miss
+  before replacement and release when the query budget is dropped.
+- `crates/index/src/runtime/query_tests.rs`:
+  `confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_query`
+  proves same-identity reuse and isolation between queries.
+- `crates/index/src/runtime/query_tests.rs`:
+  `confirmed_history_with_nonmatching_script_falls_back_per_height_and_stays_empty`
+  proves distinct-height reads for repeated nonmatching-script fallbacks.
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -235,6 +252,9 @@ history transition closed; no secondary coin set is introduced.
     the worker routes to `reset_capabilities` and backfills forward instead of
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
+  - Proof: `crates/index/src/runtime/recovery_tests.rs` tests
+    `index_ahead_of_restored_tip_is_reported_once_and_rewound` and
+    `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`.
 - **Connect walk**:
   - The worker loads bodies from `BlockBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
@@ -243,6 +263,57 @@ history transition closed; no secondary coin set is introduced.
     same-block create/spend pairs cancel before the anchor is consulted.
     Live inserts use the same admission predicate as the UTXO set, including
     OP_RETURN, oversize-script, and genesis exclusions.
+  - Enabled capabilities whose next height is equal form one forward group;
+    groups never mix capabilities with different next heights, and the lowest
+    group runs first. A body absent from the group's next window (up to 256
+    bodies) with no rows retained by that leg lets the same pass try the next
+    higher start height, at most once per distinct start. The skipped leg wrote
+    nothing, so the pass keeps the fence and watermarks it captured. No cursor
+    or queue outlives the pass: the next pass tries the lowest group first and
+    it resumes as soon as its body exists. Rows the leg already retained answer
+    `Buffered` instead: they commit at their original deadline, and only a
+    later pass, with nothing retained and a fresh fence and watermark capture,
+    may reach another group. A stop request, a rejected or stale commit, a
+    deferred or revoked history grant, a pruned-history answer, and an
+    undo-anchor failure end the pass and are never skipped.
+  - When every group that still needs rows waits on an absent body, the pass
+    reports `Stalled`: the worker retries after one quiet period without
+    needing a wake, never reports caught-up or publishes the cursor, and does
+    not loop on progress. A group that reaches the tip while a lower group is
+    owed rows keeps its rows and watermark; each capability's queries still
+    gate on its own watermark (`IDX-03`), so full history stays not-ready until
+    its watermark and coverage floor say otherwise.
+  - Preparation of `ScriptLive` and `CompactFilters` decodes each block's undo
+    anchor inside that block's own preparation task, before the writer's shared
+    read lock, and drops it when that block's rows are prepared. Anchors alive
+    at once are bounded by the preparation tasks in flight on the process-wide
+    rayon pool, not by the window's block count. The pool's width is whatever
+    the process installed: the node requests the smaller of host parallelism
+    and four, while an embedding that initialized the global pool earlier keeps
+    its own. Without those capabilities no undo record is read.
+  - Before any block of a window is admitted, its outcomes are read in height
+    order for an anchor failure, and the lowest-height one decides: a missing or
+    unreadable record follows `IDX-07`, and any other failure, including a
+    failed undo read, fails with its own error and resets nothing. Only without
+    an anchor failure are preparation results consumed in height order: blocks
+    before a preparation failure are admitted (and committed when the batch
+    fills) and the failure then surfaces unchanged.
+  - Unmeasured: peak resident memory of these stages. A window's bodies (at
+    most 256, or 32 MiB plus one body), its in-flight anchors, its prepared
+    rows, and the admitted batch are limited independently; this contract
+    claims no total resident bound and no bound that depends on script sizes.
+  - Proof (forward-group scheduling, all in
+    `crates/index/src/runtime/recovery_tests.rs`):
+    `absent_prefix_body_holds_back_only_its_own_group`,
+    `shutdown_after_an_absent_body_does_not_run_a_higher_group`,
+    `deferred_history_grant_does_not_run_a_higher_group`,
+    `retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_change`,
+    and `run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake`.
+  - Proof (undo anchors and admission order):
+    `crates/index/src/runtime/recovery_tests.rs` tests
+    `forward_script_live_follows_undo_present_missing_or_corrupt`,
+    `anchor_failure_outranks_an_earlier_preparation_failure`, and
+    `preparation_failure_keeps_its_height_after_committed_successes`.
 - If a rival reorg or tip extension occurs while a forward batch is being
   prepared, the atomic commit detects the watermark divergence, discards the
   stale prepared batch, and re-plans from the new active tip on the next pass.
@@ -263,6 +334,8 @@ history transition closed; no secondary coin set is introduced.
   filter reconciliation. For `ScriptLive` alone, the worker resets that
   capability and reseeds from the authoritative UTXO view; `TxLookup` uses
   body-only rollback.
+  An undo read that fails with a storage error is not an absent record: it
+  fails the worker with its own error and resets nothing.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
   rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
   and the watermark stamp are ordinary fenced writes (reset, revision, and
@@ -272,6 +345,16 @@ history transition closed; no secondary coin set is introduced.
   storage failure or panic marks the worker as failed (`publish_failed`) and
   stops the worker. Block validation, UTXO commits, and chainstate progress
   continue unimpeded: the apply path never depends on index writes.
+  Proof: `crates/index/src/runtime/supervisor_tests.rs` tests
+  `blocked_open_abandonment_detaches_and_poisons`,
+  `shutdown_during_open_reports_abandonment_after_supervisor_exit`, and
+  `open_timeout_publishes_error_not_infinite_spin`;
+  `crates/index/src/runtime/query_tests.rs` test
+  `unusable_worker_makes_queries_unavailable`;
+  `crates/index/src/runtime/recovery_tests.rs` test
+  `undo_read_failure_is_not_a_missing_undo`, which proves a storage-error
+  undo read fails the worker with its own error while an absent record
+  resets and reseeds.
 
 ### Compact-filter data and serving
 
@@ -315,8 +398,12 @@ header/checkpoint replies retain
 only commitments. Requests are bounded to 1,000 filters, 2,000 hashes, or 100,000
 checkpoint headers (below the 4 MB envelope). If the tip changes during streaming,
 already-sent filters still belong to the captured stop chain. A completed range
-is not replayed; an interrupted prefix closes the connection instead of silently
-abandoning the tail. Disabled, unavailable, unknown, non-basic and oversized requests
+is not replayed. A pass that only the outbound send-headroom gate stops after a
+prefix was sent parks the remainder, which starts after the last sent filter,
+keeps the stop height the prefix was computed against, and resumes without
+repeating a filter. Any other interrupted prefix, or a resumed range whose stop
+height has moved, closes the connection instead of silently abandoning the tail.
+Disabled, unavailable, unknown, non-basic and oversized requests
 receive no filter answer.
 For decoded non-basic types, unknown/unapplied stops, inverted ranges and
 oversized ranges, bitcoin-rs deliberately keeps the connection open without
@@ -327,7 +414,9 @@ discouragement; Core 31.1 disconnects these requests. Proof:
 outcome are recorded separately).
 To bridge a just-announced tip and asynchronous publication, a valid P2P request
 can be deferred for up to five seconds while publication or send headroom is
-pending. The existing socket poll retries one pending request per connection, so inbound traffic, ping
+pending; time the node's aggregate outbound budget refused the request is not
+counted toward the five seconds, and time the index or the connection's own
+queue took is counted toward the five seconds. The existing socket poll retries one pending request per connection, so inbound traffic, ping
 and cancellation remain responsive. A second pending filter request or an expired
 deadline closes the connection. No response is replayed after streaming a payload;
 chain validation never waits and filters are never generated synchronously.
@@ -351,8 +440,21 @@ Core/Kyoto runner are described in
   - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
   - `pruned_history_rebuilds_from_the_frontier_and_absent_history_waits`
+  - Forward group scheduling (`IDX-06`):
+    `absent_prefix_body_holds_back_only_its_own_group`,
+    `shutdown_after_an_absent_body_does_not_run_a_higher_group`,
+    `deferred_history_grant_does_not_run_a_higher_group`,
+    `retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_change`,
+    `run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake`.
+  - Forward undo anchors (`IDX-06`, `IDX-07`):
+    `forward_script_live_follows_undo_present_missing_or_corrupt`,
+    `anchor_failure_outranks_an_earlier_preparation_failure`,
+    `preparation_failure_keeps_its_height_after_committed_successes`,
+    `undo_read_failure_is_not_a_missing_undo`, and the existing
+    `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
+    for the filter side.
 - `crates/index/src/runtime/startup.rs` and
-  `crates/index/src/runtime/integration_tests.rs`: lifecycle
+  `crates/index/src/runtime/supervisor_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
 - `crates/index/src/runtime/query_tests.rs`: query gating, snapshot
   consistency, revision ABA detection, and
@@ -372,7 +474,8 @@ Core/Kyoto runner are described in
 `crates/index/src/runtime/query.rs` tests exercise the shared
 historical/live byte budget, independent row/scan/body-read admission limits,
 rejection of truncated scans, and non-consuming rejection of over-budget work
-(`IDX-03` and the project bounded-resources invariant). No query limit or persisted representation changes.
+(`IDX-03` and the project bounded-resources invariant). No query limit or
+persisted representation changes.
 
 ### Store-open cancellation evidence
 

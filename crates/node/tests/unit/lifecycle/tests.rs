@@ -1,8 +1,15 @@
 use bitcoin_rs_consensus::ValidationEngine;
-use std::net::SocketAddr;
+use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256};
+use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
+use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 
 use super::*;
 use crate::config::{NodeConfig, RuntimeInputs};
@@ -21,6 +28,64 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
 }
 
 #[test]
+fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> anyhow::Result<()> {
+    use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, snapshot};
+    use bitcoin_rs_primitives::{Hash256, Network, Txid};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir()?;
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::new(parking_lot::RwLock::new(Mempool::new(
+            MempoolLimits::default(),
+        ))),
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+    let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+    let worker_gateway = Arc::clone(&gateway);
+    let path = dir.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let staged = snapshot::prepare(
+            &path,
+            &worker_gateway,
+            Network::Regtest,
+            snapshot::DEFAULT_MAX_BYTES,
+            Instant::now() + Duration::from_secs(10),
+        );
+        let _ = ready_tx.send(staged.is_ok());
+        let _ = release_rx.recv();
+        let _ = result_tx.send(staged);
+    });
+    let prepared = ready_rx.recv_timeout(Duration::from_secs(10))?;
+    // Exercise the production timeout path while the old worker is parked.
+    publish_mempool_snapshot(result_rx, Instant::now() + Duration::from_millis(2));
+    gateway.prioritise(Txid(Hash256::from_le_bytes(&[7; 32])), 50)?;
+    snapshot::save(
+        dir.path(),
+        &gateway,
+        Network::Regtest,
+        snapshot::DEFAULT_MAX_BYTES,
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    let file = dir.path().join("mempool-snapshot.dat");
+    let newer = std::fs::read(&file)?;
+    release_tx.send(())?;
+    worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("snapshot worker panicked"))?;
+    assert!(
+        prepared,
+        "the delayed worker must hold a valid old snapshot"
+    );
+    assert_eq!(std::fs::read(&file)?, newer);
+    assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+    Ok(())
+}
+
+#[test]
 fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -30,6 +95,141 @@ fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
     assert!(Arc::ptr_eq(&handles.peer_table, &p2p.table()));
     assert!(Arc::ptr_eq(&handles.p2p, &p2p));
     assert_eq!(handles.local_services, p2p.local_services().to_u64());
+    Ok(())
+}
+
+#[test]
+fn verifychain_arguments_select_the_check_core_asks_for() {
+    for (check_level, level) in [
+        (0, CheckLevel::ReadBodies),
+        (1, CheckLevel::CheckBodies),
+        (2, CheckLevel::CheckUndo),
+        (3, CheckLevel::CheckUndo),
+        (4, CheckLevel::CheckUndo),
+    ] {
+        let request = verify_request(check_level, 6);
+        assert_eq!(request.level, level, "level {check_level}");
+        assert_eq!(request.depth, NonZeroU32::new(6), "level {check_level}");
+        assert!(
+            request.cancellation.is_none(),
+            "the latch travels with the call, not the mapping"
+        );
+    }
+    assert_eq!(
+        verify_request(3, 0).depth,
+        None,
+        "zero blocks is the whole chain"
+    );
+}
+
+#[test]
+fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let state = NodeState::open(isolated_config(dir.path()), None)?;
+    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let mut previous = genesis.block_hash();
+    for height in 1..=3 {
+        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?;
+        state.apply_block(&block)?;
+        previous = block.block_hash();
+    }
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+    let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    for check_level in 0..=4 {
+        for nblocks in [0, 2, 100] {
+            assert!(
+                matches!(
+                    control.verify_chain(check_level, nblocks, &cancellation),
+                    Ok(true)
+                ),
+                "level {check_level}, {nblocks} blocks"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// An applied genesis tip is an empty verification window: the real verifier
+/// answers it at every level and depth, not a handler shortcut.
+#[test]
+fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> anyhow::Result<()> {
+    use bitcoin_rs_rpc::context::ChainControlError;
+
+    let dir = tempfile::tempdir()?;
+    let state = NodeState::open(isolated_config(dir.path()), None)?;
+    state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.height),
+        Some(0),
+        "the fixture must apply genesis and nothing above it"
+    );
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+    let live = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    for check_level in 0..=4 {
+        for nblocks in [0, 1, 6] {
+            assert!(
+                matches!(control.verify_chain(check_level, nblocks, &live), Ok(true)),
+                "level {check_level}, {nblocks} blocks"
+            );
+        }
+    }
+    // The verifier itself refuses once the chainstate closes for recovery,
+    // even over the empty window.
+    state.chainstate().fail_closed_for_recovery();
+    assert!(matches!(
+        control.verify_chain(3, 6, &live),
+        Err(ChainControlError::Unavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn verify_chain_reports_cancellation_and_recovery_closure() -> anyhow::Result<()> {
+    use bitcoin_rs_rpc::context::ChainControlError;
+
+    let dir = tempfile::tempdir()?;
+    let state = NodeState::open(isolated_config(dir.path()), None)?;
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+    let live = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    assert!(
+        matches!(control.verify_chain(3, 6, &live), Ok(true)),
+        "an open chain must verify"
+    );
+    let fired = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(true)));
+    assert!(
+        matches!(
+            control.verify_chain(3, 6, &fired),
+            Err(ChainControlError::Interrupted)
+        ),
+        "a cancelled request must interrupt, not fail as damage"
+    );
+    state.chainstate().fail_closed_for_recovery();
+    assert!(
+        matches!(
+            control.verify_chain(3, 6, &live),
+            Err(ChainControlError::Unavailable)
+        ),
+        "a closed chain must be unavailable, not verified"
+    );
     Ok(())
 }
 
@@ -68,6 +268,7 @@ fn disabled_zmq_still_seals_the_observer_slot() {
         pool,
         Some(observer),
         ValidationEngine::Native,
+        None,
     ));
     assert!(
         gateway.has_observer(),
@@ -379,4 +580,454 @@ fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("teardown worker panicked"))?;
     result.map_err(|_| anyhow::anyhow!("teardown blocked on an already queued wake"))??;
     Ok(())
+}
+const WITNESS_BOUND: Duration = Duration::from_secs(10);
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct BodyGateState {
+    armed: bool,
+    entered: bool,
+    released: bool,
+}
+
+struct BodyGate {
+    state: Mutex<BodyGateState>,
+    cvar: Condvar,
+}
+
+impl BodyGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(BodyGateState {
+                armed: false,
+                entered: false,
+                released: false,
+            }),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BodyGateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn arm(&self) {
+        let mut state = self.lock();
+        state.armed = true;
+        state.entered = false;
+        state.released = false;
+    }
+
+    fn hold(&self) {
+        let mut state = self.lock();
+        if !state.armed {
+            return;
+        }
+        state.entered = true;
+        self.cvar.notify_all();
+        while !state.released {
+            state = self
+                .cvar
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn wait_entered(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.lock();
+        while !state.entered {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, _) = self
+                .cvar
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+        }
+        state.entered
+    }
+
+    fn release(&self) {
+        let mut state = self.lock();
+        state.armed = false;
+        state.released = true;
+        self.cvar.notify_all();
+    }
+}
+
+struct HoldingBodies {
+    inner: Arc<dyn BlockBodyStore>,
+    gate: Arc<BodyGate>,
+}
+
+impl BlockBodyStore for HoldingBodies {
+    fn load_staged_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        position: Option<BlockFilePosition>,
+    ) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_staged_body(height, hash, position)
+    }
+
+    fn stage_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> std::result::Result<Option<BlockFilePosition>, StorageError> {
+        self.inner.stage_block_body(height, hash, body)
+    }
+
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> std::result::Result<(), StorageError> {
+        self.inner.persist_block_body(height, hash, body)
+    }
+
+    fn persist_block_body_value(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: bytes::Bytes,
+    ) -> std::result::Result<(), StorageError> {
+        self.inner.persist_block_body_value(height, hash, body)
+    }
+
+    fn load_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_block_body(height, hash)
+    }
+
+    fn load_block_body_for_verification(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_block_body_for_verification(height, hash)
+    }
+
+    fn load_block_body_for_verification_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> std::result::Result<Option<Vec<u8>>, BoundedReadError> {
+        self.gate.hold();
+        self.inner
+            .load_block_body_for_verification_bounded(height, hash, max_bytes)
+    }
+
+    fn load_block_body_bounded(
+        &self,
+        height: u32,
+        hash: Hash256,
+        max_bytes: usize,
+    ) -> std::result::Result<Option<Vec<u8>>, BoundedReadError> {
+        self.inner.load_block_body_bounded(height, hash, max_bytes)
+    }
+
+    fn reader(&self) -> std::result::Result<Box<dyn BlockBodyReader + '_>, StorageError> {
+        self.inner.reader()
+    }
+
+    fn undo_record(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        self.inner.undo_record(height, hash)
+    }
+
+    fn load_block_body_range(
+        &self,
+        height: u32,
+        hash: Hash256,
+        offset: u32,
+        len: u32,
+    ) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_block_body_range(height, hash, offset, len)
+    }
+
+    fn block_body_metadata(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> std::result::Result<Option<BlockBodyMetadata>, StorageError> {
+        self.inner.block_body_metadata(height, hash)
+    }
+
+    fn append_cursor(&self) -> Option<BodyExtent> {
+        self.inner.append_cursor()
+    }
+
+    fn block_position(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> std::result::Result<Option<BlockFilePosition>, StorageError> {
+        self.inner.block_position(height, hash)
+    }
+
+    fn disk_usage(&self) -> Option<u64> {
+        self.inner.disk_usage()
+    }
+
+    fn sync(&self) -> std::result::Result<(), StorageError> {
+        self.inner.sync()
+    }
+
+    fn flush_index(&self) -> std::result::Result<(), StorageError> {
+        self.inner.flush_index()
+    }
+}
+
+struct BoundedThread<T> {
+    name: &'static str,
+    handle: JoinHandle<T>,
+    done: Receiver<()>,
+}
+
+impl<T: Send + 'static> BoundedThread<T> {
+    fn spawn(
+        name: &'static str,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        let (done_tx, done) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let output = body();
+                let _ = done_tx.send(());
+                output
+            })?;
+        Ok(Self { name, handle, done })
+    }
+
+    fn finish(self) -> anyhow::Result<T> {
+        let name = self.name;
+        match self.done.recv_timeout(WITNESS_BOUND) {
+            Err(RecvTimeoutError::Timeout) => {
+                anyhow::bail!("{name} did not stop within {WITNESS_BOUND:?}")
+            }
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => self
+                .handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("{name} panicked")),
+        }
+    }
+}
+
+struct ServedWitness {
+    stop: Arc<AtomicBool>,
+    gate: Option<Arc<BodyGate>>,
+    server: Option<BoundedThread<std::io::Result<()>>>,
+    client: Option<BoundedThread<anyhow::Result<String>>>,
+    client_socket: Option<TcpStream>,
+}
+
+impl ServedWitness {
+    fn new(stop: Arc<AtomicBool>, gate: Option<Arc<BodyGate>>) -> Self {
+        Self {
+            stop,
+            gate,
+            server: None,
+            client: None,
+            client_socket: None,
+        }
+    }
+
+    fn serve(
+        &mut self,
+        server: RpcServer,
+        shutdown: bitcoin_rs_chain::LatchReader,
+    ) -> anyhow::Result<()> {
+        self.server = Some(BoundedThread::spawn("verifychain-rpc-server", move || {
+            server.serve_with_shutdown(shutdown)
+        })?);
+        Ok(())
+    }
+
+    fn send(&mut self, addr: SocketAddr) -> anyhow::Result<()> {
+        let socket = TcpStream::connect(addr)?;
+        socket.set_read_timeout(Some(SOCKET_TIMEOUT))?;
+        socket.set_write_timeout(Some(SOCKET_TIMEOUT))?;
+        self.client_socket = Some(socket.try_clone()?);
+        self.client = Some(BoundedThread::spawn("verifychain-client", move || {
+            send_verifychain(socket)
+        })?);
+        Ok(())
+    }
+
+    fn finish_server(&mut self) -> anyhow::Result<()> {
+        let Some(server) = self.server.take() else {
+            anyhow::bail!("the RPC server was never started");
+        };
+        server.finish()??;
+        Ok(())
+    }
+
+    fn finish_client(&mut self) -> anyhow::Result<String> {
+        let Some(client) = self.client.take() else {
+            anyhow::bail!("the verifychain request was never sent");
+        };
+        client.finish()?
+    }
+}
+
+impl Drop for ServedWitness {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(server) = self.server.take() {
+            let _ = server.finish();
+        }
+        if let Some(gate) = &self.gate {
+            gate.release();
+        }
+        if let Some(socket) = &self.client_socket {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        if let Some(client) = self.client.take() {
+            let _ = client.finish();
+        }
+    }
+}
+
+fn send_verifychain(mut socket: TcpStream) -> anyhow::Result<String> {
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"verifychain","params":[0,1]}"#;
+    write!(
+        socket,
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic dXNlcjpwYXNzd29yZA==\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    socket.shutdown(Shutdown::Write)?;
+    let mut response = String::new();
+    socket.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn assert_socket_error(response: &str, message: &str) -> anyhow::Result<()> {
+    use sonic_rs::JsonValueTrait;
+
+    anyhow::ensure!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "a JSON-RPC 2.0 error answers HTTP 200: {response}"
+    );
+    let (_, payload) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("the reply has no HTTP body: {response}"))?;
+    let value: sonic_rs::Value = sonic_rs::from_str(payload)?;
+    anyhow::ensure!(
+        value.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0"),
+        "the reply is not a JSON-RPC 2.0 envelope: {payload}"
+    );
+    anyhow::ensure!(
+        value.get("id").and_then(JsonValueTrait::as_i64) == Some(1),
+        "the reply does not echo id 1: {payload}"
+    );
+    anyhow::ensure!(
+        value.get("result").is_none(),
+        "the reply carries a result: {payload}"
+    );
+    let error = value
+        .get("error")
+        .ok_or_else(|| anyhow::anyhow!("the reply carries no error: {payload}"))?;
+    anyhow::ensure!(
+        error.get("code").and_then(JsonValueTrait::as_i64) == Some(-1),
+        "the error is not Core's misc code -1: {payload}"
+    );
+    anyhow::ensure!(
+        error.get("message").and_then(|v| v.as_str()) == Some(message),
+        "the error message is not exactly '{message}': {payload}"
+    );
+    Ok(())
+}
+
+fn apply_regtest_chain(state: &NodeState) -> anyhow::Result<()> {
+    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let mut previous = genesis.block_hash();
+    for height in 1..=3 {
+        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?;
+        state.apply_block(&block)?;
+        previous = block.block_hash();
+    }
+    Ok(())
+}
+
+fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
+    let coordinator = Arc::new(crate::MiningCoordinator::new(
+        state.mempool_reader(),
+        state.chainstate(),
+        state.stable_read(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
+    ));
+    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
+    let (_context, server) = bind_rpc(state, &mining_control, state.block_body_source()?)?;
+    Ok(server)
+}
+
+#[test]
+fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let gate = Arc::new(BodyGate::new());
+    let state = NodeState::open_with_body_store(isolated_config(dir.path()), None, {
+        let gate = Arc::clone(&gate);
+        move |store| {
+            let wrapped: Arc<dyn BlockBodyStore> = Arc::new(HoldingBodies { inner: store, gate });
+            wrapped
+        }
+    })?;
+    apply_regtest_chain(&state)?;
+    let server = bind_test_rpc(&state)?;
+    let addr = server.local_addr()?;
+
+    gate.arm();
+    let mut witness = ServedWitness::new(state.shutdown(), Some(Arc::clone(&gate)));
+    witness.serve(server, state.shutdown_reader())?;
+    witness.send(addr)?;
+
+    anyhow::ensure!(
+        gate.wait_entered(WITNESS_BOUND),
+        "the verifier never reached the held body read"
+    );
+    state.request_shutdown();
+    witness.finish_server()?;
+    gate.release();
+    let response = witness.finish_client()?;
+    assert_socket_error(&response, "Block verification interrupted")
+}
+
+#[test]
+fn verifychain_socket_reports_recovery_closure() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let state = NodeState::open(isolated_config(dir.path()), None)?;
+    apply_regtest_chain(&state)?;
+    let server = bind_test_rpc(&state)?;
+    let addr = server.local_addr()?;
+
+    let latch = Arc::new(AtomicBool::new(false));
+    let mut witness = ServedWitness::new(Arc::clone(&latch), None);
+    witness.serve(
+        server,
+        bitcoin_rs_chain::LatchReader::new(Arc::clone(&latch)),
+    )?;
+    state.chainstate().fail_closed_for_recovery();
+    witness.send(addr)?;
+    let response = witness.finish_client()?;
+    latch.store(true, Ordering::Release);
+    witness.finish_server()?;
+    assert_socket_error(&response, "Chainstate is unavailable for verification")
 }

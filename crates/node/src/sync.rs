@@ -1,0 +1,307 @@
+//! Applied-chain seam for the block-download executor.
+//!
+//! The executor — download scheduling, staging, peer policy — lives in
+//! [`bitcoin_rs_p2p::sync`]. This module is the [`bitcoin_rs_p2p::sync::SyncChain`] implementation
+//! it drives: the applied-tip-mutating operations that stay in `node` under
+//! ARCH-07 (header admission under the chain-transition lock, window commit
+//! through `ChainTransition` + `ChainFollowers`, branch switch via
+//! [`crate::reorg::switch_to_branch`], genesis bootstrap).
+
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use bitcoin_rs_p2p::sync::chain::{
+    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
+    WindowApplyDisposition, WindowCommitError,
+};
+use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
+use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
+use crossbeam_channel::Receiver;
+
+pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
+
+/// The [`SyncChain`] implementation over [`bitcoin_rs_chainstate::Chainstate`]:
+/// applied-tip mutation behind the chain-transition lock plus the derived
+/// consumers that must fire inside it.
+struct NodeSyncChain {
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
+    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    /// The chainstate's read-only block-tree capability.
+    block_tree: bitcoin_rs_chain::BlockTreeReader,
+    followers: crate::chain_effects::ChainFollowers,
+}
+
+/// Constructs the download executor over the applied-chain seam.
+#[must_use]
+pub fn block_sync(
+    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    followers: crate::chain_effects::ChainFollowers,
+    peer_table: Arc<PeerTable>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
+    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
+) -> BlockSync {
+    let block_tree = handles.block_tree_reader();
+    BlockSync::new(
+        Arc::new(NodeSyncChain {
+            assumeutxo,
+            handles,
+            block_tree,
+            followers,
+        }),
+        peer_table,
+        inbound_headers_rx,
+        inbound_blocks_rx,
+        ibd,
+    )
+}
+
+fn settle_window_failure(
+    transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+    mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
+    mut error: bitcoin_rs_chainstate::WindowApplyError,
+) -> bitcoin_rs_chainstate::WindowApplyError {
+    let handles = transition.chainstate();
+    if error.disposition == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
+        || bitcoin_rs_chainstate::classify_apply_error(&error.source)
+            == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
+    {
+        error.disposition = bitcoin_rs_chainstate::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) =
+        crate::chain_effects::ChainFollowers::finish_transition(handles, transition, mempool_change)
+    {
+        tracing::error!(
+            original = %error.source,
+            finish = %finish_source,
+            "chain transition could not be settled after a window failure; \
+             mempool admission stays closed until recovery or restart"
+        );
+        error.disposition = bitcoin_rs_chainstate::WindowApplyDisposition::Fatal;
+    }
+    error
+}
+
+/// Settles a successful window: finishes the transition, or classifies a
+/// finish failure as [`WindowApplyDisposition::Fatal`] when the reserved
+/// even generation could not be published.
+///
+/// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
+/// and surface a `Fatal` disposition when the CAS fails, so the caller
+/// stops retrying instead of wedging on an odd generation.
+#[expect(clippy::result_large_err)]
+fn settle_window_success(
+    transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+    mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
+    applied: usize,
+    committed: Vec<bitcoin_rs_chainstate::ConnectOutcome>,
+) -> core::result::Result<usize, bitcoin_rs_chainstate::WindowApplyError> {
+    let handles = transition.chainstate();
+    match crate::chain_effects::ChainFollowers::finish_transition(
+        handles,
+        transition,
+        mempool_change,
+    ) {
+        Ok(()) => Ok(applied),
+        Err(finish_source) => {
+            tracing::error!(
+                finish = %finish_source,
+                "chain transition could not be settled after a committed window; \
+                 mempool admission stays closed until recovery or restart"
+            );
+            Err(bitcoin_rs_chainstate::WindowApplyError {
+                applied,
+                committed,
+                source: finish_source,
+                disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Fatal,
+                invalidated: Box::default(),
+            })
+        }
+    }
+}
+
+/// Test fixture: the one owner of header-tree writes node tests must
+/// synthesize directly — mid-chain forks that must not become the best tip,
+/// and subtrees admission would reject — which [`Chainstate::admit_headers`]
+/// cannot produce because admission validates and republishes the best-work
+/// tip. Production never calls this.
+///
+/// [`Chainstate::admit_headers`]: bitcoin_rs_chainstate::Chainstate::admit_headers
+#[cfg(test)]
+pub(crate) fn fixture_insert_header_node(
+    handles: &bitcoin_rs_chainstate::Chainstate,
+    parent: bitcoin_rs_chain::NodeId,
+    header: bitcoin_rs_primitives::Header,
+    status: bitcoin_rs_chain::NodeStatus,
+) -> Result<bitcoin_rs_chain::NodeId, bitcoin_rs_chain::ChainError> {
+    let mut tree = handles.block_tree().write();
+    tree.insert_node(Some(parent), header, status)
+}
+
+impl SyncChain for NodeSyncChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        match self.handles.role() {
+            bitcoin_rs_chainstate::assumeutxo::ChainstateRole::AssumedActive {
+                base_hash, ..
+            } => Some(base_hash),
+            _ => None,
+        }
+    }
+
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        let Some(manager) = &self.assumeutxo else {
+            return Ok(HistoricalAdvance::Complete);
+        };
+        manager
+            .advance_historical()
+            .map_err(|error| -> SyncChainError {
+                self.handles.fail_closed_for_recovery();
+                Box::new(error)
+            })
+    }
+
+    fn connect_historical(&self, block: &Block, body: bytes::Bytes) -> Result<(), SyncChainError> {
+        let manager = self
+            .assumeutxo
+            .as_ref()
+            .ok_or("historical validation is not configured")?;
+        manager
+            .step_historical(block, Some(body))
+            .map(|_| ())
+            .map_err(|error| -> SyncChainError { Box::new(error) })
+    }
+
+    fn network(&self) -> Network {
+        self.handles.network()
+    }
+
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, bitcoin_rs_chain::BlockTree> {
+        self.block_tree.read()
+    }
+
+    fn chain_tip(&self) -> Option<Arc<bitcoin_rs_chain::TipSnapshot>> {
+        self.handles.header_tip()
+    }
+
+    fn applied_tip(&self) -> Option<Arc<bitcoin_rs_chain::TipSnapshot>> {
+        self.handles.applied_tip_snapshot()
+    }
+
+    fn bootstrap_genesis(&self) {
+        if let Err(error) = crate::chain_effects::bootstrap_genesis(&self.handles, &self.followers)
+        {
+            tracing::warn!(%error, "failed to bootstrap genesis");
+        }
+    }
+
+    fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
+        match self.handles.admit_headers(headers) {
+            Ok(outcome) => HeaderAdmission::Accepted {
+                accepted: outcome.accepted,
+                announced_tip: outcome.announced_tip,
+                active_height: outcome.active_height,
+            },
+            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Rejected(error)) => {
+                HeaderAdmission::Rejected(error)
+            }
+            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Refused(error)) => {
+                HeaderAdmission::Refused(Box::new(error))
+            }
+        }
+    }
+
+    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+        let hash = Hash256::from(block.block_hash());
+        let segwit_active = {
+            let tree = self.block_tree.read();
+            tree.lookup(hash)
+                .and_then(|node_id| tree.node(node_id).ok())
+                .is_none_or(|node| {
+                    bitcoin_rs_chain::softfork_state(
+                        &tree,
+                        self.handles.network(),
+                        node.parent,
+                        node.height,
+                    )
+                    .segwit_active
+                })
+        };
+        bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
+            .map_err(|error| -> SyncChainError { Box::new(error) })
+    }
+
+    fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+        bitcoin_rs_chainstate::window_len(serialized_sizes)
+    }
+
+    fn commit_window(
+        &self,
+        blocks: &[&Block],
+        bodies: &[bytes::Bytes],
+    ) -> Result<usize, WindowCommitError> {
+        let transition = self
+            .handles
+            .begin_transition()
+            // A closed or already-active generation refuses a new window.
+            .map_err(|source| WindowCommitError {
+                applied: 0,
+                disposition: WindowApplyDisposition::Operational,
+                invalidated: Box::default(),
+                source: Box::new(source),
+            })?;
+        let mempool_change =
+            self.followers
+                .begin_mempool_change()
+                .map_err(|source| WindowCommitError {
+                    applied: 0,
+                    disposition: WindowApplyDisposition::Operational,
+                    invalidated: Box::default(),
+                    source: Box::new(source),
+                })?;
+        let result = match transition.connect_window(blocks, bodies) {
+            Ok(outcomes) => {
+                for (block, outcome) in blocks.iter().zip(&outcomes) {
+                    self.followers.on_connect(block, outcome);
+                }
+                let applied = outcomes.len();
+                settle_window_success(transition, mempool_change, applied, outcomes)
+            }
+            Err(error) => {
+                for (block, outcome) in blocks.iter().zip(&error.committed) {
+                    self.followers.on_connect(block, outcome);
+                }
+                // A connect failure settles according to its disposition.
+                Err(settle_window_failure(transition, mempool_change, error))
+            }
+        };
+        result.map_err(|error| WindowCommitError {
+            applied: error.applied,
+            disposition: error.disposition,
+            invalidated: error.invalidated,
+            source: Box::new(error.source),
+        })
+    }
+
+    fn switch_to_branch(
+        &self,
+        target: bitcoin_rs_chain::NodeId,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        connected_body: &mut dyn FnMut(Hash256),
+    ) -> Result<(), ReorgError> {
+        crate::reorg::switch_to_branch(
+            &self.handles,
+            &self.followers,
+            target,
+            staged_body,
+            connected_body,
+        )
+        .inspect_err(|error| {
+            if matches!(error, ReorgError::ConnectFailed { invalidated, .. } if !invalidated.is_empty()) {
+                self.handles.reevaluate_assume_valid();
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

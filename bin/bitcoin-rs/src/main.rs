@@ -128,6 +128,81 @@ mod tests {
     }
 
     #[test]
+    fn mempool_persistence_resolves_toml_environment_and_cli() -> anyhow::Result<()> {
+        let config = load_file(
+            "--config",
+            "persist_mempool = false\n",
+            &[],
+            std::iter::empty(),
+        )?;
+        assert!(!config.persist_mempool);
+        let config = load_file(
+            "--config",
+            "persist_mempool = true\n",
+            &[],
+            [(
+                OsString::from("BITCOIN_RS_PERSIST_MEMPOOL"),
+                OsString::from("false"),
+            )]
+            .into_iter(),
+        )?;
+        assert!(!config.persist_mempool);
+        let config = resolved(
+            &["bitcoin-rs", "--persist-mempool=true"],
+            &[("BITCOIN_RS_PERSIST_MEMPOOL", "false")],
+        );
+        assert!(config.persist_mempool);
+        assert!(!resolved(&["bitcoin-rs", "--persist-mempool=false"], &[]).persist_mempool);
+        let config = load_file(
+            "--config",
+            "mempool_snapshot_max_mb = 128\n",
+            &[],
+            std::iter::empty(),
+        )?;
+        assert_eq!(config.mempool_snapshot_max_bytes, 128 * 1024 * 1024);
+        let config = load_file(
+            "--config",
+            "mempool_snapshot_max_mb = 128\n",
+            &[],
+            [(
+                OsString::from("BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB"),
+                OsString::from("256"),
+            )]
+            .into_iter(),
+        )?;
+        assert_eq!(config.mempool_snapshot_max_bytes, 256 * 1024 * 1024);
+        let config = resolved(
+            &["bitcoin-rs", "--mempool-snapshot-max-mb=512"],
+            &[("BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB", "256")],
+        );
+        assert_eq!(config.mempool_snapshot_max_bytes, 512 * 1024 * 1024);
+        let config = load_file(
+            "--config",
+            "mempool_snapshot_restore_timeout_secs = 120\n",
+            &[],
+            std::iter::empty(),
+        )?;
+        assert_eq!(config.mempool_snapshot_restore_timeout_secs, 120);
+        let config = load_file(
+            "--config",
+            "mempool_snapshot_restore_timeout_secs = 120\n",
+            &[],
+            [(
+                OsString::from("BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS"),
+                OsString::from("180"),
+            )]
+            .into_iter(),
+        )?;
+        assert_eq!(config.mempool_snapshot_restore_timeout_secs, 180);
+        let config = resolved(
+            &["bitcoin-rs", "--mempool-snapshot-restore-timeout-secs=240"],
+            &[("BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS", "180")],
+        );
+        assert_eq!(config.mempool_snapshot_restore_timeout_secs, 240);
+        Ok(())
+    }
+
+    #[test]
     fn bitcoin_conf_is_overridden_by_cli() {
         let config = load_file(
             "--bitcoin-conf",
@@ -174,6 +249,7 @@ mod tests {
                 ("BITCOIN_RS_NETWORK", "testnet4"),
                 ("BITCOIN_RS_DATA_DIR", "/tmp/env-node"),
                 ("BITCOIN_RS_RPC_USER", "env-user"),
+                ("BITCOIN_RS_RPC_PASSWORD", "secret-for-testing"),
             ],
         );
 
@@ -183,7 +259,31 @@ mod tests {
             config.rpc.auth,
             Auth::Basic {
                 user: "cli-user".to_owned(),
-                password: "bitcoin-rs".to_owned(),
+                password: "secret-for-testing".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn nonloopback_rpc_requires_explicit_auth_on_cli() {
+        let error = match super::load(
+            ["bitcoin-rs", "--rpc-bind", "0.0.0.0:8332"],
+            std::iter::empty::<(OsString, OsString)>(),
+        ) {
+            Ok(_) => panic!("network-exposed RPC without operator credentials must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("non-loopback RPC bind"));
+
+        let config = resolved(
+            &["bitcoin-rs", "--rpc-bind", "0.0.0.0:8332"],
+            &[("BITCOIN_RS_RPC_PASSWORD", "runtime-only-secret")],
+        );
+        assert_eq!(
+            config.rpc.auth,
+            Auth::Basic {
+                user: "bitcoin-rs".to_owned(),
+                password: "runtime-only-secret".to_owned(),
             }
         );
     }
@@ -218,23 +318,29 @@ mod tests {
     }
 
     #[test]
-    fn v2_transport_defaults_off_and_enables_from_every_surface() {
+    fn v2_transport_defaults_on_and_disables_from_every_surface() {
         let config = resolved(&["bitcoin-rs"], &[]);
+        assert!(config.p2p.v2_transport);
+
+        let config = resolved(&["bitcoin-rs", "--v2transport=false"], &[]);
         assert!(!config.p2p.v2_transport);
 
-        let config = resolved(&["bitcoin-rs", "--v2transport"], &[]);
-        assert!(config.p2p.v2_transport);
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_V2_TRANSPORT", "false")]);
+        assert!(!config.p2p.v2_transport);
 
-        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_V2_TRANSPORT", "true")]);
-        assert!(config.p2p.v2_transport);
+        let config = resolved(
+            &["bitcoin-rs", "--v2transport"],
+            &[("BITCOIN_RS_V2_TRANSPORT", "false")],
+        );
+        assert!(config.p2p.v2_transport, "the flag outranks the environment");
 
         for (flag, text) in [
-            ("--config", "v2_transport = true\n"),
-            ("--bitcoin-conf", "v2transport=1\n"),
+            ("--config", "v2_transport = false\n"),
+            ("--bitcoin-conf", "v2transport=0\n"),
         ] {
             let config = load_file(flag, text, &[], std::iter::empty())
                 .unwrap_or_else(|error| panic!("valid {flag} configuration: {error}"));
-            assert!(config.p2p.v2_transport, "{flag}");
+            assert!(!config.p2p.v2_transport, "{flag}");
         }
     }
 

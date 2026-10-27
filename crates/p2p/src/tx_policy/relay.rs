@@ -332,11 +332,8 @@ impl PeerTable {
         let (floor, minimum) = {
             let pool = gateway.read();
             let minimum = pool.min_relay_fee_sat_per_kvb();
-            let policy = pool.policy_snapshot();
-            let floor = bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb(
-                &pool,
-                policy.incremental_relay_fee_sat_per_kvb,
-            );
+            // Core rolling floor measured against total virtual size.
+            let floor = pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
             (
                 if ibd {
                     Amount::MAX_MONEY.to_sat()
@@ -375,10 +372,24 @@ impl PeerTable {
                     .entry(source)
                     .or_insert_with(|| RelayPeer::new(now, inbound, inbound_inv, rng));
                 if info.version >= 70_013 && minimum <= Amount::MAX_MONEY.to_sat() {
+                    // `filter_due` advances the schedule and the sent state
+                    // before the send is known to have queued anything, so
+                    // snapshot what a refused send must give back.
+                    let before = (peer.last_filter, peer.sent_ibd_filter);
                     if let Some(rate) = peer.filter_due(now, floor, minimum, ibd, rng) {
                         let message = Message::FeeFilter(i64::try_from(rate).unwrap_or(i64::MAX));
-                        if self.send(source, message).is_err() {
-                            continue;
+                        match self.send(source, message) {
+                            Ok(()) => {}
+                            // The node's aggregate budget is full while the
+                            // connection is healthy: the filter was not sent,
+                            // so the state returns to what it was and the
+                            // next poll offers it again. This peer's
+                            // inventory step still runs.
+                            Err(crate::OutboundRefusal::Saturated(_)) => {
+                                (peer.last_filter, peer.sent_ibd_filter) = before;
+                                peer.next_filter = now;
+                            }
+                            Err(crate::OutboundRefusal::Closed(_)) => continue,
                         }
                     }
                 }
@@ -456,6 +467,9 @@ impl PeerTable {
         };
         let mut items = Vec::new();
         let mut identities = Vec::new();
+        // The requests behind `items`, kept so a refused send can queue them
+        // again.
+        let mut offered = Vec::new();
         for candidate in candidates {
             let request = candidate.request;
             let identity = if wtxid {
@@ -484,14 +498,35 @@ impl PeerTable {
                 Inventory::Transaction(bitcoin::Txid::from_byte_array(*request.txid.as_bytes()))
             });
             identities.push(identity);
+            offered.push(request);
         }
-        if !items.is_empty() {
-            if self.send(source, Message::Inv(items)).is_ok() {
+        if items.is_empty() {
+            return;
+        }
+        match self.send(source, Message::Inv(items)) {
+            Ok(()) => {
                 for identity in identities {
                     peer.note_known(identity);
                 }
-            } else {
-                tracing::debug!(peer_addr = %source.addr, "relay inventory queue closed or saturated; connection cancelled");
+            }
+            // The node's aggregate budget is full while the connection is
+            // healthy: nothing was announced, so nothing is known to the
+            // peer. The requests go back to the pending queue under the same
+            // caps and dedup as the over-target tail above, and the next
+            // cycle offers them again.
+            Err(crate::OutboundRefusal::Saturated(_)) => {
+                for request in offered {
+                    if peer.pending.len() < MAX_PENDING_PER_PEER
+                        && total < MAX_PENDING
+                        && !peer.pending.contains_key(&request.wtxid)
+                    {
+                        peer.pending.insert(request.wtxid, request);
+                        total += 1;
+                    }
+                }
+            }
+            Err(crate::OutboundRefusal::Closed(_)) => {
+                tracing::debug!(peer_addr = %source.addr, "relay inventory queue closed; connection cancelled");
             }
         }
     }
@@ -551,13 +586,13 @@ fn dependency_order(candidates: Vec<Candidate>) -> Vec<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{MessageReceiver, message_channel_bounded};
     use bitcoin::secp256k1::rand::{SeedableRng, rngs::StdRng};
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolEntry, MempoolLimits};
     use bitcoin_rs_primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     };
-    use crossbeam_channel::{Receiver, bounded};
     use std::sync::Arc;
 
     fn gateway() -> MempoolGateway {
@@ -567,6 +602,7 @@ mod tests {
             ))),
             None,
             ValidationEngine::Native,
+            None,
         )
     }
 
@@ -611,7 +647,7 @@ mod tests {
         wtxid: bool,
         role: crate::PeerRole,
         ready: bool,
-    ) -> (PeerSource, Receiver<Message>) {
+    ) -> (PeerSource, MessageReceiver) {
         let addr = ([127, 0, 0, 1], port).into();
         connect_at(table, addr, addr, inbound, wtxid, role, ready)
     }
@@ -624,8 +660,8 @@ mod tests {
         wtxid: bool,
         role: crate::PeerRole,
         ready: bool,
-    ) -> (PeerSource, Receiver<Message>) {
-        let (sender, receiver) = bounded(1024);
+    ) -> (PeerSource, MessageReceiver) {
+        let (sender, receiver) = message_channel_bounded(1024);
         let lease = if role == crate::PeerRole::BlockRelayOnly {
             crate::PeerLease::new_block_relay(sender)
         } else if inbound {
@@ -656,7 +692,7 @@ mod tests {
         (source, receiver)
     }
 
-    fn inventory(receiver: &Receiver<Message>) -> Vec<Inventory> {
+    fn inventory(receiver: &MessageReceiver) -> Vec<Inventory> {
         receiver
             .try_iter()
             .filter_map(|message| match message {
@@ -711,7 +747,7 @@ mod tests {
         remote: &str,
         bind: &str,
         inbound: bool,
-    ) -> (PeerSource, Receiver<Message>) {
+    ) -> (PeerSource, MessageReceiver) {
         let connected = connect_at(
             table,
             remote
@@ -1002,6 +1038,132 @@ mod tests {
         );
     }
 
+    /// A ready full-relay peer whose queue also charges `aggregate`.
+    fn connect_on(
+        table: &PeerTable,
+        port: u16,
+        aggregate: &Arc<crate::connection::SharedOutboundBudget>,
+    ) -> (PeerSource, MessageReceiver) {
+        let addr = ([127, 0, 0, 1], port).into();
+        let (sender, receiver) = message_channel_bounded(1024);
+        let lease = crate::PeerLease::new(sender).with_shared_budget(aggregate);
+        let source = lease.source(addr);
+        table.register(addr, lease.clone());
+        let version = crate::handshake::version_message(
+            1,
+            0,
+            crate::PeerRole::FullRelay,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        );
+        let mut info = crate::PeerInfo::outbound_from_version(
+            addr,
+            addr,
+            &version,
+            0,
+            0,
+            Arc::new(crate::PeerCounters::default()),
+        );
+        info.wtxid_relay = true;
+        table.publish_info(addr, &lease, info);
+        (source, receiver)
+    }
+
+    fn fee_filters(receiver: &MessageReceiver) -> Vec<i64> {
+        receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::FeeFilter(rate) => Some(rate),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A fee filter the node aggregate refused was never sent: the schedule
+    /// and the sent-while-syncing state return to what they were, so the next
+    /// poll offers it again instead of waiting out a fresh interval.
+    #[test]
+    fn feefilter_saturated_restores() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(21);
+        let aggregate = Arc::new(crate::connection::SharedOutboundBudget::with_limits(256, 0));
+        let (source, rx) = connect_on(&table, 1, &aggregate);
+        let state = |table: &PeerTable| {
+            let policy = table.tx_policy.lock();
+            let peer = &policy.relay[&source];
+            (peer.last_filter, peer.sent_ibd_filter, peer.next_filter)
+        };
+
+        // A syncing node's filter goes out while the aggregate has room.
+        table.poll_transaction_relay(&gateway, now, true, &mut rng);
+        let syncing = fee_filters(&rx);
+        assert_eq!(syncing.len(), 1);
+        let (sent_rate, sent_while_syncing, _) = state(&table);
+        assert!(sent_while_syncing && sent_rate.is_some());
+
+        // Other connections fill the aggregate; the synced node's filter is
+        // refused and every part of the state it advanced is given back.
+        let hold = crate::test_support::hog(&aggregate, 256);
+        let refused_at = now + Duration::from_secs(1);
+        table.poll_transaction_relay(&gateway, refused_at, false, &mut rng);
+        assert!(rx.is_empty());
+        let (rate, while_syncing, next) = state(&table);
+        assert_eq!(rate, sent_rate, "the last sent rate is what the peer holds");
+        assert!(while_syncing, "the peer still holds a syncing filter");
+        assert_eq!(next, refused_at, "the filter is due again at once");
+
+        drop(hold);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(2), false, &mut rng);
+        let offered = fee_filters(&rx);
+        assert_eq!(offered.len(), 1, "the refused filter is offered again");
+        assert_ne!(offered, syncing, "it is the synced node's filter");
+        assert!(!state(&table).1);
+    }
+
+    /// An `inv` the node aggregate refused announced nothing: the peer knows
+    /// nothing of it, the requests go back to the pending queue, and the next
+    /// cycle offers them.
+    #[test]
+    fn relay_inv_saturated_requeues() {
+        let table = PeerTable::new();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(22);
+        let aggregate = Arc::new(crate::connection::SharedOutboundBudget::with_limits(512, 0));
+        let (source, rx) = connect_on(&table, 1, &aggregate);
+        let request = insert(&gateway, &transaction(1, None), 10_000);
+        let identity = Identity::Wtxid(request.wtxid.0);
+        table.queue_transaction_relay(request, now, &mut rng);
+
+        let hold = crate::test_support::hog(&aggregate, 512);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
+        assert_eq!(inventory(&rx), Vec::new());
+        {
+            let policy = table.tx_policy.lock();
+            let peer = &policy.relay[&source];
+            assert_eq!(
+                peer.pending.len(),
+                1,
+                "the refused request is pending again"
+            );
+            assert!(!peer.known.contains(&identity), "nothing was announced");
+        }
+
+        drop(hold);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
+        assert_eq!(
+            inventory(&rx),
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+                *request.wtxid.as_bytes()
+            ))]
+        );
+        let policy = table.tx_policy.lock();
+        let peer = &policy.relay[&source];
+        assert!(peer.pending.is_empty());
+        assert!(peer.known.contains(&identity));
+    }
+
     #[test]
     fn latest_fee_filter_changes_only_that_peers_queued_relay() {
         let table = PeerTable::new();
@@ -1237,6 +1399,7 @@ mod tests {
             }))),
             None,
             ValidationEngine::Native,
+            None,
         );
         let (source, rx) = connect(&table, 1, false, false, crate::PeerRole::FullRelay, true);
         table.receive_fee_filter(source, 991);

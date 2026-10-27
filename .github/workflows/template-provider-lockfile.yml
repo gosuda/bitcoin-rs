@@ -1,18 +1,15 @@
 name: template-provider-lockfile
 
-# tools/stratum-sv2/template-provider is a standalone Cargo workspace with its
-# own Cargo.lock. Its deps are all registry crates — unlike fuzz/ it has no
-# `path` deps on crates/* — so only edits to its own Cargo.toml can invalidate
-# its lockfile, and this cheap metadata check owns drift detection for just
-# that manifest. Cargo.lock is in the trigger too, so lockfile-only edits or
-# deletion are still validated. No other workflow builds the bridge: ci.yml
-# covers only the root workspace, so this is the sole guard.
+# The standalone adapter embeds workspace crates; validate source/API changes
+# as well as its independent lockfile without adding SRI to the root workspace.
 on:
   pull_request:
     branches: ['**']
     paths:
-      - 'tools/stratum-sv2/template-provider/Cargo.toml'
-      - 'tools/stratum-sv2/template-provider/Cargo.lock'
+      - 'tools/stratum-sv2/template-provider/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/template-provider-lockfile.yml'
   workflow_dispatch:
 
@@ -36,3 +33,5 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - run: cargo metadata --locked --format-version 1 --manifest-path tools/stratum-sv2/template-provider/Cargo.toml > /dev/null
+      - run: cargo test --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml
+      - run: cargo clippy --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --all-targets -- -D warnings

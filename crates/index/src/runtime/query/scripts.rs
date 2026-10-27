@@ -3,7 +3,8 @@
 use super::{
     CapabilityFloors, DerivedIndexQueryEngine, Hash256, OutPoint, QueryBudget, ScriptHash,
     ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan,
-    SpendingRecord, TipSnapshot, Tx, TxIndexScanRow, TxIndexSnapshot, TxQueryError, Txid,
+    SpendingRecord, TipSnapshot, Tx, TxIndexScanRow, TxIndexSnapshot, TxQueryError,
+    TxUnavailableCause, Txid,
 };
 use crate::types::ScriptHistoryOccurrence;
 
@@ -79,10 +80,11 @@ impl DerivedIndexQueryEngine {
                 continue;
             }
             last_height = Some(height);
+            let hash = self.resolve_hash_at_height(height, tip)?;
             if let Some(positions) = Self::validated_positions(&row.value) {
                 for &position in positions {
                     let Some(transaction) =
-                        self.resolve_positioned_transaction(tip, budget, height, position)?
+                        self.resolve_positioned_transaction(budget, height, hash, position)?
                     else {
                         break;
                     };
@@ -91,7 +93,6 @@ impl DerivedIndexQueryEngine {
                     }
                 }
             }
-            let hash = self.resolve_hash_at_height(height, tip)?;
             let block = self.resolve_block(budget, height, hash)?;
             for transaction in &block.txs {
                 if let Some(record) = Self::spending_input(transaction, height, outpoint)? {
@@ -131,7 +132,7 @@ impl DerivedIndexQueryEngine {
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
         if floor > 0 {
             return Err(TxQueryError::Unavailable(
-                format!("script history coverage starts at height {floor}; history cannot be proven complete").into(),
+                TxUnavailableCause::HistoryUnproven { floor },
             ));
         }
         let rows = Self::scan_funding_rows(snapshot, budget, scripthash)?;
@@ -142,6 +143,7 @@ impl DerivedIndexQueryEngine {
             let occurrences = ScriptHistoryOccurrence::decode_all(&row.value).ok_or_else(|| {
                 TxQueryError::Storage("malformed unified script-history row".into())
             })?;
+            let mut row_hash = None;
             for occurrence in occurrences {
                 if occurrence.scripthash != scripthash {
                     continue;
@@ -153,23 +155,29 @@ impl DerivedIndexQueryEngine {
                 }
                 // `block_body_range` may be absent on a source; `None` asks
                 // for the whole-body read, never a hard miss (`block_body.rs`).
+                // One hash resolution serves every funding occurrence in the
+                // row, and rows needing no body read skip it entirely.
+                let hash = if let Some(hash) = row_hash {
+                    hash
+                } else {
+                    let resolved = self.resolve_hash_at_height(height, tip)?;
+                    row_hash = Some(resolved);
+                    resolved
+                };
                 let transaction = if let Some(transaction) =
-                    self.resolve_positioned_transaction(tip, budget, height, occurrence.position)?
+                    self.resolve_positioned_transaction(budget, height, hash, occurrence.position)?
                 {
                     transaction
                 } else {
-                    let hash = self.resolve_hash_at_height(height, tip)?;
                     let block = self.resolve_block(budget, height, hash)?;
-                    let Some(transaction) = block
-                        .txs
-                        .into_iter()
-                        .find(|candidate| candidate.txid() == txid)
+                    let Some(transaction) =
+                        block.txs.iter().find(|candidate| candidate.txid() == txid)
                     else {
                         return Err(TxQueryError::Unavailable(
-                            "script-history transaction body unavailable".into(),
+                            TxUnavailableCause::BlockBodyMissing { height },
                         ));
                     };
-                    transaction
+                    transaction.clone()
                 };
                 if transaction.txid() != txid
                     || !Self::collect_funding_outputs(
@@ -217,7 +225,7 @@ impl DerivedIndexQueryEngine {
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         if floor > 0 {
             return Err(TxQueryError::Unavailable(
-                format!("script history coverage starts at height {floor}; history cannot be proven complete").into(),
+                TxUnavailableCause::HistoryUnproven { floor },
             ));
         }
         let _ = tip;
@@ -296,7 +304,7 @@ impl DerivedIndexQueryEngine {
         let floor = floors.script_history;
         if floor > 0 {
             return Err(TxQueryError::Unavailable(
-                format!("script history coverage starts at height {floor}; history cannot be proven complete").into(),
+                TxUnavailableCause::HistoryUnproven { floor },
             ));
         }
         let cursor_height = match cursor {
@@ -388,7 +396,9 @@ impl DerivedIndexQueryEngine {
     ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
         let Some(utxo) = self.utxo.as_ref() else {
             return Err(TxQueryError::Unavailable(
-                "authoritative UTXO view is unavailable for ScriptLive".into(),
+                TxUnavailableCause::MissingAuthority(
+                    "authoritative UTXO view is unavailable for ScriptLive",
+                ),
             ));
         };
         let rows = Self::scan_live_rows(snapshot, budget, scripthash)?;
@@ -401,7 +411,9 @@ impl DerivedIndexQueryEngine {
                     // corruption or a failed transition. Returning an empty
                     // result would turn that into a false negative.
                     return Err(TxQueryError::Unavailable(
-                        "ScriptLive locator is absent from authoritative UTXO".into(),
+                        TxUnavailableCause::MissingAuthority(
+                            "ScriptLive locator is absent from authoritative UTXO",
+                        ),
                     ));
                 };
                 if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
@@ -720,11 +732,9 @@ mod tests {
             hash: *tip.hash.as_byte_array(),
         });
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-        let block_log: crate::block_log::BlockLog = std::iter::empty().collect();
         let engine = DerivedIndexQueryEngine::new(
             Arc::new(crate::runtime::DerivedIndexRuntime::new(wake_tx)),
             Arc::new(snapshot),
-            super::super::IndexBlockSource::new(Arc::new(parking_lot::RwLock::new(block_log))),
             bitcoin_rs_chain::BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(tree))),
             bitcoin_rs_chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::new(Some(tip)))),
             None,

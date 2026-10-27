@@ -3,7 +3,7 @@
 
 use super::{
     DerivedIndexInfo, DerivedIndexQueryEngine, Hash256, IndexCapabilities, TxIndexSnapshot,
-    TxQueryError,
+    TxQueryError, TxUnavailableCause,
 };
 use crate::{BasicFilter, CompactFilterQuery};
 
@@ -95,5 +95,5 @@ fn read_filter(snapshot: &dyn TxIndexSnapshot, hash: Hash256) -> Result<BasicFil
     snapshot
         .compact_filter(&hash.to_le_bytes())
         .map_err(|error| TxQueryError::Storage(error.to_string().into()))?
-        .ok_or_else(|| TxQueryError::Unavailable("compact filter data is missing".into()))
+        .ok_or_else(|| TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing))
 }

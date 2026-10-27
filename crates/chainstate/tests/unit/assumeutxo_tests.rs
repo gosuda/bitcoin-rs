@@ -122,7 +122,7 @@ impl Fixture {
         AssumeUtxoManager::open(
             Network::Regtest,
             Arc::clone(&self.active),
-            Some(dir.to_path_buf()),
+            dir.to_path_buf(),
         )
     }
 
@@ -145,7 +145,12 @@ fn disk_status(active: &Chainstate) -> Result<AssumeUtxoDiskStatus, Box<dyn std:
 #[test]
 fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
     let active = chainstate();
-    let manager = AssumeUtxoManager::open(Network::Regtest, Arc::clone(&active), None)?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        Arc::clone(&active),
+        dir.path().to_path_buf(),
+    )?;
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or("missing pin")?;
@@ -274,7 +279,12 @@ fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>
 #[test]
 fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResult {
     let fixture = Fixture::new()?;
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        fixture.active.clone(),
+        dir.path().to_path_buf(),
+    )?;
     // Authenticate the candidate before changing header selection. Invoke the
     // final installation owner directly so a manager-only precheck cannot
     // replace its guarded best-header admission rule.
@@ -410,6 +420,7 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
 #[test]
 fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult {
     let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
         fixture.blocks[2].block_hash(),
         3,
@@ -419,7 +430,11 @@ fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult 
         .block_tree
         .write()
         .insert_header(child.header, NodeStatus::HeaderValid)?;
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        fixture.active.clone(),
+        dir.path().to_path_buf(),
+    )?;
     fixture.activate(&manager)?;
     assert_eq!(
         fixture
@@ -590,7 +605,12 @@ fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult 
             Some(base_id)
         );
     }
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        fixture.active.clone(),
+        dir.path().to_path_buf(),
+    )?;
     let loaded = fixture.load()?;
     let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(matches!(result, Err(AssumeUtxoError::ActivationBehindTip)));
@@ -612,6 +632,7 @@ fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult 
 #[test]
 fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
     let fixture = snapshot_work_fixture(1, 0x2000_ffff, 2, 0x207f_ffff)?;
+    let dir = tempfile::tempdir()?;
     let before = fixture
         .active
         .applied_tip_snapshot()
@@ -630,7 +651,11 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
         assert!(base.chainwork > before.chainwork);
         assert_eq!(tree.tip().ok_or("best header missing")?.hash, base.hash);
     }
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        fixture.active.clone(),
+        dir.path().to_path_buf(),
+    )?;
     fixture.activate(&manager)?;
     let applied = fixture
         .active
@@ -684,7 +709,12 @@ fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> Te
         fixture
             .head
             .commit(Some(&prior), &unsettled, &CommitRecords::default())?;
-        let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+        let dir = tempfile::tempdir()?;
+        let manager = AssumeUtxoManager::open(
+            Network::Regtest,
+            fixture.active.clone(),
+            dir.path().to_path_buf(),
+        )?;
         let loaded = fixture.load()?;
         let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
         assert!(
@@ -751,7 +781,7 @@ fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestR
     let manager = AssumeUtxoManager::open(
         Network::Regtest,
         Arc::clone(&active),
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
     )?;
     assert!(matches!(
         {
@@ -1059,7 +1089,7 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         fixture.active.clone(),
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
         1,
     )?;
     fixture.activate(&manager)?;
@@ -1184,7 +1214,9 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
 #[test]
 fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> TestResult {
     let fixture = Fixture::new()?;
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active, None)?;
+    let dir = tempfile::tempdir()?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, fixture.active, dir.path().to_path_buf())?;
     let observed = std::thread::scope(|scope| {
         let guard = manager.lifecycle.lock();
         let (sent, received) = std::sync::mpsc::sync_channel(1);
@@ -1211,7 +1243,12 @@ fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> T
 #[test]
 fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
     let fixture = Fixture::new()?;
-    let manager = AssumeUtxoManager::open(Network::Regtest, fixture.active.clone(), None)?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        fixture.active.clone(),
+        dir.path().to_path_buf(),
+    )?;
     assert_eq!(
         manager
             .try_chainstates_report()?

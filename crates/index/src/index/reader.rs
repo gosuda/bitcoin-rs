@@ -1,4 +1,4 @@
-//! Read-side store access and typed prefix-row decoding.
+//! Read-side store access and typed prefix-row decoding for confirmed index rows.
 
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,

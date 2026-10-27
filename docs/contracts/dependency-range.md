@@ -39,6 +39,18 @@ contract.
 - Range-endpoint graphs are in scope: `cargo deny check bans` runs after
   each DEP-01 resolve. Missing cargo-deny is a failed prerequisite, not a skip.
 
+## Selected range prerequisites
+
+- `proptest` is bounded at `>=1.11, <1.12` in the root `Cargo.toml`
+  `[workspace.dependencies]`. Version `1.12` moves to the `rand_core 0.10`
+  and `rand_xorshift 0.5` family; the bound retains the selected `rand 0.9`
+  family used elsewhere.
+- The `syn@3.0.9` exception in `deny.toml` `[bans]` is an exact-version pin
+  for the proc-macro chain. When the
+  `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception
+  to that exact version in the same change. The entry describes this pin
+  only; it does not approve other splits.
+
 ## Proven by
 
 - `scripts/check-dep-range.sh minimal` and

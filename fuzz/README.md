@@ -7,7 +7,7 @@ snapshot loading. Seed corpora live in the companion repository
 [gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus)
 under `corpus/<target>/`; they are imported from rust-bitcoin/qa-assets by
 `scripts/import-qa-assets.sh` and from Bitcoin Core and btcd test vectors
-by `scripts/import-reference-corpora.sh`. See `fuzz/CORPUS_PROVENANCE.md`
+by `scripts/import-reference-corpora.sh`. See [`fuzz/CORPUS_PROVENANCE.md`](CORPUS_PROVENANCE.md)
 for upstream commits, licenses, and mapping. Parser-only rust-bitcoin
 decode targets are not kept.
 
@@ -124,10 +124,10 @@ cargo +nightly run --manifest-path fuzz/Cargo.toml --bin p2p_message \
   -- fuzz/artifacts/p2p_message/crash-<hash>
 ```
 
-`--manifest-path` is required. `fuzz/` declares its own workspace, so run from
-the repository root without it Cargo selects the root workspace, whose metadata
-exposes only the `bitcoin-rs` binary, and the command fails with `no bin target
-named p2p_message` before it reads the artifact.
+`--manifest-path` is required. `fuzz/` declares its own workspace; without
+`--manifest-path`, running from the repository root selects the root workspace
+(which exposes only the `bitcoin-rs` binary) and fails with `no bin target
+named p2p_message` before reading the artifact.
 
 To get a full backtrace, set `RUST_BACKTRACE=1`:
 

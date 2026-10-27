@@ -3,12 +3,16 @@
 //! Startup returns a fully owned `Node`, not detached state and worker handles.
 //! The daemon and embedding surfaces both enter this lifecycle directly.
 
+use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 
-use bitcoin_rs_chain::BlockBodySource;
+use bitcoin_rs_chain::{BlockBodySource, LatchReader};
+use bitcoin_rs_chainstate::verify::{
+    CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
+};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_rpc::{
     RpcServer,
@@ -28,18 +32,16 @@ use crate::state::NodeState;
 /// Teardown-entry observation seam local to the lifecycle owner.
 mod shutdown {
     #[cfg(test)]
-    pub(super) struct ShutdownStageGuard;
-
-    #[cfg(test)]
     thread_local! {
         static SHUTDOWN_STAGES_REACHED: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
     }
 
+    /// Records that the shared teardown ran. Test builds count the entry through
+    /// the observation seam; other builds record nothing. Both builds share one
+    /// plain `()`-returning call shape.
     #[cfg(test)]
-    #[must_use]
-    pub(super) fn mark_shutdown_stage() -> ShutdownStageGuard {
+    pub(super) fn mark_shutdown_stage() {
         SHUTDOWN_STAGES_REACHED.with(|slot| slot.set(slot.get().saturating_add(1)));
-        ShutdownStageGuard
     }
 
     #[cfg(test)]
@@ -47,14 +49,9 @@ mod shutdown {
         SHUTDOWN_STAGES_REACHED.with(core::cell::Cell::take)
     }
 
+    /// Non-test builds record nothing.
     #[cfg(not(test))]
-    pub(super) struct ShutdownStageMark;
-
-    #[cfg(not(test))]
-    #[must_use]
-    pub(super) fn mark_shutdown_stage() -> ShutdownStageMark {
-        ShutdownStageMark
-    }
+    pub(super) fn mark_shutdown_stage() {}
 }
 
 /// Bounded wait for the derived-index worker join on explicit shutdown and
@@ -116,6 +113,50 @@ impl ChainControl for RpcChainControl {
         self.sync.purge_invalidated(&invalidated);
         Ok(())
     }
+
+    fn verify_chain(
+        &self,
+        check_level: u8,
+        nblocks: u32,
+        cancellation: &LatchReader,
+    ) -> Result<bool, ChainControlError> {
+        let mut request = verify_request(check_level, nblocks);
+        request.cancellation = Some(cancellation.clone());
+        match verify_recent_blocks(&self.handles, request) {
+            Ok(VerifyOutcome::Passed { .. }) => Ok(true),
+            // Core reports a window that reaches blocks it does not hold as
+            // `SKIPPED_MISSING_BLOCKS`, which `verifychain` answers false.
+            Ok(VerifyOutcome::SkippedNoBlockData { height }) => {
+                tracing::info!(
+                    height,
+                    "verifychain window reaches blocks this node does not hold"
+                );
+                Ok(false)
+            }
+            Err(VerifyError::Interrupted) => Err(ChainControlError::Interrupted),
+            Err(VerifyError::ClosedForRecovery) => Err(ChainControlError::Unavailable),
+            Err(error) => {
+                tracing::warn!(%error, "verifychain could not verify a block");
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Maps Core's `verifychain` arguments onto the chainstate verifier. Levels
+/// above 2 run the level-2 checks: the verifier does not replay disconnect or
+/// reconnect. Zero blocks means the whole chain.
+fn verify_request(check_level: u8, nblocks: u32) -> VerifyRequest {
+    let level = match check_level {
+        0 => CheckLevel::ReadBodies,
+        1 => CheckLevel::CheckBodies,
+        _ => CheckLevel::CheckUndo,
+    };
+    VerifyRequest {
+        level,
+        depth: NonZeroU32::new(nblocks),
+        cancellation: None,
+    }
 }
 
 /// Binds the RPC listener without spawning a worker. Startup records the
@@ -125,9 +166,11 @@ fn bind_rpc(
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
 ) -> Result<(Arc<Context>, RpcServer)> {
-    let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
+    let config = state.config();
+    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
     let context = Context::from_handles(ContextHandles {
+        silent_payments: config.rpc.silent_payments,
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
@@ -279,7 +322,7 @@ impl NodeServices {
             }
             &*state
         });
-        let _stage = shutdown::mark_shutdown_stage();
+        shutdown::mark_shutdown_stage();
         if let Some(state) = state {
             state.request_shutdown();
             state.p2p().shutdown();
@@ -299,6 +342,12 @@ impl NodeServices {
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
+            if state.config().persist_mempool
+                && matches!(mode, TeardownMode::CleanShutdown)
+                && first_error.is_none()
+            {
+                save_mempool_snapshot(state);
+            }
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -415,6 +464,52 @@ impl NodeServices {
             }
         }
     }
+}
+
+// The worker can only stage bytes. Publication belongs to this shutdown thread,
+// so an abandoned worker cannot overwrite a subsequent embedded node's file.
+fn save_mempool_snapshot(state: &NodeState) {
+    let budget = Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + budget;
+    let gateway = state.mempool_gateway();
+    let data_dir = state.data_dir().to_path_buf();
+    let network = state.config().network;
+    let max_bytes = state.config().mempool_snapshot_max_bytes;
+    let (sender, receiver) = crossbeam_channel::bounded(1);
+    match std::thread::Builder::new()
+        .name("mempool-snapshot".into())
+        .spawn(move || {
+            let result = bitcoin_rs_mempool::snapshot::prepare(
+                &data_dir, &gateway, network, max_bytes, deadline,
+            );
+            let _ = sender.send(result);
+        }) {
+        Ok(_) => publish_mempool_snapshot(receiver, deadline),
+        Err(error) => tracing::warn!(%error, "could not start mempool snapshot save"),
+    }
+}
+
+fn publish_mempool_snapshot(
+    receiver: crossbeam_channel::Receiver<
+        std::io::Result<bitcoin_rs_mempool::snapshot::PreparedSnapshot>,
+    >,
+    deadline: std::time::Instant,
+) {
+    match receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        Ok(Ok(snapshot)) => {
+            if let Err(error) = snapshot.publish() {
+                tracing::warn!(%error, "mempool snapshot publication failed");
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "mempool snapshot save failed; preserving the previous file");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "mempool snapshot save did not finish within the shutdown budget");
+        }
+    }
+    // Disconnect before returning, so a late staging result is dropped.
+    drop(receiver);
 }
 
 fn publish_clean_checkpoint_if_eligible(
@@ -566,6 +661,10 @@ pub(crate) fn start_node(
     guard.services.event_loop_signal = event_loop_signal;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
+    // The early-announce body rendezvous: one slot shared by the announcer
+    // (writer, on every early send) and the chain query (reader, for compact
+    // `getdata` and `getblocktxn` before the body is durable).
+    let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
     let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         bitcoin_rs_p2p::ActiveChainQuery::new(
             chainstate.block_tree_reader(),
@@ -573,7 +672,8 @@ pub(crate) fn start_node(
             state.config().network,
         )
         .with_block_body_source(Arc::clone(&block_body_source))
-        .with_compact_filters(state.compact_filter_query()),
+        .with_compact_filters(state.compact_filter_query())
+        .with_recent_block(recent_block.clone()),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
@@ -601,8 +701,21 @@ pub(crate) fn start_node(
             Arc::clone(&p2p_chain_query),
             bitcoin_rs_p2p::BlockAnnounceConfig::default(),
         )
-        .with_ibd(state.ibd(), state.config().network),
+        .with_ibd(state.ibd(), state.config().network)
+        .with_recent_block(recent_block),
     );
+    // Early compact-block announce: connect fires this hook after block rules
+    // pass for a tip child, before the durable commit. The hook only hands
+    // the block to the announcer — it never publishes a tip or advances the
+    // mining generation, so miners switch on the post-commit path.
+    let announcer_for_hook = Arc::clone(&block_announcer);
+    let pow_valid_hook: bitcoin_rs_chainstate::PowValidBlockHook =
+        Arc::new(move |block, hash, height| {
+            announcer_for_hook.announce_pow_valid(block, hash, height);
+        });
+    chainstate
+        .set_pow_valid_block(pow_valid_hook)
+        .map_err(|_| anyhow::anyhow!("pow-valid hook already installed"))?;
     if let Some(announce_rx) = state.take_block_announce_receiver() {
         guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
             Arc::clone(&block_announcer),
@@ -667,7 +780,13 @@ pub(crate) fn start_node(
     guard.services.rpc_thread = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-rpc".into())
-            .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?,
+            .spawn(move || {
+                let result = rpc_server.serve_with_shutdown(rpc_shutdown.clone());
+                if !rpc_shutdown.is_triggered() {
+                    tracing::error!(error = ?result.as_ref().err(), "rpc listener exited before shutdown");
+                }
+                result
+            })?,
     );
     let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
         Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {

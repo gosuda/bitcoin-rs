@@ -1,0 +1,183 @@
+2026-10-16T09:40:21.472680Z  INFO bitcoin_rs_sv2_template_provider: embedded regtest template provider starting listen=0.0.0.0:8442 pubkey=9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW
+2026-10-16T09:40:21.494341Z  INFO fjall::db: Recovering database at /data/chainstate
+2026-10-16T09:40:21.495324Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/0
+2026-10-16T09:40:21.495419Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/0/v18
+2026-10-16T09:40:21.497036Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/11
+2026-10-16T09:40:21.497076Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/11/v0
+2026-10-16T09:40:21.497228Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/1
+2026-10-16T09:40:21.497262Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/1/v0
+2026-10-16T09:40:21.497409Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/4
+2026-10-16T09:40:21.497442Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/4/v0
+2026-10-16T09:40:21.497600Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/6
+2026-10-16T09:40:21.497640Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/6/v0
+2026-10-16T09:40:21.497765Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/7
+2026-10-16T09:40:21.497792Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/7/v0
+2026-10-16T09:40:21.497935Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/9
+2026-10-16T09:40:21.497962Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/9/v0
+2026-10-16T09:40:21.498117Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/10
+2026-10-16T09:40:21.498145Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/10/v0
+2026-10-16T09:40:21.498275Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/2
+2026-10-16T09:40:21.498304Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/2/v0
+2026-10-16T09:40:21.498470Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/3
+2026-10-16T09:40:21.498505Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/3/v0
+2026-10-16T09:40:21.498658Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/5
+2026-10-16T09:40:21.498691Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/5/v0
+2026-10-16T09:40:21.498855Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/12
+2026-10-16T09:40:21.498889Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/12/v0
+2026-10-16T09:40:21.499054Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/8
+2026-10-16T09:40:21.499115Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/8/v0
+2026-10-16T09:40:21.513960Z  INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=1 checkpoint_height=107 height=107 hash=0000000f6f8a956f6c66f09a2ce6005e06ccea8c903a266d864f9e67168e2ee4 replayed_records=0 chain_tx_count=108 replay_seconds=3.2832e-5
+2026-10-16T09:40:21.514010Z  INFO bitcoin_rs_node::state::open: restored chainstate checkpoint height=107 hash=0000000f6f8a956f6c66f09a2ce6005e06ccea8c903a266d864f9e67168e2ee4
+2026-10-16T09:40:21.514195Z  INFO bitcoin_rs_mempool::fee_history: restored fee-estimator history path=/data/fee-estimator-history.dat bytes=57965
+2026-10-16T09:40:21.514412Z  INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="fjall" chainstate_dir=/data/chainstate chainstate_cache_bytes=33554432 txindex_cache_bytes=0 total_cache_bytes=33554432
+2026-10-16T09:40:21.514435Z  INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "/data", storage: StorageConfig { backend: Fjall, dbcache_mb: 32, prune_target_mb: 0 }, p2p: P2pConfig { magic: [250, 191, 181, 218], listen: [0.0.0.0:18444], dns_seeds_enabled: false, asmap: None, noban_subnets: [], connect: [], fast_sync: false, v2_transport: false }, rpc: RpcConfig { bind: 127.0.0.1:0, rest: false, silent_payments: false, auth: Auth::GeneratedCookie }, indexes: IndexConfig { txindex: false, blockfilterindex: false, script_index: Disabled }, observability: ObservabilityConfig { log_level: "info", metrics_bind: None }, notifications: NotificationConfig { zmq: [] }, chainstate_journal: ChainstateJournalConfig { enabled: true, blocks: 500, seconds: 5, rotate_mib: 256, max_journal_mib: 2048, max_lag_blocks: 500, max_lag_seconds: 30 }, validation: ValidationConfig { assume_valid_height: 0, mode: AssumeValid, engine: Native }, mining: MiningConfig { payout_script: [] } }
+2026-10-16T09:40:21.519889Z  INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:34787
+2026-10-16T09:40:21.520071Z  INFO bitcoin_rs_p2p::service: p2p listener bound addr=0.0.0.0:18444
+2026-10-16T09:40:21.520464Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=108 projection_us=2
+2026-10-16T09:40:21.520522Z  INFO bitcoin_rs_sv2_template_provider::server: TDP server listening listen=0.0.0.0:8442
+2026-10-16T09:40:21.839000Z  INFO bitcoin_rs_sv2_template_provider::server: pool setup connection completed
+2026-10-16T09:40:21.843899Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=1 job_us=231
+2026-10-16T09:40:28.642538Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=109 projection_us=2
+2026-10-16T09:40:28.642625Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=1 result=Ok(Accepted) submit_us=28534 height=108
+2026-10-16T09:40:28.642754Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=2 job_us=108
+2026-10-16T09:40:29.503208Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=110 projection_us=2
+2026-10-16T09:40:29.503287Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=2 result=Ok(Accepted) submit_us=16503 height=109
+2026-10-16T09:40:29.503515Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=3 job_us=191
+2026-10-16T09:40:39.635762Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=111 projection_us=3
+2026-10-16T09:40:39.635787Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=3 result=Ok(Accepted) submit_us=30941 height=110
+2026-10-16T09:40:39.636013Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=4 job_us=156
+2026-10-16T09:40:42.642465Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=112 projection_us=3
+2026-10-16T09:40:42.642527Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=4 result=Ok(Accepted) submit_us=14870 height=111
+2026-10-16T09:40:42.642905Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=5 job_us=234
+2026-10-16T09:40:47.925200Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=113 projection_us=2
+2026-10-16T09:40:47.925239Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=5 result=Ok(Accepted) submit_us=12594 height=112
+2026-10-16T09:40:47.925380Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=6 job_us=116
+2026-10-16T09:40:50.187766Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=114 projection_us=2
+2026-10-16T09:40:50.187852Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=6 result=Ok(Accepted) submit_us=14808 height=113
+2026-10-16T09:40:50.188020Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=7 job_us=153
+2026-10-16T09:40:50.308948Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=115 projection_us=2
+2026-10-16T09:40:50.309043Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=7 result=Ok(Accepted) submit_us=16529 height=114
+2026-10-16T09:40:50.309281Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=8 job_us=216
+2026-10-16T09:40:51.992368Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=116 projection_us=2
+2026-10-16T09:40:51.992398Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=8 result=Ok(Accepted) submit_us=18593 height=115
+2026-10-16T09:40:51.992681Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=9 job_us=190
+2026-10-16T09:40:53.127140Z  WARN bitcoin_rs_sv2_template_provider::server: pool connection ended peer=172.19.0.3:35844 error=Socket was closed (likely by the peer)
+2026-10-16T09:40:54.783244Z  INFO bitcoin_rs_sv2_template_provider::server: pool setup connection completed
+2026-10-16T09:40:54.785283Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=9 job_us=95
+2026-10-16T09:41:02.708305Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=117 projection_us=3
+2026-10-16T09:41:02.708372Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=9 result=Ok(Accepted) submit_us=31594 height=116
+2026-10-16T09:41:02.708597Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=10 job_us=207
+2026-10-16T09:41:01.914711Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=118 projection_us=2
+2026-10-16T09:41:01.914778Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=10 result=Ok(Accepted) submit_us=13363 height=117
+2026-10-16T09:41:01.914916Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=11 job_us=123
+2026-10-16T09:41:05.463276Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=11 result=Ok(Accepted) submit_us=14833 height=118
+2026-10-16T09:41:05.463289Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=119 projection_us=2
+2026-10-16T09:41:05.463451Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=12 job_us=118
+2026-10-16T09:41:06.574819Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=120 projection_us=3
+2026-10-16T09:41:06.574888Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=12 result=Ok(Accepted) submit_us=15273 height=119
+2026-10-16T09:41:06.575085Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=13 job_us=179
+2026-10-16T09:41:07.840200Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=121 projection_us=2
+2026-10-16T09:41:07.840229Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=13 result=Ok(Accepted) submit_us=14115 height=120
+2026-10-16T09:41:07.840374Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=14 job_us=116
+2026-10-16T09:41:09.239315Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=122 projection_us=2
+2026-10-16T09:41:09.239391Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=14 result=Ok(Accepted) submit_us=16418 height=121
+2026-10-16T09:41:09.239520Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=15 job_us=106
+2026-10-16T09:41:18.305940Z  INFO bitcoin_rs_p2p::sync::telemetry: sync progress applied_height=121 header_height=121 peers=0 ibd=false
+2026-10-16T09:41:20.203258Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=123 projection_us=2
+2026-10-16T09:41:20.203373Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=15 result=Ok(Accepted) submit_us=30374 height=122
+2026-10-16T09:41:20.203610Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=16 job_us=214
+2026-10-16T09:41:24.207742Z  INFO bitcoin_rs_node::lifecycle: rpc listener exited cleanly
+2026-10-16T09:41:24.286645Z  INFO bitcoin_rs_p2p::service: p2p listener exited cleanly
+2026-10-16T09:41:24.382209Z  INFO bitcoin_rs_node::lifecycle: tx ingress consumer exited cleanly
+2026-10-16T09:41:24.382251Z  INFO bitcoin_rs_node::lifecycle: tx relay worker exited cleanly
+2026-10-16T09:41:24.382263Z  INFO bitcoin_rs_node::lifecycle: block announce worker exited cleanly
+2026-10-16T09:41:24.382268Z  INFO bitcoin_rs_node::lifecycle: chainstate maintenance worker exited cleanly
+2026-10-16T09:41:24.539923Z  INFO bitcoin_rs_node::lifecycle: published clean chainstate checkpoint generation=2
+2026-10-16T09:41:24.550384Z  INFO bitcoin_rs_mempool::fee_history: saved fee-estimator history path=/data/fee-estimator-history.dat bytes=57965
+2026-10-16T09:41:24.550424Z  INFO bitcoin_rs_node::lifecycle: bitcoin-rs node exited cleanly
+2026-10-16T09:41:30.526945Z  INFO bitcoin_rs_sv2_template_provider: embedded regtest template provider starting listen=0.0.0.0:8442 pubkey=9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW
+2026-10-16T09:41:30.549117Z  INFO fjall::db: Recovering database at /data/chainstate
+2026-10-16T09:41:30.549872Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/0
+2026-10-16T09:41:30.549903Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/0/v18
+2026-10-16T09:41:30.550244Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/11
+2026-10-16T09:41:30.550271Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/11/v0
+2026-10-16T09:41:30.550383Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/1
+2026-10-16T09:41:30.550404Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/1/v0
+2026-10-16T09:41:30.550503Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/4
+2026-10-16T09:41:30.550523Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/4/v0
+2026-10-16T09:41:30.550623Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/6
+2026-10-16T09:41:30.550643Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/6/v0
+2026-10-16T09:41:30.550738Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/7
+2026-10-16T09:41:30.550758Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/7/v0
+2026-10-16T09:41:30.550856Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/9
+2026-10-16T09:41:30.550875Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/9/v0
+2026-10-16T09:41:30.550974Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/10
+2026-10-16T09:41:30.550994Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/10/v0
+2026-10-16T09:41:30.551091Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/2
+2026-10-16T09:41:30.551110Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/2/v0
+2026-10-16T09:41:30.551216Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/3
+2026-10-16T09:41:30.551235Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/3/v0
+2026-10-16T09:41:30.551369Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/5
+2026-10-16T09:41:30.551390Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/5/v0
+2026-10-16T09:41:30.551483Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/12
+2026-10-16T09:41:30.551503Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/12/v0
+2026-10-16T09:41:30.551599Z  INFO lsm_tree::tree: Recovering LSM-tree at /data/chainstate/keyspaces/8
+2026-10-16T09:41:30.551618Z  INFO lsm_tree::version::recovery: Recovering current manifest at /data/chainstate/keyspaces/8/v0
+2026-10-16T09:41:30.559741Z  INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=122 height=122 hash=0000000062d23338b397c6da5de024c3aded8c0187714a0633a0322fd5162552 replayed_records=0 chain_tx_count=123 replay_seconds=6.8311e-5
+2026-10-16T09:41:30.559810Z  INFO bitcoin_rs_node::state::open: restored chainstate checkpoint height=122 hash=0000000062d23338b397c6da5de024c3aded8c0187714a0633a0322fd5162552
+2026-10-16T09:41:30.560097Z  INFO bitcoin_rs_mempool::fee_history: restored fee-estimator history path=/data/fee-estimator-history.dat bytes=57965
+2026-10-16T09:41:30.560452Z  INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="fjall" chainstate_dir=/data/chainstate chainstate_cache_bytes=33554432 txindex_cache_bytes=0 total_cache_bytes=33554432
+2026-10-16T09:41:30.560484Z  INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "/data", storage: StorageConfig { backend: Fjall, dbcache_mb: 32, prune_target_mb: 0 }, p2p: P2pConfig { magic: [250, 191, 181, 218], listen: [0.0.0.0:18444], dns_seeds_enabled: false, asmap: None, noban_subnets: [], connect: [], fast_sync: false, v2_transport: false }, rpc: RpcConfig { bind: 127.0.0.1:0, rest: false, silent_payments: false, auth: Auth::GeneratedCookie }, indexes: IndexConfig { txindex: false, blockfilterindex: false, script_index: Disabled }, observability: ObservabilityConfig { log_level: "info", metrics_bind: None }, notifications: NotificationConfig { zmq: [] }, chainstate_journal: ChainstateJournalConfig { enabled: true, blocks: 500, seconds: 5, rotate_mib: 256, max_journal_mib: 2048, max_lag_blocks: 500, max_lag_seconds: 30 }, validation: ValidationConfig { assume_valid_height: 0, mode: AssumeValid, engine: Native }, mining: MiningConfig { payout_script: [] } }
+2026-10-16T09:41:30.568600Z  INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:40331
+2026-10-16T09:41:30.568784Z  INFO bitcoin_rs_p2p::service: p2p listener bound addr=0.0.0.0:18444
+2026-10-16T09:41:30.569491Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=123 projection_us=2
+2026-10-16T09:41:30.569536Z  INFO bitcoin_rs_sv2_template_provider::server: TDP server listening listen=0.0.0.0:8442
+2026-10-16T09:41:31.012117Z  INFO bitcoin_rs_sv2_template_provider::server: pool setup connection completed
+2026-10-16T09:41:31.013930Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=1 job_us=68
+2026-10-16T09:42:16.481067Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=124 projection_us=2
+2026-10-16T09:42:16.481171Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=1 result=Ok(Accepted) submit_us=34717 height=123
+2026-10-16T09:42:16.481366Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=2 job_us=176
+2026-10-16T09:42:17.078233Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=125 projection_us=1
+2026-10-16T09:42:17.078313Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=2 result=Ok(Accepted) submit_us=14278 height=124
+2026-10-16T09:42:17.078512Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=3 job_us=95
+2026-10-16T09:42:20.569140Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=126 projection_us=3
+2026-10-16T09:42:20.569182Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=3 result=Ok(Accepted) submit_us=12805 height=125
+2026-10-16T09:42:20.569355Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=4 job_us=156
+2026-10-16T09:42:22.342987Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=127 projection_us=3
+2026-10-16T09:42:22.343012Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=4 result=Ok(Accepted) submit_us=14104 height=126
+2026-10-16T09:42:22.343276Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=5 job_us=182
+2026-10-16T09:42:25.983912Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=5 result=Ok(Accepted) submit_us=13718 height=127
+2026-10-16T09:42:25.983949Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=128 projection_us=3
+2026-10-16T09:42:25.984077Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=6 job_us=109
+2026-10-16T09:42:28.007806Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=129 projection_us=2
+2026-10-16T09:42:28.007872Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=6 result=Ok(Accepted) submit_us=18428 height=128
+2026-10-16T09:42:28.008072Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=7 job_us=183
+2026-10-16T09:42:27.454982Z  INFO bitcoin_rs_p2p::sync::telemetry: sync progress applied_height=128 header_height=128 peers=0 ibd=false
+2026-10-16T09:42:27.662177Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=130 projection_us=1
+2026-10-16T09:42:27.662267Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=7 result=Ok(Accepted) submit_us=12495 height=129
+2026-10-16T09:42:27.662431Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=8 job_us=141
+2026-10-16T09:42:29.849680Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=8 result=Ok(Accepted) submit_us=14952 height=130
+2026-10-16T09:42:29.849685Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=131 projection_us=2
+2026-10-16T09:42:29.849820Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=9 job_us=98
+2026-10-16T09:42:31.549159Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=9 result=Ok(Accepted) submit_us=15678 height=131
+2026-10-16T09:42:31.549365Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=132 projection_us=33
+2026-10-16T09:42:31.549507Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=10 job_us=98
+2026-10-16T09:42:32.909666Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=10 result=Ok(Accepted) submit_us=17559 height=132
+2026-10-16T09:42:32.909682Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=133 projection_us=2
+2026-10-16T09:42:32.909802Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=11 job_us=98
+2026-10-16T09:42:38.863605Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=134 projection_us=3
+2026-10-16T09:42:38.863634Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=11 result=Ok(Accepted) submit_us=16117 height=133
+2026-10-16T09:42:38.863817Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=12 job_us=114
+2026-10-16T09:42:38.909303Z  INFO bitcoin_rs_sv2_template_provider::server: typed solution submitted template_id=12 result=Ok(Accepted) submit_us=13835 height=134
+2026-10-16T09:42:38.909612Z  INFO bitcoin_rs_sv2_template_provider: issued typed template height=135 projection_us=37
+2026-10-16T09:42:38.909815Z  INFO bitcoin_rs_sv2_template_provider::server: pushed template to pool template_id=13 job_us=155
+2026-10-16T09:42:40.594777Z  WARN bitcoin_rs_sv2_template_provider::server: pool connection ended peer=172.19.0.2:33240 error=Socket was closed (likely by the peer)
+2026-10-16T09:42:41.960599Z  INFO bitcoin_rs_node::lifecycle: rpc listener exited cleanly
+2026-10-16T09:42:42.003029Z  INFO bitcoin_rs_p2p::service: p2p listener exited cleanly
+2026-10-16T09:42:42.003059Z  INFO bitcoin_rs_node::lifecycle: tx ingress consumer exited cleanly
+2026-10-16T09:42:42.003061Z  INFO bitcoin_rs_node::lifecycle: tx relay worker exited cleanly
+2026-10-16T09:42:42.003063Z  INFO bitcoin_rs_node::lifecycle: block announce worker exited cleanly
+2026-10-16T09:42:42.047148Z  INFO bitcoin_rs_node::lifecycle: chainstate maintenance worker exited cleanly
+2026-10-16T09:42:42.147842Z  INFO bitcoin_rs_node::lifecycle: published clean chainstate checkpoint generation=3
+2026-10-16T09:42:42.159747Z  INFO bitcoin_rs_mempool::fee_history: saved fee-estimator history path=/data/fee-estimator-history.dat bytes=57965
+2026-10-16T09:42:42.159796Z  INFO bitcoin_rs_node::lifecycle: bitcoin-rs node exited cleanly

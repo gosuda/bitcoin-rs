@@ -81,9 +81,6 @@ pub(crate) use crate::download_window::MIN_PEERS_FOR_FANOUT;
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
 
-/// Wire protocol version we advertise on outbound `getheaders`.
-const PROTOCOL_VERSION: u32 = 70_016;
-
 /// Time after which an unanswered frontier `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -205,7 +202,6 @@ pub struct BlockSync {
     /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained by
     /// the next tick's header drain.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
-    expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
     /// no chain transition: the failed settlement left the implementation's
@@ -259,9 +255,17 @@ struct SchedulerState {
     headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
     /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
+    expected_apply_cache: Option<ExpectedApplyCache>,
 }
 
 impl SchedulerState {
+    fn populate_expected_apply_cache(&mut self, cache: ExpectedApplyCache) {
+        if cache.hashes.is_empty() {
+            return;
+        }
+        self.expected_apply_cache = Some(cache);
+    }
+
     fn header_request(&self) -> Option<HeaderRequest> {
         self.header_request_owner
             .and_then(|source| self.headers_sync.get(&source)?.request)
@@ -375,16 +379,6 @@ struct ExpectedApplyCache {
     hashes: ExpectedBlockHashes,
 }
 
-/// A contiguous run of expected apply hashes together with the chain/applied
-/// tip snapshot it was computed against.
-#[derive(Clone, Debug)]
-struct ExpectedRun {
-    chain_tip_hash: Hash256,
-    applied_tip_hash: Hash256,
-    applied_tip_height: u32,
-    hashes: ExpectedBlockHashes,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct GetdataRequestOutcome {
     sent: bool,
@@ -424,10 +418,10 @@ impl BlockSync {
                 chain_sync: hashbrown::HashMap::new(),
                 headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
+                expected_apply_cache: None,
             }),
             refused_rerequest_at: Mutex::new(None),
             block_announcements: Mutex::new(hashbrown::HashMap::new()),
-            expected_apply_cache: Arc::new(Mutex::new(None)),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -445,6 +439,7 @@ impl BlockSync {
             chain_sync: hashbrown::HashMap::new(),
             headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
+            expected_apply_cache: None,
         };
     }
 
@@ -506,6 +501,83 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
+    /// Whether a compact block with `header` from `source` earns a
+    /// mempool-wide reconstruction scan.
+    ///
+    /// PRE: `header` is the `cmpctblock`'s embedded header.
+    /// POST: `true` only when the header has valid proof of work, the block
+    ///   is not marked invalid, its parent is a known block not marked
+    ///   invalid, the header passes the contextual rules header admission
+    ///   applies against that parent (required nBits, median time past,
+    ///   timewarp, future time, version), and it either carries more work
+    ///   than the applied chain or answers a body fetch `source` owns. This
+    ///   matches Core, which runs its contextual header checks before
+    ///   reconstruction. With the required nBits enforced, forging such a
+    ///   header costs a block at the chain's difficulty, and replaying an
+    ///   old one fails the work test.
+    /// INVARIANT: the tree read is released before the scheduler lock is
+    ///   taken, keeping the `tree -> scheduler` order without nesting.
+    ///
+    /// This is the pre-scan gate on the compact header alone. A
+    /// reconstructed body still faces the staging gate
+    /// (`unrequested_body_admissible`) like any other delivered block.
+    #[must_use]
+    pub(crate) fn compact_reconstruction_admissible(
+        &self,
+        source: PeerSource,
+        header: &bitcoin_rs_primitives::Header,
+    ) -> bool {
+        let hash = Hash256::from(header.compute_hash());
+        let network = self.chain.network();
+        if bitcoin_rs_chain::validate_pow(header, hash, network).is_err() {
+            return false;
+        }
+        let candidate_work = {
+            let tree = self.chain.block_tree();
+            let invalid = |id: NodeId| {
+                tree.node(id)
+                    .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+            };
+            let known = tree.lookup(hash);
+            if known.is_some_and(invalid) {
+                return false;
+            }
+            let Some(parent_id) = tree
+                .lookup(Hash256::from(header.prev_blockhash))
+                .filter(|&id| !invalid(id))
+            else {
+                return false;
+            };
+            // A header that admission would refuse never earns the scan. In
+            // particular its own valid proof of work must meet the target
+            // the chain requires after this parent. As in admission, a header
+            // already in the tree is not rechecked, so a clock that has since
+            // moved backwards cannot refuse it.
+            if known.is_none()
+                && bitcoin_rs_chain::validate_contextual_header(
+                    &tree,
+                    parent_id,
+                    header,
+                    network,
+                    bitcoin_rs_chain::current_unix_seconds(),
+                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let Ok(parent) = tree.node(parent_id) else {
+                return false;
+            };
+            parent.chainwork + bitcoin_rs_chain::block_work(header)
+        };
+        let extends_applied = self
+            .chain
+            .applied_tip()
+            .is_none_or(|tip| candidate_work > tip.chainwork);
+        extends_applied || self.owns_body_fetch(source, hash)
+    }
+
     /// Runs one orchestrator tick as a single canonical frontier
     /// reconciliation: observe, recover what is unowned, then schedule or
     /// name why progress is impossible.
@@ -528,12 +600,16 @@ impl BlockSync {
         // Convicted connections must release their work before selection so
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
-        let frontier = self.observe_frontier(chain.clone(), now);
-        self.sweep_chain_sync(&frontier, now);
+        let mut frontier = self.observe_frontier(chain.clone(), now);
+        let peers_changed = self.sweep_chain_sync(&frontier, now);
         self.follow_tip_progress(&frontier, now);
-        // The sweep can disconnect a peer; re-observe so selection and body
-        // planning never address a lease the sweep just removed.
-        let frontier = self.observe_frontier(chain, now);
+        // Both explicit eviction and a failed probe send can remove a peer.
+        // Release its work before refreshing the frontier, so a full pending
+        // budget cannot prevent same-tick reassignment to a live connection.
+        if peers_changed {
+            self.reconcile_peer_sessions();
+            frontier = self.observe_frontier(chain, now);
+        }
         let plan = frontier.plan();
 
         if !frontier.usable_peers.is_empty() {
@@ -663,6 +739,32 @@ impl BlockSync {
         }
     }
 
+    /// The canonical next-required body on the active branch: the applied tip's
+    /// successor during an extension, or the first connect node above the
+    /// common ancestor during a reorg.
+    pub(super) fn next_required_body(&self) -> Option<RequiredBody> {
+        let chain_tip = self.chain.chain_tip()?;
+        let applied_tip = self.chain.applied_tip()?;
+        let tree = self.chain.block_tree();
+        Self::required_body_from_tips(&tree, applied_tip.hash, chain_tip.tip_id)
+    }
+
+    /// Resolve ancestry against the caller's captured tips without sampling
+    /// either published tip again.
+    fn required_body_from_tips(
+        tree: &BlockTree,
+        applied_hash: Hash256,
+        chain_tip: NodeId,
+    ) -> Option<RequiredBody> {
+        let height = Self::first_connect_height(tree, applied_hash, chain_tip)?;
+        let node_id = tree.node_at_height_from(chain_tip, height)?;
+        let node = tree.node(node_id).ok()?;
+        Some(RequiredBody {
+            height: node.height,
+            hash: node.hash,
+        })
+    }
+
     /// The chain-side frontier: both tips and the canonical next-required
     /// body, resolved in one consistent tree read.
     pub(super) fn observe_chain_frontier(&self) -> ChainFrontier {
@@ -671,14 +773,7 @@ impl BlockSync {
         let next_required = match (&applied_tip, &chain_tip) {
             (Some(applied), Some(chain)) => {
                 let tree = self.chain.block_tree();
-                Self::first_connect_height(&tree, applied.hash, chain.tip_id)
-                    .and_then(|height| tree.node_at_height_from(chain.tip_id, height))
-                    .and_then(|node_id| {
-                        tree.node(node_id).ok().map(|node| RequiredBody {
-                            height: node.height,
-                            hash: node.hash,
-                        })
-                    })
+                Self::required_body_from_tips(&tree, applied.hash, chain.tip_id)
             }
             _ => None,
         };

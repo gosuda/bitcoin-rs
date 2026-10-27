@@ -2,15 +2,13 @@ use super::block::{NoSpentScripts, is_op_return_script};
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
-use super::{
-    BlockSource, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
-};
-use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, ScriptLiveRow, SpendingPrefixRow};
+use super::{IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer};
+use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
@@ -442,7 +440,7 @@ fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::
         commit_rollback_one(&mut writer, None, &body, &NoSpentScripts),
         Err(IndexError::NonContiguousPrepared { watermark: None })
     ));
-    assert_eq!(stored_rows(writer.indexer())?, []);
+    assert_eq!(stored_rows(writer.indexer())?, Vec::new());
     Ok(())
 }
 

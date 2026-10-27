@@ -15,6 +15,7 @@ use bitcoin_rs_index::runtime::DerivedIndexRuntime;
 use bitcoin_rs_mempool::AdmissionOrigin;
 use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
+use bitcoin_rs_mempool::MutationResult;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
 /// Failure of a node-owned single-block connect.
@@ -221,19 +222,31 @@ impl ChainFollowers {
     /// `C`, mining wake, and mempool orphan re-evaluation run once in that
     /// order. The block-inclusion removals are committed before sequence
     /// `C`; a `sequence` subscriber sees no `R` event for them, because the
-    /// block event already covers the departures.
+    /// block event already covers the departures. The committed removal
+    /// receipt travels with the mining wake so a staged preparation can
+    /// install against exactly these removals.
     ///
     /// INVARIANT: consumer failure cannot invalidate chainstate.
     pub(crate) fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
-        if let Some(gateway) = &self.mempool {
+        // Step-21 block-to-template baseline: debug-only on-connect span, same
+        // mechanism as the chainstate publish profile; no behavior change.
+        let on_connect_started = quanta::Instant::now();
+        // A follower set without an admission gate removed nothing, so its
+        // receipt is truthfully empty: every committed connect publishes one,
+        // and a foreground joined on a prepared candidate always sees its
+        // tip's receipt arrive.
+        let block_removals = if let Some(gateway) = &self.mempool {
             let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
                 AdmissionOrigin::Block,
                 &block_txs,
                 &outcome.txids,
                 outcome.height,
-            );
-        }
+                bitcoin_rs_primitives::unix_time_secs(),
+            )
+        } else {
+            MutationResult::empty()
+        };
         self.blocks
             .write()
             .push(BlockRecord::from_block(outcome.height, block));
@@ -243,13 +256,20 @@ impl ChainFollowers {
             self.zmq
                 .publish_sequence(SequenceEvent::Connected(outcome.hash));
         }
-        self.mining.publish_generation();
+        self.mining
+            .publish_block_generation(outcome.hash, &block_removals);
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.txids);
         }
         if let Some(announcer) = &self.block_announcer {
             announcer.wake();
         }
+        tracing::debug!(
+            height = outcome.height,
+            tip_hash = %outcome.hash,
+            on_connect_us = on_connect_started.elapsed().as_micros(),
+            "chain_effects: on_connect profile"
+        );
     }
 
     /// Dispatches a committed disconnect: log pop, index wake, and sequence
@@ -619,6 +639,47 @@ mod tests {
         Ok(())
     }
 
+    /// Records the committed block receipts the mining wake received.
+    #[derive(Default)]
+    struct ReceiptWake {
+        receipts: Mutex<Vec<(Hash256, usize)>>,
+    }
+
+    impl bitcoin_rs_mining::MempoolSequenceWake for ReceiptWake {
+        fn publish_generation_from(&self, _: u64) {}
+
+        fn stage_tip(&self, _: &TipSnapshot, _: &Block) {}
+
+        fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult) {
+            self.receipts
+                .lock()
+                .push((tip_hash, removals.changes.len()));
+        }
+    }
+
+    /// `RCV-02`: a follower set without an admission gate removed nothing, so a
+    /// committed connect still publishes a truthful, empty receipt for the
+    /// connected tip. A foreground joined on a prepared candidate waits for
+    /// exactly that receipt.
+    #[test]
+    fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> anyhow::Result<()> {
+        let genesis = Network::Regtest.genesis_block();
+        let tip = genesis_tip(&genesis)?;
+        let wake = Arc::new(ReceiptWake::default());
+        let wake_handle: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = wake.clone();
+        let followers = ChainFollowers::noop();
+        followers.mining().attach_sequence_wake(&wake_handle);
+        assert!(followers.mempool_gateway().is_none());
+
+        followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+        assert_eq!(
+            *wake.receipts.lock(),
+            vec![(tip.hash, 0)],
+            "one receipt for the connected tip, naming no removals"
+        );
+        Ok(())
+    }
+
     #[derive(Default)]
     struct AdmissionCoins {
         prevouts: RwLock<Vec<(OutPoint, TxOut)>>,
@@ -632,6 +693,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: hashbrown::HashMap::new(),
                 csv_active: false,
+                next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
                 confirmed: false,
             })
         }
@@ -684,6 +746,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         ));
         let publisher = Arc::new(RecordingPublisher::default());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -710,8 +773,13 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         ));
         let followers = followers_with_gateway(&gateway);
+        // Fresh-submission clock: post-commit expiry runs against the wall
+        // clock, so orphan arrivals and retries must carry real time; an epoch
+        // timestamp would expire the retried commit immediately after admission.
+        let now = bitcoin_rs_primitives::unix_time_secs();
         let parent = Network::Regtest.genesis_block().txs[0].txid();
         let available = orphan_child(OutPoint::new(parent, 0));
         let missing = orphan_child(OutPoint::new(Hash256::from_le_bytes(&[43; 32]).into(), 0));
@@ -738,7 +806,7 @@ mod tests {
                     Arc::clone(orphan),
                     AdmissionOrigin::Peer(announcer),
                     None,
-                    0,
+                    now,
                     &chain,
                 ),
                 Ok(SubmitOutcome::Held { .. })
@@ -762,14 +830,14 @@ mod tests {
         followers.on_snapshot();
         // The queued claim must select a still-live announcer after the
         // original connection leaves, without losing the resident body.
-        gateway.maintain_orphans(1, [replacement, missing_source]);
-        assert_eq!(gateway.retry_orphans(&chain, 1), []);
+        gateway.maintain_orphans(now, [replacement, missing_source]);
+        assert_eq!(gateway.retry_orphans(&chain, now), []);
         assert!(gateway.read().is_empty());
         assert_eq!(gateway.orphan_count(), 2);
         assert_eq!(gateway.read().sequence_number(), 0);
         fence.finish()?;
 
-        let retries = gateway.retry_orphans(&chain, 2);
+        let retries = gateway.retry_orphans(&chain, now);
         assert_eq!(retries.len(), 2, "one retry per resident witness identity");
         let accepted = retries
             .iter()
@@ -790,7 +858,7 @@ mod tests {
             Some(missing.as_ref())
         );
         assert_eq!(gateway.read().sequence_number(), 1);
-        assert_eq!(gateway.retry_orphans(&chain, 3), []);
+        assert_eq!(gateway.retry_orphans(&chain, now), []);
         Ok(())
     }
 
@@ -804,8 +872,12 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         ));
         let followers = followers_with_gateway(&gateway);
+        // Fresh-submission clock: see the snapshot-retry test above; epoch
+        // timestamps would expire the retried commit under the wall clock.
+        let now = bitcoin_rs_primitives::unix_time_secs();
         let block = Network::Regtest.genesis_block();
         let parent = block.txs[0].txid();
         let outpoint = OutPoint::new(parent, 0);
@@ -820,7 +892,7 @@ mod tests {
                 Arc::clone(&child),
                 AdmissionOrigin::Peer(source),
                 None,
-                0,
+                now,
                 &chain,
             ),
             Ok(SubmitOutcome::Held {
@@ -835,7 +907,7 @@ mod tests {
                 Arc::new(rejected),
                 AdmissionOrigin::Peer(source),
                 None,
-                0,
+                now,
                 &chain,
             ),
             Err(SubmitError::Policy(_)),
@@ -868,7 +940,7 @@ mod tests {
             },
         )];
         assert!(gateway.stable_generation().is_none());
-        assert_eq!(gateway.retry_orphans(&chain, 1), []);
+        assert_eq!(gateway.retry_orphans(&chain, now), []);
         assert_eq!(
             gateway.get_tx_by_wtxid(child.wtxid()).as_ref(),
             Some(child.as_ref())
@@ -877,7 +949,7 @@ mod tests {
         assert_eq!(gateway.read().sequence_number(), 0);
 
         change.finish()?;
-        let retries = gateway.retry_orphans(&chain, 2);
+        let retries = gateway.retry_orphans(&chain, now);
         assert_eq!(retries.len(), 1);
         assert_eq!(retries[0].source, source);
         assert_eq!(retries[0].txid, child.txid());
@@ -891,7 +963,7 @@ mod tests {
         assert!(gateway.read().contains_txid(&child.txid()));
         assert_eq!(gateway.orphan_count(), 0);
         assert_eq!(gateway.read().sequence_number(), 1);
-        assert_eq!(gateway.retry_orphans(&chain, 3), []);
+        assert_eq!(gateway.retry_orphans(&chain, now), []);
         Ok(())
     }
 
@@ -913,6 +985,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         ));
         let followers = followers_with_gateway(&gateway);
         let active = gateway.begin_chain_change()?;

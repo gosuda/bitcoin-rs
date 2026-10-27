@@ -8,7 +8,7 @@
 //! implications. The kernel must apply them before masking out policy bits.
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_consensus::kernel::BlockParse;
+use bitcoin_rs_consensus::kernel::{BlockParse, BlockScriptSource};
 use bitcoin_rs_consensus::verify_tx::{
     BlockScriptChecks, prepare_block_script_checks, verify_prepared_units,
 };
@@ -74,7 +74,7 @@ impl WitnessFixture {
         }
     }
 
-    fn block(&self, engine: ValidationEngine) -> Result<BlockParse, ConsensusError> {
+    fn block(&self, engine: ValidationEngine) -> Result<BlockScriptSource, ConsensusError> {
         let block = Block {
             header: Header {
                 version: 1,
@@ -83,13 +83,15 @@ impl WitnessFixture {
             },
             txs: vec![self.tx.clone()],
         };
-        BlockParse::parse(&consensus_bytes(&block), engine)
+        BlockParse::parse(&consensus_bytes(&block), engine)?
+            .into_parts(&block.txs)
+            .map(|(source, _)| source)
     }
 
     fn prepare<'b>(
         &'b self,
         flags: VerifyFlags,
-        block: &'b BlockParse,
+        block: &'b BlockScriptSource,
     ) -> Result<BlockScriptChecks<'b>, ConsensusError> {
         let txs = core::slice::from_ref(&self.tx);
         let mut view =
@@ -100,7 +102,7 @@ impl WitnessFixture {
             .map(|(_, coin)| Some(coin.clone()))
             .collect();
         view.set_resolved(vec![resolved]);
-        prepare_block_script_checks(&mut view, 0, 0, flags, block)
+        prepare_block_script_checks(&mut view, 0, 0, flags, block, None)
     }
 }
 
@@ -143,7 +145,7 @@ fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), C
                 u32::from(witness_active),
             );
             let unit = fixture.prepare(flags, &block)?;
-            let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine);
+            let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine, None);
             let batched = verify_prepared_units(core::slice::from_ref(&unit))
                 .map_err(|failure| failure.error);
             for verdict in [single, batched] {
@@ -197,7 +199,7 @@ fn valid_witness_scripts_enforce_the_inclusive_sigop_limit() -> Result<(), Conse
                     expected,
                 );
                 assert_eq!(
-                    verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine),
+                    verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine, None),
                     expected,
                 );
                 let unit = fixture.prepare(flags, &block)?;

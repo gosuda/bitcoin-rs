@@ -41,6 +41,11 @@ pub(crate) enum Execution {
     Immediate,
     Blocking,
     Scan,
+    /// A call that waits only for some shapes of its parameters: a
+    /// `getblocktemplate` request whose first parameter is an object with a
+    /// string `longpollid` and a template mode (absent, null, or
+    /// `"template"`). Every other shape answers without waiting.
+    LongPoll,
 }
 
 impl Execution {
@@ -56,6 +61,18 @@ impl Execution {
                     .or_else(|| params.get("args").and_then(|args| args.get(0)))
                     .and_then(Value::as_str)
                     == Some("start")
+            }
+            Self::LongPoll => {
+                let Some(options) = params.get(0) else {
+                    return false;
+                };
+                if !options.is_object() {
+                    return false;
+                }
+                let mode = options.get("mode");
+                let template =
+                    mode.is_none_or(|mode| mode.is_null() || mode.as_str() == Some("template"));
+                template && options.get("longpollid").is_some_and(Value::is_str)
             }
         }
     }
@@ -83,6 +100,13 @@ const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = Some(util::getzmqnotifications);
 #[cfg(not(feature = "zmq"))]
 const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = None;
 
+#[cfg(feature = "silent-payments")]
+const BLOCK_TWEAKS_HANDLER: Option<HandlerFn> =
+    Some(crate::handlers::silent_payments::getblocktweaks);
+
+#[cfg(not(feature = "silent-payments"))]
+const BLOCK_TWEAKS_HANDLER: Option<HandlerFn> = None;
+
 /// Declares both `REGISTRY` and [`MANIFEST`] from one set of row literals
 /// so a method is declared and bound in a single source location.
 macro_rules! declare_rows {
@@ -93,6 +117,9 @@ macro_rules! declare_rows {
     };
     (@handler $handler:expr, Scan) => {
         match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
+    };
+    (@handler $handler:expr, LongPoll) => {
+        match $handler { Some(handler) => Some(Dispatch::Immediate(handler)), None => None }
     };
     (@handler $handler:expr $(, $execution:ident)?) => {
         match $handler { Some(handler) => Some(Dispatch::Immediate(handler)), None => None }
@@ -143,6 +170,7 @@ macro_rules! declare_rows {
 }
 
 declare_rows! {
+    "getblocktweaks", SurfaceKind::Rpc, Status::Extension, "silent-payments", "", "Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md.", "0.14.0", BLOCK_TWEAKS_HANDLER;
     // -- JSON-RPC: shipped methods (registration order) --------------
     "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);
@@ -154,7 +182,7 @@ declare_rows! {
     "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", Some(chain::getblock);
     "getblockheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockheader);
     "getblockstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockstats);
-    "verifychain", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Levels 3 and 4 omit Core's block disconnect and reconnect checks; level 3 behaves as level 2 and level 4 does not replay the UTXO set (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::verifychain);
+    "verifychain", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Level 0 reads and decodes every requested non-genesis body and confirms it is the block the header chain names; level 1 also checks proof of work and the consensus-owned context-free body rules (stripped size, coinbase/transaction structure, money ranges, legacy sigops); level 2 also decodes the undo record; levels 3 and 4 run the level-2 checks and do not replay disconnect or reconnect. The answer is false for any damaged block or undo record and for windows this node does not hold (pruned, snapshot-only, unreadable or missing bodies) or skips on process shutdown mid-walk, matching Core's boolean failure for missing history rather than an incomplete-verification error for that case. Cancellation and recovery closure are -1 errors, not false: a triggered request latch answers -1 Block verification interrupted and a chainstate closed for recovery answers -1 Chainstate is unavailable for verification, including a closure that lands mid-walk or over an empty window. One owner serves RPC and startup; startup checks the last six blocks one level stronger, including witness commitments (crates/chainstate/src/verify.rs). See docs/contracts/external-api.md#block-database-verification.", "0.4.0", Some(chain::verifychain), Blocking;
     "gettxoutsetinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::gettxoutsetinfo);
     "getindexinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getindexinfo);
     "pruneblockchain", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::pruneblockchain);
@@ -164,13 +192,13 @@ declare_rows! {
     "gettxout", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout);
     "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof);
     "verifytxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::verifytxoutproof);
-    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported.", "0.4.0", Some(tx::sendrawtransaction);
-    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported.", "0.4.0", Some(tx::testmempoolaccept);
+    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported.", "0.4.0", Some(tx::sendrawtransaction);
+    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported.", "0.4.0", Some(tx::testmempoolaccept);
     "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction);
     "createrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface.", "0.4.0", Some(tx::createrawtransaction);
     "combinepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::combinepsbt);
     "finalizepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::finalizepsbt);
-    "getmempoolinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md.", "0.4.0", Some(mempool::getmempoolinfo);
+    "getmempoolinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The rolling minimum fee follows Core eviction/trim bumps and post-block decay, measured against total virtual size. See docs/policies/mempool-policy.md.", "0.4.0", Some(mempool::getmempoolinfo);
     "getmempoolentry", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolentry);
     "gettxspendingprevout", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Mempool lookup and options follow Core 31.1 without txospenderindex. After named binding, missing outputs and excess positional arguments use local -32602 shape errors. Core uses -1 help for no arguments/excess arity but -3 for an outputs hole created by named options; explicit null matches Core -3. Name and collision errors retain Core precedence. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot.", "0.11.0", Some(mempool::gettxspendingprevout);
     "getrawmempool", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool);
@@ -198,7 +226,7 @@ declare_rows! {
     "clearbanned", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::clearbanned);
     "setnetworkactive", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::setnetworkactive);
     "getnodeaddresses", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getnodeaddresses);
-    "getblocktemplate", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "BIP22/BIP23 template: client must advertise segwit (and signet on signet); signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex.", "0.4.0", Some(mining::getblocktemplate);
+    "getblocktemplate", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "BIP22/BIP23 template: client must advertise segwit (and signet on signet); signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex.", "0.4.0", Some(mining::getblocktemplate), LongPoll;
     "getmininginfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (scripts-valid), including after a later reorg, is duplicate.", "0.4.0", Some(mining::submitblock);
     "submitheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "See API-13 in docs/contracts/external-api.md for submitheader behavior.", "0.4.0", Some(mining::submitheader);
@@ -331,4 +359,70 @@ declare_rows! {
     "rawblock", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawblock endpoint.", "0.4.0", None;
     "rawtx", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawtx endpoint.", "0.4.0", None;
     "sequence", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs).", "0.4.0", None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonic_rs::json;
+
+    #[test]
+    fn scan_start_and_gbt_long_poll_are_blocking() {
+        for params in [
+            json!(["start", []]),
+            json!({"action":"start","scanobjects":[]}),
+            json!({"args":["start",[]]}),
+        ] {
+            assert!(blocking_request(
+                &json!({"method":"scantxoutset","params":params})
+            ));
+        }
+        for params in [
+            json!(["status"]),
+            json!(["abort"]),
+            json!({"action":"status"}),
+        ] {
+            assert!(!blocking_request(
+                &json!({"method":"scantxoutset","params":params})
+            ));
+        }
+        // A template request that waits on a string `longpollid` holds a
+        // blocking worker; every other shape answers without waiting.
+        for params in [
+            json!([{"longpollid": "x"}]),
+            json!([{"longpollid": "bogus"}]),
+        ] {
+            assert!(blocking_request(
+                &json!({"method":"getblocktemplate","params":params})
+            ));
+        }
+        for params in [
+            json!([]),
+            json!([{"rules": ["segwit"]}]),
+            json!([{"longpollid": null}]),
+            json!([{"longpollid": 1}]),
+            json!([{"mode": "proposal", "data": "00", "longpollid": "x"}]),
+            json!([{"mode": "bogus", "longpollid": "x"}]),
+            json!([{"mode": "template", "longpollid": 1}]),
+        ] {
+            assert!(
+                !blocking_request(&json!({"method":"getblocktemplate","params":params})),
+                "{params:?} must not hold a blocking worker"
+            );
+        }
+    }
+
+    #[test]
+    fn tip_waits_are_blocking_requests() {
+        for (method, params) in [
+            ("waitfornewblock", json!([])),
+            ("waitforblock", json!(["00".repeat(32)])),
+            ("waitforblockheight", json!([1])),
+        ] {
+            assert!(
+                blocking_request(&json!({"method": method, "params": params})),
+                "{method} must be classified as a blocking request"
+            );
+        }
+    }
 }

@@ -263,7 +263,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   accessor is a pure read, and the tip publication cell is only shareable
   through `&mut BlockTree`. `StableRead` excludes authoritative transitions
   for as long as a read that needs one coherent chainstate runs; its only
-  verbs are `lock` and `try_lock`, it hands back an opaque guard, and it has
+  production verbs are `lock` and bounded `try_lock_for` (zero timeout for an
+  immediate attempt), it hands back an opaque guard, and it has
   no way to reveal its matching `TransitionAuthority` — the role chainstate
   and destructive pruning hold across a mutation. `NodeState::open` mints one
   `TransitionDomain` for that node and distributes matching roles to its

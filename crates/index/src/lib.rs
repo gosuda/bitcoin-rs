@@ -37,7 +37,7 @@ pub use index::{
 pub use query_api::{
     CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,
     ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 pub use types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow, ScriptLiveRow,

@@ -22,13 +22,14 @@ use crate::inv::MAX_INV_PER_MSG;
 /// Latest protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 70_016;
 
-/// Maximum accepted payload length for one v1 network message.
-pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+/// Maximum payload length of one network message on either transport: Bitcoin
+/// Core's `MAX_PROTOCOL_MESSAGE_LENGTH`. No block serializes above it.
+pub const MAX_MESSAGE_PAYLOAD: usize = 4_000_000;
 /// Maximum control messages coalesced into one vectored write.
 pub(crate) const MAX_WRITE_BURST: usize = 8;
 
 /// Maximum number of headers accepted in one `headers` message.
-const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
+pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 /// Maximum block locator hashes accepted in one locator-based request.
 pub const MAX_LOCATOR_HASHES: usize = 101;
@@ -268,9 +269,8 @@ pub enum PeerError {
         /// Actual magic bytes.
         actual: Magic,
     },
-    /// A payload, declared by a peer or about to be sent, exceeds its
-    /// transport's bound: [`MAX_MESSAGE_PAYLOAD`] for a v1 frame, 4,000,000
-    /// bytes for a BIP324 packet.
+    /// A payload, declared by a v1 frame header or about to be sent on either
+    /// transport, exceeds [`MAX_MESSAGE_PAYLOAD`].
     #[error("payload length {0} exceeds the transport's payload bound")]
     PayloadTooLarge(usize),
     /// Payload checksum did not match the header checksum.
@@ -299,9 +299,13 @@ pub enum PeerError {
 }
 
 impl PeerError {
+    /// Attributes a receive failure to the remote, except I/O, transport
+    /// failures and a frame under another network's magic. Core closes a
+    /// transport on a wrong message start without `Misbehaving`, and a BIP324
+    /// key read by a node with v2 off arrives exactly this way.
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) => error,
+            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -445,18 +449,20 @@ pub(crate) fn write_frame<W: Write + ?Sized>(
     Ok(frame.wire_len())
 }
 
-/// Writes encoded frames in one vectored pass and returns each frame's wire
-/// length, in order, so the writer can release the budget that admitted it.
+/// Writes encoded frames in one vectored pass.
+///
+/// The caller owns each frame's outbound charge and releases it by dropping
+/// the queued frame; this function reports no lengths for accounting.
 pub(crate) fn write_frames<W: Write + ?Sized>(
     writer: &mut W,
     frames: &[FramedMessage],
-) -> Result<Vec<usize>, PeerError> {
+) -> Result<(), PeerError> {
     let mut slices = Vec::with_capacity(frames.len().saturating_mul(2));
     for frame in frames {
         frame.push_slices(&mut slices);
     }
     write_all_vectored(writer, &mut slices)?;
-    Ok(frames.iter().map(FramedMessage::wire_len).collect())
+    Ok(())
 }
 
 /// Write a Bitcoin v1 network message.
@@ -585,6 +591,7 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    // Core refuses a v1 message above this bound before reading its body.
     if payload_len > MAX_MESSAGE_PAYLOAD {
         return Err(PeerError::PayloadTooLarge(payload_len));
     }

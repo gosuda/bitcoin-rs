@@ -1031,6 +1031,7 @@ mod manifest_tests {
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(observer),
             bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
         );
         (gateway, publisher)
     }
@@ -1088,7 +1089,7 @@ mod manifest_tests {
             .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&mined))
             .expect("in");
         publisher.sequence_bodies.lock().clear();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8, 1);
         assert!(
             publisher.sequence_bodies.lock().is_empty(),
             "Core suppresses `R` on block inclusion; the block `C` event covers it"
@@ -1113,6 +1114,7 @@ mod manifest_tests {
             }))),
             Some(observer),
             bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
         );
         let low = MempoolEntry::new(std::sync::Arc::new(sequence_tx(5)), 100, 100, 1, 7, 0);
         let high = MempoolEntry::new(std::sync::Arc::new(sequence_tx(6)), 100, 900, 1, 7, 0);
@@ -1166,6 +1168,7 @@ mod manifest_tests {
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(std::sync::Arc::new(composite) as std::sync::Arc<dyn MempoolObserver>),
             bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
         );
         gateway
             .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&sequence_tx(7)))

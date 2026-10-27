@@ -97,9 +97,18 @@ fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn s
         typed(&handler.dispatch("getchaintxstats", &json!([]))?)?;
     assert_eq!(stats.window_final_block_height, 42);
 
+    // The synthetic tip above has no ancestry or bodies and cannot certify
+    // verification. An empty applied chain has a legitimately empty window.
+    let empty = Handler::new(Arc::new(Context::new()));
+    let verify: corepc_types::v31::VerifyChain =
+        typed(&empty.dispatch("verifychain", &json!([0, 6]))?)?;
+    assert!(verify.0);
+
     let verify: corepc_types::v31::VerifyChain =
         typed(&handler.dispatch("verifychain", &json!([0, 6]))?)?;
-    assert!(verify.0);
+    // The fixture has an applied tip but no chain control: nothing verifies
+    // the chain, so it cannot be declared verified.
+    assert!(!verify.0);
 
     let at_tip: corepc_types::v31::GetBlockHash =
         typed(&handler.dispatch("getblockhash", &json!([42]))?)?;
@@ -329,6 +338,8 @@ impl MiningControl for CompatMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {}
 
     fn generate(
         &self,

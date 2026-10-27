@@ -36,6 +36,7 @@ its end-state tables is a required contract value, not a measurement, and its
 | --- | --- |
 | [end-to-end-sync.md](end-to-end-sync.md) | End-to-end sync performance cells |
 | [muhash-rpc.md](muhash-rpc.md) | MuHash/gettxoutsetinfo RPC cells |
+| [measured-campaign.md](measured-campaign.md) | Registered per-lever campaign runner, analyzer, counted sampling, and control trees |
 | [native-validation-default.md](native-validation-default.md) | Native-validation promotion record (verdict historical since #1117) |
 | [offline-full-validation.md](offline-full-validation.md) | Offline full-validation campaign |
 | [p2p-loopback.md](p2p-loopback.md) | P2P loopback measurement |
@@ -43,4 +44,4 @@ its end-state tables is a required contract value, not a measurement, and its
 | [storage-footprint.md](storage-footprint.md) | Storage-footprint budget cells |
 | [utxo-memory.md](utxo-memory.md) | UTXO memory cells |
 | [index-rollback-rebuild-cutover.md](index-rollback-rebuild-cutover.md) | Rollback-versus-rebuild cutover decision |
-| [data/](data/) | Retained evidence records: `overhaul-kernel-baseline-20260829`, `overhaul-native-apply-20260902`, `overhaul-signed-spend-20260904`, `comparator-lanes-20260913` |
+| [data/](data/) | Retained evidence records: [`overhaul-kernel-baseline-20260829`](data/overhaul-kernel-baseline-20260829.md), [`overhaul-native-apply-20260902`](data/overhaul-native-apply-20260902.md), `overhaul-signed-spend-20260904`, [`comparator-lanes-20260913`](data/comparator-lanes-20260913.md) |

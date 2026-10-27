@@ -8,11 +8,18 @@ services:
     image: bitcoin-rs:btc-mempool-explorer-local
     init: true
     stop_grace_period: 5m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       BITCOIN_RS_NETWORK: "${BITCOIN_RS_NETWORK:-mainnet}"
       BITCOIN_RS_STORAGE_BACKEND: fjall
       BITCOIN_RS_RPC_USER: "${BITCOIN_RS_RPC_USER:-mempool}"
-      BITCOIN_RS_RPC_PASSWORD: "${BITCOIN_RS_RPC_PASSWORD:-change-me}"
+      BITCOIN_RS_RPC_PASSWORD: "${BITCOIN_RS_RPC_PASSWORD:?Set BITCOIN_RS_RPC_PASSWORD to a unique secret}"
+      # The image keeps RPC on loopback; the api service reaches it over the
+      # compose network, and the host port is published to 127.0.0.1 only.
+      BITCOIN_RS_RPC_BIND: "0.0.0.0:8332"
       BITCOIN_RS_TXINDEX: "true"
       BITCOIN_RS_SCRIPTINDEX: "true"
       BITCOIN_RS_LOG_LEVEL: "${BITCOIN_RS_LOG_LEVEL:-info}"
@@ -52,7 +59,7 @@ services:
       CORE_RPC_HOST: node
       CORE_RPC_PORT: "8332"
       CORE_RPC_USERNAME: "${BITCOIN_RS_RPC_USER:-mempool}"
-      CORE_RPC_PASSWORD: "${BITCOIN_RS_RPC_PASSWORD:-change-me}"
+      CORE_RPC_PASSWORD: "${BITCOIN_RS_RPC_PASSWORD:?Set BITCOIN_RS_RPC_PASSWORD to a unique secret}"
       DATABASE_ENABLED: "true"
       DATABASE_HOST: db
       DATABASE_DATABASE: mempool

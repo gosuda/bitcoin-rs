@@ -24,6 +24,7 @@ fn remaining(deadline: Instant) -> Result<Option<Duration>, Error> {
         .ok_or_else(|| Error::Protocol("write deadline reached ran past the deadline".to_owned()))
 }
 
+#[expect(clippy::expect_used, reason = "test evidence directory creation")]
 fn evidence_dir(name: &str) -> std::path::PathBuf {
     let dir = workspace().join("target").join(name);
     std::fs::create_dir_all(&dir).expect("evidence dir");

@@ -49,6 +49,22 @@ This page assigns ownership and cites proof under the
 - Parent requests validate the delivering connection and enqueue under the
   same peer-table authority that serializes replacement. Requests from an
   already cancelled lease enqueue nothing.
+- Every queued outbound message is paid for before it exists. A charge takes
+  one message and its full wire bytes from the connection's own budget and the
+  same bytes from the node's aggregate budget (`SharedOutboundBudget`, 64 MiB
+  per `P2pService`, strict: the pending total is never above the cap at any
+  instant). The charge has one owner at every moment (the reservation, then the
+  `QueuedFrame` carrying it through the lease's channel, then the writer's
+  burst) and is released exactly once when that owner drops, whether the frame
+  was written, refused, discarded with the channel, or drained at writer exit.
+  A bulk body reservation must also fit under the cap less one maximum frame.
+- A refused charge takes nothing. A refusal by the connection's own bounds
+  (`Local`) cancels the lease. A refusal by the node aggregate (`Shared`) is
+  backpressure only: the lease stays live, and the sender defers the request,
+  parks the unserved items, returns the claim to its owner, or retries on the
+  next tick. The aggregate never ends a session, and the time it refuses a
+  session is a stall that is not silence for keepalive, not the age of a
+  parked request, and not charged to a compact-filter request's allowance.
 - Scheduler ownership is keyed on connection identity. Every tick runs two
   sweep passes over the peer table's live session set, and a ready event
   from a live connection runs one; a stale ready event runs none. Each
@@ -292,7 +308,7 @@ the slot, and a same-address replacement that keeps its own identity.
 Capacity and frontier gates
 on the owned-fetch mark are covered in
 `crates/p2p/src/download_window.rs` tests; fault-path gate cleanup is
-covered in `crates/p2p/src/sync/tests/transitions_4.rs`.
+covered in `crates/p2p/src/sync/tests/header_rotation.rs`.
 `crates/p2p/src/listener.rs` test `send_block_forwards_the_blocks_header`
 covers the delivery-path forward.
 
@@ -356,6 +372,11 @@ covers the delivery-path forward.
   Each punishment increments `node.sync.invalid_block_disconnects`. A
   `BodyMutated` or `Operational` settlement failure stays retryable and
   non-punitive, and a `Fatal` settlement halts admission without peer blame.
+  `BodyMutated` names only the delivered bytes, so the header stays valid and
+  the body is fetched again: a Merkle or witness mismatch, and a body without a
+  coinbase that holds a 64-byte witness-stripped transaction (`SixtyFourByteMutation`; inner
+  Merkle nodes posing as transactions, CVE-2017-12842, Core `IsBlockMutated`).
+  Any other body without a coinbase is `Permanent`.
   A body that fails header binding before it can be staged keeps its
   existing delivery-rejection policy.
 - **Unresolved-body quota**: a body staged while the tree cannot resolve its
@@ -372,27 +393,51 @@ test `announced_near_tip_is_direct_fetched_before_tick`;
 `crates/p2p/src/listener.rs` test
 `unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
 tests `permanent_consensus_body_disconnects_delivering_source` and
-`binding_and_operational_failures_do_not_disconnect`; and
-`crates/p2p/src/sync/tests/transitions_6.rs` test
-`reconcile_forgets_window_state_only_when_connection_identity_changes`.
+`binding_and_operational_failures_do_not_disconnect`;
+`crates/p2p/src/sync/tests/window_recovery.rs` test
+`reconcile_forgets_window_state_only_when_connection_identity_changes`;
+`crates/p2p/src/compact_blocks.rs` tests
+`sixty_four_byte_transaction_without_coinbase_completion_falls_back` and
+`sixty_four_byte_transaction_completed_by_blocktxn_falls_back`, which prove a
+mutated body takes the full-block fallback with its header intact; and
+`crates/p2p/src/sync/tests/peer_fanout.rs` test
+`mutated_forward_body_preserves_descendant_for_retry`, which proves a mutated
+forward body is retried, never punished.
 
 ### `P2P-08`: Inbound admission and the outbound service gate
 
 - **Owner**: `PeerTable::try_register_inbound` (`crates/p2p/src/peer_table.rs`)
-  owns the capacity decision, and the accept loop in `serve`
-  (`crates/p2p/src/listener.rs`) is its only inbound caller.
+  owns the capacity and eviction decision, `select_inbound_to_evict`
+  (`crates/p2p/src/eviction.rs`) owns the choice of connection, and the accept
+  loop in `serve` (`crates/p2p/src/listener.rs`) is the only inbound caller.
   `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
   ordinary outbound desirable-service predicate.
 - The accept loop reserves the connection's inbound lease before it spawns the
-  handshake thread, and the reservation and the live inbound count are one
-  table write operation. A socket that arrives at `max_inbound =
-  max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots`
-  is closed with no lease and no thread (Core derives the same remainder at
-  `bitcoin-core/src/net.h:1124-1127` and applies it at `net.cpp:1838-1845`). A
-  replacement at an address already in the table is admitted: it takes the slot
-  its predecessor held. The live count is always derived from the live entry
-  set, so no independent counter can drift from it. A failed spawn releases
-  the reservation it took.
+  handshake thread, and the reservation, the live inbound count and any
+  eviction are one table write operation. A socket that arrives at
+  `max_inbound = max_peer_connections - outbound_full_relay_slots -
+  outbound_block_relay_slots` first removes and cancels the inbound connection
+  chosen by a port of Core's `SelectNodeToEvict` (Core derives the same
+  remainder at `bitcoin-core/src/net.h:1118` and evicts at
+  `net.cpp:1819-1826`). Outbound and `NoBan` connections are never chosen.
+  Every read on an inbound socket fails once its lease is cancelled, so an
+  evicted connection stops even while its peer keeps trickling a payload,
+  as Core closes an evicted socket at once. When every candidate is protected,
+  or the address holds a live outbound connection the newcomer would also
+  replace, the socket is closed with no lease and no thread. A replacement at
+  an address already holding a live inbound connection is admitted without
+  eviction: it takes the slot its predecessor held. The live count is always
+  derived from the live entry set, so no independent counter can drift from
+  it. A failed spawn releases the reservation it took.
+- Eviction protects, in Core's order: four connections by a process-keyed
+  netgroup hash, the four that most recently delivered a transaction the
+  mempool accepted, up to eight block-relay-only connections with wanted
+  services that most recently delivered a committed block, the four that most
+  recently delivered a committed block, and then half of the rest by uptime,
+  up to a quarter of the candidates reserved for localhost. It then evicts the
+  newest connection of the netgroup with the most remaining candidates.
+  `docs/policies/p2p-compatibility.md` section 7 item 12 lists where this
+  differs from Core.
 - `PeerTable::set_network_active` and conditional inbound/outbound socket
   registration share the table write lock. If disable wins first, registration
   returns no lease without replacement or capacity mutation. If registration
@@ -424,6 +469,14 @@ Proof: `crates/p2p/src/peer_table.rs` tests
 `network_disable_orders_before_or_after_inbound_and_outbound_admission` and
 `inactive_registration_never_mutates_or_returns_an_existing_lease` cover both
 admission orders, inactive identity/capacity guards and re-enable behavior.
+`one_host_filling_every_inbound_slot_gives_way_to_another_netgroup`,
+`noban_inbound_connections_are_never_evicted`,
+`a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` and
+`useful_transactions_and_blocks_protect_inbound_connections` cover eviction at
+the cap, and the `crates/p2p/src/eviction.rs` tests cover each protection step
+and the final netgroup choice. `crates/p2p/src/counters.rs` test
+`a_cancelled_stream_stops_a_payload_that_keeps_arriving` covers the read that
+ends with cancellation mid-payload.
 `crates/p2p/src/service.rs` tests
 `disable_during_outbound_tip_query_refuses_registration_before_handshake`,
 `ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp`,
@@ -545,9 +598,13 @@ pass pays per page.
   transport halves; `crates/p2p/src/bip324.rs` owns the key schedule, the
   ciphers, the handshake state machine, the packet reader, and the message
   type encoding.
-- **Off by default.** With `v2transport` off
-  (`P2pServiceConfig::v2_transport`), every connection is v1 and the node does
-  not advertise `NODE_P2P_V2`. With it on, the node advertises `NODE_P2P_V2`.
+- **Default**: the node runs with `v2transport` on, as Core's `-v2transport`
+  defaults on, and advertises `NODE_P2P_V2`; `P2pServiceConfig::v2_transport`
+  itself defaults off for direct `bitcoin-rs-p2p` users. With it off, every
+  connection is v1 and the node does not advertise `NODE_P2P_V2`. A peer that
+  opens with a v2 key then fails the v1 magic check and is disconnected
+  without discouragement, as Core closes a transport on a wrong message start
+  (`PeerError::inbound`).
 - **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
   `version` header under this node's magic hands those bytes to the v1
   decoder, a v1 `version` header under another magic is refused, and anything
@@ -570,6 +627,10 @@ pass pays per page.
   malformed message inside an authenticated packet keeps the v1 misbehavior
   rules. A message of an empty or undefined type is dropped without
   disconnecting.
+- **Observability**: the negotiated transport is published with the
+  handshake (`PeerInfo::transport`), and `getpeerinfo` reports it as Core
+  does: `transport_protocol_type` `v1` or `v2`, and for v2 the session id as
+  hex in byte order (empty for v1). Both ends of a session derive the same id.
 - **Bounds**: garbage is at most 4095 bytes; the terminator scan reads only up
   to the terminator's earliest possible end; contents above 1 + 12 +
   4,000,000 bytes are refused before their body is read, and a v2 payload is
@@ -579,30 +640,33 @@ pass pays per page.
 Proof: `crates/p2p/src/listener/v2_transport_tests.rs` tests
 `a_v2_listener_negotiates_bip324_with_a_v2_initiator`,
 `a_v2_listener_still_serves_a_v1_peer`, `an_outbound_v2_dial_negotiates_bip324`,
+`both_ends_publish_the_negotiated_v2_session`,
 `an_unanswered_v2_dial_retries_once_over_v1`, and
 `a_silent_responder_ends_at_the_handshake_deadline` cover negotiation over
 loopback sockets in both directions with the remote message loop answering
-over the session, v1 detection on a v2 listener, the single v1 retry against a
-v1-only listener, and the handshake deadline against a silent peer. The
+over the session, the session id both ends publish, v1 detection on a v2
+listener, the single v1 retry against a v1-only listener, and the handshake
+deadline against a silent peer. `crates/rpc/src/handlers/network.rs` test
+`getpeerinfo_reports_the_negotiated_transport` covers the RPC fields, and
+`crates/p2p/src/listener.rs` test
+`only_current_remote_protocol_faults_change_automatic_avoidance` covers the
+undiscouraged wrong magic. The
 `crates/p2p/src/bip324` unit tests pin the BIP vectors, the handshake
 misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
+`bin/bitcoin-rs/src/main.rs` test
+`v2_transport_defaults_on_and_disables_from_every_surface` pins the node
+default, and `docs/contracts/core-differential.md` CORE-06 owns the live Core
+31.1 run in both directions.
 
 ## Live gaps
-
-- **BIP324 default and interoperability**: `v2transport` stays off until a
-  live Bitcoin Core 31.1 run records v2 in both directions (#1503), and
-  `docs/policies/p2p-compatibility.md` still lists BIP324 as unsupported.
-  With v2 off, a peer that opens with a v2 key is read as a v1 header for
-  another network and treated as misbehavior, where Core only disconnects.
 
 - **Peer lifecycle boundary**: Header-request planning and getdata fan-out
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
   `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
   holds a shadow download window.
-- **Inbound eviction scoring**: Core makes room at the inbound cap by scoring
-  and disconnecting a peer (`AttemptToEvictConnection`,
-  `bitcoin-core/src/net.cpp:1695-1735`). This node refuses the new socket
-  instead; see `docs/policies/p2p-compatibility.md` section 7 item 12.
+- **Inbound eviction protections**: eviction at the inbound cap lacks Core's
+  minimum-ping protection, because no ping round trip is measured; see
+  `docs/policies/p2p-compatibility.md` section 7 item 12.
 
 ## Proven by
 
@@ -613,6 +677,13 @@ misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
   block encodings against the independent rust-bitcoin envelope, request
   order, retained body immutability, headroom, corruption, and stale reads
   (P2P-01).
+- `crates/p2p/src/connection.rs` tests `strict_cap_no_empty_queue_bypass`,
+  `reservation_is_the_admission`, `concurrent_reservations_never_exceed_cap`,
+  and `credit_drop_exactly_once`, and
+  `crates/p2p/src/listener/aggregate_budget_tests.rs` tests
+  `request_deferred_not_reply` and `stall_exclusion_removes_only_shared_refusals`,
+  cover the strict aggregate, release on every exit path and the
+  no-disconnect-on-aggregate-refusal rule (P2P-02).
 - `crates/p2p/src/inv.rs` test
   `cancelled_missing_parent_source_does_not_enqueue_a_request` and
   `crates/p2p/src/peer_table.rs` test
@@ -644,12 +715,13 @@ misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
   pin the identity-checked, monotonic credit mutation and retained tip
   evidence (P2P-03).
-- `crates/p2p/src/sync/tests/transitions_1.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
-  (at-tip request eligibility after catch-up, P2P-03/#617) and
+- `crates/p2p/src/sync/tests/header_progress.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
+  (at-tip request eligibility after catch-up, P2P-03/#617),
   `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
   earn credit on the reselected best chain),
-  `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
-  and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
+  and `losing_fork_credit_survives_winner_disconnect` (retained branch evidence).
+- `crates/p2p/src/sync/tests/headroom_throttling.rs` tests
+  `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
   hedge eligibility).
 - `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
   `from_connected_disables_nagle`: the counting wrapper forwards one

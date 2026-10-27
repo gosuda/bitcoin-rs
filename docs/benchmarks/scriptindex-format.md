@@ -105,11 +105,14 @@ The audit exercises the read-path operations that ScriptIndex callers use:
 |---|---|---|
 | Funding row scan | `iter_funding_rows` | `Funding` |
 | Spending row scan | `iter_spending_rows` | `Spending` |
-| Txid row scan | `iter_txid_rows` | `TxConfirmed` |
-| History resolve | `resolve_script_history` | `Funding` |
-| Unspent resolve | `resolve_unspent_outputs_with_height` | `Funding` |
+| Txid row scan (retired) | `iter_txid_rows`, removed earlier (3462e5ce2) | `TxConfirmed` |
+| History resolve (retired) | `resolve_script_history`, removed with the lenient Indexer resolve path | `Funding` |
+| Unspent resolve (retired) | `resolve_unspent_outputs_with_height`, removed with the lenient Indexer resolve path | `Funding` |
 
 The query mix is read-only. No write-path measurement is in scope.
+
+The derived index query engine is the only read path that proves a complete
+answer. The `Indexer` row scans above stay as low-level reads.
 
 ### Materiality rule
 
@@ -188,7 +191,7 @@ spend path the same one-transaction read as funding.
 **Verdict: keep LE. Sort in the reader.**
 
 > Superseded by on-disk format 5: the height suffix is now big-endian, so
-> store iteration already arrives in numeric height order. The reader-side
+> store iteration already arrives in numeric height order. The query engine's
 > numeric sort stays as a contract guarantee. The frozen verdict above is
 > retained as the audit trail for the format-4 decision.
 
@@ -198,7 +201,7 @@ compatibility constraint: derived ScriptIndex bytes are disposable.
 The pick is keep-LE because the reader already restores numeric order
 cheaply, and BE would buy nothing the API does not already guarantee:
 
-1. **The sort cost is negligible.** The reader sorts a `Vec` of
+1. **The sort cost is negligible.** The reader sorted a `Vec` of
    `ScriptHistoryEntry` (two `u32` fields each) or `(Txid, u32, u64, u32)`
    tuples by height. For a typical scripthash with 10–100 funding rows, this
    is a few hundred nanoseconds — invisible against the block-fetch I/O that
@@ -208,11 +211,7 @@ cheaply, and BE would buy nothing the API does not already guarantee:
    from the reference design for no measurable query benefit.
 
 The format-5 height suffix is big-endian, so store iteration order already
-is numeric height order within one 8-byte prefix. The high-level resolvers
-(`resolve_script_history`, `resolve_unspent_outputs_with_height`) return
-entries sorted by numeric height. The raw `iter_funding_rows`,
-`iter_spending_rows`, and `iter_txid_rows_with_values` functions return rows in store
-order, so callers get chronological order without sorting.
+is numeric height order within one 8-byte prefix. The raw `iter_funding_rows` and `iter_spending_rows` functions return rows in store order, so callers get chronological order without sorting.
 
 #### Q4: Historical per-CF logical cost
 

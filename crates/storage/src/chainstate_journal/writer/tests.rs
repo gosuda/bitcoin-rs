@@ -160,7 +160,7 @@ fn open_fresh(tag: &str, store: Arc<CountingStore>) -> TestResult<JournalWriter<
 }
 
 #[cfg(test)]
-mod persistence_1;
+mod durability_boundaries;
 
 #[cfg(test)]
-mod behavior_1;
+mod segment_lifecycle;

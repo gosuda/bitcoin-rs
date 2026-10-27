@@ -4,6 +4,8 @@
 
 The repository development toolchain is `stable`; the workspace MSRV is Rust `1.99.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
 
+The default build compiles bundled ZeroMQ from source, so it needs C and C++ compilers plus `ar` (`build-essential` on Debian/Ubuntu); no system ZeroMQ headers, `pkg-config`, `cmake`, or `libsodium` are needed. A C compiler stays required without the `zmq` feature (vendored secp256k1 and mimalloc).
+
 The default binary is kernel-free. Building the optional `kernel` lane also needs CMake and Boost on Debian/Ubuntu:
 
 ```sh
@@ -20,7 +22,7 @@ Use a lane deliberately:
 | Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features --features fjall` | One storage backend, optional extensions off |
 | Kernel | `CARGO_TARGET_DIR=target/oracle cargo build --locked --release -p bitcoin-rs --features kernel` | Optional `bitcoinkernel` validation/oracle lane |
 
-Keep the kernel lane in a separate `CARGO_TARGET_DIR` when proving a kernel-free build. Experimental BIP324 v2 is in the tree behind `--v2transport` (off by default); v1 remains the default transport. See [bip-support.md](bip-support.md).
+Keep the kernel lane in a separate `CARGO_TARGET_DIR` when proving a kernel-free build. BIP324 v2 transport is on by default, as in Bitcoin Core; `--v2transport=false` keeps every connection on v1. See [bip-support.md](bip-support.md).
 
 ## Configuration
 
@@ -52,6 +54,48 @@ export BITCOIN_RS_STORAGE_BACKEND=fjall
 
 RocksDB is a non-default backend used as a shipped alternative and comparison engine.
 
+## Mempool persistence
+
+Mempool persistence is on by default. Clean shutdown saves eligible mempool transactions to
+`mempool-snapshot.dat` in the node data directory. Startup rechecks those
+candidates against recovered Chainstate and current policy before serving
+requests. Admission ages and operator fee deltas are retained; membership,
+derived fees and dependencies are recomputed. Startup logs distinguish no
+file, full/partial restore and a rejected file.
+
+To start with a fresh pool while preserving the snapshot, set
+`--persist-mempool=false`, `BITCOIN_RS_PERSIST_MEMPOOL=false`, or
+`persist_mempool = false` in TOML. This disables saving as well. A corrupt,
+unknown-version or wrong-network ordinary snapshot is preserved at startup
+and moved intact into a unique `mempool-snapshot-rejected-*` directory when
+the next clean shutdown publishes a fresh snapshot. Snapshots are bounded
+by a byte budget, defaulting to 64 MiB. Raise it with
+`--mempool-snapshot-max-mb=256`, `BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB=256`, or
+TOML `mempool_snapshot_max_mb = 256`. There is no separate 100,000-transaction
+cap. Choose enough space for serialized transactions and metadata to preserve
+the entire live pool; the same budget applies on read. Raising it also raises
+the possible memory and I/O cost. Larger pools save complete connected
+families until the first family does not fit and log saved/omitted counts; all operator fee deltas
+are retained, or saving fails if those overlays alone exceed the bound.
+Restore excludes candidates older than fourteen days and runs within a cooperative
+timeout, defaulting to at least 60 seconds and scaling dynamically with the configured byte budget
+(`max(60, mempool_snapshot_max_mb)`). Raise it with `--mempool-snapshot-restore-timeout-secs=180`,
+`BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS=180`, or TOML
+`mempool_snapshot_restore_timeout_secs = 180`. Multi-generational CPFP packages (e.g.
+grandparent, parent, child) are restored atomically in topological order within package
+standardness limits. Candidate records persist precomputed BIP16/BIP141 SigOp costs
+(version 2 format), validated upfront against standardness limits before script execution.
+Note that mempool persistence is an operational optimization for clean shutdowns;
+abrupt termination (power loss, crash, kill) does not record a snapshot.
+Locally submitted transactions awaiting initial broadcast retain that status
+across restart if re-admitted. The existing P2P relay worker retries them in
+bounded batches, including after absent peers or queue saturation. A successful
+getdata body response completes initial broadcast; `getmempoolentry.unbroadcast`
+and `getmempoolinfo.unbroadcastcount` report pending status. Other restored
+transactions are not automatically announced.
+Power-loss preservation and Core `savemempool`/`importmempool` compatibility
+are not provided by this initial implementation.
+
 ## Start the node
 
 ```sh
@@ -67,25 +111,42 @@ Important defaults:
 | storage backend | `fjall` |
 | RPC bind | `127.0.0.1:8332` on mainnet |
 | REST | off |
-| RPC basic auth | `bitcoin-rs` / `bitcoin-rs` unless cookie auth is configured |
+| RPC authentication | Fresh `.cookie` in the data directory (mode `0600` on Unix) |
 | dbcache | 450 MiB |
 | pruning | off |
+| mempool persistence | on |
 | txindex | off |
 | scriptindex | off |
 | fast sync | off |
 | metrics listener | off |
 | mining payout | unset |
 
-Change the default RPC credentials before exposing the port.
+RPC binds to loopback by default. A non-loopback RPC bind requires an
+explicit nonempty password (`--rpc-password` or `BITCOIN_RS_RPC_PASSWORD`)
+or an operator-supplied `--rpc-cookie` file. The generated cookie is
+rotated before each listener starts and cannot be used for a non-loopback
+bind without an explicit cookie-file configuration. The legacy public
+password `bitcoin-rs` is rejected as a Basic-auth password on every bind;
+an operator-supplied cookie file is used as written, so choose its secret
+yourself.
+
+The Docker image also keeps RPC on loopback. To serve RPC outside the
+container, explicitly set `BITCOIN_RS_RPC_BIND=0.0.0.0:8332` together
+with operator-specific credentials. Publish the port only to trusted
+clients; Basic auth is not encrypted without a TLS-terminating proxy.
 
 `--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
+
+The optional `silent-payments` build feature plus `--silent-payments` enables
+the authenticated, experimental `getblocktweaks` RPC. It needs retained certified
+block inputs rather than txindex; see [Silent Payments usage and limits](silent-payments.md).
 
 `--fast-sync` (also `BITCOIN_RS_FAST_SYNC` or `fast_sync` in TOML) relaxes the block-download policy: the node targets 32 full-relay outbound peers instead of 8 (its two block-relay-only slots are unchanged), fans block requests out as soon as two eligible outbound peers are connected instead of eight, and divides the 256-block download window across the eligible peers with a floor of 8 blocks per peer instead of 16 (two peers get 128 each; the 8-block floor is reached at 32 peers). Consensus validation is unchanged. The mode is opt-in and its throughput has not been measured against the default.
 
 ## Check progress
 
 ```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
+curl -s --user "$(cat .bitcoin-rs/.cookie)" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' \
   http://127.0.0.1:8332/
@@ -110,12 +171,16 @@ Example regtest startup:
 ```sh
 ./target/release/bitcoin-rs \
   --network regtest \
+  --p2p-listen 127.0.0.1:18444 \
+  --dns-seeds-enabled=false \
   --scriptindex \
   --data-dir .bitcoin-rs-regtest \
   --rpc-bind 127.0.0.1:18443
 ```
 
 The wallet-facing contract is [contracts/wallet-facing.md](contracts/wallet-facing.md).
+
+A Compose example runs the upstream mempool explorer against these endpoints: [btc-mempool-explorer](../tools/btc-mempool-explorer/README.md).
 
 ### REST
 
@@ -172,7 +237,7 @@ cargo build --release -p bitcoin-rs --features kernel
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
 ```
 
-Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)`, `kernel::verify_tx_scripts(tx, spent, flags, engine)`, and `verify_transaction(..., engine)` take a `bitcoin_rs_consensus::ValidationEngine` value at each call. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
+Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value, while `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&bitcoin_rs_script::SignatureCache>`. Pass `None` for uncached calls, or `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction, keeping `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
 
 ## Operator migration: validation engine
 
@@ -180,7 +245,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior: their defaults used to compile **and implicitly select** `kernel`, and now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must both enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI) — or, for a direct `bitcoin-rs-consensus` caller, pass `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
-- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --rpc-bind --p2p-listen` included).
+- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
 - `--validation-mode` / `validation_mode` (Full/AssumeValid/Fast) is the separate script-skip policy and is unchanged.
 
 ## More
@@ -188,3 +253,5 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - [README.md](README.md): documentation index and release gates
 - [contracts/](contracts/): normative contracts
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): development workflow
+- [Snapshot inspector](../tools/snapshot/README.md): inspect and verify Core snapshot files without starting a node
+- [Validation tooling](validation-tooling.md): evidence lanes behind the interfaces above

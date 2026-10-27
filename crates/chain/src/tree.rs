@@ -11,7 +11,6 @@ use crate::{
     node::{BlockHeader, BlockTreeNode, NodeId, NodeStatus},
 };
 
-#[path = "active_index.rs"]
 mod active_index;
 use active_index::ActiveHeightIndex;
 

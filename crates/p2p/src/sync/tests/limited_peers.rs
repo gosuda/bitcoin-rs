@@ -33,7 +33,7 @@ fn policy(ibd: Arc<InitialBlockDownload>, requested_height: u32) -> BlockDownloa
 }
 
 /// Everything the connection was sent so far.
-fn sent_messages(rx: &crossbeam_channel::Receiver<Message>) -> Vec<Message> {
+fn sent_messages(rx: &crate::test_support::MessageReceiver) -> Vec<Message> {
     rx.try_iter().collect()
 }
 

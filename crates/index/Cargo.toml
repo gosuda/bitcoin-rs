@@ -60,3 +60,4 @@ tempfile.workspace = true
 name = "history_resolve"
 harness = false
 required-features = ["rocksdb"]
+

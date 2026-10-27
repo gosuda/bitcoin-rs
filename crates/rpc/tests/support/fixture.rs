@@ -151,11 +151,13 @@ pub(crate) struct Fixture {
     /// The captured Core response tuple.
     pub core: HttpTuple,
     /// The pinned current bitcoin-rs tuple; required exactly when the
-    /// relation is a known gap.
+    /// relation is a known gap. Absent on exact fixtures, which pin Core only.
+    #[serde(default)]
     pub current: Option<HttpTuple>,
     /// How Core relates to live.
     pub relation: Relation,
     /// The single concrete gap identifier; required exactly for known gaps.
+    #[serde(default)]
     pub gap: Option<String>,
     /// The complete structural paths (from `structural_diff_paths`) at
     /// which the pinned Core and pinned current tuples diverge; required
@@ -173,7 +175,8 @@ pub(crate) struct Fixture {
 pub(crate) enum HeaderClass {
     /// Value must be present and equal on both sides.
     Exact,
-    /// Value is wall-clock or connection dependent: presence only.
+    /// Value is wall-clock or connection dependent: presence on the live
+    /// reply only.
     Volatile,
     /// Declared live divergence: values must be present and differ.
     Gap,
@@ -187,8 +190,9 @@ pub(crate) struct HeaderCheck {
     /// Names compared for exact structural equality.
     #[serde(default)]
     pub(crate) exact: Vec<String>,
-    /// Names whose value is wall-clock or connection dependent:
-    /// classified, presence-checked, deliberately not value-compared.
+    /// Names whose value is wall-clock or connection dependent: classified,
+    /// required on the live reply, deliberately not value-compared, and not
+    /// required on the pinned tuple.
     #[serde(default)]
     pub(crate) volatile: Vec<String>,
     /// Declared divergence names (known-gap fixtures only).
@@ -863,9 +867,10 @@ fn validate_provenance(
 }
 
 /// Every header name on the pinned side (current for a known gap, core for
-/// an exact relation) must be classified exactly once; exact and volatile
-/// names must be present on the pinned side, and gap names are only legal
-/// on known-gap fixtures and must be declared in `gap_paths`.
+/// an exact relation) must be classified exactly once; exact and gap names
+/// must be present on the pinned side, volatile names need not be, and gap
+/// names are only legal on known-gap fixtures and must be declared in
+/// `gap_paths`.
 fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
     let fail = |why: String| LoadError::Violation(format!("{}: {why}", path.display()));
     let pinned = match (&fixture.relation, &fixture.current) {
@@ -898,10 +903,15 @@ fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                     "header {name:?} is classified both {previous:?} and {class_name:?}"
                 )));
             }
-            if pinned
-                .headers
-                .iter()
-                .all(|(candidate, _)| !candidate.eq_ignore_ascii_case(&lower))
+            // A volatile name is transport or connection dependent, so the
+            // pinned tuple may omit it: a Core capture keeps only the headers
+            // its probe recorded. Exact and gap names need a pinned value to
+            // compare against.
+            if class_name != "volatile"
+                && pinned
+                    .headers
+                    .iter()
+                    .all(|(candidate, _)| !candidate.eq_ignore_ascii_case(&lower))
             {
                 return Err(fail(format!(
                     "header {name:?} is classified {class_name:?} but the pinned tuple \
@@ -1168,6 +1178,69 @@ mod tests {
             let mut fixture = original.clone();
             fixture["provenance"]["core_binary_sha256"] = Value::from(digest);
             assert_reference_rejected(&fixture, "pinned binary digest")?;
+        }
+        Ok(())
+    }
+
+    /// Step 13: the checked-in exact 401 fixture, whose pinned Core capture
+    /// omits the transport header, still passes when the live reply carries
+    /// it; the gate rejects a live reply that drops the declared volatile
+    /// header, the exact challenge, or the exact content type.
+    #[test]
+    fn exact_401_tuple_checks_volatile_presence_on_the_live_reply_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::compare::{LiveChain, compare};
+        use super::{BodyForm, Fixture, HttpTuple};
+
+        const AUTH_401: &str = include_str!("../corpus/core-31.1/17_auth_absent.json");
+        let fixture: Fixture = serde_json::from_str(AUTH_401)?;
+        let chain = LiveChain {
+            blocks: 0,
+            headers: 0,
+            best_block_hash: String::new(),
+        };
+        let live = |headers: &[(&str, &str)]| HttpTuple {
+            status: 401,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            body_len: Some(0),
+            body: BodyForm::Empty,
+        };
+        let full = live(&[
+            ("WWW-Authenticate", "Basic realm=\"jsonrpc\""),
+            ("Content-Length", "0"),
+            ("Content-Type", "text/html; charset=ISO-8859-1"),
+            ("Connection", "close"),
+        ]);
+        compare(&fixture, &full, &chain)
+            .map_err(|mismatch| format!("full 401 tuple rejected: {mismatch}"))?;
+
+        let mut without_connection = full.clone();
+        without_connection
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("connection"));
+        let mut without_challenge = full.clone();
+        without_challenge
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("www-authenticate"));
+        let mut wrong_type = full;
+        wrong_type
+            .headers
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .ok_or("live tuple must carry a content type")?
+            .1 = "application/json".to_owned();
+        for (label, tuple) in [
+            ("declared volatile header", without_connection),
+            ("exact challenge", without_challenge),
+            ("exact content type", wrong_type),
+        ] {
+            assert!(
+                compare(&fixture, &tuple, &chain).is_err(),
+                "a live reply with a bad {label} must be rejected"
+            );
         }
         Ok(())
     }

@@ -5,7 +5,7 @@ use super::*;
 /// Returns the next `getheaders` from `rx`, skipping other traffic; fails
 /// when none is queued.
 fn next_getheaders(
-    rx: &crossbeam_channel::Receiver<Message>,
+    rx: &crate::test_support::MessageReceiver,
 ) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
@@ -146,7 +146,7 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders() -> TestResult {
     let old_rx = connect_peer(&peers, synthetic_peer(peer, 1));
     let old_source = current_source(&peers, peer);
 
-    let (replacement_tx, replacement_rx) = unbounded::<Message>();
+    let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     peers.register(peer, PeerLease::new(replacement_tx));
 
     sync.tick();

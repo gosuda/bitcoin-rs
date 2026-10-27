@@ -20,9 +20,27 @@ pub struct FjallStore {
     write_lock: parking_lot::Mutex<()>,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
+    /// Last field: drops after the engine handles above have closed.
+    guard: Option<crate::StoreGuard>,
 }
 
 impl FjallStore {
+    /// Keeps `guard` alive until this store's engine handle is closed.
+    ///
+    /// Panics when a guard is already installed: replacing it would release
+    /// the first guard while the engine handle it protects is still open.
+    #[must_use]
+    pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
+        assert!(
+            self.guard.is_none(),
+            "a Fjall store takes exactly one lifetime guard"
+        );
+        Self {
+            guard: Some(guard),
+            ..self
+        }
+    }
+
     /// Opens or creates a Fjall store at `path` with one keyspace per column family.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, FJALL_DEFAULT_CACHE_BYTES)
@@ -60,6 +78,7 @@ impl FjallStore {
             write_lock: parking_lot::Mutex::new(()),
             #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
+            guard: None,
         })
     }
 
@@ -115,6 +134,12 @@ impl FjallStore {
             fjall_batch = fjall_batch.durability(Some(durability));
         }
         self.stage_ops(&mut fjall_batch, batch.ops)?;
+        if fjall_batch.is_empty() && durability == Some(PersistMode::SyncAll) {
+            return self
+                .db
+                .persist(PersistMode::SyncAll)
+                .map_err(StorageError::backend);
+        }
         fjall_batch.commit().map_err(StorageError::backend)
     }
 

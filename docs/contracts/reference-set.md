@@ -106,7 +106,7 @@ The product corpora are defined in
   The C150 oracle is the first certified Core 31.1 `gettxoutsetinfo`
   response at height 150,000.
 - `Cmodern`: mainnet blocks `0 .. 709,635`; stop hash
-  `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`.
+  `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`;
   `txouts` 75,903,651; `total_amount_sat` 1,887,251,879,232,217;
   `muhash` `71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`.
   The Cmodern oracle is the first certified Core 31.1 `gettxoutsetinfo`
@@ -204,4 +204,4 @@ This is an evidence tool pin. No checker run is claimed by this page.
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
-`ReferenceSet`, oracle, product reference.
+`bitcoinkernel`, `C150`, `Cmodern`.

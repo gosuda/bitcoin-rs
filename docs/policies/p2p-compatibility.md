@@ -15,7 +15,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
 | Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
-| Transport | Legacy v1 by default; experimental BIP324 v2 is opt-in via `--v2transport` (§7) |
+| Transport | BIP324 v2 by default with v1 detection and fallback; `--v2transport=false` keeps every connection on v1 (§7) |
 
 ### 2.1 Version-Bump Rules
 
@@ -27,9 +27,9 @@ Re-pinning to a newer Core version requires all of:
 
 ## 3. Transport and Envelope
 
-- Default Bitcoin P2P **v1 envelope** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload.
-- Experimental BIP324 v2 is present behind `--v2transport` (off by default), with key exchange, packet framing (capped at `MAX_PAYLOAD_LEN = 4,000,000` bytes, Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH`, `crates/p2p/src/bip324/reader.rs`) and v1 fallback (`crates/p2p/src/transport.rs`, `bip324.rs`). Reference vectors and in-tree negotiation tests are implementation evidence, not recorded bidirectional Core interoperability (§7).
-- V1 payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB` (`crates/p2p/src/wire.rs`). Core caps v1 messages at 4,000,000 bytes; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference.
+- Bitcoin P2P **v1 envelope**, used with v2 off or with a v1-only peer (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload.
+- BIP324 v2 is on by default (`--v2transport`, as Core's `-v2transport`), with key exchange, packet framing (message payloads capped at `MAX_MESSAGE_PAYLOAD`, `crates/p2p/src/bip324/reader.rs`) and v1 detection and fallback (`crates/p2p/src/transport.rs`, `bip324.rs`). Live interop with Core 31.1 in both connection directions is recorded (https://github.com/gosuda/bitcoin-rs/pull/1612, `docs/contracts/core-differential.md` CORE-06; §7).
+- Message payload bound: `MAX_MESSAGE_PAYLOAD = 4,000,000` bytes (`crates/p2p/src/wire.rs`), Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH`, on either transport. A v1 frame header declaring more is refused before its body is read, as Core does. No block serializes above this bound.
 - Network magic and default ports come from `bitcoin_rs_primitives::Network` and are asserted equal to Core's constants per network (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444).
 - Fork networks sharing a chain may override the message-start bytes with `--p2p-magic` (a bitcoin-rs extension; requires `--network mainnet` semantics and explicit `--connect` peers). Not a Core option; recorded as extension, not parity.
 
@@ -43,7 +43,7 @@ The `version` message pins:
 | Field | Value | Core 31.1 comparison |
 | :--- | :--- | :--- |
 | `version` | `70016` | matches Core's latest protocol version |
-| `services` | `NETWORK \| WITNESS`, or `NETWORK_LIMITED \| WITNESS` when `storage.prune_target_mb > 0`; adds `COMPACT_FILTERS` only when the optional filter index is ready | Core derives the base set from the prune setting (`init.cpp:2022-2026`): a pruned node never advertises `NODE_NETWORK`. `--blockfilterindex` defaults off and requires unpruned history. `BLOOM` remains unsupported. |
+| `services` | `NETWORK \| WITNESS`, or `NETWORK_LIMITED \| WITNESS` when `storage.prune_target_mb > 0`; adds `P2P_V2` while `v2transport` is on (the default) and `COMPACT_FILTERS` only when the optional filter index is ready | Core derives the base set from the prune setting (`init.cpp:2022-2026`): a pruned node never advertises `NODE_NETWORK`. `--blockfilterindex` defaults off and requires unpruned history. `BLOOM` remains unsupported. |
 | `relay` | `true` on a full-relay connection, `false` on a block-relay-only dial | matches Core's per-connection preference (`PushNodeVersion`, `net_processing.cpp:1651-1689`) |
 | `user_agent` | `/bitcoin-rs:<version>/` | distinct subver string; Core records it in `getpeerinfo.subver` |
 | `timestamp` | `0` | deviation: we do not send a real clock; Core 31 does not misbehave-score time offsets (live interop evidence), but this remains a recorded deviation |
@@ -69,7 +69,7 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `ping` | Answered with `pong` echoing the nonce, ready peers only. No latency telemetry is kept. |
 | `pong` | ignored | No ping RTT accounting exists; the pong body is unused. |
 | `inv` | Missing transaction vectors enter the connection-bound transaction request owner; only the selected eligible source receives `getdata`. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, resident orphan wtxids, and recent rejects); a resident orphan never suppresses a txid-typed request, because another witness of that txid can still be valid; `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. While the node is in initial block download, transaction-typed vectors are never requested (Core 31.1 `net_processing.cpp:4401-4404`). Block-typed vectors (`MSG_BLOCK`, `MSG_WITNESS_BLOCK`) are never answered with a body `getdata`: they are announced to header sync against the announcing connection, which credits its best-known block and receives `getheaders` (Core `net_processing.cpp:4370-4410`, `docs/contracts/p2p-wire.md` `P2P-07`). Outbound block announcement uses single-block `inv` (`MSG_BLOCK`) as a compatibility fallback when a peer did not negotiate BIP130 `sendheaders`, when an active-chain anchor cannot be established, or when the anchor's distance from the committed tip exceeds `MAX_BLOCKS_TO_ANNOUNCE` (8). Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
-| `getdata` | `MSG_BLOCK` streams stripped stored blocks from the applied chain or an eligible stale branch; `MSG_WITNESS_BLOCK` preserves the stored witness serialization (BIP144). For full-relay peers, transaction inventory is served from the mempool, or from the orphan map only for a `MSG_WTX` item whose exact wtxid is resident. For block-relay-only peers, the listener removes transaction vectors before dispatch and drops transaction-only requests without a response. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. A `MSG_CMPCT_BLOCK` item is answered with a `cmpctblock` only while the block is within 5 of the applied tip; a deeper one is served as the whole witness-bearing `block`, as Core does (`net_processing.cpp:2705-2721`). Misses among dispatched inventory resolve to one trailing `notfound`. Bound: 50 000 vectors. |
+| `getdata` | `MSG_BLOCK` streams stripped stored blocks from the applied chain or an eligible stale branch; `MSG_WITNESS_BLOCK` preserves the stored witness serialization (BIP144). For full-relay peers, transaction inventory is served from the mempool, or from the orphan map only for a `MSG_WTX` item whose exact wtxid is resident. For block-relay-only peers, the listener removes transaction vectors before dispatch and drops transaction-only requests without a response. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. A `MSG_CMPCT_BLOCK` item is answered with a `cmpctblock` only while the block is within 5 of the applied tip; a deeper one is served as the whole witness-bearing `block`, as Core does (`net_processing.cpp:2705-2721`). Misses among dispatched inventory resolve to one trailing `notfound`. Items are served one at a time in request order. A saturated outbound queue pauses the request instead of disconnecting the peer. The queue is saturated for production when it has no free item slot (4 096 queued messages) or no room for one more worst-case block behind its queued bytes (64 MiB cap). The pause sends nothing for the unserved items: they stay with the connection in request order, and the connection reads nothing from the peer while they remain. The misses found before the pause go out in one `notfound` once a reservation for its exact length succeeds against both the connection's own bound and the node's aggregate outbound budget, as Core sends its `notfound` at once when it stops at its send-buffer limit and resumes its queued items later (`net_processing.cpp:2766-2833`); a refusal from either budget keeps the misses parked, the list untaken and unbuilt, and nothing is sent. A request served completely follows the same rule for its trailing `notfound`: when its last item took the last production reservation, the misses stay parked until a reservation for their exact length succeeds against both budgets. The remaining items are served in order once a fresh worst-case production reservation succeeds against both budgets. After a `getdata` that leaves no production reservation available, the connection also reads nothing further until a one-message probe charge succeeds against both budgets; the probe is returned at once and holds no slot, and the next reply is reserved only when it is dispatched, where a refusal still defers it; Core pauses message processing the same way while its send buffer is full (`net_processing.cpp:5459`), but for every message, whereas only a `getdata` establishes the hold here, and a peer that never sent one keeps the plain saturation policy (a full connection-local queue cancels the connection). A request or hold that lasts 20 minutes, or a writer that dies, ends the session; time during which the node's aggregate outbound budget (see "Outbound queue accounting" below) refused the connection is not counted toward the 20 minutes. Every message is queued under a reservation taken before it exists: a body is loaded only while the session holds a reservation for one worst-case frame, and the parked `notfound` is reserved at its exact length before it is built, so no check-then-send race remains. Bound: 50 000 vectors. |
 | `notfound` | transaction fallback | A matching transaction request releases only its actual source and promptly considers retained alternatives; unrelated or unsolicited responses cannot release another connection's ownership. Block entries remain ignored. Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
@@ -77,17 +77,51 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. The shared inbound channel is bounded once for the node, and each connection's unsolicited share of it is bounded separately; a body the download window asked that connection for is always admitted (`docs/contracts/p2p-wire.md` `P2P-07`). |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel, except while the node is in initial block download: unsolicited transaction bodies are then dropped before ingress, without a misbehavior score or disconnect (Core 31.1 `net_processing.cpp:4713-4716`). Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | served | At most 32 retained IP addresses, once per full-relay connection. Book-disabled test/embedding connections remain silent. |
-| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. |
+| `getaddr` | served | At most 32 retained IPv4/IPv6 addresses, once per full-relay connection; a peer that sent `sendaddrv2` gets `addrv2` rows from the same book, any other peer gets legacy `addr`. Book-disabled test/embedding connections remain silent. Core sends `addrv2` once negotiated (`net_processing.cpp:5803-5807`); non-IP networks are not relayed. |
+| `addr` / `addrv2` | consumed | Decoded with a 1,000-entry wire bound, then admitted to the shared address book behind a 32-entry connection allowance replenished one per 10 seconds. Source-group limits and routability apply before retention; unsupported non-IP transports are ignored. The same learned IPv4/IPv6 rows feed both `addr` and `addrv2` `getaddr` replies. |
 | `feefilter` | applied | BIP133. Valid nonnegative thresholds through `MAX_MONEY` filter queued outbound transaction inventory for that connection; invalid values are ignored. The threshold never changes admission. Full-relay connections at protocol 70013+ receive rounded effective local floors on randomized refreshes. |
-| `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. Inbound announcements also publish compact-fetch eligibility. |
-| `cmpctblock` / `blocktxn` | sink | BIP152 receive path. `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; missing transactions are requested with `getblocktxn` on the same connection; two distinct mempool identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
-| `getblocktxn` | served | BIP152. A stored, non-invalid block within 10 of the applied tip is answered with `blocktxn`, including a block that became stale after its compact announcement. As in Core, this shallow path requires body availability but does not apply the inventory stale-age filter. A deeper request uses full witness-bearing `block` inventory policy, including the stale validation and age restrictions below; depth is checked before past-the-end indexes. Unknown or unavailable blocks stay unanswered. The mutually supported compact serving profile determines transaction witness encoding. On the `blocktxn` path an index past the body is a protocol disconnect; empty or non-increasing indexes are rejected at the inbound boundary regardless of depth. The headroom gate runs before any body load. |
+| `sendcmpct` | negotiated | BIP152. Sent after `verack` in low-bandwidth mode (`send_compact=false`, version 2). Up to 3 peers are promoted to high-bandwidth mode (`sendcmpct(true, 2)`), demoting older peers (`sendcmpct(false, 2)`) when the cap is reached. Inbound `sendcmpct` establishes peer compact-relay version and high-bandwidth preference. Ready peers in high-bandwidth mode receive unsolicited `cmpctblock` announcements for new tips if the peer is known to hold the parent block (`prev_blockhash`); suppressed in `blocksonly` mode. A high-bandwidth `cmpctblock` may precede connect for a PoW-valid tip child (rules passed, commit intent, segwit active); a later connect failure is not retracted and sends nothing further. Inbound announcements also publish compact-fetch eligibility. |
+| `cmpctblock` / `blocktxn` | sink | BIP152 receive path. Like Core, a `cmpctblock` enters reconstruction only when its header earns the mempool scan. The header needs valid proof of work for the network, the block must not be marked invalid, and its parent must be a known block not marked invalid. The header must also pass the contextual checks header admission applies against that parent, including the required nBits, so a header mined at an easier target never earns the scan; as in admission, a header already in the tree is not rechecked. Finally it must either carry more work than the applied chain or answer a body fetch the same connection owns. Any other `cmpctblock` routes only its header to admission. A hash already attempted on that connection within the reconstruction deadline is not scanned again. Admitted, `cmpctblock` starts bounded per-peer reconstruction: the prefilled coinbase/transactions plus short-ID matches against the mempool and the bounded reconstruction extra pool under the identity profile we advertised (`COMPACT_BLOCK_VERSION`) — the extra pool holds at most 100 wtxid-keyed bodies (transactions removed as replaced, peer orphan-held bodies, and peer policy-only rejects below 100 000 serialized bytes; never a coinbase; hint-only, never admitted or relayed by retention; Core `DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN`) — BIP152 identity is directional: our advertised version fixes what a compliant peer sends us, and the peer's recorded version fixes what we serve; version 1 matches by txid and version 2 by wtxid; two witness variants of one txid stay distinct while a pool-resident identity duplicated in the extra pool is one claim, not a collision; missing transactions are requested with `getblocktxn` on the same connection; two distinct hint identities that collide on one short ID retire only that slot, which `getblocktxn` then carries; a duplicate declared short ID, a count mismatch, or a reconstruction that fails the bounds checks falls back to one full-block `getdata`; an entry whose deadline passes is dropped silently and the peer relies on the connection's separate stall/liveness handling — this module sends no deadline-driven `getdata`. `blocktxn` completes a pending reconstruction. Before delivery both completion paths re-verify the assembled body against the header's transaction-ID merkle root and reject a mutated transaction-ID tree (CVE-2012-2459 duplicate-final-transaction collision) and a body without a coinbase that holds a 64-byte transaction (CVE-2017-12842), so a short-ID misguess can never publish a wrong block; a failed check falls back the same way. A verified block enters the ordinary block pipeline like any `block` message — no validation bypass. |
+| `getblocktxn` | served | BIP152. A stored, non-invalid block within 10 of the applied tip is answered with `blocktxn`, including a block that became stale after its compact announcement. The most recently early-announced body also answers from the held bytes before the store carries it. As in Core, this shallow path requires body availability but does not apply the inventory stale-age filter. A deeper request uses full witness-bearing `block` inventory policy, including the stale validation and age restrictions below; depth is checked before past-the-end indexes. Unknown or unavailable blocks stay unanswered. The mutually supported compact serving profile determines transaction witness encoding. On the `blocktxn` path an index past the body is a protocol disconnect; empty or non-increasing indexes are rejected at the inbound boundary regardless of depth. The headroom gate runs before any body load or held-body reply construction. A saturated gate leaves the request unanswered without disconnecting the peer. |
 | `merkleblock` / `filterload` / `filteradd` / `filterclear` | ignored | BIP37. We do not advertise `NODE_BLOOM`, so a default Core peer never sends them; if one does, they are ignored. |
-| `getcfilters` / `getcfheaders` / `getcfcheckpt` | served when enabled and ready | BIP157 basic type 0 only; active-chain stop, at most 1,000 filters / 2,000 hashes; checkpoint headers at positive multiples of 1,000. Filter payloads stream under send headroom from one index snapshot. Unknown, unsupported, unavailable and oversized requests receive no answer. |
+| `getcfilters` / `getcfheaders` / `getcfcheckpt` | served when enabled and ready | BIP157 basic type 0 only; active-chain stop, at most 1,000 filters / 2,000 hashes; checkpoint headers at positive multiples of 1,000. Filter payloads stream under send headroom from one index snapshot. A pass that the outbound budget stops after a prefix was sent parks only the remainder, which resumes from the first unsent filter without replaying one and keeps the stop height the prefix was computed against; any other early stop of a sent prefix, or a resumed range whose stop height has moved, closes the connection. Unknown, unsupported, unavailable and oversized requests receive no answer. |
 | `cfilter` / `cfheaders` / `cfcheckpt` | ignored | The node serves external consumers; it does not synchronize its validated chain through compact filters. |
 | `reject` | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
 | `alert` | Decoded as opaque bytes, ignored. The command is dead in Core. |
+
+Outbound queue accounting. Every queued message is one charge of a message and its
+full wire bytes against two budgets: the connection's own (4 096 messages, 64 MiB)
+and the node's aggregate of queued outbound wire bytes, one strict 64 MiB cap shared
+by every connection of a `P2pService` and never process-global. The aggregate's
+pending total is never above its cap at any instant, with no exemption for a message
+on an empty queue; the connection's own caps keep their rule that a lone oversized
+message is admitted to an empty local queue, and that message is still charged to the
+aggregate. A bulk body reservation must also fit under the cap less one maximum
+frame, so control traffic still flows while bodies are refused. A charge has one owner
+at every moment (the reservation, then the queued frame that carries it, then the
+writer's burst) and returns to both budgets exactly once when that owner drops:
+written, refused, discarded with the channel, or drained when the writer exits.
+
+A refused charge takes nothing and names its cause. The connection's own cap, or a
+writer that has returned, cancels the lease as before. The node aggregate is
+backpressure only: the lease stays live and the sender keeps its intent. A request
+whose reply cannot be reserved (`ping`, `getheaders`, an answerable `getaddr`, and the
+`getblocktxn` or `getdata` follow-up to a `cmpctblock` or `blocktxn`) is deferred: the
+connection reads nothing until the reply can be reserved, dispatches the request
+once, and never produces an unreserved reply. A probe `ping` and an outbound
+`getaddr` stay owed until they can be sent. Time the aggregate refused a connection
+is a stall: it is not silence in either direction for the keepalive, not the age of a
+parked `getdata` tail or deferred request, and not charged to a parked compact-filter
+request's five-second allowance. Local saturation, a dead writer and silence outside
+a stall keep their rules.
+
+Background producers keep their intent when the aggregate refuses them. A
+`getheaders`, block `getdata` or cold-start hedge marks nothing and is planned again
+on the next tick (the hedge tries the next candidate); a transaction `getdata`
+returns its claim to the request owner; a refused `feefilter` restores its schedule;
+a refused relay `inv` returns its requests to the peer's pending queue; and a refused
+block announcement, `sendcmpct` demotion or high-bandwidth rotation leaves the
+selection as it was and is retried.
 
 Block serving resolves each body by its own `(height, hash)`, so stale and winning
 blocks at the same height cannot be confused. Header-chain membership or
@@ -118,7 +152,9 @@ receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
 other sources receive `MSG_TX`, following
 [BIP144](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay). Relay queue
 saturation drops the newest announcement without blocking admission;
-per-peer outbound saturation cancels that connection's lease. Each queued
+a connection's own outbound saturation cancels that connection's lease, while
+a full node aggregate (see "Outbound queue accounting") only defers the send
+and cancels nothing. Each queued
 announcement is checked against the shared mempool immediately before its
 relay send, matched on the admission epoch recorded when the request was
 queued: a transaction that left the pool before the check — or was
@@ -150,14 +186,15 @@ transport I/O/timeouts, and local encoding failures never discourage an IP.
 | Invalid handshake ordering | disconnect and temporarily avoid the IP | Core ignores some cases, including redundant `version` and messages before `version`; bitcoin-rs retains its stricter FSM |
 | Invalid decoded payload or structural count | disconnect and temporarily avoid the IP | Core's payload exceptions and individual handlers have distinct rules; this is not blanket parsing-error parity |
 | Checksum failure | disconnect and temporarily avoid the IP | Core v1 rejects the message and resets its decoder; this remains a stricter bitcoin-rs policy |
-| Invalid command bytes, wrong magic, or length above 32 MiB | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection is separate from `Misbehaving`; Core's message-size cap is 4,000,000 bytes |
+| Wrong magic (including a BIP324 key read with v2 off) | close the unread transport, without discouragement | Core closes the transport on a wrong message start without `Misbehaving` |
+| Invalid command bytes or length above 4,000,000 bytes | close the unread transport; temporarily avoid ordinary remote IPs | Core transport rejection, with the same 4,000,000-byte cap, is separate from `Misbehaving` |
 | `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000 | disconnect and temporarily avoid the IP | the relevant Core handlers mark for discouragement |
 | Locator above 101 or `notfound` above 50,000 | disconnect and temporarily avoid the IP | Core directly disconnects oversized locators; oversized `notfound` is ignored by request handling, without generic punishment |
 | `getblocktxn` indexes beyond the body on the `blocktxn` serving path | disconnect and temporarily avoid the IP | Core marks these body-relative bounds violations for discouragement (`net_processing.cpp:2600-2608`), separately from differential decoding |
 | Empty `getblocktxn` list or non-increasing in-process absolute indexes | disconnect and temporarily avoid the IP | Empty rejection is stricter native policy; Core accepts an empty list. Both wire decoders guarantee increasing indexes before lookup (`blockencodings.h:23-54`, `net_processing.cpp:4333-4340`), so non-increasing lists are defensive in-process cases. Core decodes `uint16_t` indexes; the native codec retains `u64` indexes, with different range acceptance |
 | `tx` or transaction `inv` on a block-relay-only connection | disconnect without discouragement | connection-role rejection; not a new numeric penalty |
 | `addr` or `addrv2` on a block-relay-only connection | ignore | address relay is declined |
-| Idle connection | ping once a direction has been idle 2 minutes; disconnect once a direction is silent past 20 minutes; no discouragement | periodic ping and outstanding-ping timeout remain distinct from misconduct |
+| Idle connection | ping once a direction has been idle 2 minutes; disconnect once a direction is silent past 20 minutes, except that receive silence does not count while a paused `getdata` stops the connection from reading; no discouragement | periodic ping and outstanding-ping timeout remain distinct from misconduct |
 | Valid traffic exceeds local queue/request budgets | bounded accounting, backpressure or connection-local cancellation | resource management, not a generic punishment score |
 
 Discouragement retains at most 4,096 canonical IPs for one monotonic hour.
@@ -204,7 +241,7 @@ issued through `GetRequestsToSend` in `SendMessages` (`net_processing.cpp:6206`)
 TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 `net_processing.cpp:319` under the `INVENTORY_BROADCAST_*` delays at `:163-166`):
 
-1. **BIP324 v2 transport**: experimental, default-off implementation. V1 remains the default; Core 31 accepts v1 peers. Promotion requires a recorded live bidirectional Core 31.1 run proving v2 in both directions; the external-evidence inventory does not yet claim that qualification (issue #1503).
+1. **BIP324 v2 transport**: on by default, as in Core 31. A live run against an unmodified Core 31.1 recorded v2 in both connection directions with matching session ids, ping answers and a full header and block sync over each, plus a v2-off node syncing over v1 from v2 Core (https://github.com/gosuda/bitcoin-rs/pull/1612; CORE-06). No deviation from Core is known; the v1 retry after an unanswered v2 dial, decoy packets and rekeying rest on in-tree tests only. `--v2transport=false` keeps every connection on v1 and stops advertising `NODE_P2P_V2`. BIP324 does not authenticate peers, so it does not stop an active MITM or eclipsing peer.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: implemented for newly committed active tips. Ready peers receive unsolicited BIP152 high-bandwidth compact blocks (up to 3 peers when parent is known and tx relay is active), BIP130 headers (up to 8 blocks when anchored to the active chain), or fallback to single-block `inv` (`MSG_BLOCK`). Stale tips across reorgs are discarded and intermediate tips are coalesced under queue backpressure.
 4. **Address management**: one P2P-owned `AddressBook` retains canonical
@@ -416,7 +453,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
    with the original confirmation time, without replacing newer demonstrated
    anchors. Dispatched attempts never return merely because connection fails.
    A stale queue item cannot dispatch after its reservation was returned.
-5. **Service bits**: the base set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. `NODE_BLOOM` remains unsupported. `NODE_COMPACT_FILTERS` is advertised on new handshakes only while the explicitly enabled filter index is healthy and caught up. Pruning and filter indexing cannot be enabled together. Existing connections retain their negotiated flags, but each filter query checks current readiness. See [the indexing contract](../contracts/indexing.md) and [the pinned Core/Kyoto runner](../../tools/compact-filter-interop/README.md).
+5. **Service bits**: the base set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. `NODE_P2P_V2` is added while `v2transport` is on, its default, as Core does. `NODE_BLOOM` remains unsupported. `NODE_COMPACT_FILTERS` is advertised on new handshakes only while the explicitly enabled filter index is healthy and caught up. Pruning and filter indexing cannot be enabled together. Existing connections retain their negotiated flags, but each filter query checks current readiness. See [the indexing contract](../contracts/indexing.md) and [the pinned Core/Kyoto runner](../../tools/compact-filter-interop/README.md).
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic discouragement** (§6) uses bounded exact-IP expiry rather than Core's rolling Bloom filter. The explicit strict-parser, transport and permission differences are listed in §6; there is no additive score.
 8. **Chain-sync timeout scope**: a full-relay outbound connection that stops bringing a better chain is timed out as Core does (`ConsiderEviction`, `net_processing.cpp:5498-5550`), with one `getheaders` probe at 20 minutes (`CHAIN_SYNC_TIMEOUT`, definition `net_processing.cpp:109`) and the first four outbound connections to reach the tip protected (`MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT`, definition `net_processing.cpp:107`). Protection and the timeout both key on a tip the peer actually handed us, never on the height its handshake claimed: Core reads `pindexBestKnownBlock` there, not `nStartingHeight` (use-site `net_processing.cpp:3203-3210`). An operator-pinned connection is exempt in both, as it is in Core: `IsOutboundOrBlockRelayConn()` excludes `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Block-relay-only connections are exempt here; Core times out both outbound classes. A connection dialed for blocks alone is therefore never replaced by this timer.
@@ -424,7 +461,15 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
 10. **Extra-peer selection**: once a stale tip needs no extra full-relay connection, bitcoin-rs retires the newest automatic full-relay outbound connection that sits one beyond the slots and is older than `MINIMUM_CONNECT_TIME` (`retire_extra_full_relay_connection`, `crates/p2p/src/service.rs:976`). An operator-pinned connection is outside the count and the victim set both, as in Core: neither `IsFullOutboundConn()` nor `IsBlockOnlyConn()` includes `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`). Core's `EvictExtraOutboundPeers` (`net_processing.cpp:5604-5668`) instead retires the connection that announced a block longest ago, breaking a tie by dropping the most recently connected one. The retired count is the same; the retired connection is not. A pinned outbound peer therefore neither creates an excess nor stands as a victim, matching `IsFullOutboundConn`/`IsBlockOnlyConn` excluding `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`).
 11. **Unanswered ping**: Core sends one ping per `PING_INTERVAL` and remembers the nonce it asked for; when the pong has not arrived by `TIMEOUT_INTERVAL` after that ping, `MaybeSendPing` ends the connection regardless of any other traffic (`net_processing.cpp:5698-5712`). bitcoin-rs probes on the same cadence and ends a connection when either direction has been silent for `TIMEOUT_INTERVAL`, but it credits any inbound message as receive activity and keeps no outstanding-ping record, so a peer that never answers a probe while other traffic continues is not retired by that rule here.
 
-12. **Inbound admission**: bitcoin-rs refuses an inbound socket once the live inbound count reaches `max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots` (default `200 - 8 - 2 = 190`, `net.h:1124-1127`), closing the stream before a handshake lease exists (`crates/p2p/src/listener.rs`, `PeerTable::try_register_inbound`). Core derives the same remainder and then scores an eviction (`AttemptToEvictConnection`, `net.cpp:1695-1735`) to make room. The eviction scoring is deliberately not implemented: no bitcoin-rs sync path depends on being able to displace an inbound peer, the resource-exhaustion defect closes at the admission boundary, and adding a second peer-selection policy would need an acceptance requirement it does not have. The operator-visible consequence is that the 191st inbound connection is refused rather than replacing a chosen peer.
+12. **Inbound eviction**: once the live inbound count reaches `max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots` (default `200 - 8 - 2 = 190`, Core `net.h:1118`), a newcomer at an address holding a live inbound connection replaces it without eviction. Any other newcomer evicts the connection chosen by a port of Core's `SelectNodeToEvict` (`node/eviction.cpp:178-240`), or is refused when every candidate is protected or its address holds a live outbound connection (`crates/p2p/src/eviction.rs`, `PeerTable::try_register_inbound`; Core `net.cpp:1819-1826`). The port differs from Core as follows, so its choice can differ from Core's:
+    - There is no minimum-ping protection. Core protects the eight connections with the lowest ping round trip, and bitcoin-rs measures none (item 11), so up to eight more connections are evictable.
+    - Recency is an order, not a clock. Core compares last-block, last-transaction and connection times in whole seconds, so a same-second tie falls to the next criterion. bitcoin-rs orders by delivery sequence and monotonic instant.
+    - A block counts once applied. Core credits a peer whose block is newly stored (`net_processing.cpp:3429-3432`), side-branch blocks included. bitcoin-rs credits a block when it is applied to the active chain.
+    - Wanted services are judged at eviction. Core fixes `fRelevantServices` when the peer's `version` arrives (`net_processing.cpp:3672`). bitcoin-rs evaluates `has_all_desirable_service_flags` against the tip depth at the newcomer's arrival, which differs only for a `NODE_NETWORK_LIMITED` peer whose standing crossed the 144-block threshold in between.
+    - A newcomer at an address holding a live outbound connection is refused instead of evicting. The table keys one connection per address, so admitting it would replace the outbound connection too. Core keeps both.
+    - Core reserves part of the uptime protection for onion, I2P, CJDNS and localhost peers; only localhost exists as a transport here.
+
+    Two Core steps never apply. BIP37 filters are ignored, so no peer has the bloom filter Core's transaction-time tie-break looks at. A discouraged address is refused at accept, where Core admits it while the inbound slots are not almost full and then evicts it first (`net.cpp:1811-1817`), so no candidate is discouraged.
 13. **Outbound service gate**: an outbound peer that does not advertise the desirable set is disconnected right after its `version`, before it is published as usable, exactly as Core's `HasAllDesirableServiceFlags` check does (`net_processing.cpp:1857-1872`, applied to an outbound connection at `:3864-3871`). The desirable set is `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks (`NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`). Inbound peers are not service-checked, as in Core.
 14. **Limited peers and block download**: a connection without `NODE_NETWORK` is never asked for block bodies while the node is in initial block download, and after it only for the last 288 blocks of that peer's own chain (`net_processing.cpp:6521`, `NODE_NETWORK_LIMITED_MIN_BLOCKS` at `:159`, window applied at `:1637`). The rule reads the node's single `InitialBlockDownload` latch and applies to request, fan-out, probe, and hedge selection alike; header requests stay open to such a peer.
 15. **Transaction download scheduling bounds**: one P2P owner tracks
@@ -532,6 +577,81 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
   `local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries`
   cover negotiated announcements and actual retained witness identity.
   Run with `cargo test -p bitcoin-rs-p2p --lib`.
+- **Paused `getdata`**: `crates/p2p/src/dispatch.rs` tests
+  `headroom_false_before_first_load_parks_without_loading`,
+  `hostile_50000_item_getdata_parks_the_tail`,
+  `halted_mixed_getdata_parks_ordered_tail_and_unsent_misses`, and
+  `gate_closed_at_the_trailing_report_parks_the_misses` cover the park and
+  the request order it keeps. `crates/p2p/src/listener/getdata_pause_tests.rs`
+  drives `run_message_loop` over loopback sockets:
+  `saturated_getdata_parks_tail_and_serves_it_after_drain` pins the wire order
+  across a byte-saturated drain with the immediate `notfound`,
+  `tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order` the same for an
+  item-cap-saturated queue where the `notfound` must wait,
+  `a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_pong`
+  the last-slot boundary (trailing `notfound` and the following `ping`),
+  `a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply` the read
+  hold, `a_full_queue_keeps_the_misses_and_sends_nothing` the no-send-when-full
+  invariant, `paused_peer_that_never_reads_ends_on_write_timeout` and
+  `production_writer_marks_the_budget_dead_when_a_write_fails` the writer-death
+  wake, and `lease_cancel_ends_a_parked_session` the cancel exit.
+  `crates/p2p/src/connection.rs` tests cover the headroom and capacity
+  predicates and the budget's wake protocol, and `keepalive_tests` cover the
+  receive-silence exemption.
+- **Aggregate outbound budget**: `crates/p2p/src/connection.rs` tests
+  `strict_cap_no_empty_queue_bypass`, `reservation_is_the_admission`,
+  `concurrent_reservations_never_exceed_cap`, `shrink_and_drop_wake_waiters`,
+  `credit_drop_exactly_once`, `bulk_margin_keeps_control_flowing`,
+  `send_with_fails_closed_and_releases_the_credit`,
+  `dead_writer_refuses_charges_and_reclaims_nothing`,
+  `healthy_peer_progresses_beside_a_locally_saturated_peer`, and
+  `aggregate_waiter_resumes_on_another_connections_drain` pin the strict cap,
+  the reservation as the admission, exactly-once release and the wake
+  protocol. `crates/p2p/src/listener.rs` tests
+  `queued_frames_release_on_writer_exit` and `writer_releases_budget_after_write`
+  pin release on every writer exit path.
+  `crates/p2p/src/listener/aggregate_budget_tests.rs` tests
+  `headroom_retains_one_credit`, `parked_misses_reserved_before_build`,
+  `reply_bound_covers_actual_replies`, `request_deferred_not_reply`,
+  `deferred_request_retries_and_keeps_the_existing_local_rules`,
+  `stall_exclusion_removes_only_shared_refusals`, and
+  `a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control` cover
+  deferral, the exact reservations and the stall rule over loopback sockets.
+  `crates/p2p/src/peer.rs` test `filter_deadline_excludes_only_shared`,
+  `crates/p2p/src/dispatch.rs` test
+  `filter_remainder_is_the_parked_requests_only_cursor`, and
+  `crates/p2p/src/chain_query.rs` tests
+  `filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_partial_stream`
+  and `compact_filter_interruptions_that_are_not_backpressure_stay_errors`
+  cover the filter remainder and its deadline.
+  `crates/p2p/src/sync/tests/aggregate_saturation.rs`,
+  `crates/p2p/src/sync/tests.rs`
+  `cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it`,
+  `crates/p2p/src/tx_policy/preferred_tests.rs` `tx_getdata_saturated_unclaims`,
+  `crates/p2p/src/tx_policy/relay.rs` `feefilter_saturated_restores` and
+  `relay_inv_saturated_requeues`, and `crates/p2p/src/block_announce.rs`
+  `announcement_saturated_retried` and
+  `demotion_saturated_keeps_the_selection_and_retries` cover the producers
+  that keep their intent.
+- **Compact receive admission**: two tests in
+  `crates/p2p/src/sync/tests/head_sync.rs` together cover each branch of
+  `BlockSync::compact_reconstruction_admissible`.
+  - `compact_reconstruction_admission_follows_cores_header_gate` covers a
+    target other than the required one and the case with nothing applied yet.
+  - `compact_reconstruction_admission_reads_admitted_tree_state` covers an
+    admitted header past the live clock ceiling, and a block or a parent
+    marked invalid.
+
+  `crates/p2p/src/listener.rs` test
+  `compact_reconstruction_requires_an_earning_header` covers the message path
+  through the listener. Run with `cargo test -p bitcoin-rs-p2p --lib`.
+  - A header without proof of work, one with an unknown parent, and a
+    replayed applied block are only announced, with no mempool scan.
+  - Ownership counts only for the exact connection.
+  - An extending or owned block reconstructs, and a repeat does not rescan.
+
+  `compact_blocks::tests::replay_dedup_spans_more_than_sixty_four_blocks_until_the_deadline`
+  holds deduplication across more than 64 hashes until the deadline.
 - **Compact serving**: `crates/p2p/src/chain_query.rs` test
   `compact_exchange_keeps_the_mutually_supported_version` drives the
   production dispatcher through negotiation in both orders and checks
@@ -547,7 +667,7 @@ TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
   response across an actual regtest process reorg, fetches its missing
   transaction, verifies reconstruction, and fetches both same-height bodies.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
-- **Live lane (cut)**: owned by [`CORE-01` / `CORE-02` / `CORE-03` / `CORE-05`](../contracts/core-differential.md). `CORE-05` compares outbound `inv`, `headers`, and high-bandwidth `cmpctblock` frames from equivalent peers on pinned Core and bitcoin-rs, including a live reorg. This policy does not restate the Core version, RPC set, or CI job.
-- Node-level reorg effects are coordinated in `crates/node/src/reorg_effects.rs` (`switch_to_branch`, `invalidate_block`), which moves the applied tip off a losing branch; the node's P2P-chain adapter calls `switch_to_branch` when a higher-work header branch wins. The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
+- **Live lane (cut)**: owned by [`CORE-01` / `CORE-02` / `CORE-03` / `CORE-05` / `CORE-06`](../contracts/core-differential.md). `CORE-05` compares outbound `inv`, `headers`, and high-bandwidth `cmpctblock` frames from equivalent peers on pinned Core and bitcoin-rs, including a live reorg. `CORE-06` runs BIP324 v2 against Core in both connection directions. This policy does not restate the Core version, RPC set, or CI job.
+- Node-level reorg effects are coordinated in `crates/node/src/reorg.rs` (`switch_to_branch`, `invalidate_block`), which moves the applied tip off a losing branch; the node's P2P-chain adapter calls `switch_to_branch` when a higher-work header branch wins. The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
 
 See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the contracts index and precedence rule.

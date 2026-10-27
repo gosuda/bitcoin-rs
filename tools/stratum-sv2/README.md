@@ -1,204 +1,176 @@
-# Stratum V2 tool: bitcoin-rs as the mining owner behind the SRI stack
+# Embedded bitcoin-rs behind the SRI Stratum V2 stack
 
-This tool runs bitcoin-rs (regtest) together with the pinned Stratum
-Reference Implementation (SRI) pool, translator and CPU mining devices, with a
-thin template-distribution bridge in between. It exists to prove
-[gosuda/bitcoin-rs#1289](https://github.com/gosuda/bitcoin-rs/issues/1289):
-**an unmodified, pinned SRI mining stack can use bitcoin-rs as its Bitcoin
-node / template source through a documented adapter**, while bitcoin-rs keeps
-mining ownership (transaction selection, fees, coinbase and
-witness-commitment rules, candidate validation, block submission) and no SRI
-dependency lands anywhere outside `tools/` (the bridge's `stratum-apps`
-dependency lives in `template-provider/`).
-
-> **Noise key pinning:** the pool config pins the bridge's Noise public key
-> (`config/pool.toml`, `public_key = "9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW"`).
-> It is derived from the fixed example key in
-> `template-provider/src/main.rs` (`EXAMPLE_PRIVATE_KEY_HEX`, overridable via
-> `TP_PRIVATE_KEY_HEX`). If you override the key, update the pool config with
-> the value the template-provider logs at startup, then `docker compose up -d pool`.
-> Until the pin matches, the pool refuses the connection by design — the pin
-> is the security feature.
-
-## Architecture
+This regtest example runs the production `bitcoin_rs_node::Node` and its SV2
+Template Distribution adapter in one process. The unchanged pinned SRI pool,
+translator and two mining devices remain external. The adapter borrows the
+existing `MiningControl`, retains `Arc<Candidate>` jobs, and submits native
+blocks through canonical validation and publication. There is no internal
+HTTP, JSON, transaction hex, `NodeState`, or `test-seam` dependency.
 
 ```text
-device-direct-1 (SV2)   device-direct-2 (SV2)      host SV1 miner (optional, unpinned)
-        | SV2                    | SV2                        | SV1
-        +------------------------+------------+               v
-                                             |      translator (stratumv2/translator_sv2:v0.8.0)
-                                             |               | SV2
-                                             v               v
-                                    pool (stratumv2/pool_sv2:v0.8.0)
-                                             | templates / solutions (Noise, pinned TP pubkey)
-                                             v
-                    template-provider bridge (this repo: ./template-provider)
-                                             | JSON-RPC: getblocktemplate (long-poll) / submitblock
-                                             v
-                              bitcoin-rs mining owner (regtest)
-                                             |
-                                             v
-                                    Bitcoin network (regtest)
+device-direct-1 -- SV2 --+
+                       +--> SRI pool -- TDP/Noise --> adapter + embedded Node
+device-direct-2 -- SV2 --+                                  |
+                                                     MiningControl
 ```
-
-The default `docker compose up` set exercises the two direct SV2 devices
-(two simultaneous channels). The translator is always on but idle until an
-SV1 miner connects — see [Optional SV1 leg](#optional-sv1-leg-unpinned).
-
-## Pinned revisions
-
-| Component          | Revision                                                        | Source                                             |
-|--------------------|-----------------------------------------------------------------|----------------------------------------------------|
-| bitcoin-rs         | this PR's HEAD                                                  | built from the repo-root `Dockerfile` by compose   |
-| sv2-apps           | tag `v0.8.0` = commit `7f49074357e54da4f5b13acfcc29dc3cbb9e541f` (verified at build time) | device clone; pool/translator images |
-| pool image         | `stratumv2/pool_sv2:v0.8.0@sha256:679e08ae5dd99bac01394b0c592c97f45982d0d9d24e03f460ccd1c2592d3a00` | upstream image, config in `config/pool.toml`       |
-| translator image   | `stratumv2/translator_sv2:v0.8.0@sha256:a6b7380999fb6048caa269766afc64541880849cec6c34594e48133ca4d454ef` | upstream image, config in `config/translator.toml` |
-| mining device      | `mining_device` built from sv2-apps `v0.8.0` (`cargo build --locked --release --bin mining_device` in `integration-tests/`) | `device/Dockerfile` |
-| bridge Rust deps   | `stratum-apps = "0.8.0"` (pulls `stratum-core 0.6.0`)           | `template-provider/Cargo.toml`                     |
-
-## Prerequisites
-
-- Docker with Compose v2 (`docker compose version`).
-- ~4 GB disk for images + regtest chainstate (trivial: regtest stays near-empty).
 
 ## Run
 
-```console
-$ cd tools/stratum-sv2
-$ docker compose build            # bitcoin-rs node, bridge, two devices
-$ docker compose up -d
-$ docker compose logs -f template-provider pool device-direct-1
+Requires Docker Compose and the repository checkout. From the repository root:
+
+```sh
+docker compose -f tools/stratum-sv2/compose.yaml up --build -d
+docker compose -f tools/stratum-sv2/compose.yaml logs -f template-provider pool
+# After repeated accepted solutions, stop and join workers, retaining data:
+docker compose -f tools/stratum-sv2/compose.yaml down --timeout 30
 ```
 
-Bootstrap order is `bitcoin-rs` (healthcheck: JSON-RPC `getblockchaininfo`)
-→ `template-provider` → `pool` → devices. With the default example key
-nothing needs editing: `config/pool.toml` already pins the build-time
-`template_provider_type.Sv2Tp.public_key` the bridge logs at startup.
+The provider builds from the repository root with Rust 1.99 and the standalone
+lockfile. It uses native validation and Fjall, and stores its regtest node in
+the existing `bitcoin-rs-data` volume. Do not run the previous separate node
+against that volume concurrently. No volume is reset by startup or shutdown.
+The optional SV1 translator still listens on host loopback port 3333. Pool
+monitoring remains on loopback port 9090. Device core counts are deliberately
+small; increase them only for the test host's capacity.
 
-Only when `TP_PRIVATE_KEY_HEX` is overridden does the pin change: read the
-new public key from the bridge's startup log, update the pool config, and
-restart the pool:
+The default Noise key is example material, unchanged from the previous
+example. `config/pool.toml` pins its public key:
+`9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW`.
+If `TP_PRIVATE_KEY_HEX` is overridden, update that pin from the provider's
+startup log before reconnecting the pool. External SRI image and source pins
+remain in Compose and `device/Dockerfile`.
 
-```console
-$ docker compose logs template-provider | grep -i key
-$EDITOR config/pool.toml          # paste it as template_provider_type.Sv2Tp.public_key
-$ docker compose up -d pool       # pool starts and connects
+The pinned CPU devices cache the pool's resolved address. If a restart changes
+the pool container's IP, restart the devices after the pool is ready. Their
+upstream shutdown does not handle SIGTERM; Compose can kill those device
+processes after its timeout. The embedded provider handles SIGINT and joins
+its node workers before exiting.
+
+For a local build without Docker:
+
+```sh
+cargo run --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml
 ```
 
-Within ~a minute the devices open channels, receive jobs and produce shares;
-on regtest (difficulty floor 1) a solved block follows quickly. Device
-`--cores 32 --handicap 0` is tuned for an ~80-thread host — scale `--cores`
-to your machine so a share lands within seconds.
+Configuration: `TP_LISTEN` (default `0.0.0.0:8442`), `TP_PRIVATE_KEY_HEX`,
+`TP_CERT_VALIDITY_SECS` (default `3600`),
+`BITCOINRS_DATA_DIR`, `BITCOINRS_P2P_LISTEN` and `BITCOINRS_RPC_BIND`.
+The normal node lifecycle binds its diagnostic RPC listener to an ephemeral
+loopback port by default; mining never contacts it. The example network is
+fixed to regtest. Standard output contains diagnostic job/submission
+microseconds, canonical submission results, and the resulting applied height.
 
-## How to read the evidence
+## Ownership and bounds
 
-| Claim                              | Observation                                                                                                                                            |
-|------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Two channels opened                | `curl -s http://127.0.0.1:9090/api/v1/clients` (pool monitoring, one channel per device) or `docker compose logs pool \| grep -i channel`                |
-| Shares accepted                    | `docker compose logs pool \| grep -i share` (accepts / batch acks); device logs show shares sent                                                        |
-| Block accepted                     | `docker compose logs template-provider` logs the solution and the `submitblock` result; bitcoin-rs log shows the accepted block                          |
-| Tip advanced                       | `curl -s -u bitcoin-rs:bitcoin-rs -H 'content-type: text/plain' --data-binary '{"jsonrpc":"1.0","id":1,"method":"getblockchaininfo","params":[]}' http://127.0.0.1:18443/` → `blocks` grows |
-| New job after tip change           | template-provider logs a new template id + `SetNewPrevHash` right after the tip advances; pool/devices pick up the new job                                |
+- The mining owner builds every candidate and decides what fits. A pool's
+  `CoinbaseOutputConstraints` become a `CoinbaseBudget` on the typed template
+  request. The owner selects transactions that leave that room in the
+  coinbase, or answers with the generation's ordinary candidate when it already
+  admits the budget. `Candidate::admits` is the one fit rule. The adapter owns
+  no selector, headroom constant or second fit check; it calls `admits` once
+  more before writing a job and closes the session if the owner's candidate
+  fails it. No job is sent before constraints arrive.
+- A dedicated OS thread long-polls the owner's ordinary template only to learn
+  that the generation moved, using the owner's opaque template identity. It
+  wakes the sessions and publishes nothing: its candidate is never sent to a
+  pool. Tip and same-tip membership changes reuse existing generation
+  publication; there is no timer-based template poll. Generation races during
+  acquisition retry after 100 milliseconds with the last seen identity.
+  Shutdown and other errors end the worker.
+- Each session asks the owner for its own candidate when constraints arrive or
+  change and after each wake. A request never long-polls and runs on one
+  awaited blocking task; a connection has at most one. Distinct budgets on one
+  generation are distinct owner candidates, but the owner walks the pool for at
+  most one budgeted candidate at a time, with bounded waits and retries.
+  A transient owner refusal (the generation moved, or another budgeted walk held
+  the owner's slot for its whole wait) is retried after 100 milliseconds and
+  stops on session shutdown. The owner gives no liveness guarantee under
+  unbroken churn or contention: the pool then keeps the last job it received in
+  full. A budget that cannot fit even an empty block (`coinbase reservation
+  exhausts the … limit`) closes only that session; other sessions and the worker
+  continue.
+- Jobs are identified by the owner's candidate id. Sessions handed an equal id
+  share one retained job and one TDP template id. The hub retains the 16 most
+  recently issued jobs. Each session also pins the job it last delivered in
+  full, so other sessions' jobs cannot evict the job its pool is working on.
+  Resident jobs are therefore at most 16 plus one per session (eight sessions):
+  an entry count, not a byte bound, since every job holds its candidate's
+  transactions, and memory has not been measured.
+- `RequestTransactionData` and `SubmitSolution` resolve the exact template id:
+  the session's pinned job first, then the shared history, never a newer job.
+  A job is pinned only after both of its messages are written; the previous job
+  stays pinned until then, and a failed write closes the session. New
+  constraints leave jobs already delivered unchanged and request a new one. A
+  superseded job evicted from the history receives `template-not-found` for its
+  transaction data, and a solution for it is not applied. TDP has no reply to a
+  solution, so the provider logs a warning.
+- At most eight pool sessions are served. Solution assembly/validation,
+  transaction-data serialization and template requests run on awaited blocking
+  tasks. Sessions finish them, including an outstanding template request whose
+  connection has gone, before Node teardown; the owner's bounds make that wait
+  finite. No blocking Node call runs on a Tokio I/O worker.
+- Shutdown stops accepts, closes incomplete session reads, drains submissions
+  and template requests, signals the normal node shutdown input, joins the
+  long-poll worker, and calls consuming `Node::shutdown`. Compose uses SIGINT
+  and a 30-second grace period.
+- The exact Noise read future survives template refreshes. Cancellation on
+  shutdown closes the entire connection; a partial record is never resumed with
+  a new decoder. Writes have a deadline and a failed write closes the session.
+- Coinbase prefix, version, sequence, locktime, required outputs and commitment
+  come from the native candidate. The pool adds its payout outputs; native
+  submission supplies the ordinary witness reserved value if required. The node
+  owns actual fee accounting, transaction selection, PoW, consensus validation,
+  mempool removal, tip publication and announcements. Superseded solutions get
+  those same checks rather than an adapter-defined stale-job verdict.
 
-## Payout destination and coinbase ownership
+## Validation and measurement
 
-- The pool pays `coinbase_tx_value_remaining` (subsidy + fees from the
-  bitcoin-rs template) to its `coinbase_reward_script`:
-  `addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)`
-  (regtest P2WPKH, bech32) — set in `config/pool.toml`.
-- bitcoin-rs's mining owner owns the coinbase/witness-commitment rules and
-  the bridge mirrors them: `coinbase_prefix` is the BIP34 height push only,
-  version/sequence/locktime follow bitcoin-rs's coinbase construction, and
-  `coinbase_tx_outputs` carries **only the witness-commitment output**
-  (value 0, from the GBT `default_witness_commitment`) when the template has
-  one — zero outputs otherwise. The pool's reward output is therefore the
-  only value-carrying coinbase output; the pool appends its signature and
-  extranonce to the scriptSig, which the bridge's solution check ignores.
-
-## Optional SV1 leg (unpinned)
-
-SRI v0.8.0 ships no SV1 miner, so this leg cannot be pinned with SRI-only
-components and is **not exercised** by the default setup. The translator is
-running and publishes SV1 on `127.0.0.1:3333`; point any Stratum V1 miner
-(e.g. a host-run `cgminer`/BMSB-compatible client) at it to add a third leg
-(one aggregated upstream channel via `aggregate_channels = true`). Treat any
-result from this leg as anecdotal until pinned and verified.
-
-## Configuration mechanism (why mounted TOML)
-
-The upstream images are built to take an optional TOML from the binary's
-`-c/--config` **default path** (`pool-config.toml` / `translator-config.toml`
-relative to the image workdir `/app`), with `POOL__*` / `TPROXY__*` env vars
-as an override layer (see upstream `docker/docker_env.example`:
-"Every app is configured entirely from the environment — there are no
-mounted config files" refers to their compose shipping no file; the loader
-accepts either, env-only is unit-tested in `pool-apps/pool/src/args.rs`).
-We mount `config/pool.toml` and `config/translator.toml` read-only at those
-default paths, so the stock entrypoint (`exec /app/${APP}`) picks them up
-with no env vars needed.
-
-## Bridge configuration (environment)
-
-The bridge is env-configured (regtest defaults shown):
-
-| Variable               | Default                      | Purpose                              |
-|------------------------|------------------------------|--------------------------------------|
-| `TP_LISTEN`            | `0.0.0.0:8442`               | TDP listener the pool connects to    |
-| `BITCOINRS_RPC_URL`    | `http://127.0.0.1:18443`     | bitcoin-rs JSON-RPC endpoint         |
-| `BITCOINRS_RPC_USER`   | `bitcoin-rs`                 | RPC basic-auth user                  |
-| `BITCOINRS_RPC_PASS`   | `bitcoin-rs`                 | RPC basic-auth password              |
-| `TP_PRIVATE_KEY_HEX`   | fixed example key            | Noise secret key (64 hex chars)      |
-| `TP_CERT_VALIDITY_SECS`| `3600`                       | Noise certificate lifetime           |
-
-## Explicit non-claims
-
-- **No ASIC or commercial-miner guarantee.** The only miners exercised are
-  SRI's own CPU `mining_device`; no real SV2 ASIC or SV1 farm was tested.
-- **Example-only keys.** The pool/translator authority keypair is the SRI
-  reference example keypair (public in upstream examples); the bridge Noise
-  key is a fixed example key; the payout address is a fixed regtest address.
-  Do not reuse any of them outside regtest.
-- **Regtest-only evidence.** Nothing here claims mainnet/testnet viability.
-- **Not a pool product.** No balances, PPS/PPLNS accounting, withdrawals or
-  wallet — the pool just pays each accepted block on-chain.
-- **Not a consensus oracle.** SRI consumes bitcoin-rs templates; bitcoin-rs
-  remains authoritative for transaction selection and candidate validation.
-
-## Evidence (from verification run, this tree)
-
-Recorded on this branch with the pinned components above (`docker compose up -d`):
-
-- **Two simultaneous worker channels.** `GET http://127.0.0.1:9090/api/v1/clients` reported 3 clients: the two `mining_device`s with `standard_channels_count: 1` each (~32 MH/s each on an 8-CPU container) and the idle translator; the pool log shows `OpenStandardMiningChannel` for `…worker1` and `…worker2`.
-- **Jobs flow to miners.** Both devices log `Received new mining job … is future: true` and `Received SetNewPrevHash` on every template refresh.
-- **Shares validate.** Devices log `Found share …` → `Received SubmitSharesSuccess`; the pool logs `SubmitSharesStandard` acceptance.
-- **Blocks accepted through the normal path.** For each found share the pool logs `💰 Block Found!!! … Propagating solution to the Template Provider`; the template-provider logs `block accepted by bitcoin-rs via submitblock` — the production `submitblock` RPC. Every `SubmitSolution` was accepted in the recorded run (15+ consecutive).
-- **Tip advance → new job.** After each accepted block the provider long-poll returns, issues a new template id and pushes `NewTemplate` + `SetNewPrevHash` (`pushed template to pool`), and the devices receive the replacement job; `getblockchaininfo` showed `blocks` climbing past 15 during the run.
-
-Representative log slice (template-provider):
-
-```text
-INFO issued template template_id=1 height=1 txs=0 value_remaining=5000000000
-INFO pushed template to pool template_id=1
-INFO block accepted by bitcoin-rs via submitblock template_id=1 \
-     block_hash=0000000461737e004f46344d1813131756f1781effc93d43d99ae8bbbc5ac1f7
-INFO issued template template_id=2 height=2 ...
-INFO tip advanced tip_height=1
+```sh
+cargo test --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml
+cargo clippy --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --all-targets -- -D warnings
 ```
 
-### Debugging notes (kept honestly)
+The public-Node test uses a real datadir without a mock or test feature. It
+checks wire coinbase outputs, independent block merkle reconstruction, typed
+submission/duplicates, same-tip mempool refresh through the worker's wake, a
+valid superseded solution, stale-parent refusal, recovery from injected
+generation races before the first wake and after it, and cancellation on
+shutdown. Its 100-block history is required to spend a matured coinbase.
+Hub tests check that equal owner identities share one job and that history stays
+at 16 entries.
 
-Three integration boundary rules the unit tests and this run pin, found
-during verification of this design:
+Focused localhost Noise tests drive real sessions over an embedded Node. They
+hold back part of an encrypted request across a job refresh and verify the
+completed request and next record decode. They pause a real native block
+submission through the existing mempool observer, request session shutdown, and
+verify submission drains and the block commits before Node teardown. They also
+cover the budgeted and retained jobs:
 
-1. The SRI pool's bootstrap gate only records templates flagged
-   `future_template`, so the bridge sends `future_template: true` and lets
-   the paired `SetNewPrevHash` activate the job (the upstream Core adapter's
-   idle behavior).
-2. SV2 `coinbase_tx_outputs` is a serialized-`TxOut` list: the commitment
-   script must be wrapped as `TxOut { value: 0, script }` (8 zero bytes +
-   compactsize + script), not sent as a bare script.
-3. `watch::Sender::send` **silently drops the value while the channel has
-   zero receivers** (every publish before the first pool connects). The hub
-   uses `send_replace`, which stores unconditionally and still notifies —
-   otherwise the initial template push is a no-op and the pool waits for
-   its first template forever.
+- a budget the unconstrained candidate cannot spare gets a fitting job, and a
+  second session with a looser budget keeps the unconstrained one;
+- another pool issuing more jobs than the history retains evicts the first
+  session's job from the history, yet that session still answers
+  `RequestTransactionData` for it and its `SubmitSolution` reaches consensus;
+  an evicted superseded id gets `template-not-found` and its solution is not
+  applied to any other job;
+- an unsatisfiable budget closes only its own session;
+- a failed write leaves the previously pinned job in place.
+
+The [retained interoperability run](evidence/interop.md) records an earlier
+provider image with two real SRI devices, pool reconnect, and checkpoint
+restore. It predates owner-budgeted jobs and pinned-job retention and has not
+been repeated for them. It is functional evidence, not a comparative benchmark.
+
+This is limited regtest interoperability support, not production pool
+qualification or a mining-throughput claim. For before/after measurements,
+build the RPC example from base revision `a11021788` in a separate checkout;
+its adapter is removed here rather than kept as a second production path.
+Use the same node validation engine/backend, candidate transactions, host and
+external SRI pins. Capture raw timestamps and command/build identities, CPU,
+allocations and peak RSS. Compare fresh and reused HTTP connections separately.
+Job-write and canonical-submission durations are diagnostic spans; they do not
+measure mutation-to-candidate or first P2P announcement latency and cannot
+establish an end-to-end speedup. Memory for the retained jobs, the serialised
+budgeted selection and its job lag, and read-guard contention remain
+unmeasured; full matched percentile measurements are required before making
+performance claims.

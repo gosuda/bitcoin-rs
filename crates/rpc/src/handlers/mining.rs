@@ -9,9 +9,7 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{
-    Block, ConsensusDecode, Header, Network, Tx, Txid, consensus_bytes, deserialize,
-};
+use bitcoin_rs_primitives::{Block, ConsensusDecode, Header, Network, Tx, Txid, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
@@ -204,7 +202,13 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         return Err(RpcError::InvalidParameter(PRIORITISE_DUST_ERROR.to_owned()));
     }
     if let Some(control) = ctx.mining.mining_control.as_ref() {
-        control.publish_generation();
+        let fee_delta_sequence = {
+            let pool = ctx.mempool.gateway.read();
+            let fee_delta_sequence = pool.fee_delta_sequence_number();
+            drop(pool);
+            fee_delta_sequence
+        };
+        control.publish_fee_delta_generation(fee_delta_sequence);
     }
     Ok(json!(true))
 }
@@ -432,6 +436,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
+            coinbase_budget: None,
         });
     }
     let array = params_array(params)?;
@@ -441,6 +446,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
+            coinbase_budget: None,
         });
     };
     if request.is_null() {
@@ -449,6 +455,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
+            coinbase_budget: None,
         });
     }
     if !request.is_object() {
@@ -479,6 +486,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
+            coinbase_budget: None,
         });
     }
     if mode_text != "template" {
@@ -508,6 +516,8 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
             .collect(),
         rules: rules.into_iter().map(MiningRule::new).collect(),
         long_poll_id,
+        // The BIP22/BIP23 surface never carries a coinbase budget.
+        coinbase_budget: None,
     })
 }
 
@@ -621,7 +631,7 @@ fn render_template_transactions(
     transactions
         .iter()
         .map(|tx| v31::BlockTemplateTransaction {
-            data: consensus_bytes(tx.tx.as_ref()).to_lower_hex_string(),
+            data: tx.data_hex.clone(),
             txid: tx.txid.to_string(),
             hash: tx.wtxid.to_string(),
             depends: tx.depends.iter().map(|index| i64::from(*index)).collect(),
@@ -766,7 +776,7 @@ mod tests {
     };
     use bitcoin_rs_primitives::{
         Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
 
     use crate::handlers::util::{
@@ -888,7 +898,7 @@ mod tests {
     }
 
     fn register_dummy_peer(ctx: &Context) {
-        let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::Message>(1);
+        let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::QueuedFrame>(1);
         ctx.network.peer_table.register(
             "127.0.0.1:8333"
                 .parse()
@@ -1547,15 +1557,21 @@ mod tests {
         let mut template = sample_template();
         let tx = Tx {
             version: 2,
-            inputs: Vec::new(),
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_stack(vec![vec![0x01, 0x02, 0x03], vec![0x04]]),
+            }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(1_000),
-                script_pubkey: Script::new(),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
             lock_time: LockTime::ZERO,
         };
         let txid = tx.txid();
         let wtxid = tx.wtxid();
+        let data_hex = consensus_bytes(&tx).to_lower_hex_string();
         let mut candidate = sample_candidate();
         candidate.transactions.push(CandidateTransaction {
             tx: Arc::new(tx.clone()),
@@ -1565,6 +1581,7 @@ mod tests {
             sigop_cost: 2,
             weight: 400,
             depends: vec![],
+            data_hex: data_hex.clone(),
         });
         template.candidate = Arc::new(candidate);
         let control = FakeMiningControl::with_template(template, sample_mining_info());
@@ -1577,15 +1594,22 @@ mod tests {
             .expect("transactions array");
         assert_eq!(transactions.len(), 1);
         let txid_hex = txid.to_string();
-        let tx_hex = consensus_bytes(&tx).to_lower_hex_string();
         assert_eq!(
             transactions[0].get("txid").and_then(JsonValueTrait::as_str),
             Some(txid_hex.as_str())
         );
-        assert_eq!(
-            transactions[0].get("data").and_then(JsonValueTrait::as_str),
-            Some(tx_hex.as_str())
-        );
+        let rendered = transactions[0]
+            .get("data")
+            .and_then(JsonValueTrait::as_str)
+            .expect("template data hex");
+        assert_eq!(rendered, data_hex.as_str());
+        let raw = Vec::<u8>::from_hex(rendered)
+            .unwrap_or_else(|err| panic!("template data must be hex: {err}"));
+        let decoded: Tx =
+            deserialize(&raw).unwrap_or_else(|err| panic!("template data must decode: {err}"));
+        assert_eq!(decoded, tx);
+        assert!(!decoded.inputs[0].witness.is_empty());
+        assert_eq!(decoded.wtxid(), wtxid);
     }
 
     #[test]

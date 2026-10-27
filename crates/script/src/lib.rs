@@ -11,6 +11,7 @@ mod checker;
 mod eval;
 mod interpreter;
 mod script;
+mod signature_cache;
 /// Signature operation counters.
 pub mod sigops;
 mod stack;
@@ -28,4 +29,5 @@ pub use script::{
     is_witness_program, minimal_non_dust, multisig_key_count, opcode, push_data, push_int,
     witness_program,
 };
+pub use signature_cache::SignatureCache;
 pub use sigops::{count_segwit, count_tx_legacy};

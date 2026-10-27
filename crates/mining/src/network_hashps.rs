@@ -113,4 +113,4 @@ fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
 
 /// Reference: Bitcoin Core `GetNetworkHashPS`, `src/rpc/mining.cpp`.
 #[cfg(test)]
-mod oracle_tests;
+mod tests;

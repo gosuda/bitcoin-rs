@@ -35,7 +35,7 @@ use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness,
+    Txid, Witness, unix_time_secs,
 };
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_script::push_int;
@@ -43,7 +43,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 /// Header timestamp base for the regtest fixture chain.
 const BASE_TIME: u32 = 1_296_688_603;
-/// Seconds between fixture blocks; also spaces admission timestamps.
+/// Seconds between fixture blocks.
 const BLOCK_INTERVAL: u32 = 600;
 /// Regtest block subsidy paid to every fixture coinbase.
 const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
@@ -135,8 +135,9 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
 }
 
 /// Admits `tx` through the node's shared gateway exactly like production RPC
-/// ingress.
-fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
+/// ingress, stamping the entry with the wall-clock time so post-admission
+/// expiry treats it as fresh.
+fn admit(state: &NodeState, tx: Tx) -> Result<SubmitOutcome> {
     let view = ChainAdmissionView::new(
         state.chainstate().utxo_reader(),
         state.chainstate().applied_tip_reader(),
@@ -145,7 +146,13 @@ fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
     );
     state
         .mempool_gateway()
-        .submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, time, &view)
+        .submit_transaction(
+            Arc::new(tx),
+            AdmissionOrigin::Rpc,
+            None,
+            unix_time_secs(),
+            &view,
+        )
         .map_err(|error| anyhow!("admission failed: {error}"))
 }
 
@@ -262,7 +269,7 @@ fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
     // A real admission at the high tier still cannot fabricate an estimate.
     fund_utxo(&state, parent_txid(0x01), PARENT_VALUE_SATS)?;
     let tx = spending_tx(parent_txid(0x01), HIGH_FEE_SATS, 0xffff_ffff);
-    admit(&state, tx.clone(), u64::from(BASE_TIME))?;
+    admit(&state, tx.clone())?;
     assert!(pool.read().contains_txid(&tx.txid()), "tx must be pooled");
     assert_eq!(
         pool.read().estimate_fee_rate(1),
@@ -312,7 +319,7 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
     shadow.block_connected(&[], 0);
     for tx in high.iter().chain(low.iter()) {
         let txid = tx.txid();
-        admit(&state, tx.clone(), u64::from(BASE_TIME))?;
+        admit(&state, tx.clone())?;
         mirror_admitted(&mut shadow, &state, txid);
     }
     assert_eq!(pool.read().len(), 4, "all four admissions must be pooled");
@@ -396,14 +403,14 @@ fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
 
     let mut shadow = FeeEstimator::new();
     shadow.block_connected(&[], 0);
-    admit(&state, victim.clone(), u64::from(BASE_TIME))?;
+    admit(&state, victim.clone())?;
     mirror_admitted(&mut shadow, &state, victim.txid());
     assert!(
         pool.read().contains_txid(&victim.txid()),
         "victim must pool"
     );
 
-    admit(&state, replacement.clone(), u64::from(BASE_TIME))?;
+    admit(&state, replacement.clone())?;
     mirror_admitted(&mut shadow, &state, replacement.txid());
     shadow.tx_left(&victim.txid());
     assert_matches_declared_semantics(&state, &shadow);
@@ -445,9 +452,9 @@ fn eviction_untracks_without_false_confirmation() -> Result<()> {
 
     let mut shadow = FeeEstimator::new();
     shadow.block_connected(&[], 0);
-    admit(&state, evicted.clone(), u64::from(BASE_TIME))?;
+    admit(&state, evicted.clone())?;
     mirror_admitted(&mut shadow, &state, evicted.txid());
-    admit(&state, kept.clone(), u64::from(BASE_TIME))?;
+    admit(&state, kept.clone())?;
     mirror_admitted(&mut shadow, &state, kept.txid());
 
     let _ = state
@@ -492,7 +499,7 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
         spending_tx(parent_txid(0x42), HIGH_FEE_SATS, 0xffff_ffff),
     ];
     for tx in &txs {
-        admit(&state, tx.clone(), u64::from(BASE_TIME))?;
+        admit(&state, tx.clone())?;
     }
 
     let genesis = applied_tip_hash(&state)?;
@@ -568,7 +575,7 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
         spending_tx(parent_txid(0x52), HIGH_FEE_SATS, 0xffff_ffff),
     ];
     for tx in &txs {
-        admit(&state, tx.clone(), u64::from(BASE_TIME))?;
+        admit(&state, tx.clone())?;
     }
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 1, 0, txs.to_vec())?;
@@ -626,7 +633,7 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
         spending_tx(parent_txid(0x62), HIGH_FEE_SATS, 0xffff_ffff),
     ];
     for tx in &txs {
-        admit(&state, tx.clone(), u64::from(BASE_TIME))?;
+        admit(&state, tx.clone())?;
     }
     let tip = applied_tip_hash(&state)?;
     mine_and_apply(&state, tip, 1, 0, txs.to_vec())?;
@@ -653,7 +660,7 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     // The degraded node is fully operational: a fresh admission still tracks.
     fund_utxo(&reopened, parent_txid(0x63), PARENT_VALUE_SATS)?;
     let fresh = spending_tx(parent_txid(0x63), HIGH_FEE_SATS, 0xffff_ffff);
-    admit(&reopened, fresh.clone(), u64::from(BASE_TIME) + 2)?;
+    admit(&reopened, fresh.clone())?;
     assert!(
         pool.read().contains_txid(&fresh.txid()),
         "degraded node must keep admitting"

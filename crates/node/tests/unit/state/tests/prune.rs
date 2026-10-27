@@ -294,7 +294,7 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
     let _assumeutxo = AssumeUtxoManager::open(
         Network::Regtest,
         state.chainstate(),
-        Some(dir.path().to_path_buf()),
+        dir.path().to_path_buf(),
     )?;
 
     let service = Arc::new(super::super::storage::NodePruneService::new(

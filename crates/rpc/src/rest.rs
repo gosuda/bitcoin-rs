@@ -1181,7 +1181,11 @@ mod tests {
     struct PanicBlockSource;
 
     impl bitcoin_rs_chain::BlockBodySource for PanicBlockSource {
-        fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
+        fn block_body(
+            &self,
+            _height: u32,
+            _hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
             panic!("exhausted render budget must not load a block body");
         }
     }

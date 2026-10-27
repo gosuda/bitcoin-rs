@@ -1,0 +1,233 @@
+use super::*;
+
+#[test]
+fn apply_cache_invalidated_on_chain_tip_move() -> TestResult {
+    let fixture = apply_cache_fixture(4, 0)?;
+    install_budget(
+        &fixture.sync,
+        super::super::SyncBudget {
+            max_pending_blocks: 4,
+            max_pending_bytes: usize::MAX,
+            max_received_blocks: 64,
+            max_received_bytes: usize::MAX,
+            ..super::super::default_sync_budget(Network::Regtest)
+        },
+    );
+
+    stage_body(&fixture.sync, &fixture.blocks[0]);
+    let (applied, _failed) = fixture.sync.apply_buffered_blocks(None);
+    assert_eq!(applied, 1);
+    let cache = cache_snapshot(&fixture.sync)
+        .ok_or_else(|| std::io::Error::other("miss did not populate apply cache"))?;
+    let original_chain_tip_hash = cache.chain_tip_hash;
+    assert_eq!(cache.offset, 1);
+
+    let moved_tip = {
+        let current = fixture
+            .chain_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing chain tip"))?;
+        let mut hash_bytes = current.hash.to_le_bytes();
+        hash_bytes[0] ^= 0xff;
+        TipSnapshot {
+            tip_id: current.tip_id,
+            chain_tx_count: current.chain_tx_count,
+            height: current.height,
+            chainwork: current.chainwork,
+            hash: Hash256::from_le_bytes(&hash_bytes),
+        }
+    };
+    fixture.chain_tip.store(Some(Arc::new(moved_tip)));
+    assert_ne!(
+        fixture
+            .chain_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing chain tip"))?
+            .hash,
+        original_chain_tip_hash,
+        "chain tip must move for this test to be meaningful"
+    );
+
+    assert!(
+        fixture.sync.drain_cached_expected_blocks(1).is_none(),
+        "stale cache keyed to the old chain tip must not serve a drain"
+    );
+
+    stage_body(&fixture.sync, &fixture.blocks[1]);
+    let _ = fixture.sync.apply_buffered_blocks(None);
+    let after = cache_snapshot(&fixture.sync)
+        .ok_or_else(|| std::io::Error::other("miss did not repopulate apply cache"))?;
+    assert_ne!(
+        after.chain_tip_hash, original_chain_tip_hash,
+        "repopulated cache must be keyed to the moved tip"
+    );
+    Ok(())
+}
+
+#[test]
+fn window_failure_applies_prefix_and_restores_suffix() -> TestResult {
+    // Blocks now apply in windows, so a mid-window failure has to split the
+    // chunk three ways: the prefix committed, the one block that failed, and
+    // an untouched suffix that must go back on the stager. Getting that
+    // split wrong is invisible to the (applied, failed) counts alone, so
+    // this asserts the stager contents too.
+    let fixture = apply_cache_fixture(4, 0)?;
+
+    let mut corrupted = fixture.blocks[1].clone();
+    corrupted.txs.push(regtest_fixture::coinbase(99));
+    assert_eq!(
+        corrupted.block_hash(),
+        fixture.blocks[1].block_hash(),
+        "corruption must not move the header hash or the drain never sees it"
+    );
+
+    stage_body(&fixture.sync, &fixture.blocks[0]);
+    stage_body(&fixture.sync, &corrupted);
+    stage_body(&fixture.sync, &fixture.blocks[2]);
+    stage_body(&fixture.sync, &fixture.blocks[3]);
+
+    let (applied, failed) = fixture.sync.apply_buffered_blocks(None);
+    assert_eq!(
+        (applied, failed),
+        (1, 1),
+        "only the block before the corrupt one commits"
+    );
+    assert_eq!(
+        fixture.applied_tip.load_full().map(|tip| tip.height),
+        Some(1),
+        "the chain stops at the last good block"
+    );
+
+    let restored = fixture.sync.scheduler.lock().stager.received_len();
+    assert_eq!(
+        restored, 0,
+        "invalidated blocks and their descendants are purged, not restored"
+    );
+    Ok(())
+}
+
+#[test]
+fn restore_split_pins_off_by_one() {
+    assert_eq!(super::super::restore_split(2, 2, 2), 4);
+    assert_eq!(super::super::restore_split(2, 1, 2), 4);
+    assert_eq!(super::super::restore_split(0, 0, 0), 0);
+}
+
+#[test]
+fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers() -> TestResult {
+    const PEER_COUNT: usize = 9;
+    const SELECTED_PEERS: usize = super::super::MIN_PEERS_FOR_FANOUT;
+    let (sync, peers, block_tree, applied_tip, expected) =
+        sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
+    install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
+    let mut receivers = Vec::new();
+    let mut addrs = Vec::new();
+    for idx in 0..PEER_COUNT {
+        let addr = test_addr(9506, idx)?;
+        addrs.push(addr);
+        receivers.push(connect_peer(
+            &peers,
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
+        ));
+    }
+    sync.tick();
+    assert_applied_genesis(&applied_tip, &block_tree)?;
+    let cap = super::super::PENDING_BUDGET.div_ceil(PEER_COUNT).clamp(
+        super::super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+        super::super::PEER_INFLIGHT_BUDGET,
+    );
+    for (idx, receiver) in receivers[..SELECTED_PEERS].iter().enumerate() {
+        let Message::GetData(inventory) = receiver.try_recv()? else {
+            return Err(std::io::Error::other("expected initial stripe").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            expected[idx * cap..(idx + 1) * cap]
+        );
+    }
+    let _ = receivers[0].try_recv()?;
+    let Message::GetData(remainder) = receivers[SELECTED_PEERS].try_recv()? else {
+        return Err(std::io::Error::other("expected remainder getdata for spare peer").into());
+    };
+    assert_eq!(
+        witness_block_inventory(remainder)?,
+        expected[SELECTED_PEERS * cap..]
+    );
+    let dropped = addrs[1];
+    peers.disconnect(dropped);
+    sync.tick();
+    let Message::GetData(inventory) = receivers[SELECTED_PEERS].try_recv()? else {
+        return Err(std::io::Error::other("expected requeued getdata").into());
+    };
+    let mut requeued = witness_block_inventory(inventory)?;
+    for (idx, rx) in receivers.iter().enumerate() {
+        if idx == 1 || idx == SELECTED_PEERS {
+            continue; // disconnected peer; spare drained above
+        }
+        requeued.extend(witness_block_inventory(next_getdata(rx)?)?);
+    }
+    requeued.sort();
+    let mut freed = expected[cap..2 * cap].to_vec();
+    freed.sort();
+    assert_eq!(requeued, freed, "every freed block must be re-requested");
+    assert_eq!(
+        sync.scheduler.lock().window.pending_len(),
+        super::super::PENDING_BUDGET
+    );
+    Ok(())
+}
+
+#[test]
+fn same_address_registration_after_window_eviction_keeps_replacement() -> TestResult {
+    let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain(3)?;
+    let addr = test_addr(9508, 0)?;
+    let (old_tx, old_rx) = crate::test_support::message_channel();
+    let old = PeerLease::new(old_tx);
+    peers.register(addr, old.clone());
+    peers.publish_info(addr, &old, synthetic_peer(addr, 100));
+    sync.tick();
+    let _ = old_rx.try_recv()?;
+    let _ = old_rx.try_recv()?;
+    let (new_tx, new_rx) = crate::test_support::message_channel();
+    let new = PeerLease::new(new_tx);
+    peers.register(addr, new.clone());
+    peers.publish_info(addr, &new, synthetic_peer(addr, 100));
+    sync.tick();
+    assert!(peers.is_current(new.source(addr)));
+    assert!(old.is_cancelled());
+    assert!(peers.is_connected(addr));
+    assert!(new_rx.try_recv().is_ok());
+    Ok(())
+}
+
+#[test]
+fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> TestResult {
+    let HeaderSyncFixture { sync, peers, .. } = header_sync_with_genesis()?;
+    install_budget(
+        &sync,
+        super::super::SyncBudget {
+            max_pending_blocks: 0,
+            ..super::super::default_sync_budget(Network::Regtest)
+        },
+    );
+    let addr = test_addr(9509, 0)?;
+    let (tx, _rx) = crate::test_support::message_channel();
+    let lease = PeerLease::new(tx);
+    peers.register(addr, lease.clone());
+    peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
+    sync.tick();
+    assert!(sync.scheduler.lock().header_request().is_some());
+
+    assert!(!peers.register(addr, lease));
+    sync.reconcile_peer_sessions();
+    assert!(sync.scheduler.lock().header_request().is_some());
+
+    let (new_tx, _new_rx) = crate::test_support::message_channel();
+    let replacement = PeerLease::new(new_tx);
+    peers.register(addr, replacement.clone());
+    peers.publish_info(addr, &replacement, synthetic_peer(addr, 8));
+    sync.reconcile_peer_sessions();
+    assert!(sync.scheduler.lock().header_request().is_none());
+    assert!(sync.scheduler.lock().headers_sync.is_empty());
+    Ok(())
+}

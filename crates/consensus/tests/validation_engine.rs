@@ -3,7 +3,7 @@
 
 use bitcoin_rs_consensus::kernel::BlockParse;
 #[cfg(feature = "kernel")]
-use bitcoin_rs_consensus::{BlockFacts, BlockView, ScriptStageTimings, verify_block_input_scripts};
+use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
@@ -78,6 +78,7 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
         0,
         VerifyFlags::MANDATORY,
         ValidationEngine::Native,
+        None,
     );
     let native_reason = script_reason(native);
     assert!(
@@ -92,6 +93,7 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
         0,
         VerifyFlags::MANDATORY,
         ValidationEngine::Kernel,
+        None,
     );
     let kernel_reason = script_reason(kernel);
     assert!(
@@ -102,10 +104,10 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
     let block = single_tx_block(&tx);
     let parsed = BlockParse::parse(&consensus_bytes(&block), ValidationEngine::Native)
         .unwrap_or_else(|error| panic!("native parse: {error}"));
-    let mut view = BlockView::from_facts(
-        &block.txs,
-        BlockFacts::from_txids(&block.txs, vec![tx.txid()]),
-    );
+    let (parsed, facts) = parsed
+        .into_parts(&block.txs)
+        .unwrap_or_else(|error| panic!("native facts: {error}"));
+    let mut view = BlockView::from_facts(&block.txs, facts);
     view.set_resolved(vec![vec![coins.lookup(&tx.inputs[0].previous_output)]]);
     let native_block = verify_block_input_scripts(
         &mut view,
@@ -114,6 +116,7 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
         VerifyFlags::MANDATORY,
         &mut ScriptStageTimings::default(),
         &parsed,
+        None,
     );
     assert!(
         script_reason(native_block).starts_with("script failed:"),
@@ -133,6 +136,7 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
         0,
         VerifyFlags::MANDATORY,
         ValidationEngine::Kernel,
+        None,
     );
     match tx_verdict {
         Err(ConsensusError::UnsupportedEngine { engine }) => {
@@ -164,6 +168,7 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
         0,
         VerifyFlags::MANDATORY,
         ValidationEngine::Kernel,
+        None,
     ) {
         Err(ConsensusError::UnsupportedEngine { engine }) => {
             assert_eq!(engine, ValidationEngine::Kernel);
@@ -216,6 +221,7 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
             &one_prevout,
             VerifyFlags::MANDATORY,
             engine,
+            None,
         );
         assert!(
             matches!(
@@ -244,6 +250,7 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
             &long,
             VerifyFlags::MANDATORY,
             engine,
+            None,
         );
         assert!(
             matches!(

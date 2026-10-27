@@ -54,7 +54,6 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use thiserror::Error;
 
-#[path = "checkpoint_publisher.rs"]
 pub(crate) mod publisher;
 
 fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
@@ -75,7 +74,6 @@ fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     }
 }
 
-#[path = "checkpoint_headers.rs"]
 pub(crate) mod headers;
 
 pub(crate) enum CheckpointLoad {
@@ -707,5 +705,4 @@ fn manifest_tip(tip: headers::HeaderCheckpointTip, chain_tx_count: u64) -> Check
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/checkpoint/tests/mod.rs"]
 mod tests;

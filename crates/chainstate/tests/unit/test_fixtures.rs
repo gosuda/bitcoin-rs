@@ -11,9 +11,9 @@ use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use hashbrown::HashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
-use crate::{ApplyError, Chainstate};
+use crate::{ApplyError, Chainstate, TipStagedHook};
 
 pub(crate) fn journal_coin(marker: u8, height: u32, value: u64) -> Coin {
     Coin {
@@ -55,6 +55,38 @@ pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyErr
     };
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     Ok(tip)
+}
+
+/// What the staged-tip hook observed: the staged tip it was handed, the
+/// borrowed block's identity, and the published tip still in the cell.
+/// Only hashes and heights cross the hook boundary — never a block clone.
+pub(crate) struct StagedFire {
+    pub(crate) staged_hash: Hash256,
+    pub(crate) staged_height: u32,
+    pub(crate) block_hash: Hash256,
+    pub(crate) published: Option<(Hash256, u32)>,
+}
+
+/// Records every staged-tip fire with the published tip still in the cell.
+pub(crate) fn staging_recorder(
+    chain: &Chainstate,
+    fires: &Arc<Mutex<Vec<StagedFire>>>,
+) -> TipStagedHook {
+    let fires = Arc::clone(fires);
+    let chain = chain.clone();
+    Arc::new(move |staged, block| {
+        // `applied_tip_snapshot` is a lock-free read; the hook takes no
+        // domain write lock and never reenters chainstate mutation.
+        let published = chain
+            .applied_tip_snapshot()
+            .map(|tip| (tip.hash, tip.height));
+        fires.lock().push(StagedFire {
+            staged_hash: staged.hash,
+            staged_height: staged.height,
+            block_hash: Hash256::from(block.block_hash()),
+            published,
+        });
+    })
 }
 
 #[derive(Default)]

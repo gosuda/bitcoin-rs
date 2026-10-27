@@ -54,6 +54,7 @@ fn kernel_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), 
         &spent,
         flags,
         bitcoin_rs_consensus::ValidationEngine::Kernel,
+        None,
     )
 }
 

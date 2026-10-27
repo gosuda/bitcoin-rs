@@ -190,6 +190,12 @@ impl<'b> BlockView<'b> {
         self.facts.txids()
     }
 
+    /// Returns the decoded transactions in block order.
+    #[must_use]
+    pub fn txs(&self) -> &[Tx] {
+        self.txs
+    }
+
     /// Returns whether the derived Merkle root equals `merkle_root`.
     #[must_use]
     pub fn merkle_root_matches(&self, merkle_root: bitcoin_rs_primitives::Hash256) -> bool {

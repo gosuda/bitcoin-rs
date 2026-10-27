@@ -7,7 +7,6 @@ use super::HeaderRequest;
 use super::HeaderRequestKind;
 use super::HeaderRequestState;
 use super::LOCATOR_MAX_ENTRIES;
-use super::PROTOCOL_VERSION;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
@@ -28,6 +27,7 @@ use crate::Message;
 use crate::PeerSource;
 use crate::download_window::SyncPeer;
 use crate::peer_info::PeerInfo;
+use crate::wire::PROTOCOL_VERSION;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
@@ -331,17 +331,7 @@ impl BlockSync {
         {
             return GetdataRequestOutcome::default();
         }
-        let outcome = self.send_getdata_for_pending_blocks(source, false, height, chain);
-        // The request path primes the expected-apply cache with exactly this
-        // batch. A direct fetch runs before this round's apply pass, where
-        // more bodies may already be staged, so drop the primed cache and let
-        // the apply path walk the tree and repopulate it with the full run —
-        // but only when a request actually went out; a refused outcome left
-        // the cache untouched.
-        if outcome.sent {
-            *self.expected_apply_cache.lock() = None;
-        }
-        outcome
+        self.send_getdata_for_pending_blocks(source, false, height, chain)
     }
 
     /// Height of `hash` when it lies on the branch that ends at `tip`, and
@@ -959,53 +949,66 @@ impl BlockSync {
         // and the pending stamp under one table authority, so a replacement
         // slipping in between cannot leave a request registered to a dead
         // connection.
-        if self
-            .peer_table
-            .send_then(source, msg, || {
-                let mut scheduler = self.scheduler.lock();
-                scheduler.headers_sync.entry(source).or_default().request = Some(HeaderRequest {
-                    source,
-                    kind,
-                    locator_tip_hash,
-                    target_height,
-                    requested_at: now,
-                    state: HeaderRequestState::AwaitingResponse,
+        let sent = self.peer_table.send_then(source, msg, || {
+            let mut scheduler = self.scheduler.lock();
+            scheduler.headers_sync.entry(source).or_default().request = Some(HeaderRequest {
+                source,
+                kind,
+                locator_tip_hash,
+                target_height,
+                requested_at: now,
+                state: HeaderRequestState::AwaitingResponse,
+            });
+            if kind == HeaderRequestKind::Frontier {
+                // A continuation from a different peer must not replace
+                // the frontier request its current owner still owes.
+                let can_claim_owner = scheduler.header_request_owner.is_none_or(|owner| {
+                    owner == source
+                        || scheduler
+                            .headers_sync
+                            .get(&owner)
+                            .and_then(|owned| owned.request)
+                            .is_none_or(|request| {
+                                now.saturating_duration_since(request.requested_at)
+                                    >= request.timeout()
+                            })
                 });
-                if kind == HeaderRequestKind::Frontier {
-                    // A continuation from a different peer must not replace
-                    // the frontier request its current owner still owes.
-                    let can_claim_owner = scheduler.header_request_owner.is_none_or(|owner| {
-                        owner == source
-                            || scheduler
-                                .headers_sync
-                                .get(&owner)
-                                .and_then(|owned| owned.request)
-                                .is_none_or(|request| {
-                                    now.saturating_duration_since(request.requested_at)
-                                        >= request.timeout()
-                                })
-                    });
-                    if can_claim_owner {
-                        scheduler.header_request_owner = Some(source);
-                    }
-                } else if scheduler.header_request_owner == Some(source) {
-                    scheduler.header_request_owner = None;
+                if can_claim_owner {
+                    scheduler.header_request_owner = Some(source);
                 }
-            })
-            .is_err()
-        {
-            tracing::warn!(
-                peer_addr = %source.addr,
-                "block sync: outbound channel disconnected"
-            );
-            // The send failure means this connection is gone: evict it so the
-            // scheduler cannot re-pick a dead peer every tick. The identity
-            // check inside `disconnect_source` keeps a same-address
-            // replacement untouched, and the exact-source lifecycle is
-            // dropped so a fast reconnect does not inherit stale sync state.
-            self.peer_table.disconnect_source(source);
-            self.clear_headers_sync_for(source);
-            return GetheadersOutcome::Failed;
+            } else if scheduler.header_request_owner == Some(source) {
+                scheduler.header_request_owner = None;
+            }
+        });
+        match sent {
+            Ok(()) => {}
+            Err(crate::OutboundRefusal::Saturated(_)) => {
+                // The node's aggregate outbound budget is full while this
+                // connection is healthy: nothing was queued and nothing was
+                // stamped, so the next tick rebuilds the request from the
+                // then-current locator. The peer stays connected and keeps
+                // its sync state.
+                tracing::debug!(
+                    peer_addr = %source.addr,
+                    "block sync: getheaders deferred; node outbound budget is full"
+                );
+                return GetheadersOutcome::Failed;
+            }
+            Err(crate::OutboundRefusal::Closed(_)) => {
+                tracing::warn!(
+                    peer_addr = %source.addr,
+                    "block sync: outbound channel disconnected"
+                );
+                // The send failure means this connection is gone: evict it so
+                // the scheduler cannot re-pick a dead peer every tick. The
+                // identity check inside `disconnect_source` keeps a
+                // same-address replacement untouched, and the exact-source
+                // lifecycle is dropped so a fast reconnect does not inherit
+                // stale sync state.
+                self.peer_table.disconnect_source(source);
+                self.clear_headers_sync_for(source);
+                return GetheadersOutcome::Failed;
+            }
         }
         tracing::debug!(
             peer_addr = %source.addr,
@@ -1255,7 +1258,7 @@ impl BlockSync {
         batch_len: usize,
     ) -> PresyncOutcome {
         let (failure, request_more, ready_headers, finished) =
-            match state.process(headers, batch_len >= crate::dispatch::MAX_HEADERS_RESPONSE) {
+            match state.process(headers, batch_len >= crate::wire::MAX_HEADERS_MESSAGE_COUNT) {
                 Ok(result) => (
                     None,
                     result.request_more,

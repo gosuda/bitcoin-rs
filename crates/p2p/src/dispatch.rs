@@ -11,7 +11,7 @@ use crate::inv::{
     inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
 };
 use crate::peer::{Peer, PeerState};
-use crate::wire::{Message, PeerError};
+use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PeerError};
 
 /// Fully applied active-chain tip published by chainstate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,8 +24,6 @@ pub struct CommittedTip {
     pub prev_hash: BlockHash,
 }
 
-/// Maximum headers returned by one `headers` response.
-pub const MAX_HEADERS_RESPONSE: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.
 pub(crate) use crate::wire::MAX_LOCATOR_HASHES;
 
@@ -37,9 +35,52 @@ pub struct InventoryServing {
     /// body).
     pub not_found: Vec<Inventory>,
     /// True when production stopped at the headroom gate with items
-    /// unexamined. The caller applies the saturation policy; remaining
-    /// items are never served (I9: no silent half-serve).
+    /// unexamined. A halt loads no body and reports no unserved item as
+    /// served or missing: the caller keeps the unexamined items and resumes
+    /// them once the gate opens (I9: no silent half-serve).
     pub halted: bool,
+}
+
+/// The single durable record of one compact-filter request across serving
+/// attempts.
+///
+/// The first attempt carries the peer's request unchanged with no expected
+/// end. When a serving pass stops after emitting a prefix of a range
+/// (`getcfilters` only), the remainder is the same request narrowed to start
+/// after the emitted prefix, with `expected_end` pinning the stop height the
+/// emitted prefix was computed against. A later pass recomputes the range and
+/// fails if the chain moved under the cursor, instead of splicing two
+/// different ranges into one reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterRequest {
+    /// The request still to serve: the peer's original message, or its
+    /// narrowed remainder.
+    pub request: Message,
+    /// Height of the last filter the full range ends at, fixed by the first
+    /// pass that emitted a prefix. `None` before anything was emitted.
+    pub expected_end: Option<u32>,
+}
+
+impl FilterRequest {
+    /// Wraps a peer's compact-filter request for its first serving attempt.
+    #[must_use]
+    pub const fn new(request: Message) -> Self {
+        Self {
+            request,
+            expected_end: None,
+        }
+    }
+}
+
+/// Outcome of one compact-filter serving attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FilterServing {
+    /// The whole request was answered (or there was nothing to answer).
+    Done,
+    /// Nothing more could be sent now: publication or send headroom is
+    /// pending. The record is the exact remainder; passing it back resumes
+    /// without replaying anything already sent.
+    Pending(FilterRequest),
 }
 
 /// Read-only active-chain view used by server-side P2P responders.
@@ -49,16 +90,27 @@ pub trait ChainQuery: Send + Sync {
         false
     }
 
-    /// Serves a bounded BIP157 request from persisted filters only. Returns
-    /// false only when publication or send headroom is pending and no response
-    /// has been sent. The caller retains the request until its existing deadline.
+    /// Serves a bounded BIP157 request from persisted filters only.
+    ///
+    /// PRE: `request` is a [`FilterRequest`] built by
+    /// [`FilterRequest::new`] or returned by an earlier
+    /// [`FilterServing::Pending`] of this same request. `headroom` reserves
+    /// (or reuses) the caller's production credit immediately before each
+    /// filter is loaded and returns false when none is available.
+    /// POST: `Done` when every filter in the range was sent. `Pending` with
+    /// the exact remainder when publication or `headroom` stopped serving; a
+    /// pending record never repeats a message already sent, and `Pending`
+    /// carries the input unchanged when nothing was sent. `Err` for a range
+    /// that is interrupted for good (the index stopped early, or the chain
+    /// moved under a resumed cursor) and for send failures.
+    /// INVARIANT: a saturated outbound gate is `Pending`, never an error.
     fn serve_compact_filters(
         &self,
-        _request: &Message,
+        _request: &FilterRequest,
         _headroom: &dyn Fn() -> bool,
         _send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-    ) -> Result<bool, PeerError> {
-        Ok(true)
+    ) -> Result<FilterServing, PeerError> {
+        Ok(FilterServing::Done)
     }
     /// Returns a bounded contiguous active-chain header response.
     fn headers_after(
@@ -71,7 +123,9 @@ pub trait ChainQuery: Send + Sync {
     /// Serves block inventory one response at a time, in `items` order. For
     /// each block-typed item `headroom` is consulted EXACTLY ONCE,
     /// immediately BEFORE its body load; `false` halts production and sets
-    /// `halted` (I7, I9). Full-block items are served as
+    /// `halted` (I7, I9). `headroom` reserves or reuses the caller's
+    /// worst-case outbound reservation, which the following `serve` spends.
+    /// Full-block items are served as
     /// [`Message::BlockPayload`]; `MSG_CMPCT_BLOCK` items as
     /// [`Message::CmpctBlock`] built at the given BIP152 version — `None`
     /// (peer never negotiated) leaves compact items in `not_found`. Each
@@ -147,8 +201,8 @@ pub trait ChainQuery: Send + Sync {
     }
 }
 
-/// Read-only transaction inventory view used by the Inv filter and the
-/// `getdata` tx responder.
+/// Transaction inventory view and successful-getdata acknowledgement seam,
+/// used by the Inv filter and transaction responder.
 ///
 /// Implemented here for the mempool gateway; the p2p crate owns the protocol
 /// adapter while mempool owns admission, orphan, and rejection state.
@@ -169,9 +223,15 @@ pub trait TxInventory: Send + Sync {
     /// Returns the witness transaction body for `wtxid`, or `None` when the
     /// node does not have it. Used to answer BIP339 `getdata` (`WTx`) items.
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
+
+    /// Called only after a transaction body was successfully queued for getdata.
+    fn transaction_sent(&self, _wtxid: Wtxid) {}
 }
 
 impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
+    fn transaction_sent(&self, wtxid: Wtxid) {
+        self.mark_broadcast(wtxid);
+    }
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
         Self::have_tx(self, hash, hash_is_wtxid)
     }
@@ -187,21 +247,21 @@ impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
 
 impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGateway {
     fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
-        Self::for_each_identity(self, f);
+        Self::for_each_reconstruction_identity(self, f);
     }
     fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
-        Self::get_tx(self, txid)
+        Self::reconstruction_tx_by_txid(self, txid)
     }
 
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
-        Self::get_tx_by_wtxid(self, wtxid)
+        Self::reconstruction_tx_by_wtxid(self, wtxid)
     }
 }
 
 /// Chainless dispatch: collects the protocol responses and returns them.
 ///
 /// With `chain: None` responses can never contain a block body, so the batch
-/// is protocol-bounded (at most [`MAX_HEADERS_RESPONSE`] headers, or one
+/// is protocol-bounded (at most [`MAX_HEADERS_MESSAGE_COUNT`] headers, or one
 /// inventory-bound notfound/getdata echo) and safe to materialize whole.
 /// Block announcements go to a no-op sink.
 pub fn dispatch_inbound<S>(
@@ -231,7 +291,11 @@ pub fn dispatch_inbound<S>(
 /// Every response is emitted through `send` in the identical order the
 /// former batch form produced (I8); `send` errors abort emission and
 /// propagate. `headroom` gates block-body materialization (I7) and is
-/// evaluated before each load.
+/// evaluated before each load. It reserves the outbound bytes of one
+/// worst-case frame (or reuses a reservation already held) and returns
+/// `false` when the connection or the node cannot take them; the next `send`
+/// spends that reservation, so a body is loaded only while its queue space is
+/// already owned.
 ///
 /// When `tx_inventory` is `Some`, the `inv` arm suppresses `getdata` for
 /// transactions the node already holds (mempool, orphan map, or
@@ -325,11 +389,15 @@ pub fn dispatch_inbound_full<S>(
                 )));
             }
             if let Some(chain) = chain
-                && !chain.serve_compact_filters(message, headroom, send)?
+                && let FilterServing::Pending(remainder) = chain.serve_compact_filters(
+                    &FilterRequest::new(message.clone()),
+                    headroom,
+                    send,
+                )?
             {
-                peer.pending_filter_request = Some((
-                    message.clone(),
-                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                peer.pending_filter_request = Some(crate::peer::ParkedFilter::new(
+                    remainder,
+                    std::time::Instant::now(),
                 ));
             }
         }
@@ -343,8 +411,7 @@ pub fn dispatch_inbound_full<S>(
         Message::GetData(items) => {
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
-            let compact_version = peer.compact_blocks.servable_version();
-            serve_getdata(chain, tx_inventory, compact_version, items, headroom, send)?;
+            serve_inbound_getdata(peer, chain, tx_inventory, items, headroom, send)?;
         }
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
@@ -370,126 +437,195 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
         .collect();
     let stop_hash = BlockHash(Hash256::from_le_bytes(request.stop_hash.as_byte_array()));
     let mut headers = chain.map_or_else(Vec::new, |chain| {
-        chain.headers_after(&locator_hashes, stop_hash, MAX_HEADERS_RESPONSE)
+        chain.headers_after(&locator_hashes, stop_hash, MAX_HEADERS_MESSAGE_COUNT)
     });
-    headers.truncate(MAX_HEADERS_RESPONSE);
+    headers.truncate(MAX_HEADERS_MESSAGE_COUNT);
     Message::Headers(headers)
 }
 
-/// Serves one `getdata` through the sink.
+/// Serves one decoded `getdata` and parks what the production gate stops.
 ///
-/// When `tx_inventory` is `None` the behaviour is unchanged from the
-/// pre-tx-inventory path: with no chain view the whole request is reported
-/// missing; otherwise blocks stream through the chain query behind the
-/// headroom gate, followed by at most one trailing `notfound` (I8).
+/// PRE: `items` passed the inventory bound and nothing is parked on `peer`:
+/// the session reads nothing while a tail is parked, so a second request here
+/// is a caller bug, and replacing or reordering the parked tail would
+/// silently half-serve it.
+/// POST: the tail [`serve_getdata`] returns is `peer.pending_getdata` and the
+/// misses it keeps are `peer.pending_notfound`; both are empty when the whole
+/// request was handled.
+fn serve_inbound_getdata<S>(
+    peer: &mut Peer<S>,
+    chain: Option<&dyn ChainQuery>,
+    tx_inventory: Option<&dyn TxInventory>,
+    items: &[Inventory],
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    if peer.has_parked_getdata() {
+        return Err(PeerError::Io(std::io::Error::other(
+            "getdata already parked",
+        )));
+    }
+    let compact_version = peer.compact_blocks.servable_version();
+    let mut not_found = Vec::new();
+    let tail = serve_getdata(
+        chain,
+        tx_inventory,
+        compact_version,
+        items,
+        &mut not_found,
+        headroom,
+        send,
+    )?;
+    peer.pending_getdata = tail;
+    peer.pending_notfound.extend(not_found);
+    Ok(())
+}
+
+/// Serves `items` of one `getdata` through the sink, one item at a time and
+/// in request order, until the outbound production gate halts it.
 ///
-/// When `tx_inventory` is `Some`, tx-typed items are served from the
-/// transaction inventory (the node's mempool): a held tx is emitted as a
-/// `tx` message with the serialization requested by its inventory type
-/// (P2P-01 / BIP144). Unknown transactions enter the trailing `notfound`.
-/// Block-typed items continue to
-/// stream through the chain query behind the headroom gate. BIP339 `WTx`
-/// items are resolved by wtxid; `Transaction`/`WitnessTransaction` items by
-/// txid.
-fn serve_getdata(
+/// Block-typed and unknown items resolve through the chain query; with no
+/// chain view they are reported missing. When `tx_inventory` is `Some`,
+/// tx-typed items are served from the transaction inventory (the node's
+/// mempool): a held tx is emitted as a `tx` message with the serialization
+/// requested by its inventory type (P2P-01 / BIP144). BIP339 `WTx` items are
+/// resolved by wtxid; `Transaction`/`WitnessTransaction` items by txid. With
+/// `tx_inventory` `None` a tx-typed item is not a block and is reported
+/// missing by the chain query.
+///
+/// PRE: `not_found` holds no item of `items`; `send` queues one message on
+/// the connection that asked.
+/// POST: every item before the returned tail was answered: served through
+/// `send`, or appended to `not_found`. A non-empty return is `items` from the
+/// first item the gate stopped at; nothing was sent for it. An empty return
+/// means the whole request was handled: then one `notfound` carrying all of
+/// `not_found` has been sent (I8), or — when the gate closed between the
+/// last item and the trailing report — nothing was sent, `not_found` keeps
+/// the misses, and the caller parks them like any other parked tail (I9).
+/// A `send` or chain error aborts and propagates.
+/// INVARIANT: `headroom` is consulted before every body load, every tx
+/// lookup, and the trailing `notfound` send, so a saturated gate materializes
+/// nothing and queues no message, and a halt neither sends nor disconnects.
+/// The reservation `headroom` takes is held across lookups that send nothing
+/// (a miss) and is spent by the next `send`, so a run of misses never takes
+/// a second reservation. The caller, which owns the budget, reports the kept
+/// misses once an exactly sized reply fits, and resumes the tail once it can
+/// reserve production room again. At most one decoded request
+/// (`MAX_INV_PER_MSG` items) is ever pending, so the tail and `not_found`
+/// are bounded.
+pub(crate) fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
     compact_version: Option<u64>,
     items: &[Inventory],
+    not_found: &mut Vec<Inventory>,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-) -> Result<(), PeerError> {
-    if items.is_empty() {
-        return Ok(());
-    }
-
-    // Fast path: no tx inventory — the original block-only behaviour. This
-    // keeps every existing call site (listener, chainless dispatch, tests)
-    // byte-identical until a TxInventory handle is wired in.
-    let Some(inv) = tx_inventory else {
-        return serve_getdata_blocks(chain, compact_version, items, headroom, send);
-    };
-
-    // Item-by-item: tx-typed items resolve through the tx inventory; block
-    // items stream through the chain query behind the headroom gate.
-    let mut not_found: Vec<Inventory> = Vec::new();
-    for item in items {
-        match item {
-            Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
-                let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-                if let Some(mut tx) = inv.get_tx(native) {
-                    if matches!(item, Inventory::Transaction(_)) {
-                        for input in &mut tx.inputs {
-                            input.witness.clear();
-                        }
-                    }
-                    send(Message::Tx(tx))?;
-                } else {
-                    not_found.push(*item);
-                }
-            }
-            Inventory::WTx(wtxid) => {
-                let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-                if let Some(tx) = inv.get_tx_by_wtxid(native) {
-                    send(Message::Tx(tx))?;
-                } else {
-                    not_found.push(*item);
-                }
-            }
-            // Block-typed and unknown items: resolve through the chain query
-            // one at a time so headroom is honoured per load and block misses
-            // merge into the single trailing notfound.
-            block_item => {
-                if let Some(chain) = chain {
-                    let outcome = chain.serve_inventory_blocks(
-                        std::slice::from_ref(block_item),
-                        compact_version,
-                        headroom,
-                        send,
-                    )?;
-                    if outcome.halted {
-                        return Err(PeerError::Protocol(
-                            "getdata serving halted: outbound production gate",
-                        ));
-                    }
-                    not_found.extend(outcome.not_found);
-                } else {
-                    not_found.push(*block_item);
-                }
-            }
+) -> Result<Vec<Inventory>, PeerError> {
+    for (index, item) in items.iter().enumerate() {
+        let tx_source = tx_inventory.filter(|_| {
+            matches!(
+                item,
+                Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+            )
+        });
+        let served = match tx_source {
+            Some(inv) => serve_tx_item(inv, item, headroom, send, not_found)?,
+            None => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
+        };
+        if !served {
+            return Ok(items[index..].to_vec());
         }
     }
-
-    if !not_found.is_empty() {
-        send(Message::NotFound(not_found))?;
+    if not_found.is_empty() {
+        return Ok(Vec::new());
     }
-
-    Ok(())
+    // The trailing misses are answered behind every served item, but a gate
+    // that closed while the last items were served must not turn into a
+    // refused send: that cancels the lease for the session's own queue state.
+    // The headroom check runs immediately before the send, so only a sender
+    // that wins the slot concurrently can still refuse it. When it is closed,
+    // the misses stay in `not_found` for the caller to park: they are not
+    // items, and returning them as the tail would send them as `getdata`
+    // answers.
+    if !headroom() {
+        return Ok(Vec::new());
+    }
+    send(Message::NotFound(std::mem::take(not_found)))?;
+    Ok(Vec::new())
 }
 
-/// Block-only `getdata` serving: the original pre-tx-inventory path.
-fn serve_getdata_blocks(
-    chain: Option<&dyn ChainQuery>,
-    compact_version: Option<u64>,
-    items: &[Inventory],
+/// Answers one tx-typed `getdata` item from the transaction inventory.
+///
+/// Returns `false`, having done nothing, when `headroom` is closed; `true`
+/// once the transaction was sent or the item appended to `not_found`.
+fn serve_tx_item(
+    inv: &dyn TxInventory,
+    item: &Inventory,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-) -> Result<(), PeerError> {
-    match chain {
-        None => send(Message::NotFound(items.to_vec()))?,
-        Some(chain) => {
-            let outcome = chain.serve_inventory_blocks(items, compact_version, headroom, send)?;
-            if outcome.halted {
-                return Err(PeerError::Protocol(
-                    "getdata serving halted: outbound production gate",
-                ));
-            }
-            if !outcome.not_found.is_empty() {
-                send(Message::NotFound(outcome.not_found))?;
-            }
-        }
+    not_found: &mut Vec<Inventory>,
+) -> Result<bool, PeerError> {
+    if !headroom() {
+        return Ok(false);
     }
-    Ok(())
+    let found = match item {
+        Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
+            let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
+            inv.get_tx(native).map(|mut tx| {
+                let wtxid = tx.wtxid();
+                if matches!(item, Inventory::Transaction(_)) {
+                    for input in &mut tx.inputs {
+                        input.witness.clear();
+                    }
+                }
+                (wtxid, tx)
+            })
+        }
+        Inventory::WTx(wtxid) => {
+            let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
+            inv.get_tx_by_wtxid(native).map(|tx| (native, tx))
+        }
+        _ => None,
+    };
+    match found {
+        Some((wtxid, tx)) => {
+            send(Message::Tx(tx))?;
+            inv.transaction_sent(wtxid);
+        }
+        None => not_found.push(*item),
+    }
+    Ok(true)
+}
+
+/// Answers one block-typed or unknown `getdata` item through the chain
+/// query, which consults `headroom` once before a body load.
+///
+/// Returns `false`, having sent nothing, when the chain query halted at the
+/// gate; `true` once the item was served or appended to `not_found`.
+fn serve_block_item(
+    chain: Option<&dyn ChainQuery>,
+    compact_version: Option<u64>,
+    item: &Inventory,
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+    not_found: &mut Vec<Inventory>,
+) -> Result<bool, PeerError> {
+    let Some(chain) = chain else {
+        not_found.push(*item);
+        return Ok(true);
+    };
+    let outcome = chain.serve_inventory_blocks(
+        std::slice::from_ref(item),
+        compact_version,
+        headroom,
+        send,
+    )?;
+    if outcome.halted {
+        return Ok(false);
+    }
+    not_found.extend(outcome.not_found);
+    Ok(true)
 }
 
 /// Answers one `getblocktxn` through the chain view and sends whatever reply
@@ -573,13 +709,13 @@ mod tests {
     };
 
     use super::{
-        ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
-        dispatch_inbound, dispatch_inbound_full,
+        ChainQuery, FilterRequest, FilterServing, InventoryServing, MAX_LOCATOR_HASHES,
+        TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
     };
     use crate::connection::{OutboundBudget, PeerLease};
     use crate::inv::MAX_INV_PER_MSG;
     use crate::peer::{Peer, PeerState};
-    use crate::wire::{Message, PeerError};
+    use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PeerError};
 
     fn block_payload(block: &Block) -> Message {
         Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
@@ -617,11 +753,11 @@ mod tests {
     impl ChainQuery for FakeChain {
         fn serve_compact_filters(
             &self,
-            _: &Message,
+            request: &FilterRequest,
             _: &dyn Fn() -> bool,
             _: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-        ) -> Result<bool, PeerError> {
-            Ok(false)
+        ) -> Result<FilterServing, PeerError> {
+            Ok(FilterServing::Pending(request.clone()))
         }
         fn headers_after(
             &self,
@@ -760,7 +896,7 @@ mod tests {
 
     #[test]
     fn getheaders_truncates_chain_response_above_protocol_cap() -> Result<(), PeerError> {
-        let count = u32::try_from(MAX_HEADERS_RESPONSE + 1)
+        let count = u32::try_from(MAX_HEADERS_MESSAGE_COUNT + 1)
             .map_err(|_| PeerError::Protocol("test header count overflow"))?;
         let chain = GreedyHeaders {
             headers: FakeChain::with_headers(count).headers,
@@ -776,7 +912,7 @@ mod tests {
         let [Message::Headers(headers)] = responses.as_slice() else {
             panic!("expected one headers response, got {responses:?}");
         };
-        assert_eq!(headers.len(), MAX_HEADERS_RESPONSE);
+        assert_eq!(headers.len(), MAX_HEADERS_MESSAGE_COUNT);
         Ok(())
     }
 
@@ -1160,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn headroom_false_before_first_load_halts_without_loading() {
+    fn headroom_false_before_first_load_parks_without_loading() {
         let headers = FakeChain::with_headers(1).headers;
         let block = Block {
             header: headers[0],
@@ -1193,18 +1329,18 @@ mod tests {
             &mut |_| {},
         );
 
-        assert!(matches!(
-            result,
-            Err(PeerError::Protocol(
-                "getdata serving halted: outbound production gate",
-            ))
-        ));
+        assert!(
+            result.is_ok(),
+            "a saturated gate parks the request instead of failing the peer"
+        );
         assert_eq!(chain.headroom_calls.load(Ordering::Relaxed), 1);
         assert_eq!(chain.loads.load(Ordering::Relaxed), 0);
         assert!(
             emitted.into_inner().is_empty(),
             "halt never emits a trailing notfound (I9)"
         );
+        assert_eq!(peer.pending_getdata, vec![known]);
+        assert_eq!(peer.pending_notfound, Vec::new());
     }
 
     fn wire_len_of(message: &Message) -> usize {
@@ -1212,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn hostile_50000_item_getdata_cannot_materialize_unbounded_blocks() {
+    fn hostile_50000_item_getdata_parks_the_tail() {
         let block = Block::default();
         let block_wire_len = wire_len_of(&Message::Block(block.clone()));
         let (outbound_tx, _undrained_rx) = crossbeam_channel::unbounded();
@@ -1239,7 +1375,7 @@ mod tests {
             Some(&chain),
             None,
             &|| true,
-            &|| budget.has_block_production_headroom(),
+            &|| budget.may_reserve_production(),
             &mut |message| {
                 lease
                     .send(message)
@@ -1249,15 +1385,195 @@ mod tests {
             &mut |_| {},
         );
 
-        assert!(matches!(
-            result,
-            Err(PeerError::Protocol(
-                "getdata serving halted: outbound production gate",
-            ))
-        ));
+        assert!(result.is_ok(), "a saturated gate parks the tail");
         assert_eq!(chain.loads.load(Ordering::Relaxed), 7);
         assert_eq!(chain.headroom_calls.load(Ordering::Relaxed), 8);
         assert_eq!(budget.pending(), (7, 7 * block_wire_len));
+        assert_eq!(peer.pending_getdata.len(), MAX_INV_PER_MSG - 7);
+        assert_eq!(peer.pending_notfound, Vec::new());
+        assert!(!lease.is_cancelled(), "parking never cancels the lease");
+    }
+
+    /// A gate that closes mid-request parks the unexamined remainder in
+    /// request order, keeps the misses found so far unsent, and the tail
+    /// resumed later answers in the order the peer asked.
+    #[test]
+    fn halted_mixed_getdata_parks_ordered_tail_and_unsent_misses() -> Result<(), PeerError> {
+        let headers = FakeChain::with_headers(2).headers;
+        let block_a = Block {
+            header: headers[0],
+            txs: Vec::new(),
+        };
+        let block_b = Block {
+            header: headers[1],
+            txs: Vec::new(),
+        };
+        let inv_a =
+            Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(wire_hash(&block_a)));
+        let inv_b =
+            Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(wire_hash(&block_b)));
+        let held = dummy_tx(1);
+        let tx_hit =
+            Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*held.txid().as_bytes()));
+        let tx_miss = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([7; 32]));
+        let unknown_block = Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array([9; 32]));
+        let inventory = FakeTxInventory::empty().with_tx(held.clone());
+        let chain = StreamingChain {
+            blocks: vec![block_a.clone(), block_b.clone()],
+            loads: AtomicUsize::new(0),
+            headroom_calls: AtomicUsize::new(0),
+            load_tripwire: None,
+        };
+        let mut peer = ready_peer();
+        let emitted = RefCell::new(Vec::new());
+        // Consultations: tx_miss (1), block_a (2) pass; tx_hit (3) halts.
+        let consulted = std::cell::Cell::new(0_usize);
+
+        dispatch_inbound_full(
+            &mut peer,
+            &Message::GetData(vec![tx_miss, inv_a, tx_hit, inv_b, unknown_block]),
+            Some(&chain),
+            Some(&inventory),
+            &|| true,
+            &|| {
+                consulted.set(consulted.get() + 1);
+                consulted.get() <= 2
+            },
+            &mut |response| {
+                emitted.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )?;
+
+        assert_eq!(
+            emitted.take(),
+            vec![block_payload(&block_a)],
+            "only what was served before the gate closed is on the wire"
+        );
+        assert_eq!(peer.pending_notfound, vec![tx_miss]);
+        assert_eq!(peer.pending_getdata, vec![tx_hit, inv_b, unknown_block]);
+
+        let mut misses = Vec::new();
+        let rest = serve_getdata(
+            Some(&chain),
+            Some(&inventory),
+            None,
+            &peer.pending_getdata,
+            &mut misses,
+            &|| true,
+            &mut |response| {
+                emitted.borrow_mut().push(response);
+                Ok(())
+            },
+        )?;
+
+        assert!(rest.is_empty(), "an open gate finishes the tail");
+        assert_eq!(
+            emitted.take(),
+            vec![
+                Message::Tx(held),
+                block_payload(&block_b),
+                Message::NotFound(vec![unknown_block]),
+            ],
+            "the resumed tail keeps request order and ends in one notfound"
+        );
+        assert!(
+            misses.is_empty(),
+            "the trailing notfound drained the misses when the gate stayed open"
+        );
+        Ok(())
+    }
+
+    /// The probe's tail shape: the gate closes between the last served item
+    /// and the trailing report. The misses must come back parked instead of
+    /// being sent into a full queue, which would cancel the lease.
+    #[test]
+    fn gate_closed_at_the_trailing_report_parks_the_misses() -> Result<(), PeerError> {
+        let headers = FakeChain::with_headers(1).headers;
+        let block = Block {
+            header: headers[0],
+            txs: Vec::new(),
+        };
+        let served = Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(
+            *headers[0].compute_hash().as_bytes(),
+        ));
+        let miss = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([6; 32]));
+        let chain = StreamingChain {
+            blocks: vec![block.clone()],
+            loads: AtomicUsize::new(0),
+            headroom_calls: AtomicUsize::new(0),
+            load_tripwire: None,
+        };
+        let inventory = FakeTxInventory::empty();
+        let emitted = RefCell::new(Vec::new());
+        // Consultations: the miss (1) and the block (2) pass; the trailing
+        // report (3) finds the gate closed.
+        let consulted = std::cell::Cell::new(0_usize);
+        let mut not_found = Vec::new();
+
+        let tail = serve_getdata(
+            Some(&chain),
+            Some(&inventory),
+            None,
+            &[miss, served],
+            &mut not_found,
+            &|| {
+                consulted.set(consulted.get() + 1);
+                consulted.get() <= 2
+            },
+            &mut |response| {
+                emitted.borrow_mut().push(response);
+                Ok(())
+            },
+        )?;
+
+        assert!(tail.is_empty(), "the whole request was handled");
+        assert_eq!(
+            emitted.into_inner(),
+            vec![block_payload(&block)],
+            "the block was served while the gate was open"
+        );
+        assert_eq!(
+            not_found,
+            vec![miss],
+            "the trailing report must keep the misses parked, unsent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_while_one_is_parked_is_refused_and_keeps_the_tail() {
+        let parked = Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array([4; 32]));
+        let mut peer = ready_peer();
+        peer.pending_getdata = vec![parked];
+        let emitted = RefCell::new(Vec::new());
+
+        let result = dispatch_inbound_full(
+            &mut peer,
+            &Message::GetData(vec![Inventory::WitnessBlock(
+                bitcoin::BlockHash::from_byte_array([5; 32]),
+            )]),
+            None,
+            None,
+            &|| true,
+            &|| true,
+            &mut |response| {
+                emitted.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+            &mut |_| {},
+        );
+
+        assert!(matches!(result, Err(PeerError::Io(_))));
+        assert_eq!(
+            peer.pending_getdata,
+            vec![parked],
+            "the earlier tail survives"
+        );
+        assert_eq!(emitted.into_inner(), Vec::new());
     }
 
     #[test]
@@ -1394,6 +1710,75 @@ mod tests {
             }],
             lock_time: LockTime::ZERO,
         }
+    }
+
+    #[test]
+    fn getdata_completes_initial_broadcast_only_after_successful_send()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::serve_getdata;
+        use bitcoin_rs_consensus::ValidationEngine;
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
+        };
+        use bitcoin_rs_primitives::Witness;
+        use std::sync::Arc;
+        for kind in 0..3 {
+            let gateway = MempoolGateway::new(
+                Arc::new(parking_lot::RwLock::new(Mempool::new(
+                    MempoolLimits::default(),
+                ))),
+                None,
+                ValidationEngine::Native,
+                None,
+            );
+            let mut tx = dummy_tx(1);
+            tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+            let txid = tx.txid();
+            let wtxid = tx.wtxid();
+            gateway.insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(tx), 100, 1000, 1, 0, 0),
+            )?;
+            let sequence = gateway.read().sequence_number();
+            let item = match kind {
+                0 => Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())),
+                1 => {
+                    Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*txid.as_bytes()))
+                }
+                _ => Inventory::WTx(bitcoin::Wtxid::from_byte_array(*wtxid.as_bytes())),
+            };
+            let mut not_found = Vec::new();
+            assert!(
+                serve_getdata(
+                    None,
+                    Some(&gateway),
+                    None,
+                    &[item],
+                    &mut not_found,
+                    &|| true,
+                    &mut |_| Err(PeerError::Misbehavior("test sink full"))
+                )
+                .is_err()
+            );
+            assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
+            let mut responses = Vec::new();
+            serve_getdata(
+                None,
+                Some(&gateway),
+                None,
+                &[item],
+                &mut not_found,
+                &|| true,
+                &mut |message| {
+                    responses.push(message);
+                    Ok(())
+                },
+            )?;
+            assert!(matches!(responses.as_slice(), [Message::Tx(_)]));
+            assert_eq!(gateway.read().unbroadcast_transactions().count(), 0);
+            assert_eq!(gateway.read().sequence_number(), sequence);
+        }
+        Ok(())
     }
 
     #[test]
@@ -1560,6 +1945,7 @@ mod tests {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
             ValidationEngine::Native,
+            None,
         );
         let mut tx = dummy_tx(0x42);
         tx.inputs[0].witness = Witness::from_stack(vec![vec![0x01]]);
@@ -1634,7 +2020,7 @@ mod tests {
                     locktime_cutoff: 0,
                     prevout_meta: hashbrown::HashMap::new(),
                     csv_active: false,
-                    confirmed: false,
+                    ..ChainAdmissionSnapshot::default()
                 })
             }
         }
@@ -1644,6 +2030,7 @@ mod tests {
                 Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
                 None,
                 ValidationEngine::Native,
+                None,
             );
             let mut tx = dummy_tx(0x51);
             tx.inputs[0].script_sig.clear();
@@ -1968,6 +2355,101 @@ mod tests {
             vec![Message::Pong(42)]
         );
         assert!(matches!(dispatch(&mut peer), Err(PeerError::Io(_))));
+        Ok(())
+    }
+
+    /// Serves the first filter of a request and hands back the rest, as a
+    /// serving pass stopped by the outbound budget does.
+    struct NarrowingChain;
+
+    impl ChainQuery for NarrowingChain {
+        fn serve_compact_filters(
+            &self,
+            request: &FilterRequest,
+            _: &dyn Fn() -> bool,
+            send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<FilterServing, PeerError> {
+            let Message::GetCFilters(first) = &request.request else {
+                return Ok(FilterServing::Done);
+            };
+            send(Message::Pong(u64::from(first.start_height)))?;
+            Ok(FilterServing::Pending(FilterRequest {
+                request: Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
+                    filter_type: first.filter_type,
+                    start_height: first.start_height + 1,
+                    stop_hash: first.stop_hash,
+                }),
+                expected_end: Some(9),
+            }))
+        }
+
+        fn headers_after(&self, _: &[BlockHash], _: BlockHash, _: usize) -> Vec<Header> {
+            Vec::new()
+        }
+
+        fn serve_inventory_blocks(
+            &self,
+            _: &[Inventory],
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<InventoryServing, PeerError> {
+            Ok(InventoryServing::default())
+        }
+
+        fn block_transactions(
+            &self,
+            _: &BlockTransactionsRequest,
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
+            Ok(None)
+        }
+    }
+
+    /// The remainder a serving pass returns is the parked request's only
+    /// cursor: the sent prefix is not replayed and the fixed end is kept.
+    #[test]
+    fn filter_remainder_is_the_parked_requests_only_cursor() -> Result<(), PeerError> {
+        let mut peer = ready_peer();
+        let request = Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
+            filter_type: 0,
+            start_height: 3,
+            stop_hash: bitcoin::BlockHash::all_zeros(),
+        });
+        let mut sent = Vec::new();
+
+        dispatch_inbound_full(
+            &mut peer,
+            &request,
+            Some(&NarrowingChain),
+            None,
+            &|| true,
+            &|| true,
+            &mut |message| {
+                sent.push(message);
+                Ok(())
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )?;
+
+        assert_eq!(sent, vec![Message::Pong(3)]);
+        let parked = peer
+            .pending_filter_request
+            .as_ref()
+            .ok_or(PeerError::Protocol("the remainder was not parked"))?;
+        assert_eq!(
+            parked.pending,
+            FilterRequest {
+                request: Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
+                    filter_type: 0,
+                    start_height: 4,
+                    stop_hash: bitcoin::BlockHash::all_zeros(),
+                }),
+                expected_end: Some(9),
+            }
+        );
         Ok(())
     }
 

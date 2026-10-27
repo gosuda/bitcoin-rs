@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -113,32 +113,6 @@ pub fn start<S>(
     messages
 }
 
-/// Exercise a complete version/verack handshake between two cursor-backed peers.
-///
-/// PRE: both peers wrap independent buffers.
-/// POST: both peers are ready, advertising the explicit unpruned service
-///   set (full history plus witness).
-/// INVARIANT: this helper never varies the advertisement by role.
-pub fn handshake_cursors(
-    left: &mut Peer<Cursor<Vec<u8>>>,
-    right: &mut Peer<Cursor<Vec<u8>>>,
-) -> Result<(), PeerError> {
-    let unpruned = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-    let left_messages = start(left, 1, 0, PeerRole::FullRelay, unpruned);
-    exchange(left, right, left_messages)?;
-    let right_messages = start(right, 2, 0, PeerRole::FullRelay, unpruned);
-    exchange(right, left, right_messages)?;
-    exchange(left, right, vec![Message::Verack])?;
-    exchange(right, left, vec![Message::Verack])?;
-    exchange(left, right, post_verack_messages().to_vec())?;
-    exchange(right, left, post_verack_messages().to_vec())?;
-    left.compact_blocks
-        .record_local_advertised(COMPACT_BLOCK_VERSION);
-    right
-        .compact_blocks
-        .record_local_advertised(COMPACT_BLOCK_VERSION);
-    Ok(())
-}
 /// Drive a Bitcoin v1 handshake from the inbound listener side.
 ///
 /// The caller has already accepted the TCP connection and constructed a
@@ -213,7 +187,8 @@ pub(crate) fn next_handshake_step<S: Read>(
     }
 }
 
-/// Reads one handshake message, retrying transient poll timeouts.
+/// Reads one handshake message, retrying transient poll timeouts and v2
+/// decoy/undefined-type packets.
 ///
 /// PRE: `deadline` bounds the whole handshake phase.
 /// POST: Return the first complete message, or the error that ended the
@@ -239,7 +214,7 @@ fn read_handshake_message<S: Read>(
                 tracing::debug!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
                 continue;
             }
-            Ok((message, raw)) => {
+            Ok(Some((message, raw))) => {
                 if matches!(message, Message::Version(_)) {
                     peer.version_received_time = Some(
                         SystemTime::now()
@@ -249,6 +224,7 @@ fn read_handshake_message<S: Read>(
                 }
                 return Ok((message, raw));
             }
+            Ok(None) => continue,
             Err(PeerError::Io(error))
                 if matches!(
                     error.kind(),
@@ -260,25 +236,6 @@ fn read_handshake_message<S: Read>(
             Err(error) => return Err(error),
         }
     }
-}
-
-fn exchange<A, B>(
-    from: &mut Peer<A>,
-    to: &mut Peer<B>,
-    messages: Vec<Message>,
-) -> Result<(), PeerError>
-where
-    A: Read + Write,
-    B: Read + Write,
-{
-    for message in messages {
-        from.send(&message)?;
-        let responses = dispatch_inbound(to, &message)?;
-        for response in responses {
-            to.send(&response)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

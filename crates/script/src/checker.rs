@@ -14,6 +14,7 @@ use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig
 
 use crate::eval::{OP_CODESEPARATOR, remove_all};
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
+use crate::signature_cache::SignatureCache;
 
 /// Signature version context: which sighash algorithm and encoding rules apply.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -53,6 +54,10 @@ pub(crate) struct TxSignatureChecker<'a> {
     amount: Amount,
     prevouts: &'a [TxOut],
     cache: &'a SighashCache<'a>,
+    /// Admission-local positive signature-result cache. `None` outside admission.
+    /// Carried for the duration of one verification call only; every encoding,
+    /// parsing, sighash, and script check still runs on a hit.
+    sig_cache: Option<&'a SignatureCache>,
     /// Raw taproot annex bytes, when present (BIP341). Used by
     /// `check_schnorr_signature` to commit the annex to the sighash.
     annex: Option<Vec<u8>>,
@@ -61,6 +66,9 @@ pub(crate) struct TxSignatureChecker<'a> {
 impl<'a> TxSignatureChecker<'a> {
     /// Builds a checker for one input of `tx`, with `prevouts` covering every
     /// input so taproot sighashes can commit to all spent outputs.
+    ///
+    /// `sig_cache` is the admission-local positive result cache for this call
+    /// only; pass `None` outside admission. It is never stored beyond the call.
     #[must_use]
     pub(crate) fn new(
         tx: &'a Tx,
@@ -68,6 +76,7 @@ impl<'a> TxSignatureChecker<'a> {
         amount: Amount,
         prevouts: &'a [TxOut],
         cache: &'a SighashCache<'a>,
+        sig_cache: Option<&'a SignatureCache>,
     ) -> Self {
         Self {
             tx,
@@ -75,6 +84,7 @@ impl<'a> TxSignatureChecker<'a> {
             amount,
             prevouts,
             cache,
+            sig_cache,
             annex: None,
         }
     }
@@ -168,6 +178,21 @@ impl<'a> TxSignatureChecker<'a> {
         };
 
         let message = Message::from_digest(*sighash.as_byte_array());
+        if let Some(sig_cache) = self.sig_cache {
+            let key = SignatureCache::ecdsa_key(sighash.as_byte_array(), sig, pubkey);
+            if sig_cache.contains(&key) {
+                return Ok(true);
+            }
+            // One process-wide context: constructing `verification_only()` per
+            // signature rebuilds secp256k1's verification tables on every CHECKSIG.
+            let verified = secp256k1::SECP256K1
+                .verify_ecdsa(&message, &ecdsa_sig, &secp_pubkey)
+                .is_ok();
+            if verified {
+                sig_cache.insert(key);
+            }
+            return Ok(verified);
+        }
         // One process-wide context: constructing `verification_only()` per
         // signature rebuilds secp256k1's verification tables on every CHECKSIG.
         let verified = secp256k1::SECP256K1
@@ -258,6 +283,22 @@ impl<'a> TxSignatureChecker<'a> {
             .map_err(|e| ScriptError::Verification(e.to_string()))?;
 
         let message = Message::from_digest(*sighash.as_byte_array());
+        if let Some(sig_cache) = self.sig_cache {
+            let key = SignatureCache::schnorr_key(sighash.as_byte_array(), sig, pubkey);
+            if sig_cache.contains(&key) {
+                return Ok(true);
+            }
+            return match secp256k1::SECP256K1.verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
+            {
+                Ok(()) => {
+                    sig_cache.insert(key);
+                    Ok(true)
+                }
+                Err(_) => Err(ScriptError::Invalid {
+                    code: ScriptErrCode::SchnorrSig,
+                }),
+            };
+        }
         secp256k1::SECP256K1
             .verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
             .map(|()| true)
@@ -312,16 +353,9 @@ impl<'a> TxSignatureChecker<'a> {
         };
         let tx_sequence = i64::from(input.sequence.to_consensus());
 
-        // Transaction version must be >= 2 for BIP68 rules. Core stores
-        // version as uint32_t, so 0xffffffff is a large positive number, not
-        // -1; compare as unsigned (bit-preserving) to match.
-        #[expect(
-            clippy::as_conversions,
-            clippy::cast_sign_loss,
-            reason = "Core stores tx version as uint32_t; bit-preserving cast to u32"
-        )]
-        let version_u32 = self.tx.version as u32;
-        if version_u32 < 2 {
+        // Transaction version must be >= 2 for BIP68 rules. The version is
+        // stored unsigned (the wire value), matching Core's uint32_t.
+        if self.tx.version < 2 {
             return false;
         }
 
@@ -546,7 +580,7 @@ mod tests {
     use crate::eval::{OP_CODESEPARATOR, remove_all};
     use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
 
-    fn make_tx(version: i32, lock_time: u32, sequence: u32) -> Tx {
+    fn make_tx(version: u32, lock_time: u32, sequence: u32) -> Tx {
         Tx {
             version,
             inputs: vec![TxIn {
@@ -601,13 +635,12 @@ mod tests {
         Result<bool, ScriptError>,
     );
 
-    #[test]
-    fn ecdsa_encoding_rules_match_core_per_flag() {
+    fn ecdsa_encoding_cases() -> [EcdsaCase; 10] {
         const COMPRESSED: [u8; 33] = [0x02; 33];
         const UNCOMPRESSED: [u8; 65] = [0x04; 65];
         const BAD_PREFIX: [u8; 33] = [0x05; 33];
         let dersig = VerifyFlags::DERSIG;
-        let cases: [EcdsaCase; 10] = [
+        [
             (
                 "DERSIG rejects a non-DER signature",
                 vec![0x00, 0x01, 0x02, 0x03, 0x01],
@@ -690,15 +723,24 @@ mod tests {
                     .union(VerifyFlags::NULLFAIL),
                 Ok(false),
             ),
-        ];
+        ]
+    }
 
-        for (name, sig, pubkey, sigversion, flags, expected) in cases {
+    #[test]
+    fn ecdsa_encoding_rules_match_core_per_flag() {
+        for (name, sig, pubkey, sigversion, flags, expected) in ecdsa_encoding_cases() {
             for script_code in [[].as_slice(), &[0x51]] {
                 let tx = make_tx(2, 0, SEQUENCE_FINAL);
                 let prevouts = make_prevouts();
                 let cache = SighashCache::new(&tx);
-                let checker =
-                    TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+                let checker = TxSignatureChecker::new(
+                    &tx,
+                    0,
+                    Amount::from_sat(50_000),
+                    &prevouts,
+                    &cache,
+                    None,
+                );
                 let got =
                     checker.check_ecdsa_signature(&sig, &pubkey, script_code, sigversion, flags);
                 assert_eq!(got, expected, "{name}");
@@ -753,7 +795,7 @@ mod tests {
             let prevouts = make_prevouts();
             let cache = SighashCache::new(&tx);
             let checker =
-                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache, None);
             assert_eq!(checker.check_locktime(required), expected, "{name}");
         }
     }
@@ -763,7 +805,7 @@ mod tests {
         let cases = [
             (
                 "a lower relative locktime is satisfied",
-                2_i32,
+                2_u32,
                 100_u32,
                 50_i64,
                 true,
@@ -798,7 +840,7 @@ mod tests {
             let prevouts = make_prevouts();
             let cache = SighashCache::new(&tx);
             let checker =
-                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache, None);
             assert_eq!(checker.check_sequence(required), expected, "{name}");
         }
     }

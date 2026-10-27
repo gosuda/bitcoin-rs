@@ -306,6 +306,36 @@ impl TxPolicy {
         true
     }
 
+    /// Exact inverse of [`Self::claim`] for one key whose `getdata` the node's
+    /// aggregate outbound budget refused before anything was queued.
+    ///
+    /// PRE: `source` owns `key` through a claim of this critical section.
+    /// POST: the owner is cleared and, for a non-preferred candidate, its
+    /// eviction reference is restored, so the request is exactly as it was
+    /// before the claim and the next plan selects it again. The candidates,
+    /// their readiness and the counts are untouched: nothing was sent, so
+    /// nothing failed, and no source is penalized.
+    /// INVARIANT: a different owner, or no owner, is left alone. Only the
+    /// claimed key is reversed: the same hash under the other identity kind
+    /// is excluded from the plan by [`Self::in_flight`] while this key is
+    /// owned, so it was never claimed alongside it.
+    fn unclaim(&mut self, key: Identity, source: PeerSource) {
+        let Some(request) = self.requests.get_mut(&key) else {
+            return;
+        };
+        if request.owner.is_none_or(|(owner, _)| owner != source) {
+            return;
+        }
+        request.owner = None;
+        if let Some(candidate) = request
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == source && !candidate.preferred)
+        {
+            self.evictable.insert(eviction_key(key, candidate));
+        }
+    }
+
     fn disconnected(&mut self, source: PeerSource, now: Instant) -> Vec<Identity> {
         let keys: Vec<_> = self
             .requests
@@ -708,9 +738,20 @@ impl PeerTable {
         }
         for (source, batch) in batches {
             let items = batch.iter().map(|(_, item)| *item).collect();
-            if self.send(source, Message::GetData(items)).is_err() {
-                for (key, _) in batch {
-                    policy.failed(key, source, committed);
+            match self.send(source, Message::GetData(items)) {
+                Ok(()) => {}
+                // The node's aggregate budget is full while the source is
+                // healthy: nothing was sent, so the claim is reversed and the
+                // same opportunity is planned again by a later poll.
+                Err(crate::OutboundRefusal::Saturated(_)) => {
+                    for (key, _) in batch {
+                        policy.unclaim(key, source);
+                    }
+                }
+                Err(crate::OutboundRefusal::Closed(_)) => {
+                    for (key, _) in batch {
+                        policy.failed(key, source, committed);
+                    }
                 }
             }
         }
@@ -974,7 +1015,7 @@ mod tests {
             }
         }
         let table = Arc::new(PeerTable::new());
-        let (sender, receiver) = crossbeam_channel::bounded(4);
+        let (sender, receiver) = crate::test_support::message_channel_bounded(4);
         let lease = crate::PeerLease::new(sender);
         let addr = ([127, 0, 0, 1], 8333).into();
         table.register(addr, lease.clone());
@@ -1017,7 +1058,7 @@ mod tests {
         assert!(receiver.try_recv().is_err());
         assert_eq!(table.tx_policy.lock().announcements, 0);
         let pending_table = Arc::clone(&table);
-        let (new_sender, new_receiver) = crossbeam_channel::bounded(4);
+        let (new_sender, new_receiver) = crate::test_support::message_channel_bounded(4);
         let new_lease = crate::PeerLease::new(new_sender);
         let new_addr = ([127, 0, 0, 1], 8334).into();
         POLL_HOOK.with(|hook| {
@@ -1053,9 +1094,19 @@ mod tests {
     pub(super) fn registered_source(
         table: &PeerTable,
         port: u16,
-    ) -> (PeerSource, crossbeam_channel::Receiver<Message>) {
-        let (sender, receiver) = crossbeam_channel::bounded(32);
+    ) -> (PeerSource, crate::test_support::MessageReceiver) {
+        let (sender, receiver) = crate::test_support::message_channel_bounded(32);
         let lease = crate::PeerLease::new(sender);
+        let source = register_ready(table, port, &lease);
+        (source, receiver)
+    }
+
+    /// Registers `lease` at `port` with a published outbound handshake.
+    pub(super) fn register_ready(
+        table: &PeerTable,
+        port: u16,
+        lease: &crate::PeerLease,
+    ) -> PeerSource {
         let addr = ([127, 0, 0, 1], port).into();
         table.register(addr, lease.clone());
         let version = crate::handshake::version_message(
@@ -1066,7 +1117,7 @@ mod tests {
         );
         table.publish_info(
             addr,
-            &lease,
+            lease,
             crate::PeerInfo::outbound_from_version(
                 addr,
                 addr,
@@ -1076,7 +1127,7 @@ mod tests {
                 std::sync::Arc::new(crate::PeerCounters::default()),
             ),
         );
-        (lease.source(addr), receiver)
+        lease.source(addr)
     }
 
     #[derive(Default)]
@@ -1547,6 +1598,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "tx_policy/preferred_tests.rs"]
 #[expect(clippy::expect_used, reason = "bounded admission contract assertions")]
 mod preferred_tests;

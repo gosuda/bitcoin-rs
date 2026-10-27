@@ -30,6 +30,7 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | — | [Reference vectors](../crates/primitives/tests/bip_vectors.rs) |
 | 147 | [NULLDUMMY](../crates/script/src/eval.rs) | ✅ | — | Enforced with WITNESS flag |
 | 320 | [General-purpose version bits](../crates/chain/src/deployment.rs) | ❌ | — | Candidates use versionbits; no general-purpose policy |
+| 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | — | Default challenge only; custom challenges unsupported |
 | 341 | [Taproot](../crates/script/src/taproot.rs) | ✅ | — | Height-gated; key and script paths |
 | 342 | [Tapscript](../crates/script/src/eval.rs) | ✅ | — | OP_SUCCESSx; [tagged hashes](../crates/script/src/taproot.rs) |
 | 431 | [TRUC v3](../crates/mempool/src/truc.rs) | ✅ | — | Topology, sibling and ephemeral-spend rules |
@@ -44,10 +45,10 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 133 | [Fee filter](../crates/p2p/src/tx_policy/relay.rs) | ✅ | — | Per-peer inventory floor; rounded local refresh |
 | 144 | [Segwit relay](../crates/p2p/src/dispatch.rs) | ✅ | — | Witness block/transaction inventory preserves bytes |
 | 152 | [Compact blocks](../crates/p2p/src/compact_blocks.rs) | ✅ | ✓ | Announcements are implemented (see policy §7); only the CORE-05 live-reorg qualification is pending; [Core 31.1 request/response scope](api/ecosystem-compat.toml); reconstruction counts diagnostic |
-| 155 | [Address v2](../crates/p2p/src/wire.rs) | ◐ | — | Negotiation and IP receive path; getaddr sends legacy addr |
+| 155 | [Address v2](../crates/p2p/src/wire.rs) | ◐ | — | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
 | 157/158 | [Compact filters](../crates/index/src/index/filters.rs) | ✅ | ✓ | Optional blockfilterindex; basic active-chain filters; [Kyoto regtest scope](api/ecosystem-compat.toml) |
-| 159 | [Limited-network service](../crates/node/src/state_open.rs) | ✅ | — | Pruned nodes advertise NETWORK_LIMITED + WITNESS |
-| 324 | [v2 transport](../crates/p2p/src/transport.rs) | 🧪 | — | Opt-in; [vectors](../crates/p2p/tests/data/bip324/) and [negotiation tests](../crates/p2p/src/listener/v2_transport_tests.rs); bidirectional Core interop pending |
+| 159 | [Limited-network service](../crates/node/src/state/open.rs) | ✅ | — | Pruned nodes advertise NETWORK_LIMITED + WITNESS |
+| 324 | [v2 transport](../crates/p2p/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/p2p/tests/data/bip324/) and [negotiation tests](../crates/p2p/src/listener/v2_transport_tests.rs) |
 | 330 | [Erlay](https://github.com/gosuda/bitcoin-rs/issues/1501) | ❌ | — | Explicitly deferred backlog (#1501 tracks the deferral, so the policy keeps it `Unsupported` rather than `Planned`); sendtxrcncl ignored |
 | 339 | [Wtxid relay](../crates/p2p/src/peer.rs) | ✅ | — | Negotiation, announcements and getdata |
 | 35 | [Mempool request](../crates/p2p/src/dispatch.rs) | ❌ | — | Command decoded then ignored |
@@ -68,7 +69,7 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 173/350 | [Segwit addresses](../crates/rpc/src/convert.rs) | ✅ | — | Wallet-free script address rendering |
 | 380 | [Output descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | getdescriptorinfo/deriveaddresses; scantxoutset rejects ranged/multipath forms |
 | 389 | [Multipath descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | Multipath key expressions in getdescriptorinfo/deriveaddresses; rejected by scantxoutset |
-| 352 | [Silent Payments](../crates/index/src/silent_payments.rs) | 🧪 | — | Opt-in library scan codec; [tweak service / thin index](https://github.com/gosuda/bitcoin-rs/issues/1491) remains planned; [docs](silent-payments.md) |
+| 352 | [Silent Payments](../crates/index/src/silent_payments.rs) | 🧪 | — | Opt-in keyless codec and authenticated `getblocktweaks` extension; external wallet interoperability unverified; [docs](silent-payments.md) |
 
 ## Out of scope by policy
 

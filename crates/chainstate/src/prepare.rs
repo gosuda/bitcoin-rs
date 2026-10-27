@@ -7,7 +7,7 @@ use super::{
 };
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::{Block, ConsensusEncode, OutPoint, TxOut, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, ConsensusEncode, OutPoint, Tx, TxOut, Txid, consensus_bytes};
 use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -29,7 +29,13 @@ pub(super) fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
     engine: bitcoin_rs_consensus::ValidationEngine,
-) -> core::result::Result<(bitcoin_rs_consensus::kernel::BlockParse, Vec<Txid>), ApplyError> {
+) -> core::result::Result<
+    (
+        bitcoin_rs_consensus::kernel::BlockScriptSource,
+        bitcoin_rs_consensus::BlockFacts,
+    ),
+    ApplyError,
+> {
     // Preserved bytes must BE this block, not merely agree with it on
     // transaction count. The parse below drives the txids and the transactions
     // that script verification runs, while the witness commitment check and
@@ -63,8 +69,7 @@ pub(super) fn parse_block_for_apply(
             txids: parsed.transaction_count(),
         });
     }
-    let txids = parsed.txids().map_err(ApplyError::Consensus)?;
-    Ok((parsed, txids))
+    parsed.into_parts(&block.txs).map_err(ApplyError::Consensus)
 }
 
 /// Parses a block and resolves the outputs it spends.
@@ -74,13 +79,12 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Si
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let (parsed, txids) = parse_block_for_apply(block, provided_serialized, engine)?;
-    let tx_plan = plan_block_transactions(block, &txids);
-    let facts = parsed.derive_facts(&block.txs, &txids);
+    let (script_source, facts) = parse_block_for_apply(block, provided_serialized, engine)?;
+    let tx_plan = plan_block_transactions(block, facts.txids());
     let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
-        parsed,
+        script_source,
         view,
         tx_plan,
         resolved,
@@ -180,16 +184,15 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
 /// committed shared set directly.
 pub(super) fn resolve_block_prevouts(
     resolved: Arc<ResolvedUtxoView>,
-    block: &Block,
+    txs: &[Tx],
     tx_plan: &BlockTxPlan,
     height: u32,
     txids: &[Txid],
 ) -> core::result::Result<Vec<Vec<Option<TxOut>>>, ApplyError> {
     if tx_plan.needs_local_utxo_overlay {
-        let mut view =
-            BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
-        let mut resolved = Vec::with_capacity(block.txs.len());
-        for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+        let mut view = BlockLocalUtxoView::new(resolved, txs, height, tx_plan.overlay_capacity);
+        let mut resolved = Vec::with_capacity(txs.len());
+        for (tx_index, (tx, txid)) in (0_u32..).zip(txs.iter().zip(txids)) {
             if tx.is_coinbase() {
                 resolved.push(Vec::new());
                 view.add_outputs(tx_index, *txid, tx.outputs.len())?;
@@ -212,8 +215,7 @@ pub(super) fn resolve_block_prevouts(
         // 0..150_000, parallel and serial interleaved, serial winning every
         // round: 139.4s vs 125.4s overall, and this stage 6.9s vs 1.63s. The
         // fan-out was adding 5.3s of dispatch on top of 1.6s of work.
-        Ok(block
-            .txs
+        Ok(txs
             .iter()
             .map(|tx| {
                 if tx.is_coinbase() {
@@ -231,7 +233,7 @@ pub(super) fn resolve_block_prevouts(
 /// Runs every non-script transaction check for a block whose scripts are
 /// verified upstream: assume-valid or local replay.
 fn run_non_script_checks_only(
-    block: &Block,
+    txs: &[Tx],
     tx_plan: &BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
     txids: &[Txid],
@@ -240,7 +242,7 @@ fn run_non_script_checks_only(
     flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
-        block.txs.par_iter().try_for_each(|tx| {
+        txs.par_iter().try_for_each(|tx| {
             if tx.is_coinbase() {
                 bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
                 return Ok(());
@@ -255,8 +257,8 @@ fn run_non_script_checks_only(
         })?;
         return Ok(());
     }
-    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
-    for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+    let mut view = BlockLocalUtxoView::new(resolved, txs, height, tx_plan.overlay_capacity);
+    for (tx_index, (tx, txid)) in (0_u32..).zip(txs.iter().zip(txids)) {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx_index, *txid, tx.outputs.len())?;
@@ -282,17 +284,17 @@ fn run_non_script_checks_only(
 )]
 pub(super) fn verify_block_transactions(
     handles: &Chainstate,
-    block: &Block,
     view: &mut bitcoin_rs_consensus::BlockView<'_>,
     tx_plan: &BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
     context: &BlockValidationContext,
     provenance: BlockProvenance,
-    parsed: &bitcoin_rs_consensus::kernel::BlockParse,
+    script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
+    script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
 ) -> core::result::Result<(), ApplyError> {
-    debug_assert_eq!(block.txs.len(), view.txids().len());
+    debug_assert_eq!(view.txs().len(), view.txids().len());
     if tx_plan.only_coinbase {
-        for tx in &block.txs {
+        for tx in view.txs() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
         }
         return Ok(());
@@ -302,7 +304,7 @@ pub(super) fn verify_block_transactions(
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
         return run_non_script_checks_only(
-            block,
+            view.txs(),
             tx_plan,
             resolved,
             view.txids(),
@@ -320,7 +322,7 @@ pub(super) fn verify_block_transactions(
     // block; the non-overlay case reads the committed shared set directly.
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
-        resolve_block_prevouts(resolved, block, tx_plan, context.height, view.txids());
+        resolve_block_prevouts(resolved, view.txs(), tx_plan, context.height, view.txids());
     tracing::debug!(
         height = context.height,
         script_resolution_us = resolution_started.map(|start| start.elapsed().as_micros()),
@@ -340,7 +342,8 @@ pub(super) fn verify_block_transactions(
         context.locktime_cutoff,
         context.flags,
         &mut script_timings,
-        parsed,
+        script_source,
+        script_cache,
     );
     tracing::debug!(
         height = context.height,

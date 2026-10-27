@@ -17,7 +17,6 @@ use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
 use std::error::Error;
 
-use bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb;
 use bitcoin_rs_mempool::standardness::{
     AcceptanceRejectReason, StandardnessError, StandardnessPolicy, is_standard_tx,
 };
@@ -31,9 +30,6 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::opcode;
 use parking_lot::RwLock;
-
-/// Node default: Bitcoin Core incremental relay fee, 1000 sat/kvB.
-const INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
 /// Bitcoin Core default dust relay rate, sat/kvB.
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
@@ -402,7 +398,12 @@ fn multiple_dust_outputs_are_not_standard() {
 #[test]
 fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(pool)),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
     let orphan = tx(outpoint(200, 0), 1_000, 0xFF_FF_FF_FF);
     let facts = gateway.preview_transactions(&[orphan], None, &EmptyChain)?;
     let fact = facts.results.first().ok_or("expected one fact row")?;
@@ -436,6 +437,7 @@ impl AdmissionChain for MetaChain {
             height: self.height,
             locktime_cutoff: self.locktime_cutoff,
             csv_active: self.csv_active,
+            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -568,7 +570,12 @@ fn relative_lock_cases() -> [Case; 7] {
 #[test]
 fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(pool)),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
     for case in relative_lock_cases() {
         let spendable = TxOut {
             value: Amount::from_sat(10_000),
@@ -608,7 +615,12 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     );
     let parent_outpoint = OutPoint::new(parent.txid(), 0);
     pool.insert_entry(entry(parent, 250, 3_000))?;
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(pool)),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
     let child = tx_multi(
         &[(parent_outpoint, 1), (outpoint(47, 0), 0xFF_FF_FF_FF)],
         9_000,
@@ -678,9 +690,81 @@ fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<
     Ok(())
 }
 
-#[test]
-fn mempool_min_fee_rises_under_size_pressure_and_the_preview_enforces_it()
--> Result<(), Box<dyn Error>> {
+// ---------------------------------------------------------------------------
+// Rolling minimum fee (policy: Core `GetMinFee`)
+// ---------------------------------------------------------------------------
+
+/// Clock reading for the floor fixtures. Unless a block has connected, the
+/// rolling floor does not decay, so the value only names the reading.
+const T0: u64 = 1_700_000_000;
+
+/// Core's rolling-fee half-life: twelve hours.
+const HALF_LIFE_SECS: u64 = 12 * 60 * 60;
+
+/// The outcome of a package evicted to fit the pool's byte limit.
+const CAPACITY_EVICTION: MutationOutcome = MutationOutcome::Removed(RemovalReason::PolicyEviction);
+
+/// Output value of the spend fixtures previewed below. Each is funded by one
+/// confirmed coin holding this value plus the fee under test.
+const SPEND_OUTPUT_SATS: u64 = 10_000;
+
+/// Virtual size of the one-input, one-P2WPKH-output spend fixtures.
+const SPEND_VSIZE: u64 = 82;
+
+/// The fee that pays `rate` sat/kvB over one spend fixture, truncated the way
+/// Core's `CFeeRate::GetFee` truncates.
+const fn spend_fee_at(rate: u64) -> u64 {
+    rate * SPEND_VSIZE / 1_000
+}
+
+/// Preview verdict for one spend fixture paying exactly `fee`, funded by a
+/// confirmed coin. `tag` keeps the funding outpoints of one test distinct.
+fn preview_spend(
+    gateway: &MempoolGateway,
+    tag: u8,
+    fee: u64,
+) -> Result<Option<AcceptanceRejectReason>, Box<dyn Error>> {
+    let coin = TxOut {
+        value: Amount::from_sat(SPEND_OUTPUT_SATS + fee),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let chain = meta_chain(
+        12,
+        0,
+        true,
+        outpoint(tag, 0),
+        coin,
+        PrevoutMeta {
+            height: 10,
+            mtp: 0,
+            coinbase: false,
+        },
+    );
+    let spend = tx(outpoint(tag, 0), SPEND_OUTPUT_SATS, 0xFF_FF_FF_FF);
+    let facts = gateway.preview_transactions(&[spend], None, &chain)?;
+    Ok(facts
+        .results
+        .first()
+        .ok_or("expected one fact row")?
+        .reject_reason)
+}
+
+fn gateway_over(pool: Mempool) -> MempoolGateway {
+    MempoolGateway::new(
+        Arc::new(RwLock::new(pool)),
+        None,
+        ValidationEngine::Native,
+        None,
+    )
+}
+
+/// A 4 000 vB pool that has just evicted its cheapest package.
+///
+/// Two 1 000 vB packages pay three and two times `evicted_rate`, and a 2 000 vB
+/// package pays `evicted_rate`: the pool is exactly full. A fourth 1 000 vB
+/// package at six times `evicted_rate` overflows it, so the capacity
+/// eviction removes the `evicted_rate` package whole and leaves 1 000 vB free.
+fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Error>> {
     let limits = MempoolLimits {
         max_total_bytes: 4_000,
         ..MempoolLimits::default()
@@ -689,23 +773,120 @@ fn mempool_min_fee_rises_under_size_pressure_and_the_preview_enforces_it()
     pool.insert_entry(entry(
         tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF),
         1_000,
-        1_000,
+        3 * evicted_rate,
     ))?;
     pool.insert_entry(entry(
         tx(outpoint(2, 0), 1_000, 0xFF_FF_FF_FF),
         1_000,
-        2_000,
+        2 * evicted_rate,
     ))?;
+    let evicted = tx(outpoint(3, 0), 1_000, 0xFF_FF_FF_FF);
+    let evicted_txid = txid(&evicted);
+    pool.insert_entry(entry(evicted, 2_000, 2 * evicted_rate))?;
+    assert_eq!(pool.total_vsize(), 4_000, "the pool is exactly full");
 
+    let overflow = tx(outpoint(4, 0), 1_000, 0xFF_FF_FF_FF);
+    let result = pool.insert_entry(entry(overflow, 1_000, 6 * evicted_rate))?;
+    let evicted_for_capacity: Vec<_> = result
+        .changes
+        .iter()
+        .filter(|change| change.outcome == CAPACITY_EVICTION)
+        .map(|change| change.txid)
+        .collect();
     assert_eq!(
-        mempool_min_fee_sat_per_kvb(&pool, INCREMENTAL_RELAY_FEE_SAT_PER_KVB),
-        2_000
+        evicted_for_capacity,
+        vec![evicted_txid],
+        "the cheapest package, and only it, leaves for capacity"
     );
+    assert_eq!(pool.total_vsize(), 3_000);
+    Ok(pool)
+}
 
-    let lukewarm = tx(outpoint(3, 0), 1_000, 0xFF_FF_FF_FF);
+#[test]
+fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted()
+-> Result<(), Box<dyn Error>> {
+    let limits = MempoolLimits {
+        max_total_bytes: 4_000,
+        ..MempoolLimits::default()
+    };
+    let mut pool = Mempool::new(limits);
+    // Three quarters full, well past the point where the retired heuristic
+    // raised the floor, with the cheapest package at the relay floor itself.
+    for (label, fee) in [(1, 1_000), (2, 2_000), (3, 3_000)] {
+        pool.insert_entry(entry(
+            tx(outpoint(label, 0), 1_000, 0xFF_FF_FF_FF),
+            1_000,
+            fee,
+        ))?;
+    }
+    assert_eq!(pool.total_vsize(), 3_000);
+    let relay_floor = pool.min_relay_fee_sat_per_kvb();
+    assert_eq!(pool.min_fee_sat_per_kvb(T0), relay_floor);
 
-    pool.insert_entry(entry(lukewarm, 1_000, 1_200))?;
-    assert_eq!(pool.len(), 3);
+    let gateway = gateway_over(pool);
+    assert_eq!(
+        preview_spend(&gateway, 0x31, spend_fee_at(relay_floor))?,
+        None,
+        "a crowded pool that has evicted nothing admits at the relay floor"
+    );
+    Ok(())
+}
 
+#[test]
+fn mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it()
+-> Result<(), Box<dyn Error>> {
+    const EVICTED_RATE: u64 = 1_000;
+    let pool = pool_after_capacity_eviction(EVICTED_RATE)?;
+    let relay_floor = pool.min_relay_fee_sat_per_kvb();
+
+    // Core's rolling floor: the evicted package's rate plus the incremental
+    // relay fee. The retired heuristic read the cheapest *remaining* package
+    // (2 000 sat/kvB here), so it forgot the eviction and quoted a higher
+    // number that depended on what happened to stay.
+    let floor = pool.min_fee_sat_per_kvb(T0);
+    assert_eq!(
+        floor,
+        EVICTED_RATE + pool.policy_snapshot().incremental_relay_fee_sat_per_kvb
+    );
+    assert!(floor > relay_floor, "the eviction raised the floor");
+
+    let gateway = gateway_over(pool);
+    let required = spend_fee_at(floor);
+    assert!(
+        required > spend_fee_at(relay_floor),
+        "the failing fee clears the configured relay floor, so only the rolling floor can refuse it"
+    );
+    assert_eq!(
+        preview_spend(&gateway, 0x32, required - 1)?,
+        Some(AcceptanceRejectReason::MinRelayFeeNotMet),
+        "one satoshi under the rolling floor"
+    );
+    assert_eq!(
+        preview_spend(&gateway, 0x33, required)?,
+        None,
+        "exactly at the rolling floor"
+    );
+    Ok(())
+}
+
+#[test]
+fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life()
+-> Result<(), Box<dyn Error>> {
+    const EVICTED_RATE: u64 = 7_000;
+    let mut pool = pool_after_capacity_eviction(EVICTED_RATE)?;
+    let floor = EVICTED_RATE + pool.policy_snapshot().incremental_relay_fee_sat_per_kvb;
+
+    // With no block since the eviction the floor does not decay, however
+    // long the clock runs.
+    assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
+    assert_eq!(pool.min_fee_sat_per_kvb(T0 + 30 * 24 * 60 * 60), floor);
+
+    // A block, even one that confirms nothing, starts the decay at its own
+    // time. The pool is above half full, so the half-life is the full twelve
+    // hours; reads move forward in time.
+    pool.remove_for_block(&[], &[], 2, T0);
+    assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
+    assert_eq!(pool.min_fee_sat_per_kvb(T0 + HALF_LIFE_SECS), floor / 2);
+    assert_eq!(pool.min_fee_sat_per_kvb(T0 + 2 * HALF_LIFE_SECS), floor / 4);
     Ok(())
 }

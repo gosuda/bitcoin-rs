@@ -2,24 +2,37 @@
 name = "bitcoin-rs-sv2-template-provider"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.99"
 publish = false
-description = "SV2 Template Distribution bridge between bitcoin-rs's mining owner and an external Stratum V2 pool (example for issue #1289)"
+description = "Embedded bitcoin-rs mining adapter for an external Stratum V2 pool"
 
 # Standalone crate: keeps SRI dependencies out of the bitcoin-rs workspace.
 [workspace]
 
 [dependencies]
+bitcoin-rs-node = { path = "../../../crates/node", default-features = false, features = ["fjall"] }
+bitcoin-rs-mining = { path = "../../../crates/mining" }
+bitcoin-rs-primitives = { path = "../../../crates/primitives" }
+crossbeam-channel = "0.5"
+futures-executor = "=0.3.32"
 # SRI protocol plumbing only: Noise_XX transport (`network`) and the SV2
 # codec/frame types (`core`). `bitcoin-core-sv2`, `config`, `sv1` and every
-# role bundle stay disabled — the bridge speaks JSON-RPC to bitcoin-rs, not
-# Bitcoin Core IPC, and its only config surface is the environment.
+# role bundle stay disabled. The node is embedded through its production API.
 stratum-apps = { version = "0.8.0", default-features = false, features = ["network", "core", "std"] }
 # Key material for `Secp256k1SecretKey`: stratum-apps 0.8 wraps secp256k1
 # 0.28, while its rust-bitcoin re-export uses 0.29 — a different type.
 secp256k1 = { version = "0.28", default-features = false, features = ["alloc", "rand"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "sync", "signal"] }
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
-serde_json = "1"
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+bitcoin-rs-mempool = { path = "../../../crates/mempool" }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

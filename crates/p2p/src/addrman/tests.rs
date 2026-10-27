@@ -1421,14 +1421,10 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
     );
 }
-#[path = "asmap_tests.rs"]
 mod asmap_tests;
 
-#[path = "probe_tests.rs"]
 mod probe_tests;
 
-#[path = "eligibility_tests.rs"]
 mod eligibility_tests;
 
-#[path = "services_tests.rs"]
 mod services_tests;

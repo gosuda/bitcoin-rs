@@ -164,6 +164,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
         &spent,
         VerifyFlags::MANDATORY,
         bitcoin_rs_consensus::ValidationEngine::Kernel,
+        None,
     )
     .expect("kernel accepts independently signed BIP143 input");
     // Every BIP143 mode commits to this amount. Ensure the oracle is not
@@ -175,6 +176,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
             &spent,
             VerifyFlags::MANDATORY,
             bitcoin_rs_consensus::ValidationEngine::Kernel,
+            None,
         ),
         Err(ConsensusError::Script {
             input_index: INPUT,

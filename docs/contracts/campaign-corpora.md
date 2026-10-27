@@ -144,4 +144,4 @@ that height. No Cmodern cell may close on a guessed or recalled UTXO total.
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
-product corpus, chain-state oracle, `muhash`.
+`C150`, `Cmodern`, product performance cell.

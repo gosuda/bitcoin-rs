@@ -17,7 +17,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, 
 use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
 use bitcoin::hex::DisplayHex as _;
 
-use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
+use crate::context::{AppliedView, ChainControlError, Context, TxQueryError, TxUnavailableCause};
 use crate::convert::{
     self, compact_target_hex, i32_saturated, i64_saturated, i64_saturated_len, sat_to_btc,
     typed_to_sonic, typed_to_sonic_omitting_nulls,
@@ -764,9 +764,9 @@ struct FeeFields {
 
 fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, TxQueryError> {
     let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
-        return Err(TxQueryError::Unavailable(
+        return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
             "transaction index disabled".into(),
-        ));
+        )));
     };
     let tx_count = block.txs.len().saturating_sub(1);
     let mut fees = Vec::with_capacity(tx_count);
@@ -776,9 +776,9 @@ fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, 
             match derived_index.outpoint_value(&input.previous_output) {
                 Ok(Some(value)) => total_in = total_in.saturating_add(value),
                 Ok(None) => {
-                    return Err(TxQueryError::Unavailable(
+                    return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
                         "input value missing from complete index".into(),
-                    ));
+                    )));
                 }
                 Err(error) => return Err(error),
             }
@@ -787,7 +787,9 @@ fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, 
             sum.saturating_add(output.value.to_sat())
         });
         let Some(fee) = total_in.checked_sub(total_out) else {
-            return Err(TxQueryError::Unavailable("negative fee".into()));
+            return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+                "negative fee".into(),
+            )));
         };
         fees.push((fee, tx.weight()));
     }
@@ -920,24 +922,24 @@ fn utxo_size_inc_for_block(ctx: &Context, block: &Block) -> Result<i64, TxQueryE
         return Ok(size_inc);
     }
     let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
-        return Err(TxQueryError::Unavailable(
+        return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
             "transaction index disabled".into(),
-        ));
+        )));
     };
     for tx in block.txs.iter().skip(1) {
         for input in &tx.inputs {
             let Some(prev) = derived_index.transaction(&input.previous_output.txid)? else {
-                return Err(TxQueryError::Unavailable(
+                return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
                     "input transaction missing from complete index".into(),
-                ));
+                )));
             };
             let Some(output) = prev
                 .outputs
                 .get(usize::try_from(input.previous_output.vout).unwrap_or(usize::MAX))
             else {
-                return Err(TxQueryError::Unavailable(
+                return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
                     "input vout missing from complete index".into(),
-                ));
+                )));
             };
             let removed = i64::try_from(output_utxo_size(output)).unwrap_or(i64::MAX);
             size_inc = size_inc.saturating_sub(removed);
@@ -984,64 +986,92 @@ pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         Err(ChainControlError::Genesis) => Err(RpcError::InvalidParams(
             "cannot invalidate the genesis block",
         )),
+        Err(ChainControlError::Interrupted) => {
+            Err(RpcError::Misc("Block verification interrupted".to_owned()))
+        }
+        Err(ChainControlError::Unavailable) => Err(RpcError::Misc(
+            "Chainstate is unavailable for verification".to_owned(),
+        )),
         Err(ChainControlError::Failed(message)) => Err(RpcError::Internal(message)),
     }
 }
 
-pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn verifychain(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
-    let checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
-    let nblocks_param = array.get(1).and_then(JsonValueTrait::as_u64).unwrap_or(6);
-    let Ok(nblocks) = u32::try_from(nblocks_param) else {
-        return Err(RpcError::InvalidParams("nblocks exceeds u32"));
+    // A request that arrives after the handler stopped reports interruption
+    // before touching any chain state.
+    if cancellation.is_triggered() {
+        return Err(RpcError::Misc("Block verification interrupted".to_owned()));
+    }
+    let parameter = |index: usize, name: &str, default: i64| -> Result<i64, RpcError> {
+        let Some(value) = array.get(index).filter(|value| !value.is_null()) else {
+            return Ok(default);
+        };
+        if !value.is_number() {
+            return Err(super::wrong_type(index + 1, name, value, "number"));
+        }
+        // An unsigned value beyond `i64::MAX` saturates, so it meets the
+        // range check below instead of silently becoming the default.
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().map(|_| i64::MAX))
+            .ok_or_else(|| RpcError::Misc("JSON integer out of range".to_owned()))
     };
-    if checklevel == 0 {
-        // Bitcoin Core: checklevel 0 reads blocks from disk without per-block verification.
-        // bitcoin-rs reports pass since this v1 doesn't surface block-read failures here.
+    // Core reads both parameters with `getInt`: anything outside the signed
+    // 32-bit range is out of range, and the level then clamps to `0..=4`.
+    let checklevel = i32::try_from(parameter(0, "checklevel", 3)?)
+        .map_err(|_| RpcError::Misc("JSON integer out of range".to_owned()))?
+        .clamp(0, 4);
+    let depth = parameter(1, "nblocks", 6)?;
+    // Core treats a non-positive depth as the whole chain; a depth outside
+    // the signed 32-bit range never reaches that rule.
+    let nblocks = match i32::try_from(depth) {
+        Ok(depth) => u32::try_from(depth).unwrap_or(0),
+        Err(_) => return Err(RpcError::Misc("JSON integer out of range".to_owned())),
+    };
+    let level = u8::try_from(checklevel).unwrap_or(4);
+    // A chainstate closed for recovery cannot be declared verified, not even
+    // over an empty window; the verifier enforces the same fail-closed rule
+    // for the startup path and for a closure that lands mid-walk.
+    if ctx.chain.closed_for_recovery.is_triggered() {
+        return Err(RpcError::Misc(
+            "Chainstate is unavailable for verification".to_owned(),
+        ));
+    }
+    if ctx.chain.applied_tip.load_full().is_none() {
         return typed_to_sonic(&v31::VerifyChain(true));
     }
-    let tree = ctx.chain.block_tree.read();
-    let Some(applied) = ctx.chain.applied_tip.load_full() else {
-        return typed_to_sonic(&v31::VerifyChain(true));
-    };
-    let mut cursor = applied.tip_id;
-    let mut checked: u32 = 0;
-    loop {
-        if checked >= nblocks {
-            break;
-        }
-        let Ok(node) = tree.node(cursor) else {
-            return typed_to_sonic(&v31::VerifyChain(false));
-        };
-        // L1+: PoW self-consistency check.
-        if !compact_target_met_by(node.header.bits, node.header.compute_hash().0) {
-            return typed_to_sonic(&v31::VerifyChain(false));
-        }
-        // L2+: Merkle-root sanity when block body is available. Absent blocks
-        // (header-only / pruned) skip the merkle check.
-        if checklevel >= 2 {
-            if let Some(record) = ctx.chain.block_by_hash(node.hash) {
-                if let Some(bytes) = ctx.chain.block_body_bytes(&record) {
-                    if let Ok(block) = deserialize::<Block>(&bytes) {
-                        let txids = block.txids();
-                        if !bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids(
-                            &block, &txids,
-                        ) {
-                            return typed_to_sonic(&v31::VerifyChain(false));
-                        }
-                    }
-                }
+    // One owner verifies: the node-owned chain control answers from the
+    // shared recent-blocks verifier, so RPC never walks storage itself.
+    // Without that verifier the chain cannot be declared verified. The
+    // request latch travels with the call so an in-flight cancellation
+    // interrupts the walk instead of passing or failing as damage.
+    let verified = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .map_or(Ok(false), |control| {
+            control.verify_chain(level, nblocks, cancellation)
+        })
+        .map_err(|error| match error {
+            ChainControlError::Interrupted => {
+                RpcError::Misc("Block verification interrupted".to_owned())
             }
-        }
-        // L3+: behaves as L2 in this v1 — a future strand wires per-tx structural
-        // checks (e.g., max-size, witness sanity). L4 (full UTXO replay) is deferred.
-        checked = checked.saturating_add(1);
-        let Some(parent_id) = node.parent else {
-            break;
-        };
-        cursor = parent_id;
-    }
-    typed_to_sonic(&v31::VerifyChain(true))
+            ChainControlError::Unavailable => {
+                RpcError::Misc("Chainstate is unavailable for verification".to_owned())
+            }
+            ChainControlError::UnknownBlock => RpcError::NotFound("block not found"),
+            ChainControlError::Genesis => {
+                RpcError::InvalidParams("cannot invalidate the genesis block")
+            }
+            ChainControlError::Failed(message) => RpcError::Internal(message),
+        })?;
+    typed_to_sonic(&v31::VerifyChain(verified))
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1184,7 +1214,9 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
         use bitcoin_rs_index::TxQueryError;
         match error {
             TxQueryError::Retry => RpcError::Misc("Block filter index is still catching up; retry later".into()),
-            TxQueryError::Unavailable(reason) | TxQueryError::Storage(reason) =>
+            TxQueryError::Unavailable(cause) =>
+                RpcError::Misc(format!("Block filter index unavailable: {cause}")),
+            TxQueryError::Storage(reason) =>
                 RpcError::Misc(format!("Block filter index unavailable: {reason}")),
         }
     })?.ok_or_else(|| RpcError::Misc("Filter not found. This could be because the block was not connected to the active chain.".into()))?;
@@ -1695,7 +1727,7 @@ fn block_verbose_typed(
     let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
-    let coinbase_version = crate::tx_render::wire_transaction_version(coinbase_tx.version);
+    let coinbase_version = u32::from_le_bytes(coinbase_tx.version.to_le_bytes());
     let mut value = if verbosity < 2 {
         typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
@@ -1752,7 +1784,8 @@ fn block_verbose_typed(
             ctx.chain.chain_network,
         )?
     };
-    // The pinned coinbase DTO narrows this unsigned wire field to i32.
+    // The pinned coinbase DTO narrows this unsigned wire field to i32; the
+    // overwrite restores the native unsigned wire value.
     // Both typed block envelopes must already contain this object.
     let coinbase = value
         .as_object_mut()
@@ -1848,35 +1881,6 @@ fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Op
     Some(BlockHash::from(node.hash))
 }
 
-/// WHY-local: the chain crate's compact-target helpers are `pub(crate)`, and
-/// this crate must not grow a dependency to reach them. `verifychain` only
-/// needs the `PoW` self-consistency verdict the old `validate_pow` call made:
-/// decode `bits` into a 256-bit target and compare the header hash against it
-/// (both read as little-endian integers, as consensus does).
-fn compact_target_met_by(bits: CompactTarget, hash: Hash256) -> bool {
-    let bits = bits.to_consensus();
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    // A zero mantissa or a negative sign bit decodes to a zero target, and an
-    // exponent past 32 bytes overflows the 256-bit range; none are meetable.
-    if mantissa == 0 || bits & 0x0080_0000 != 0 || exponent > 32 {
-        return false;
-    }
-    let mut target = [0_u8; 32];
-    let mantissa_bytes = mantissa.to_le_bytes();
-    let start = exponent - 3;
-    target[start..start + 3].copy_from_slice(&mantissa_bytes[..3]);
-    let hash_bytes = hash.to_le_bytes();
-    hash_bytes
-        .iter()
-        .rev()
-        .zip(target.iter().rev())
-        .map(|(hash_byte, target_byte)| hash_byte.cmp(target_byte))
-        .find(|ordering| *ordering != core::cmp::Ordering::Equal)
-        .unwrap_or(core::cmp::Ordering::Equal)
-        != core::cmp::Ordering::Greater
-}
-
 fn decode_header(record: &BlockRecord) -> Result<Header, RpcError> {
     let Some(bytes) = record.header_bytes() else {
         return Err(RpcError::Internal(
@@ -1931,10 +1935,14 @@ mod tests {
     use crate::context::BlockBodies;
 
     impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        fn block_body(
+            &self,
+            height: u32,
+            hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
             self.calls
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            (height == self.height && hash == self.hash).then(|| self.body.clone())
+            Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
         }
     }
 
@@ -2237,9 +2245,13 @@ mod tests {
         }
 
         impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+            fn block_body(
+                &self,
+                height: u32,
+                hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
-                (height == self.height && hash == self.hash).then(|| self.body.clone())
+                Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
             }
         }
 
@@ -2360,8 +2372,8 @@ mod tests {
         // remains int32_t. Literal expected values independently pin that split.
         let mut block = fixture_block_with_spend();
         block.header.version = -1;
-        block.txs[0].version = -1;
-        block.txs[1].version = i32::MIN;
+        block.txs[0].version = u32::MAX;
+        block.txs[1].version = 1_u32 << 31;
         block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
             .expect("fixture merkle root");
         let record = BlockRecord::from_block(0, &block);
@@ -3192,8 +3204,12 @@ mod tests {
         struct SizedStore(u64);
 
         impl bitcoin_rs_chain::BlockBodySource for SizedStore {
-            fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
-                None
+            fn block_body(
+                &self,
+                _height: u32,
+                _hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+                Ok(None)
             }
             fn disk_usage(&self) -> Option<u64> {
                 Some(self.0)
@@ -4433,26 +4449,7 @@ mod getchaintips_tests {
 }
 
 #[cfg(test)]
-mod verifychain_tests {
-    use alloc::sync::Arc;
-
-    use super::*;
-
-    #[test]
-    fn verifychain_accepts_core_parameters_and_refuses_oversized_nblocks() {
-        let ctx = Arc::new(Context::new());
-        for params in [json!([]), json!([3, 6]), json!([0, 6]), json!([4, 0])] {
-            let result = verifychain(&ctx, &params)
-                .unwrap_or_else(|err| panic!("verifychain{params:?} failed: {err}"));
-            assert_eq!(result.as_bool(), Some(true), "{params:?}");
-        }
-
-        match verifychain(&ctx, &json!([3, u64::from(u32::MAX) + 1])) {
-            Ok(value) => panic!("oversized nblocks succeeded: {value:?}"),
-            Err(err) => assert_eq!(err.to_string(), "invalid params: nblocks exceeds u32"),
-        }
-    }
-}
+mod verifychain_tests;
 
 fn compute_branchlen(
     tree: &bitcoin_rs_chain::BlockTree,

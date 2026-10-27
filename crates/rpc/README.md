@@ -31,10 +31,10 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 - **System Owners**:
   - **Routing & Demux**: `classify` in `crates/rpc/src/server.rs` owns the listener directory table; see [Transport Demuxing](#1-protocol-demuxing-and-authentication) for the routing rules.
   - **Authentication**: `Auth::validate_header` in `crates/rpc/src/auth.rs` guards JSON-RPC requests; `serve_connection` in `crates/rpc/src/server.rs` is the routing callsite. REST and Esplora remain unauthenticated.
-  - **Error Codes**: JSON-RPC failures map through `RpcError` in `crates/rpc/src/error.rs`. Current mappings cover standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Bitcoin Core codes `-3` (invalid type) and `-5` (not found). The code reserves `-8` (invalid parameter), but no current variant emits it. Other Core codes (`-1`, `-22`, `-25`, `-26`, `-27`) remain method-specific obligations when their behavior is implemented.
+  - **Error Codes**: JSON-RPC failures map through `RpcError` in `crates/rpc/src/error.rs`. Current mappings cover standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Bitcoin Core codes `-3` (invalid type), `-5` (not found), and `-8` (invalid parameter). Method-specific handlers also emit `-1` (misc), `-22` (deserialization), `-25` (verify), and `-26` (verify-rejected) where their behavior is implemented; `-27` remains a method-specific obligation when its behavior is implemented.
   - **Read Consistency & Tip Fencing**: Multi-record queries against chain state must use two-phase optimistic fencing (`capture_chain_view` / `ensure_chain_view` in `crates/rpc/src/esplora.rs`) or active-tip ancestry verification against `BlockTree` (`crates/rpc/src/rest.rs`). If a reorg occurs during execution, return `503 Service Unavailable`.
   - **Status Reads vs Live Scans**: Published-status reads (`getblockchaininfo`, `getchaintxstats`, and the typed `Context::sync_progress`) project from one `AppliedView` capture of the last complete applied publication and never acquire the node's `StableRead` transition role, so a block mid-transition cannot stall an explorer or monitoring client. Reads that must see a *mutable* chainstate as one piece (`scantxoutset`'s tip-plus-UTXO scan, `gettxoutsetinfo`, and REST `getutxos`) run inside `Context::with_stable_chainstate`, which holds that exclusion across the whole read. Mempool admission is not one of them: `sendrawtransaction` and Esplora broadcasts submit through `MempoolGateway::submit_local_transaction` under the mempool's optimistic `AdmissionFence::Stable` version fence, retrying when a transition lands mid-check rather than excluding one. That exclusion is mutable-chainstate exclusion, not status synchronization.
-  - **Index Query Budgets**: Statistical and script index queries must be bounded by `QueryBudget` (`crates/index/src/runtime/query.rs`, `crates/rpc/src/esplora.rs`) to prevent memory exhaustion and disk query starvation.
+  - **Index Query Budgets**: Statistical and script index queries must be bounded by `QueryBudget` (`crates/index/src/runtime/query.rs`) to prevent memory exhaustion and disk query starvation.
   - **Multi-Format Rendering**: REST routes supporting multiple representations (such as `/rest/headers/...` in `crates/rpc/src/rest.rs`) implement `.json`, `.hex`, and `.bin` formats with explicit `Content-Type` headers (`application/json`, `text/plain`, `application/octet-stream`), while single-representation routes (e.g. `/rest/chaininfo.json`) remain JSON-only.
 
 ### 3. Caching and pagination rules
@@ -56,6 +56,8 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 
 ## Features
 
+- `silent-payments`: experimental `getblocktweaks` extension, separately enabled
+  at runtime with `--silent-payments`. See [usage and limits](../../docs/silent-payments.md).
 - `zmq`: gates ZMQ notification methods in the JSON-RPC registry. The crate
   defines and forwards no storage-backend features (`ARCH-04`).
 

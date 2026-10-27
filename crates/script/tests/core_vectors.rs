@@ -39,7 +39,8 @@ use bitcoin_rs_primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, deserialize,
 };
 use bitcoin_rs_script::{
-    Interpreter, PreparedTransaction, ScriptError, VerifyFlags, opcode, push_data, push_int,
+    Instruction, Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, SignatureCache,
+    VerifyFlags, instructions, opcode, push_data, push_int,
 };
 
 // Core error names admitted by the corpus parser; verdicts compare acceptance only.
@@ -1099,7 +1100,7 @@ fn verify_native_tx(row: &TxVectorRow) -> Verdict {
     // a triage reader needs; a bare Reject says nothing.
     let mut first_failure = None;
     for input_idx in 0..row.tx.inputs.len() {
-        let result = prepared.verify_input(input_idx, row.flags);
+        let result = prepared.verify_input(input_idx, row.flags, None);
         if !matches!(result, Ok(true)) {
             first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
             break;
@@ -1433,6 +1434,7 @@ fn script_tests_kernel_column() {
             &prevouts,
             row.flags,
             bitcoin_rs_consensus::ValidationEngine::Kernel,
+            None,
         );
         Verdict::from_kernel(&result)
     });
@@ -1511,6 +1513,7 @@ fn tx_valid_kernel_column() {
             &row.prevouts,
             row.flags,
             bitcoin_rs_consensus::ValidationEngine::Kernel,
+            None,
         );
         Verdict::from_kernel(&result)
     });
@@ -1576,7 +1579,7 @@ fn is_policy_only_tx_invalid(row: &TxVectorRow) -> bool {
         return false;
     };
     for input_idx in 0..row.tx.inputs.len() {
-        let result = prepared.verify_input(input_idx, mand_flags);
+        let result = prepared.verify_input(input_idx, mand_flags, None);
         if !matches!(result, Ok(true)) {
             return false;
         }
@@ -1622,6 +1625,7 @@ fn tx_invalid_kernel_column() {
             &row.prevouts,
             row.flags,
             bitcoin_rs_consensus::ValidationEngine::Kernel,
+            None,
         );
         Verdict::from_kernel(&result)
     });
@@ -1648,4 +1652,343 @@ fn tx_invalid_kernel_column() {
 fn kernel_oracle_infrastructure_error_panics() {
     let err = bitcoin_rs_consensus::ConsensusError::Kernel("simulated harness failure".to_string());
     Verdict::from_kernel(&Err(err));
+}
+
+// ===========================================================================
+// Signature-cache adversarial behavior (real Core signatures, verdicts only)
+// ===========================================================================
+
+/// Verifies every input with an optional admission-local cache, returning the
+/// first non-accept. Only the externally observable verdict is compared.
+fn sigcache_verify_every_input(
+    tx: &Tx,
+    prevouts: &[(OutPoint, TxOut)],
+    flags: VerifyFlags,
+    cache: Option<&SignatureCache>,
+) -> Result<bool, ScriptError> {
+    let prepared = match PreparedTransaction::new(tx, prevouts) {
+        Ok(prepared) => prepared,
+        Err(error) => panic!("adversarial prevouts resolve: {error}"),
+    };
+    for input_idx in 0..tx.inputs.len() {
+        let result = prepared.verify_input(input_idx, flags, cache);
+        if !matches!(result, Ok(true)) {
+            return result;
+        }
+    }
+    Ok(true)
+}
+
+/// Push template of a script: one entry per instruction, the pushed length
+/// for pushes and `None` for opcodes or decode failures.
+fn push_shape(script: &[u8]) -> Vec<Option<usize>> {
+    instructions(script)
+        .map(|instruction| match instruction {
+            Ok(Instruction::PushBytes(data)) => Some(data.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Flips the first byte of the first non-empty witness item or of the first
+/// non-empty push of a push-only scriptSig, so a well-formed signature
+/// becomes a cryptographic failure without changing any encoding shape.
+/// Byte 0 of a push-based scriptSig is the push opcode itself, so flipping
+/// it would reshape the script instead of mutating the signature; the flip
+/// lands inside the parsed payload, and the before/after push template
+/// proves the shape survived.
+fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
+    for input in &mut tx.inputs {
+        for item in input.witness.iter_mut() {
+            if !item.is_empty() {
+                item[0] ^= 0x01;
+                return;
+            }
+        }
+        if input.script_sig.as_bytes().is_empty() {
+            continue;
+        }
+        let before = push_shape(input.script_sig.as_bytes());
+        // Locate first, mutate after: the parsed push borrows the script,
+        // so the flip must land once the parse ends.
+        let start = {
+            let bytes = input.script_sig.as_bytes();
+            let mut start = None;
+            for instruction in instructions(bytes) {
+                if let Ok(Instruction::PushBytes(data)) = instruction
+                    && !data.is_empty()
+                {
+                    start = Some(data.as_ptr().addr() - bytes.as_ptr().addr());
+                    break;
+                }
+            }
+            start
+        };
+        let Some(start) = start else {
+            panic!(
+                "a non-empty scriptSig without a data push carries no signature payload to flip"
+            );
+        };
+        input.script_sig[start] ^= 0x01;
+        assert_eq!(
+            push_shape(input.script_sig.as_bytes()),
+            before,
+            "the signature flip must not reshape the scriptSig"
+        );
+        return;
+    }
+    panic!("adversarial row carries no signature bytes to flip");
+}
+
+/// First `tx_valid` row that is signature-bound: it accepts uncached under its
+/// own flags, and both a flipped signature byte and a bumped nLockTime (which
+/// every sighash mode commits to) break it uncached. Selecting for those
+/// properties keeps every negative test below non-vacuous without inventing a
+/// spend.
+fn sigcache_digest_bound_row() -> TxVectorRow {
+    let mut counts = Counts::default();
+    let rows = match load_tx_vectors("tx_valid.json", true, &mut counts) {
+        Ok(rows) => rows,
+        Err(error) => panic!("tx_valid should load: {error}"),
+    };
+    let found = rows.into_iter().find(|row| {
+        let bound = row.tx.inputs.iter().any(|input| {
+            input.witness.iter().any(|item| !item.is_empty())
+                || push_shape(input.script_sig.as_bytes())
+                    .iter()
+                    .any(|push| push.is_some_and(|len| len > 0))
+        });
+        if !bound {
+            return false;
+        }
+        if sigcache_verify_every_input(&row.tx, &row.prevouts, row.flags, None) != Ok(true) {
+            return false;
+        }
+        // The hit-parity test warms under MANDATORY, so the row must accept
+        // there too: tx_valid rows that disable DERSIG (e.g. row 0's 0xdd byte)
+        // pass under their own flags but fail MANDATORY with SigDer.
+        if sigcache_verify_every_input(&row.tx, &row.prevouts, VerifyFlags::MANDATORY, None)
+            != Ok(true)
+        {
+            return false;
+        }
+        let mut flipped = row.tx.clone();
+        sigcache_flip_first_signature_byte(&mut flipped);
+        if sigcache_verify_every_input(&flipped, &row.prevouts, row.flags, None) == Ok(true) {
+            return false;
+        }
+        let mut retargeted = row.tx.clone();
+        let bumped = row.tx.lock_time.to_consensus().wrapping_add(1);
+        retargeted.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(bumped);
+        sigcache_verify_every_input(&retargeted, &row.prevouts, row.flags, None) != Ok(true)
+    });
+    match found {
+        Some(row) => row,
+        None => panic!("tx_valid carries no signature-bound row broken by both mutations"),
+    }
+}
+
+#[test]
+fn signature_cache_hit_matches_uncached_across_flags() {
+    let row = sigcache_digest_bound_row();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        sigcache_verify_every_input(&row.tx, &row.prevouts, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "warmup under MANDATORY"
+    );
+    assert_eq!(
+        sigcache_verify_every_input(&row.tx, &row.prevouts, row.flags, Some(&cache)),
+        Ok(true),
+        "hit under row flags matches the uncached accept"
+    );
+    assert_eq!(
+        sigcache_verify_every_input(&row.tx, &row.prevouts, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "repeat hit stays accepting"
+    );
+}
+
+#[test]
+fn signature_cache_warmed_still_rejects_bad_signature() {
+    let row = sigcache_digest_bound_row();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        sigcache_verify_every_input(&row.tx, &row.prevouts, row.flags, Some(&cache)),
+        Ok(true),
+        "warmup"
+    );
+    let mut bad = row.tx.clone();
+    sigcache_flip_first_signature_byte(&mut bad);
+    let uncached = sigcache_verify_every_input(&bad, &row.prevouts, row.flags, None);
+    assert_ne!(
+        uncached,
+        Ok(true),
+        "selection guarantees the flip breaks verification"
+    );
+    assert_eq!(
+        sigcache_verify_every_input(&bad, &row.prevouts, row.flags, Some(&cache)),
+        uncached,
+        "cached verdict matches uncached after warming"
+    );
+}
+
+#[test]
+fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
+    let row = sigcache_digest_bound_row();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        sigcache_verify_every_input(&row.tx, &row.prevouts, row.flags, Some(&cache)),
+        Ok(true),
+        "warmup"
+    );
+    // nLockTime is committed by every sighash mode, so bumping it retargets the
+    // digest without touching any signature or policy encoding.
+    let mut retargeted = row.tx.clone();
+    let bumped = row.tx.lock_time.to_consensus().wrapping_add(1);
+    retargeted.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(bumped);
+    let uncached = sigcache_verify_every_input(&retargeted, &row.prevouts, row.flags, None);
+    assert_ne!(
+        uncached,
+        Ok(true),
+        "selection guarantees the retarget breaks verification"
+    );
+    assert_eq!(
+        sigcache_verify_every_input(&retargeted, &row.prevouts, row.flags, Some(&cache)),
+        uncached,
+        "cached verdict matches uncached after warming"
+    );
+}
+
+/// Fixed P2WPKH twins in the benchmark `ecdsa_case` shape: one real low-S
+/// ECDSA signature plus its high-S twin (same r, s replaced with n - s, same
+/// hashtype) over the same digest, key, and transaction. Returns the low-S
+/// spend, the high-S spend, and their shared prevout row.
+fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
+    use bitcoin_hashes::{Hash as _, hash160};
+    use bitcoin_rs_primitives::{Hash256, Sighash, SighashCache};
+    use secp256k1::{Message, PublicKey, SECP256K1, SecretKey, ecdsa};
+
+    let secret = match SecretKey::from_slice(&[11; 32]) {
+        Ok(secret) => secret,
+        Err(error) => panic!("fixed ecdsa secret: {error}"),
+    };
+    let pubkey = PublicKey::from_secret_key(SECP256K1, &secret)
+        .serialize()
+        .to_vec();
+    let program_digest = hash160::Hash::hash(&pubkey);
+    let mut program = Vec::with_capacity(22);
+    program.push(0x00);
+    program.push(0x14);
+    program.extend_from_slice(program_digest.as_byte_array());
+    let mut code = Vec::with_capacity(25);
+    code.push(0x76);
+    code.push(0xa9);
+    code.push(0x14);
+    code.extend_from_slice(program_digest.as_byte_array());
+    code.push(0x88);
+    code.push(0xac);
+
+    let mut txid_bytes = [0u8; 32];
+    txid_bytes[0] = 0x51;
+    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid_bytes)), 0);
+    let tx = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: outpoint,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(90_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+    };
+    let prevout = TxOut {
+        value: Amount::from_sat(100_000),
+        script_pubkey: Script::from_bytes(program),
+    };
+    let digest = match SighashCache::new(&tx).segwit_v0_signature_hash(
+        0,
+        &code,
+        prevout.value,
+        Sighash::All,
+    ) {
+        Ok(digest) => digest,
+        Err(error) => panic!("bip143 digest: {error}"),
+    };
+    let mut low = SECP256K1.sign_ecdsa(&Message::from_digest(*digest.as_byte_array()), &secret);
+    low.normalize_s();
+    let mut low_bytes = low.serialize_der().to_vec();
+    low_bytes.push(0x01);
+
+    let compact = low.serialize_compact();
+    let high_s = match SecretKey::from_slice(&compact[32..]) {
+        Ok(s) => s,
+        Err(error) => panic!("low-S s scalar: {error}"),
+    }
+    .negate()
+    .secret_bytes();
+    let mut twin = [0u8; 64];
+    twin[..32].copy_from_slice(&compact[..32]);
+    twin[32..].copy_from_slice(&high_s);
+    let high = match ecdsa::Signature::from_compact(&twin) {
+        Ok(high) => high,
+        Err(error) => panic!("high-S compact: {error}"),
+    };
+    let mut high_bytes = high.serialize_der().to_vec();
+    high_bytes.push(0x01);
+    assert_ne!(high_bytes, low_bytes, "twins must differ in s");
+
+    let rows = vec![(outpoint, prevout)];
+    let mut low_tx = tx.clone();
+    low_tx.inputs[0].witness = vec![low_bytes, pubkey.clone()].into();
+    let mut high_tx = tx;
+    high_tx.inputs[0].witness = vec![high_bytes, pubkey].into();
+    (low_tx, high_tx, rows)
+}
+
+#[test]
+fn signature_cache_policy_encoding_still_rejected_after_permissive_success() {
+    // Only the witness signature differs between the twins, so a LOW_S
+    // rejection cannot be blamed on any other input.
+    let (low_tx, high_tx, rows) = sigcache_p2wpkh_s_twins();
+    let strict = VerifyFlags::MANDATORY.union(VerifyFlags::LOW_S);
+    let low_prepared = match PreparedTransaction::new(&low_tx, &rows) {
+        Ok(prepared) => prepared,
+        Err(error) => panic!("low-S prevouts resolve: {error}"),
+    };
+    assert_eq!(
+        low_prepared.verify_input(0, VerifyFlags::MANDATORY, None),
+        Ok(true),
+        "low-S consensus-valid"
+    );
+    assert_eq!(
+        low_prepared.verify_input(0, strict, None),
+        Ok(true),
+        "low-S policy-clean"
+    );
+
+    // The high-S twin is a real consensus-valid signature, so the permissive
+    // pass succeeds and caches the group operation; the LOW_S encoding check
+    // still rejects it afterwards on the same cached inputs.
+    let cache = SignatureCache::new();
+    let high_prepared = match PreparedTransaction::new(&high_tx, &rows) {
+        Ok(prepared) => prepared,
+        Err(error) => panic!("high-S prevouts resolve: {error}"),
+    };
+    assert_eq!(
+        high_prepared.verify_input(0, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "permissive warmup succeeds and caches the group operation"
+    );
+    assert_eq!(
+        high_prepared.verify_input(0, strict, Some(&cache)),
+        Err(ScriptError::Invalid {
+            code: ScriptErrCode::SigHighS
+        }),
+        "high-S rejection survives a permissive cached success"
+    );
 }

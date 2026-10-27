@@ -8,7 +8,7 @@
 use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
-use super::ExpectedRun;
+use super::SchedulerState;
 use super::chain::WindowApplyDisposition;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
@@ -138,18 +138,15 @@ impl BlockSync {
                 // computed hashes so subsequent rounds (as more blocks stage under
                 // the same chain/applied tip) hit instead of re-walking.
                 let horizon = self.expected_apply_horizon(staged_count);
-                let run = self.expected_block_hashes(horizon);
-                let expected_len = run.as_ref().map_or(0, |run| run.hashes.len());
-                let drained = match run.as_ref() {
-                    Some(run) => self
-                        .scheduler
-                        .lock()
-                        .stager
-                        .drain_expected_prefix(&run.hashes),
+                let cache = self.expected_block_hashes(horizon);
+                let expected_len = cache.as_ref().map_or(0, |c| c.hashes.len());
+                let mut scheduler = self.scheduler.lock();
+                let drained = match cache.as_ref() {
+                    Some(c) => scheduler.stager.drain_expected_prefix(&c.hashes),
                     None => Vec::new(),
                 };
-                if let Some(run) = run {
-                    self.populate_expected_apply_cache(run);
+                if let Some(c) = cache {
+                    scheduler.populate_expected_apply_cache(c);
                 }
                 (drained, expected_len)
             });
@@ -302,7 +299,7 @@ impl BlockSync {
     /// Returns `None` unless the run reaches `start_height` contiguously (the
     /// reorg / pruning guard); a partial run is never returned so the caller
     /// cannot apply or cache a non-contiguous prefix.
-    fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedRun> {
+    fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedApplyCache> {
         if max_count == 0 {
             return None;
         }
@@ -341,32 +338,13 @@ impl BlockSync {
             return None;
         }
         hashes.reverse();
-        Some(ExpectedRun {
+        Some(ExpectedApplyCache {
             chain_tip_hash: chain_tip.hash,
             applied_tip_hash: applied_tip.hash,
             applied_tip_height: applied_tip.height,
+            offset: 0,
             hashes,
         })
-    }
-
-    /// Repopulates the apply cache from a freshly computed expected run.
-    ///
-    /// Stores the full horizon at `offset: 0` keyed by the snapshot the run was
-    /// computed against. `advance_expected_apply_cache` then advances `offset`
-    /// past the blocks applied this round, so the next round drains the
-    /// remaining suffix on a cache hit. The run is empty only when there is
-    /// nothing to apply, in which case caching would be a no-op.
-    fn populate_expected_apply_cache(&self, run: ExpectedRun) {
-        if run.hashes.is_empty() {
-            return;
-        }
-        *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
-            chain_tip_hash: run.chain_tip_hash,
-            applied_tip_hash: run.applied_tip_hash,
-            applied_tip_height: run.applied_tip_height,
-            offset: 0,
-            hashes: run.hashes,
-        });
     }
 
     pub(super) fn drain_cached_expected_blocks(
@@ -375,12 +353,18 @@ impl BlockSync {
     ) -> Option<(Vec<DrainedBlock>, usize)> {
         let chain_tip = self.chain.chain_tip()?;
         let applied_tip = self.chain.applied_tip()?;
-        let cache = self.expected_apply_cache.lock();
-        let cache = cache.as_ref()?;
+        let mut scheduler = self.scheduler.lock();
+        let SchedulerState {
+            stager,
+            expected_apply_cache,
+            ..
+        } = &mut *scheduler;
+        let cache = expected_apply_cache.as_ref()?;
         if cache.chain_tip_hash != chain_tip.hash
             || cache.applied_tip_hash != applied_tip.hash
             || cache.applied_tip_height != applied_tip.height
         {
+            *expected_apply_cache = None;
             return None;
         }
         let remaining = cache.hashes.len().saturating_sub(cache.offset);
@@ -389,35 +373,30 @@ impl BlockSync {
             return None;
         }
         let expected_end = cache.offset.saturating_add(expected_len);
-        let drained = self
-            .scheduler
-            .lock()
-            .stager
-            .drain_expected_prefix(&cache.hashes[cache.offset..expected_end]);
+        let drained = stager.drain_expected_prefix(&cache.hashes[cache.offset..expected_end]);
         Some((drained, expected_len))
     }
 
     fn advance_expected_apply_cache(&self, applied_hashes: &[Hash256], failed: bool) {
-        if failed {
-            *self.expected_apply_cache.lock() = None;
+        let mut scheduler = self.scheduler.lock();
+        if failed || applied_hashes.is_empty() {
+            if failed {
+                scheduler.expected_apply_cache = None;
+            }
             return;
         }
-        if applied_hashes.is_empty() {
-            return;
-        }
-        let mut cache_guard = self.expected_apply_cache.lock();
-        if cache_guard.is_none() {
+        if scheduler.expected_apply_cache.is_none() {
             return;
         }
         let Some(chain_tip) = self.chain.chain_tip() else {
-            *cache_guard = None;
+            scheduler.expected_apply_cache = None;
             return;
         };
         let Some(applied_tip) = self.chain.applied_tip() else {
-            *cache_guard = None;
+            scheduler.expected_apply_cache = None;
             return;
         };
-        let Some(cache) = cache_guard.as_mut() else {
+        let Some(cache) = scheduler.expected_apply_cache.as_mut() else {
             return;
         };
         let applied_count = applied_hashes.len();
@@ -425,7 +404,7 @@ impl BlockSync {
             .ok()
             .and_then(|count| cache.applied_tip_height.checked_add(count))
         else {
-            *cache_guard = None;
+            scheduler.expected_apply_cache = None;
             return;
         };
         if cache.chain_tip_hash != chain_tip.hash
@@ -435,14 +414,14 @@ impl BlockSync {
             || applied_tip.height != expected_applied_height
             || applied_tip.hash != applied_hashes[applied_count - 1]
         {
-            *cache_guard = None;
+            scheduler.expected_apply_cache = None;
             return;
         }
         cache.applied_tip_hash = applied_tip.hash;
         cache.applied_tip_height = applied_tip.height;
         cache.offset = cache.offset.saturating_add(applied_count);
         if cache.offset >= cache.hashes.len() {
-            *cache_guard = None;
+            scheduler.expected_apply_cache = None;
         }
     }
 
@@ -469,19 +448,11 @@ impl BlockSync {
     /// on the active chain during an extension, or the first connect node
     /// above the common ancestor while a heavier branch is pending.
     ///
-    /// `first_connect_height` is the ancestor-aware derivation the request
-    /// path already uses (`send_getdata_for_pending_blocks`,
-    /// `probe_idle_frontier`); the observation and staging sites that call
-    /// this must name the same block — during a header-first reorg the
-    /// applied tip sits on the losing side, so `applied_tip.height + 1`
-    /// names a mid-path winner node rather than the connect frontier.
+    /// Delegates to [`Self::next_required_body`], keeping a single authoritative
+    /// derivation of the canonical connect frontier.
     pub(super) fn next_expected_block(&self) -> Option<(u32, Hash256)> {
-        let chain_tip = self.chain.chain_tip()?;
-        let applied_tip = self.chain.applied_tip()?;
-        let tree = self.chain.block_tree();
-        let height = Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)?;
-        let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
-        Some((height, tree.node(node_id).ok()?.hash))
+        self.next_required_body()
+            .map(|body| (body.height, body.hash))
     }
 
     pub(super) fn next_expected_block_hash(&self) -> Option<Hash256> {

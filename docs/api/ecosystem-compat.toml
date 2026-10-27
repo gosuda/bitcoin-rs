@@ -36,11 +36,11 @@
 # counts do not (`ECO-03`, `ECO-09`).
 
 [[row]]
-surface = "BIP352 public scan codec (library only)"
+surface = "BIP352 public scan codec and getblocktweaks RPC extension"
 core_reference = "BIP352 v0; not a Bitcoin Core RPC"
 status = "experimental"
-representative_consumer = "evaluated: BlindBit Oracle f9ab7fd8bc35467c492324f743ba1b69049a2bb6; no wallet run"
-evidence = "29 public receiving-vector projections pin sums/tweaks; the pinned upstream Python reference passes the full vectors. Existing certified BlockSpends supplies historical prevouts. Draft HTTP shapes differ from the evaluated consumer's gRPC data API. No tweak HTTP/gRPC endpoint or funded wallet discovery is claimed; see docs/silent-payments.md."
+representative_consumer = "REST sidecar verified: BlindBit Oracle f9ab7fd8bc35467c492324f743ba1b69049a2bb6; native RPC consumer and funded wallet discovery unverified"
+evidence = "Pinned BIP352 vectors, adapter failure/publication tests and signed-spend HTTP reorg/restart coverage. A recorded unmodified Oracle run verified the exact block/tweak result through existing REST without the native tweak feature; its historical reproducer is documented separately. Source budgets can refuse valid blocks; wallet discovery and native RPC benefit remain unverified. See docs/silent-payments.md for provenance, reproducer and coverage limits."
 
 [[row]]
 surface = "P2P v1 wire protocol"
@@ -59,9 +59,9 @@ evidence = "deterministic block-announcement tests cover headers, inv fallback, 
 [[row]]
 surface = "BIP324 / P2P v2 transport"
 core_reference = "BIP324"
-status = "experimental"
-representative_consumer = "qualification target: unmodified Bitcoin Core 31.1 in both connection directions (issue #1503)"
-evidence = "default-off v2transport implementation with key exchange, packet framing and v1 fallback (crates/p2p/src/transport.rs, bip324.rs). Reference vectors and listener/v2_transport_tests.rs are in-tree evidence only. No recorded live bidirectional Core v2 qualification; v1 remains the default (docs/policies/p2p-compatibility.md sections 2/3/7)."
+status = "externally verified"
+representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind in both connection directions (scripts/run-p2p-core-interop.sh, docs/contracts/core-differential.md CORE-06)"
+evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/p2p/tests/core_interop_live.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and listener/v2_transport_tests.rs."
 
 [[row]]
 surface = "Compact block relay (BIP152)"
@@ -127,11 +127,11 @@ representative_consumer = "planned: an existing mining consumer (issue #1122 fol
 evidence = "in-tree only: crates/mining/src/control.rs proposal/solved-block vocabulary and mining suites; external-miner harness as above (implemented evidence only)."
 
 [[row]]
-surface = "Mining IPC / Stratum V2 adapters"
-core_reference = "selected Core IPC / mining protocol interfaces"
-status = "intentionally unsupported"
-representative_consumer = "none"
-evidence = "no adapter is shipped; this is future work (issue #1122 compatibility surfaces), not a compatibility commitment. When built, IPC stays an adapter, not an internal architecture template (ECO-01)."
+surface = "Stratum V2 Template Distribution adapter (regtest example)"
+core_reference = "Stratum V2 Template Distribution Protocol as implemented by SRI; not a Bitcoin Core interface"
+status = "experimental"
+representative_consumer = "SRI pool and CPU mining devices pinned in tools/stratum-sv2/compose.yaml"
+evidence = "an experimental regtest adapter, not a compatibility commitment and no production pool qualification. It is a standalone crate outside the workspace (tools/stratum-sv2/template-provider) that embeds the production Node; Noise/TDP sessions get owner-budgeted jobs and retain them per session (tools/stratum-sv2/README.md). In-tree evidence is its localhost Noise and embedded-Node tests. One retained functional compose run exercised the pinned SRI pool and two devices (tools/stratum-sv2/evidence/interop.md); it predates budgeted jobs and pinned-job retention, has not been repeated for them, and did not exercise the translator. No throughput claim. IPC is tracked separately by the Core IPC row and stays unsupported (ECO-01)."
 
 [[row]]
 surface = "USDT tracepoints (validation/mempool/net providers)"

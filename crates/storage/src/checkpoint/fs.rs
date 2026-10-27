@@ -8,6 +8,10 @@ use cap_std::fs::{Dir, File, OpenOptions};
 
 /// Marker filename containing the current datadir schema epoch.
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
+/// The node's lifetime data-directory lock file (`crates/node/src/state/
+/// data_dir_lock.rs`). It is ordinary schema-epoch-0 furniture: a fresh
+/// datadir may carry it before any marker exists.
+pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
 // This serialized marker is the single source of truth for the current
@@ -31,10 +35,18 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
             let mut has_other_entry = false;
             for entry in data.entries()? {
                 let entry = entry?;
-                if entry.file_name().to_str() == Some(CURRENT_SCHEMA_TEMP_FILE) {
-                    stale_temp = true;
-                } else {
-                    has_other_entry = true;
+                match entry.file_name().to_str() {
+                    Some(name) if name == CURRENT_SCHEMA_TEMP_FILE => stale_temp = true,
+                    // A datadir that lost its marker to a crash may still
+                    // carry the node's lifetime lock; a regular lock file is
+                    // not evidence of an incompatible epoch-0 directory. Any
+                    // other file type under that name is.
+                    Some(name) if name == DATA_DIR_LOCK_FILE => {
+                        if !entry.file_type()?.is_file() {
+                            has_other_entry = true;
+                        }
+                    }
+                    _ => has_other_entry = true,
                 }
             }
             if has_other_entry {

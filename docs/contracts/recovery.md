@@ -82,17 +82,21 @@ record lives in the chainstate key-value store and the ordered protocol is
 owned by `crates/chainstate`.
 
 One connect or disconnect commits one atomic named-family batch whose
-`write_durable_if` receipt covers the head row, the block's undo row, and its
-body locator row; the appended body bytes and the blocks directory are synced
-before the batch may name them. The coins themselves commit in memory and
-become durable through the checkpoint export; the undo and body records in
-the batch are what make a committed tip recoverable. The chainstate journal
-is derived from this batch and may lag it, never lead it. `commit_id` is
-strictly monotonic on disconnect as well as on connect: a reorg lowers
-`height`, never `commit_id`.
+`write_durable_if` receipt covers the head row, the block's undo row, its
+body locator row, and block-file maximum-height rows; the appended body bytes
+and the blocks directory are synced before the batch may name them. The coins
+themselves commit in memory and become durable through the checkpoint export;
+the undo and body records in the batch are what make a committed tip
+recoverable. The chainstate journal is derived from this batch and may lag it,
+never lead it. `commit_id` is strictly monotonic on disconnect as well as on
+connect: a reorg lowers `height`, never `commit_id`.
 
 AssumeUTXO activation and historical archive updates use the same transition
-reservation but separate recovery namespaces. Activation first syncs immutable
+reservation but separate recovery namespaces. The manager holds a required
+persistent data directory; activation archive writes, full-revalidation marker
+checks, reservation cleanup, and historical checkpoint maintenance always use
+it. The required path guarantees a directory was supplied, not filesystem
+health; missing or corrupt files fail at use. Activation first syncs immutable
 `coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`, then commits the pinned base,
 count, and lifecycle in the head. An unreferenced import is an orphan, not a
 checkpoint or activation authority. Historical updates advance `commit_id`
@@ -177,10 +181,12 @@ For one block, or a bounded fully verified prefix during IBD:
    reads with the generation fence.
 2. Build exact forward and undo facts without mutating the public stable
    view.
-3. Append required body and undo frames. Sync files and required directory
-   entries.
-4. Apply one atomic storage batch containing coins, metadata, and the new
-   durable head. Wait for durable completion.
+3. Append required block-body frames. Sync the block files and required
+   directory entries.
+4. Apply one atomic storage batch containing the durable head row, undo rows,
+   body locator records, and block-file maximum-height rows. Wait for durable
+   completion. A successful commit on this nonempty batch makes prior deferred
+   body-index writes on the same store durable with the head.
 5. Publish the committed chain and coin view.
 6. Feed the committed chain update into the mempool canonical lifecycle,
    update the fee estimator, and reconcile projections.
@@ -188,6 +194,72 @@ For one block, or a bounded fully verified prefix during IBD:
    alignment.
 8. Dispatch notifications and relay in the declared observable order outside
    all domain locks.
+
+Coins commit in memory rather than as rows in the durable-head batch; their
+durability is achieved through checkpoint export.
+
+Speculative template preparation is distinct from durable authority. Before the
+block-file sync in step 3, chainstate fires an optional staged-tip hook to
+enqueue prospective work:
+- In `PublishMode::Now`, the hook fires only when the staged block is a direct
+  child of the currently published tip. Reorg connects never match because the
+  published tip stays on the old branch until settlement.
+- In `PublishMode::Grouped`, the hook fires only for the newest block of the
+  staged prefix, immediately before the group sync. If a window fails, only the
+  last successful block before the failure is handed off.
+- The node gates hook enqueuing by initial block download (IBD).
+- In `PublishMode::Replay`, the hook never fires. Replaying committed gap blocks
+  schedules no speculative preparation.
+
+The hook enqueues work without waiting for preparation to finish. The existing commit order remains:
+block-file sync (step 3), atomic storage batch commit (step 4), public chain and
+coin view publication (step 5), and follower dispatch (step 8). Speculative
+projections never advance `tip` or `DurableHead`. They publish no applied tip,
+advance no durable serials, and expose no candidate before durable commit.
+
+Proof: `crates/node/tests/mining/coordination.rs` test
+`staged_preparation_does_not_publish_before_commit` pins the `PublishMode::Now`
+positive case (the worker finishes the direct tip child while the body sync is
+held) and the no-publish side (the applied tip and ordinary templates still
+reference the old parent); no dedicated test pins the reorg-connect-never-fires
+case;
+`crates/chainstate/tests/unit/apply/window_tx_count_tests.rs` test
+`a_grouped_window_stages_only_its_newest_block_before_the_sync` and
+`crates/chainstate/tests/unit/apply/window_invalidation_tests.rs` test
+`a_failing_window_stages_only_its_last_successful_block` pin the grouped
+newest-block handoff before the sync;
+`crates/chainstate/tests/unit/durable_replay_tests.rs` test
+`replay_of_a_committed_gap_never_fires_the_staged_tip_hook` pins the Replay
+arm. The IBD enqueue gate lives in `crates/node/src/state/open.rs` (the
+`set_tip_staged` closure over the chainstate IBD latch); no dedicated test
+pins that gate.
+
+Cache installation requires an authoritative committed receipt for the exact
+tip, matching txids and removal reasons, and the live full generation key. Any
+mismatch, prioritisation, or failure discards the preparation and falls back to
+lazy assembly. In follower dispatch (step 8), a gatewayless connect publishes a
+truthful empty receipt at the same point. Receipt publication notifies
+foreground waiters, including when the connect has no mempool gateway.
+
+Proof: `crates/mining/src/coordinator/tests.rs` tests
+`empty_preparation_installs_against_matching_receipt`,
+`nonempty_preparation_installs_against_matching_receipt`, and
+`empty_preparation_cannot_install_against_nonempty_receipt` pin exact-receipt
+installation and mismatch fallback;
+`stale_ready_without_a_receipt_serves_lazily_instead_of_parking` pins the
+prioritisation-moved fallback; `crates/node/tests/mining/coordination.rs`
+tests `prepared_candidate_installs_on_commit_with_arc_reuse` and
+`fee_priority_race_discards_stale_preparation` pin commit-time install and
+stale-race discard.
+
+Proof: `crates/node/src/chain_effects.rs` test
+`gatewayless_connect_publishes_an_empty_receipt_for_the_tip` pins the truthful
+empty receipt at the follower-dispatch point;
+`crates/mining/src/coordinator/tests.rs` test
+`ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc` pins
+receipt publication releasing the parked foreground waiter with the prepared
+candidate; `publish_block_generation_retains_receipt_and_publishes` pins the
+retained receipt carrying stable identities with exact removal reasons.
 
 A failure before stable publication leaves the fence closed until explicit
 recovery. A guard destructor must never quietly reopen the fence after an
@@ -199,6 +271,8 @@ caps are stated constants, not emergent cadence:
 `DURABLE_HEAD_GROUP_BLOCKS` = 64 blocks or `DURABLE_HEAD_GROUP_MAX_BYTES` =
 8 MiB of block data, whichever first — one durable batch every one to two
 seconds at IBD rates, and a crash-redo bound of at most 64 body re-applies.
+Callers of `BlockBodyStore::sync` without a following durable batch on the
+body-index store must call `flush_index` after syncing the block files.
 This is the ordered commit protocol. It is also called the durable root
 recovery contract.
 
@@ -254,7 +328,7 @@ The crash and error points in this contract and
 | Crash or error point | Recovery result |
 |---|---|
 | Body append mid-frame | The in-progress frame is discarded on next start; no durable head references it. |
-| Undo append mid-frame | Same as body append; partial undo is not the authoritative head. |
+| Undo row written, head batch not committed | An undo row without a committed head reference is not authoritative. The head batch atomically commits the head and the undo rows it names. |
 | Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. |
 | Durable batch complete, no publish | Restart sees the new head, coins, and `refs`; mempool and index reconcile. |
 | Durable batch ambiguous | Recovery resolves the ambiguity by `CommitId` and full identity; no mixed head/coins. |
@@ -371,7 +445,7 @@ tests.
   protocol; it is evidence publication, not chainstate authority. It
   publishes a recovery fact only after the restored authoritative position is
   known; neither the warning store nor the marker may move chainstate. The
-  node crate keeps `RecoveryReporter` (`crates/node/src/state_storage.rs`) as
+  node crate keeps `RecoveryReporter` (`crates/node/src/state/storage.rs`) as
   the composition adapter implementing `IndexAheadSink` and
   `RollbackWarningSource` alongside the storage capabilities it adapts.
 - For checkpoint fallback and index-watermark-ahead evidence, the publisher
@@ -476,7 +550,15 @@ durable.
     refusing with `ApplyError::Shutdown`.
   - `committed_gap_append_gap_does_not_enter_retention_relief` proves a poisoned
     writer returns its original append-gap refusal without progress publication,
-    preserving its recovery marker and journal head while closing admission.
+    preserving its recovery marker and journal head while closing admission;
+  - `replay_of_a_committed_gap_never_fires_the_staged_tip_hook` proves replay
+    of an authenticated gap never fires the speculative staged-tip hook (`RCV-02`).
+- `crates/chainstate/tests/unit/apply/`:
+  - `window_tx_count_tests::a_grouped_window_stages_only_its_newest_block_before_the_sync`
+    proves a grouped IBD window stages only its newest block before the durable sync (`RCV-02`);
+  - `window_invalidation_tests::a_failing_window_stages_only_its_last_successful_block`
+    proves a failing window stages only the last valid block before the error and never
+    the failing block (`RCV-02`).
 - `crates/chainstate/src/connect.rs` and
   `crates/chainstate/src/disconnect.rs`: run the `RCV-02` tail —
   sync, one atomic batch, derived journal emission, then publication — and
@@ -512,7 +594,7 @@ durable.
   cumulative transaction count, preserves the full-revalidation marker, and
   restarts at the retention limit before genesis without an applied tip
   (`RCV-02`).
-- `crates/storage/src/chainstate_journal/writer/tests/behavior_1.rs`:
+- `crates/storage/src/chainstate_journal/writer/tests/segment_lifecycle.rs`:
   - `recovery_progress_compaction_preserves_full_revalidation_marker` proves
     progress compaction leaves the sticky marker armed (`RCV-02`, `JW-MARK-2`);
   - `recovery_compaction_cannot_clear_an_append_gap` proves compaction cannot
@@ -544,7 +626,7 @@ durable.
   the legacy migration (`legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line`,
   `legacy_datadir_with_no_rows_falls_back_to_the_requested_line`).
 - Checkpoint publication and recovery:
-  `crates/chainstate/tests/unit/checkpoint/tests/` covers consensus-valid active-chain
+  `crates/chainstate/src/checkpoint/tests/` covers consensus-valid active-chain
   replay, applied-ancestry selection, competing-fork rejection, and
   immutable-generation resume, including
   `failed_publication_preserves_current`;
@@ -570,6 +652,49 @@ durable.
 - `crates/node/tests/overhaul_fee_history.rs` (existing):
   - `restart_adopts_persisted_estimator_history`,
     `corrupt_history_file_degrades_to_insufficient_data` (`RCV-11`);
+- `crates/node/tests/mining/coordination.rs`:
+  - `staged_preparation_does_not_publish_before_commit` proves that the worker
+    finishes the direct tip child while the body sync is held and that, while
+    held, applied tip and templates reference the old parent, and pool spends
+    remain uncommitted (`RCV-02`);
+  - `prepared_candidate_installs_on_commit_with_arc_reuse` proves that after
+    the durable commit lands, the first template on the new tip installs the
+    prepared candidate `Arc` with exact removal survivors (`RCV-02`);
+  - `fee_priority_race_discards_stale_preparation` proves that a fee-priority
+    mutation during held sync discards the stale prepared candidate and serves
+    the updated priority (`RCV-02`);
+  - `shutdown_with_staged_work_installs_nothing_and_answers_unavailable`
+    proves shutdown with staged work never installs or publishes speculative
+    templates and returns unavailable (`RCV-02`).
+- `crates/mining/src/coordinator/tests.rs`: the cache-installation and
+  foreground-waiter guarantees of the speculative preparation (`RCV-02`):
+  - `publish_block_generation_retains_receipt_and_publishes` proves the
+    committed receipt keeps its tip hash and each removed txid with its exact
+    reason, and the live generation key still publishes;
+  - `empty_preparation_installs_against_matching_receipt` and
+    `nonempty_preparation_installs_against_matching_receipt` prove a
+    preparation installs its candidate only against the receipt whose
+    identities, reasons, and live generation key match its prediction;
+  - `empty_preparation_cannot_install_against_nonempty_receipt` and
+    `fee_moved_preparation_discards_and_serves_live` prove a removal mismatch
+    or a moved fee sequence discards the preparation and serves lazy assembly
+    for the live key;
+  - `matching_foreground_joins_running_preparation_without_duplicate_finish`,
+    `pending_stage_foreground_joins_without_duplicate_finish`, and
+    `ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc`
+    prove a matching foreground joins a running, pending, or ready
+    preparation without a duplicate lazy finish, parks until the committed
+    receipt arrives, and is served the prepared candidate itself;
+  - `stale_ready_without_a_receipt_serves_lazily_instead_of_parking` proves a
+    foreground whose generation can no longer match is never parked;
+  - `shutdown_releases_a_preparation_waiter` proves shutdown releases a joined
+    waiter with the unavailable error, and
+    `worker_panic_releases_joined_waiter_to_lazy_fallback` proves a worker
+    panic releases a parked waiter into lazy assembly.
+- `crates/node/src/chain_effects.rs`:
+  `gatewayless_connect_publishes_an_empty_receipt_for_the_tip` proves a
+  connect through a follower set with no mempool gateway publishes a receipt
+  for the connected tip that names no removals (`RCV-02`).
 
 ## Vocabulary
 

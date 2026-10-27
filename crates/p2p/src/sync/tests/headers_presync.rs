@@ -5,8 +5,8 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::behavior_5::deliver_headers;
-use super::behavior_5::next_locator;
+use super::settlement_faults::deliver_headers;
+use super::settlement_faults::next_locator;
 use bitcoin_rs_primitives::Hash256;
 
 use super::super::SyncBudget;
@@ -14,11 +14,11 @@ use super::super::default_sync_budget;
 use super::super::headers_presync::HeadersSyncPhase;
 use super::super::headers_presync::HeadersSyncState;
 use super::*;
-use crate::dispatch::MAX_HEADERS_RESPONSE;
+use crate::wire::MAX_HEADERS_MESSAGE_COUNT;
 
 /// The wire page size a full `headers` message must fill to keep a
 /// download-twice sync in its collection phase.
-const PAGE: usize = MAX_HEADERS_RESPONSE;
+const PAGE: usize = MAX_HEADERS_MESSAGE_COUNT;
 
 /// Work units one regtest-easy header mints (measured, not assumed: see
 /// the assertion in the first test).
@@ -105,9 +105,9 @@ fn connect(
     peers: &Arc<PeerTable>,
     port: u16,
     start_height: i32,
-) -> (SocketAddr, PeerLease, crossbeam_channel::Receiver<Message>) {
+) -> (SocketAddr, PeerLease, crate::test_support::MessageReceiver) {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let (tx, rx) = unbounded::<Message>();
+    let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
     peers.publish_info(addr, &lease, synthetic_peer(addr, start_height));
@@ -160,7 +160,7 @@ fn expire_request(sync: &BlockSync, source: PeerSource) -> TestResult {
     Ok(())
 }
 
-fn assert_no_getheaders(rx: &crossbeam_channel::Receiver<Message>) {
+fn assert_no_getheaders(rx: &crate::test_support::MessageReceiver) {
     assert!(
         !rx.try_iter()
             .any(|message| matches!(message, Message::GetHeaders(_))),
@@ -195,7 +195,7 @@ fn assert_request_unchanged(
 fn assert_competing_requests_suppressed(
     sync: &BlockSync,
     source: PeerSource,
-    rx: &crossbeam_channel::Receiver<Message>,
+    rx: &crate::test_support::MessageReceiver,
     locator: Vec<Hash256>,
     target_height: i32,
 ) -> TestResult {
@@ -793,7 +793,7 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
         "the predecessor has both lifecycle facts before replacement",
     );
 
-    let (replacement_tx, replacement_rx) = unbounded::<Message>();
+    let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     let replacement_lease = PeerLease::new(replacement_tx);
     peers.register(addr, replacement_lease.clone());
     peers.publish_info(addr, &replacement_lease, synthetic_peer(addr, 100_000));

@@ -25,7 +25,7 @@ a running pinned binary, not a replay of captured JSON.
 - **Owner**: `scripts/run-p2p-core-interop.sh`.
 - After bitcoin-rs catches up to Core on regtest, `getblockcount`,
   `getbestblockhash`, and `getblockchaininfo.{chain,blocks}` agree.
-- Evidence schema `bitcoin-rs-core-differential-v3` is verified by
+- Evidence schema `bitcoin-rs-core-differential-v4` is verified by
   `crates/p2p/tests/core_interop_live.rs`.
 - This complements `kernel_block_parity` / `kernel_vector_parity`: those
   tests the C++ engine in-process; this tests a running Core node.
@@ -70,6 +70,29 @@ a running pinned binary, not a replay of captured JSON.
   matrix may upgrade CORE-05 only after the main workflow retains a successful
   evidence artifact for the merged implementation.
 
+### `CORE-06`: BIP324 v2 transport against live Core
+
+- **Owner**: `scripts/run-p2p-core-interop.sh`, with Core started as
+  `-v2transport=1`; verified by `assert_transports` in
+  `crates/p2p/tests/core_interop_live.rs`.
+- The main bitcoin-rs node keeps `--v2transport=false`, so CORE-02, CORE-03
+  and its connection to Core stay v1 evidence; its leg must report `v1` with
+  empty session ids on both ends.
+- A fresh bitcoin-rs node with `--v2transport=true` dials Core, and Core dials
+  (`addnode … onetry true`) another fresh node with `--v2transport=true` and
+  no other peer. Each syncs Core's whole chain over that v2 connection.
+- For each connection the evidence records both ends' `getpeerinfo`
+  `transport_protocol_type`, `session_id` and direction. Both v2 legs must
+  report `v2` on both ends with the same 32-byte session id, and each must
+  answer a `ping` Core sends after the sync with a `pong`.
+- A third fresh node with `--v2transport=false` dials Core and syncs the same
+  chain. The evidence `ibd_cost` records Core's `bytessent` and `bytesrecv`
+  for it and for the v2 dialer as each reaches Core's tip: a measurement of
+  v2's bandwidth cost, recorded rather than bounded. The v2-off node's best
+  block hash is recorded with it and must equal Core's.
+- Like CORE-05, this is a main-only qualification lane: the recorded evidence
+  artifact, not the lane's presence, is what qualifies BIP324 interop.
+
 ### `CORE-04`: Curated live block and transaction acceptance
 
 - **Owner**: `e2e/tests/acceptance.rs`, using `e2e::differential` and
@@ -85,7 +108,8 @@ a running pinned binary, not a replay of captured JSON.
   Each case also requires the reference's expected accept/reject result.
 - Block cases cover a Core coinbase-only block, bad merkle root, multiple
   coinbase transactions, short coinbase scriptSig, excessive coinbase
-  value, incorrect BIP34 height, and timestamp equal to MTP. A final
+  value, incorrect BIP34 height, timestamp equal to MTP, and a
+  max-version (0xFFFFFFFF) BIP68 spend with an unmet relative lock. A final
   Core-produced block spends the mature funding coin after all rejections.
 - Transaction previews cover a valid mature spend, immature coinbase,
   duplicate inputs, overspend, output above the money range, missing input,

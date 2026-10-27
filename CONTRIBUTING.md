@@ -54,7 +54,7 @@ cannot drift:
 
 ```sh
 ./scripts/ci-pr.sh fmt            # format check
-./scripts/ci-pr.sh clippy         # three kernel-free all-target profiles
+./scripts/ci-pr.sh clippy         # four kernel-free all-target Clippy profiles + production silent-payments check
 ./scripts/ci-pr.sh test-crates    # per-crate profiles, including checked-in fixtures
 ./scripts/ci-pr.sh test-binary    # binary profile (rocksdb,fjall,redb)
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass
@@ -234,11 +234,13 @@ CI runs these endpoints in the scheduled/manual
 ### Bitcoin Core differential
 
 Live observable-behavior check against a pinned Core 31.1 `bitcoind`
-(`docs/contracts/core-differential.md`):
+([`docs/contracts/core-differential.md`](docs/contracts/core-differential.md),
+reproduction details in [`docs/validation-tooling.md`](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential)):
 
 ```sh
+cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features fjall,zmq
 scripts/run-p2p-core-interop.sh \
-  --bitcoind-command "$(scripts/install-bitcoind.sh)" \
+  --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" \
   --bitcoin-rs-command target/quickstart/bitcoin-rs
 ```
 
@@ -263,6 +265,9 @@ owns script-engine selection and its promotion criteria.
 
 Keep implementation guidance with its owner rather than introducing another
 architecture or validation specification in this guide.
+
+Follow the [source and test organization policy](docs/policies/source-organization.md)
+when adding or reorganizing modules, tests, and fixtures.
 
 ## Proposing and implementing BIPs
 
@@ -325,7 +330,9 @@ are redesigned, the stronger the external validation evidence must be.
 
 ## Documentation references
 
-- [docs/README.md](docs/README.md) — Documentation index
-- [docs/contracts/](docs/contracts/) — Normative architectural and protocol contracts
-- [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
-- [CONCEPTS.md](CONCEPTS.md) — Domain terminology and concepts
+- [docs/README.md](docs/README.md): documentation index
+- [docs/contracts/README.md](docs/contracts/README.md): normative architectural and protocol contracts
+- [docs/validation-tooling.md](docs/validation-tooling.md): validation tooling and differential evidence lanes
+- [docs/getting-started.md](docs/getting-started.md): node setup and configuration
+- [CONSTRAINTS.md](CONSTRAINTS.md): repository-wide project invariants
+- [CONCEPTS.md](CONCEPTS.md): domain terminology and concepts

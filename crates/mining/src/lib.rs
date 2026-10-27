@@ -36,11 +36,13 @@ pub use control::{
 };
 pub use coordinator::snapshot_for_selection;
 pub use coordinator::{
-    AppliedTipSource, ChainContextSource, MempoolSequenceWake, MempoolSnapshotSource, MiningService,
+    AppliedTipSource, ChainContextSource, MempoolSequenceWake, MempoolSnapshotSource,
+    MiningService, PreparedTemplateBody,
 };
 pub use generation_signal::MiningGenerationSignal;
 pub use network_hashps::{estimate_network_hashps, network_hash_ps};
 pub use template::{
-    Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
-    assemble_ordered_candidate, solve_block,
+    Candidate, CandidateContext, CandidateTransaction, CoinbaseBudget, SelectedBody, SelectedTx,
+    TemplateId, assemble_candidate, assemble_ordered_candidate, select_template_body,
+    select_template_body_after, solve_block,
 };

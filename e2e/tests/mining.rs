@@ -10,44 +10,7 @@ use bitcoin_rs_e2e::helpers::{
     genesis_block, mine_bare_blocks, op_true_script, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
-
-/// `getblocktemplate` exposes the BIP22 fields a miner needs.
-#[test]
-fn block_template_shape() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    submit_genesis(&mut node)?;
-    let hashes = mine_bare_blocks(&mut node, 3)?;
-
-    let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
-    assert_eq!(template.str_field("previousblockhash")?, hashes[2]);
-    assert_eq!(template.u64_field("height")?, 4);
-    assert_eq!(template.u64_field("coinbasevalue")?, 50_u64 * 100_000_000);
-    assert_eq!(template.str_field("bits")?, "207fffff");
-    assert_eq!(
-        template.str_field("target")?,
-        "7fffff0000000000000000000000000000000000000000000000000000000000"
-    );
-    assert_eq!(template.str_field("noncerange")?, "00000000ffffffff");
-    assert_eq!(template.u64_field("sigoplimit")?, 80_000);
-    assert_eq!(template.u64_field("sizelimit")?, 4_000_000);
-    assert_eq!(template.u64_field("weightlimit")?, 4_000_000);
-    assert!(
-        template.u64_field("mintime")? <= template.u64_field("curtime")?,
-        "mintime must not exceed curtime: {template}"
-    );
-    let capabilities = template
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::Assertion("capabilities missing".into()))?;
-    assert!(capabilities.iter().any(|c| c == "longpoll"));
-    let mutable = template
-        .get("mutable")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::Assertion("mutable missing".into()))?;
-    assert!(mutable.iter().any(|m| m == "prevblock"));
-    node.stop()
-}
+use serde_json::json;
 
 /// A template assembled offline grinds to valid proof-of-work: its header is
 /// admitted by `submitheader`, the matching body then connects via

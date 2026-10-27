@@ -28,6 +28,15 @@ pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore
 
 pub use pruning::{MandatoryRetention, RetentionError, RetentionLease, RetentionRegistry};
 
+/// Opaque ownership token a store keeps until its engine handle is closed.
+///
+/// Each file-owning store carries it as its last field, so it drops only after
+/// the engine (or file) handle has closed. The node hands every store its
+/// data-directory lock this way: the lock then lives exactly as long as the
+/// last handle that can still write the directory, whoever retains that
+/// handle. Storage never inspects the token.
+pub type StoreGuard = std::sync::Arc<dyn core::any::Any + Send + Sync>;
+
 pub use durable_head::{
     BodyExtent, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
     KvDurableHeadStore,

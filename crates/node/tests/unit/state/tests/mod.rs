@@ -1,7 +1,9 @@
 mod checkpoint;
 mod construction;
+mod data_dir_lock;
 mod events;
 mod index;
+mod pow_valid_hook;
 mod prune;
 mod recovery;
 

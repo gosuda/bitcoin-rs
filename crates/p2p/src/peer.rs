@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 
@@ -117,6 +118,83 @@ impl CompactBlockNegotiation {
     }
 }
 
+/// Why a parked compact-filter request last made no progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilterHalt {
+    /// The filter index has not published the range yet, or the last pass
+    /// was never refused by an outbound budget.
+    Index,
+    /// This connection's own outbound bounds refused the reservation.
+    Local,
+    /// The node's aggregate outbound budget refused the reservation.
+    Shared,
+}
+
+impl FilterHalt {
+    /// The halt a serving pass reports: the kind of its last refused
+    /// reservation, or [`FilterHalt::Index`] when nothing was refused.
+    pub(crate) const fn from_refusal(refusal: Option<crate::connection::Refusal>) -> Self {
+        match refusal {
+            Some(crate::connection::Refusal::Local) => Self::Local,
+            Some(crate::connection::Refusal::Shared) => Self::Shared,
+            None => Self::Index,
+        }
+    }
+}
+
+/// One compact-filter request waiting to resume, with its publication
+/// deadline.
+///
+/// `pending` is the only cursor: the peer's request, or the narrowed
+/// remainder after a prefix was sent. The allowance is the time the request
+/// may wait for index publication or for this connection's own queue. Time
+/// spent refused by the node aggregate is never charged to it. The aggregate
+/// counts this connection's own queued bytes with everyone else's, with no
+/// fairness quota.
+#[derive(Debug)]
+pub(crate) struct ParkedFilter {
+    /// The request still to serve.
+    pub(crate) pending: crate::dispatch::FilterRequest,
+    /// Waiting time left before the request times out.
+    pub(crate) allowance: std::time::Duration,
+    /// Start of the interval the next pass charges.
+    pub(crate) since: std::time::Instant,
+    /// Why the last pass stopped; decides whether the interval is charged.
+    pub(crate) last: FilterHalt,
+}
+
+impl ParkedFilter {
+    /// Total waiting time one request is allowed outside shared refusals.
+    pub(crate) const ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Parks `pending` at `now` with the full allowance.
+    pub(crate) const fn new(
+        pending: crate::dispatch::FilterRequest,
+        now: std::time::Instant,
+    ) -> Self {
+        Self {
+            pending,
+            allowance: Self::ALLOWANCE,
+            since: now,
+            last: FilterHalt::Index,
+        }
+    }
+
+    /// Charges the interval since the last pass at `now` and starts the next.
+    ///
+    /// POST: the allowance shrinks by the interval unless the last pass was
+    /// refused by the node aggregate; `true` means the allowance is spent.
+    pub(crate) fn charge(&mut self, now: std::time::Instant) -> bool {
+        if self.last != FilterHalt::Shared {
+            self.allowance = self
+                .allowance
+                .saturating_sub(now.saturating_duration_since(self.since));
+        }
+        self.since = now;
+        self.allowance.is_zero()
+    }
+}
+
 /// One peer connection and its negotiated protocol state.
 #[derive(Debug)]
 pub struct Peer<S> {
@@ -138,8 +216,25 @@ pub struct Peer<S> {
     pub compact_blocks: CompactBlockNegotiation,
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
-    /// One BIP157 request waiting for asynchronous index publication.
-    pub(crate) pending_filter_request: Option<(Message, std::time::Instant)>,
+    /// One BIP157 request waiting for asynchronous index publication or for
+    /// outbound room.
+    pub(crate) pending_filter_request: Option<ParkedFilter>,
+    /// One decoded request-scoped message whose reply could not be reserved
+    /// yet (`ping`, `getheaders`, `getaddr`, a compact-block follow-up). It
+    /// is dispatched once, after its reply is reserved; the session reads
+    /// nothing from the peer while it is held, so the inbound side stays
+    /// bounded at one decoded request.
+    pub(crate) deferred_inbound: Option<Message>,
+    /// The unserved remainder of one `getdata` that stopped at the outbound
+    /// production gate, in request order; empty when nothing is parked.
+    /// Always a suffix of one decoded request, so it never exceeds
+    /// [`crate::inv::MAX_INV_PER_MSG`] items. The session loop reads nothing
+    /// from the peer while it is non-empty.
+    pub(crate) pending_getdata: Vec<Inventory>,
+    /// Items of the parked `getdata` already found unservable. They are
+    /// reported in one `notfound` ahead of the tail's own answers once the
+    /// queue can take the message.
+    pub(crate) pending_notfound: Vec<Inventory>,
     /// `net:*` probe context attached by live connection roots; `None` on
     /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
@@ -175,6 +270,9 @@ impl<S> Peer<S> {
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
             pending_filter_request: None,
+            deferred_inbound: None,
+            pending_getdata: Vec::new(),
+            pending_notfound: Vec::new(),
             net_trace: None,
             recv: negotiated.recv,
             send: Some(negotiated.send),
@@ -191,6 +289,13 @@ impl<S> Peer<S> {
     /// through this peer fail.
     pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
         self.send.take()
+    }
+
+    /// Whether a `getdata` is parked, tail or deferred `notfound`: the
+    /// session owes the peer answers and must not read further requests.
+    #[must_use]
+    pub(crate) fn has_parked_getdata(&self) -> bool {
+        !self.pending_getdata.is_empty() || !self.pending_notfound.is_empty()
     }
 
     /// Attaches the `net:*` probe context captured at the connection root.
@@ -226,11 +331,14 @@ impl<S: Read + Write> Peer<S> {
 }
 
 impl<S: Read> Peer<S> {
-    /// Read one message through the connection's transport.
+    /// Read at most one message through the connection's transport.
     ///
-    /// A poll timeout part-way through a frame or packet keeps the bytes
-    /// already read, so retrying after `TimedOut` or `WouldBlock` continues it.
-    pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
+    /// `Ok(None)` only from a v2 session: the packet was a BIP324 decoy or a
+    /// message of an empty or undefined type, both dropped. A v1 frame always
+    /// yields `Some`. A poll timeout part-way through a frame or packet keeps
+    /// the bytes already read, so retrying after `TimedOut` or `WouldBlock`
+    /// continues it.
+    pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
         self.recv
             .read_message(&mut self.stream, self.magic, |command, payload| {
@@ -306,6 +414,67 @@ pub(crate) const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 mod tests {
     use super::*;
     use crate::wire::write_message;
+
+    fn filter_request() -> crate::dispatch::FilterRequest {
+        crate::dispatch::FilterRequest::new(crate::Message::GetAddr)
+    }
+
+    /// The publication deadline is charged for waiting on the filter index or
+    /// on the connection's own queue, never for time the node aggregate
+    /// refused the request.
+    #[test]
+    fn filter_deadline_excludes_only_shared() {
+        let t0 = std::time::Instant::now();
+        let half = ParkedFilter::ALLOWANCE / 2;
+
+        let mut shared = ParkedFilter::new(filter_request(), t0);
+        shared.last = FilterHalt::Shared;
+        assert!(
+            !shared.charge(t0 + ParkedFilter::ALLOWANCE * 4),
+            "an interval the aggregate refused is not charged"
+        );
+        assert_eq!(shared.allowance, ParkedFilter::ALLOWANCE);
+        assert_eq!(shared.since, t0 + ParkedFilter::ALLOWANCE * 4);
+
+        for halt in [FilterHalt::Index, FilterHalt::Local] {
+            let mut parked = ParkedFilter::new(filter_request(), t0);
+            parked.last = halt;
+            assert!(!parked.charge(t0 + half), "{halt:?}: half the allowance");
+            assert_eq!(parked.allowance, half, "{halt:?}: the interval is charged");
+            assert!(
+                parked.charge(t0 + half + ParkedFilter::ALLOWANCE),
+                "{halt:?}: a spent allowance times the request out"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_interval_does_not_hide_a_genuine_one() {
+        let t0 = std::time::Instant::now();
+        let mut parked = ParkedFilter::new(filter_request(), t0);
+        parked.last = FilterHalt::Shared;
+        let after_stall = t0 + ParkedFilter::ALLOWANCE * 10;
+        assert!(!parked.charge(after_stall));
+        parked.last = FilterHalt::Index;
+        assert!(
+            parked.charge(after_stall + ParkedFilter::ALLOWANCE),
+            "the next pass charges only its own interval, and that interval is spent"
+        );
+    }
+
+    #[test]
+    fn filter_halt_reports_the_kind_of_the_last_refusal() {
+        use crate::connection::Refusal;
+        assert_eq!(FilterHalt::from_refusal(None), FilterHalt::Index);
+        assert_eq!(
+            FilterHalt::from_refusal(Some(Refusal::Local)),
+            FilterHalt::Local
+        );
+        assert_eq!(
+            FilterHalt::from_refusal(Some(Refusal::Shared)),
+            FilterHalt::Shared
+        );
+    }
 
     #[test]
     fn compact_negotiation_ignores_versions_we_do_not_advertise() {
@@ -397,7 +566,9 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
 
-        let (message, payload) = peer.read_message()?;
+        let (message, payload) = peer
+            .read_message()?
+            .ok_or_else(|| std::io::Error::other("a v1 frame is a message"))?;
 
         assert_eq!(message, Message::Pong(2));
         assert!(!payload.is_empty());
@@ -429,7 +600,8 @@ mod tests {
         let mut stalls = 0_usize;
         let message = loop {
             match peer.read_message() {
-                Ok((message, _)) => break message,
+                Ok(Some((message, _))) => break message,
+                Ok(None) => continue,
                 Err(PeerError::Io(error))
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
                         && Instant::now() < deadline =>

@@ -109,6 +109,233 @@ fn start(binary: Kind) -> ProcessNode {
     .expect("public process must start")
 }
 
+/// API-02: verification must inspect its requested bodies without repairing them.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one common-chain fixture owns parameter parity, corruption injection and state preservation"
+)]
+fn verifychain_reads_the_requested_window_and_preserves_state() {
+    use std::io::{Seek as _, SeekFrom};
+
+    let mut core = ProcessNode::spawn_with(
+        Kind::Core,
+        &SpawnOptions {
+            extra_args: &["-blocksxor=0"],
+            ..Default::default()
+        },
+    )
+    .expect("pinned Core with readable isolated block files");
+    let mut node = start(Kind::BitcoinRs);
+    assert_eq!(
+        compare_rpc(&mut core, &mut node, "verifychain", &json!([0, 0])).expect("genesis"),
+        json!(true)
+    );
+    let funds = mine_common_chain(&mut core, &mut node, 8).expect("common verification window");
+    for params in [
+        json!([]),
+        json!([0, 0]),
+        json!([1, 1]),
+        json!([2, 0]),
+        json!([4, -1]),
+        json!([-1, 100]),
+        json!([5, 0]),
+        json!([null, null]),
+    ] {
+        assert_eq!(
+            compare_rpc(&mut core, &mut node, "verifychain", &params)
+                .expect("valid parameter parity"),
+            json!(true)
+        );
+    }
+    for params in [
+        json!(["0"]),
+        json!([0, false]),
+        json!([2_147_483_648_i64]),
+        json!([0, -2_147_483_649_i64]),
+        json!([0, 0.5]),
+    ] {
+        let reference = core
+            .rpc("verifychain", &params)
+            .expect_err("Core rejects invalid parameter");
+        let candidate = node
+            .rpc("verifychain", &params)
+            .expect_err("candidate rejects invalid parameter");
+        let (Error::Rpc { code: expected, .. }, Error::Rpc { code: actual, .. }) =
+            (reference, candidate)
+        else {
+            panic!("expected RPC errors for {params}");
+        };
+        assert_eq!(actual, expected, "error code for {params}");
+    }
+
+    let original = &funds.common_block_bytes[0];
+    let mut changed: bitcoin::Block = bitcoin::consensus::deserialize(original).expect("block one");
+    changed.txdata[0].output[0].value = bitcoin::Amount::from_sat(1);
+    let changed = bitcoin::consensus::serialize(&changed);
+    assert_eq!(changed.len(), original.len());
+    let value_offset = changed
+        .iter()
+        .zip(original)
+        .position(|(a, b)| a != b)
+        .expect("changed amount");
+    let mut changed: bitcoin::Block = bitcoin::consensus::deserialize(original).expect("block one");
+    let mut witness = changed.txdata[0].input[0].witness.to_vec();
+    assert_eq!(witness[0].len(), 32, "Core-mined witness nonce");
+    witness[0][0] ^= 1;
+    changed.txdata[0].input[0].witness = bitcoin::Witness::from_slice(&witness);
+    let changed = bitcoin::consensus::serialize(&changed);
+    assert_eq!(changed.len(), original.len());
+    let witness_offset = changed
+        .iter()
+        .zip(original)
+        .position(|(a, b)| a != b)
+        .expect("changed witness nonce");
+    for (mut process, relative) in [
+        (core, "regtest/blocks/blk00000.dat"),
+        (node, "node/blocks/blk00000.dat"),
+    ] {
+        let datadir = process.take_datadir().expect("isolated datadir custody");
+        let path = datadir.path().join(relative);
+        let bytes = std::fs::read(&path).expect("isolated block file");
+        let position = bytes
+            .windows(original.len())
+            .position(|body| body == original)
+            .expect("common block in file");
+        let tip = process
+            .rpc("getbestblockhash", &json!([]))
+            .expect("applied tip before verification");
+        let coins = process
+            .rpc("gettxoutsetinfo", &json!(["hash_serialized_3"]))
+            .expect("coins before verification");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("test fault injection");
+        // Core's level-one CheckBlock excludes contextual witness checks. A
+        // nonce mutation leaves txids unchanged and must still pass that level.
+        for (offset, level, verdict) in [
+            (value_offset, 2, false),
+            (0, 0, false),
+            (witness_offset, 1, true),
+        ] {
+            let location = u64::try_from(position + offset).expect("file offset");
+            file.seek(SeekFrom::Start(location)).expect("seek fault");
+            file.write_all(&[original[offset] ^ 1])
+                .expect("write fault");
+            file.sync_all().expect("persist test fault");
+            assert_eq!(
+                process
+                    .rpc("verifychain", &json!([level, 1]))
+                    .expect("healthy suffix"),
+                json!(true)
+            );
+            assert_eq!(
+                process
+                    .rpc("verifychain", &json!([level, 0]))
+                    .expect("corrupt full window"),
+                json!(verdict)
+            );
+            assert_eq!(
+                process
+                    .rpc("getbestblockhash", &json!([]))
+                    .expect("unchanged tip"),
+                tip
+            );
+            let after = process
+                .rpc("gettxoutsetinfo", &json!(["hash_serialized_3"]))
+                .expect("unchanged coins");
+            assert_eq!(after["hash_serialized_3"], coins["hash_serialized_3"]);
+            assert_eq!(
+                std::fs::read(&path).expect("unrepaired bytes")[position + offset],
+                original[offset] ^ 1
+            );
+            file.seek(SeekFrom::Start(location)).expect("seek restore");
+            file.write_all(&[original[offset]])
+                .expect("restore fixture byte");
+            file.sync_all().expect("persist fixture restoration");
+        }
+        assert_eq!(
+            process
+                .rpc("verifychain", &json!([2, 0]))
+                .expect("restored fixture"),
+            json!(true)
+        );
+        drop(file);
+        process
+            .stop()
+            .expect("stop before removing isolated datadir");
+        drop(datadir);
+    }
+}
+
+/// API-02: native framing damage is corruption, not unavailable history.
+#[test]
+fn verifychain_reports_damaged_native_frames_without_repairing_them() {
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
+    let funds = mine_common_chain(&mut core, &mut node, 2).expect("common valid blocks");
+    core.stop().expect("reference mining finished");
+    let original_body = funds.common_block_bytes.last().expect("tip body");
+    let datadir = node.take_datadir().expect("isolated datadir custody");
+    let path = datadir.path().join("node/blocks/blk00000.dat");
+    let original = std::fs::read(&path).expect("native block file");
+    let body_start = original
+        .windows(original_body.len())
+        .position(|bytes| bytes == original_body)
+        .expect("tip body in file");
+    // Native frame: magic, length, height (four bytes each), then 32-byte hash.
+    let frame_start = body_start
+        .checked_sub(4 + 4 + 4 + 32)
+        .expect("frame header");
+    let tip = node
+        .rpc("getbestblockhash", &json!([]))
+        .expect("applied tip");
+    let coins = node
+        .rpc("gettxoutsetinfo", &json!(["hash_serialized_3"]))
+        .expect("coins before verification");
+    let mut faults = Vec::new();
+    for offset in [0, 4, 8, 12] {
+        let mut bytes = original.clone();
+        bytes[frame_start + offset] ^= 1;
+        faults.push(bytes);
+    }
+    faults.push(original[..body_start - 1].to_vec());
+    faults.push(original[..body_start + original_body.len() - 1].to_vec());
+    for bytes in faults {
+        std::fs::write(&path, &bytes).expect("inject frame damage");
+        for level in 0..=4 {
+            assert_eq!(
+                node.rpc("verifychain", &json!([level, 0]))
+                    .expect("damaged frame must yield a boolean"),
+                json!(false)
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("unrepaired file"), bytes);
+        assert_eq!(node.rpc("getbestblockhash", &json!([])).expect("tip"), tip);
+        let after = node
+            .rpc("gettxoutsetinfo", &json!(["hash_serialized_3"]))
+            .expect("unchanged coins");
+        assert_eq!(after["hash_serialized_3"], coins["hash_serialized_3"]);
+        std::fs::write(&path, &original).expect("restore fixture");
+        assert_eq!(
+            node.rpc("verifychain", &json!([0, 0]))
+                .expect("restored file"),
+            json!(true)
+        );
+    }
+    let missing = path.with_extension("missing");
+    std::fs::rename(&path, &missing).expect("hide fixture file");
+    assert_eq!(
+        node.rpc("verifychain", &json!([0, 0]))
+            .expect("missing body file must yield a boolean"),
+        json!(false)
+    );
+    std::fs::rename(missing, &path).expect("restore missing file");
+    node.stop().expect("stop before removing isolated datadir");
+    drop(datadir);
+}
+
 /// API-01/API-02: Core 31.1 omits inapplicable pruning and signet fields.
 /// The optional compact-filter RPC must remain unavailable until enabled.
 #[test]

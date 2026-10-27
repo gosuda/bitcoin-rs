@@ -257,7 +257,8 @@ fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
     let dir = tempfile::tempdir()?;
     let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
-        let Ok(_store) = bitcoin_rs_storage::open_redb_tx_index_store_with_cache(dir.path(), share)
+        let Ok(_store) =
+            bitcoin_rs_storage::open_redb_tx_index_store_with_cache(dir.path(), share, None)
         else {
             panic!("redb txindex open with budgeted share failed")
         };

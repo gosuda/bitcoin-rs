@@ -214,6 +214,7 @@ fn feature_active(feature: &str) -> bool {
     match feature {
         "" => true,
         "zmq" => cfg!(feature = "zmq"),
+        "silent-payments" => cfg!(feature = "silent-payments"),
         // An unknown feature name can never be active here; the coverage test
         // rejects such a row outright.
         _ => false,

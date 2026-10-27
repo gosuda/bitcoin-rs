@@ -7,7 +7,7 @@ mod fixture;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_primitives::{Script, Tx, TxOut};
 use bitcoin_rs_script::{
-    Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, VerifyFlags,
+    Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, SignatureCache, VerifyFlags,
 };
 
 fn prepared(
@@ -24,7 +24,7 @@ fn prepared(
     let rows = vec![(tx.inputs[0].previous_output, output.clone())];
     let result = PreparedTransaction::new(&tx, &rows)
         .expect("ordered complete prevouts")
-        .verify_input(0, flags);
+        .verify_input(0, flags, None);
     let input = &tx.inputs[0];
     assert_eq!(
         result,
@@ -199,6 +199,191 @@ fn op_success_overrides_stack_limits_and_final_truth_checks() {
         mismatches.is_empty(),
         "OP_SUCCESS mismatches: {}",
         mismatches.join("\n")
+    );
+}
+
+/// First accepted key-path spend: a real BIP341 signature over the fixture
+/// funding output, usable as-is for cache warm/cold comparisons.
+fn first_accepted_key_spend() -> (Tx, TxOut) {
+    let prevout = output();
+    let case = fixture::cases(outpoint(), &prevout)
+        .into_iter()
+        .find(|case| case.accepted && case.name.starts_with("key-Default"))
+        .expect("fixture carries an accepted key-path Default spend");
+    let tx: Tx = bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&case.tx))
+        .expect("native decode");
+    let output = TxOut {
+        value: bitcoin_rs_primitives::Amount::from_sat(prevout.value.to_sat()),
+        script_pubkey: Script::from_bytes(prevout.script_pubkey.to_bytes()),
+    };
+    (tx, output)
+}
+
+fn verify_cached(
+    tx: &Tx,
+    output: &TxOut,
+    flags: VerifyFlags,
+    cache: Option<&SignatureCache>,
+) -> Result<bool, ScriptError> {
+    let rows = vec![(tx.inputs[0].previous_output, output.clone())];
+    PreparedTransaction::new(tx, &rows)
+        .expect("ordered complete prevouts")
+        .verify_input(0, flags, cache)
+}
+
+#[test]
+fn signature_cache_hit_matches_uncached_across_flags() {
+    let (tx, output) = first_accepted_key_spend();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "warmup under MANDATORY"
+    );
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::STANDARD, Some(&cache)),
+        Ok(true),
+        "hit under STANDARD matches the uncached accept"
+    );
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "repeat hit stays accepting"
+    );
+}
+
+#[test]
+fn signature_cache_warmed_still_rejects_flipped_signature_byte() {
+    let (tx, output) = first_accepted_key_spend();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "warmup"
+    );
+    let mut bad = tx;
+    bad.inputs[0].witness[0][0] ^= 0x01;
+    let uncached = verify_cached(&bad, &output, VerifyFlags::MANDATORY, None);
+    assert!(
+        uncached != Ok(true),
+        "flipped Schnorr byte must break uncached verification (else the test is vacuous)"
+    );
+    assert_eq!(
+        verify_cached(&bad, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        uncached,
+        "cached verdict matches uncached after warming"
+    );
+}
+
+#[test]
+fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
+    let (tx, output) = first_accepted_key_spend();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "warmup"
+    );
+    // The output value is committed by the BIP341 outputs digest
+    // (sha_outputs), so paying one more satoshi to the same output retargets
+    // the message without touching encodings.
+    let mut retargeted = tx;
+    let paid = retargeted.outputs[0].value.to_sat();
+    retargeted.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(paid + 1);
+    let uncached = verify_cached(&retargeted, &output, VerifyFlags::MANDATORY, None);
+    assert!(
+        uncached != Ok(true),
+        "retargeted sighash must break uncached verification (else the test is vacuous)"
+    );
+    assert_eq!(
+        verify_cached(&retargeted, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        uncached,
+        "cached verdict matches uncached after warming"
+    );
+}
+
+/// Key-path Default spend under a genuinely different key (seed 77; the shared
+/// fixture tree uses seed 37), signed by the rust-bitcoin oracle exactly as the
+/// bench and `verifier_boundaries.rs` do. Returns the oracle spend and its own
+/// funding prevout so the test proves both sources valid before transplant.
+fn accepted_spend_under_different_key() -> (bitcoin::Transaction, bitcoin::TxOut) {
+    use bitcoin::secp256k1::{Keypair, Message as OracleMessage, Secp256k1, SecretKey};
+    use bitcoin::sighash::{Prevouts, SighashCache as OracleCache, TapSighashType};
+
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&[77; 32]).expect("second fixture key");
+    let keypair = Keypair::from_secret_key(&secp, &secret);
+    let tweaked = bitcoin::key::TapTweak::tap_tweak(keypair, &secp, None);
+    let (output_key, _) = tweaked.public_parts();
+    let prevout = bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(100_000),
+        script_pubkey: bitcoin::ScriptBuf::new_p2tr_tweaked(output_key),
+    };
+    let mut tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([78; 32]), 0),
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(90_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let hash = OracleCache::new(&tx)
+        .taproot_key_spend_signature_hash(
+            0,
+            &Prevouts::All(std::slice::from_ref(&prevout)),
+            TapSighashType::Default,
+        )
+        .expect("second-key BIP341 digest");
+    let signature = secp.sign_schnorr_no_aux_rand(
+        &OracleMessage::from_digest(*bitcoin::hashes::Hash::as_byte_array(&hash)),
+        tweaked.as_keypair(),
+    );
+    tx.input[0].witness = bitcoin::Witness::from_slice(&[signature.serialize()]);
+    (tx, prevout)
+}
+
+#[test]
+fn signature_cache_warmed_still_rejects_wrong_key_signature() {
+    let (tx, output) = first_accepted_key_spend();
+    let cache = SignatureCache::new();
+    assert_eq!(
+        verify_cached(&tx, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        Ok(true),
+        "warmup"
+    );
+    // A real signature under a genuinely different x-only key: valid under its
+    // own funding prevout, but bound to another key and message.
+    let (other_oracle, other_oracle_prevout) = accepted_spend_under_different_key();
+    assert_ne!(
+        other_oracle_prevout.script_pubkey.to_bytes(),
+        output.script_pubkey.as_bytes(),
+        "funding programs (hence tweaked keys) must differ"
+    );
+    assert_eq!(
+        prepared(&other_oracle, &other_oracle_prevout, VerifyFlags::MANDATORY),
+        Ok(true),
+        "second source valid under its own key"
+    );
+    let other_tx: Tx =
+        bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&other_oracle))
+            .expect("native decode");
+    let mut wrong_key = tx;
+    wrong_key.inputs[0].witness = other_tx.inputs[0].witness.clone();
+    let uncached = verify_cached(&wrong_key, &output, VerifyFlags::MANDATORY, None);
+    assert!(
+        uncached != Ok(true),
+        "wrong-key signature must break uncached verification (else the test is vacuous)"
+    );
+    assert_eq!(
+        verify_cached(&wrong_key, &output, VerifyFlags::MANDATORY, Some(&cache)),
+        uncached,
+        "cached verdict matches uncached after warming"
     );
 }
 

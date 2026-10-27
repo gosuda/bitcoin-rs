@@ -44,7 +44,7 @@ fn is_closed_for_recovery_tracks_the_fatal_close() {
         "failing closed must surface as the queryable recovery-closed fact"
     );
     assert!(
-        chainstate.lock_transition().is_err(),
+        matches!(chainstate.lock_transition(), Err(ApplyError::Shutdown)),
         "the same closure still refuses every later transition"
     );
 }

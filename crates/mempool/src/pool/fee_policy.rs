@@ -14,6 +14,10 @@ use hashbrown::{HashMap, HashSet};
 pub(crate) struct PolicyStamp {
     sequence: u64,
     fee_sequence: u64,
+    /// Revision of the rolling floor's raising transitions: a concurrent
+    /// floor raise that moves no other component still invalidates prepared
+    /// work captured before it.
+    rolling_epoch: u64,
     limits: MempoolLimits,
     policy: MempoolPolicySnapshot,
 }
@@ -108,6 +112,7 @@ impl Mempool {
         PolicyStamp {
             sequence: self.mempool_sequence,
             fee_sequence: self.fee_delta_sequence,
+            rolling_epoch: self.rolling_epoch,
             limits: self.limits,
             policy: self.policy_snapshot(),
         }

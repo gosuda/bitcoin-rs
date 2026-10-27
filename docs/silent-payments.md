@@ -1,149 +1,139 @@
 # Experimental BIP352 public scan material
 
-This is the feasibility and codec stage of #1491, based on PR #1554.
-The opt-in `bitcoin-rs-index/silent-payments` Cargo feature exposes
-`transaction_tweak` and `block_tweaks`. No durable rows, startup rescan,
-runtime switch or wallet subsystem is added. A network service remains future
-work; the codec supports one certified retained block.
+`getblocktweaks` is an opt-in, authenticated JSON-RPC prototype over the existing
+listener. It projects certified retained inputs through the stateless
+[`bitcoin-rs-index/silent-payments` codec](../crates/index/src/silent_payments.rs).
+It adds no durable rows, wallet state or startup scan. Complete scanning, funded
+wallet discovery and a cost benefit over existing APIs remain unverified.
 
-## Semantics and reference pins
+## RPC usage and publication
 
-[BIP352 and its reference code/vectors](https://github.com/bitcoin/bips/blob/8754690b725e9aa93ca8bd91bf0ac85dc44ce096/bip-0352.mediawiki)
-are pinned to `8754690b725e9aa93ca8bd91bf0ac85dc44ce096`.
-The [WIP index-server specification](https://github.com/silent-payments/BIP0352-index-server-specification/blob/dc705a055e72024e332e232cf038c96afd42d50e/README.md)
-is separately pinned to `dc705a055e72024e332e232cf038c96afd42d50e`.
-Its JSON examples do not define BIP352 cryptography.
+Build with `cargo build --locked -p bitcoin-rs --features silent-payments` and
+start with `--silent-payments` (default: off). The environment variable is
+`BITCOIN_RS_SILENT_PAYMENTS`; the TOML key is `silent_payments`. Enabling the
+option without the build feature fails configuration before opening node data.
+Ordinary RPC authentication applies; REST enablement is independent.
 
-Given a **consensus-validated** transaction, exact input-ordered prevout scripts,
-and an explicit Taproot activation status (`taproot_active`), the codec requires
-a P2TR output and an eligible input. When Taproot is not active, pre-activation
-native witness v1 scripts are unassigned programs rather than BIP341 Taproot
-outputs: the transaction produces no tweaks, and blocks return empty tweaks
-without misinterpreting pre-activation witness spends as corrupt. When Taproot
-is active, spending a native witness program with version greater than one
-excludes the whole transaction (`coin.out.scriptPubKey.IsWitnessProgram && version > 1`,
-matching Core `src/common/bip352.cpp`). Inputs spending non-v0 P2SH programs (including
-P2SH-wrapped future witness scripts) contribute no key to shared-secret derivation
-rather than disqualifying other eligible inputs. It extracts compressed keys from
-P2PKH (hash-matching even malleated scriptSigs), P2WPKH and P2SH-P2WPKH.
-Unsupported scripts and uncompressed keys contribute no key. Taproot uses the
-even lift of the output key; script-path spends with the BIP341 NUMS internal
-key are excluded after inspecting an optional annex without mutating it.
+Accept one positional or named `block`: an applied-chain height or block hash.
+Unknown/additional parameters are rejected; there are no ranges, subscriptions,
+wallet keys or interest filters. Example:
 
-Keys are summed with multiplicity; zero intermediate sums are permitted.
-No keys or a final point at infinity means ineligibility. The input hash is
-`hash_BIP0352/Inputs(lowest_outpoint || compressed_sum)`. The lowest outpoint
-is among **all** inputs, including ineligible types, sorted by its 36
-serialized little-endian bytes (not display txid or numeric vout). A
-zero/out-of-range scalar fails explicitly. The result carries txid, sum,
-input hash, the 33-byte compressed point `input_hash * sum`, and every P2TR
-candidate with its output index. Dust, spent and duplicate outputs are kept.
+```json
+{"jsonrpc":"2.0","id":1,"method":"getblocktweaks","params":{"block":850000}}
+```
 
-The receiver performs ECDH, label/output derivation and discovery locally.
-Candidates must be verified with complete block/transaction data and chain
-membership. A tweak does not prove an output is unspent or a wallet balance.
-This codec does not authenticate caller-supplied scripts or execute consensus
-validation; full validity comes from the already-validated chainstate/input
-contract. Only local structural checks are performed on Taproot witness and
-control blocks (rejecting empty witnesses and invalid control-block lengths,
-while accepting a correctly sized control block without validating its internal
-key or leaf-version byte); shape violations produce an error rather than
-consensus verification.
+The result contains `height`, `hash`, `tip_height`, `tip_hash`, `taproot_active`
+and `transactions`. Each transaction has its display `txid`, a compressed 33-byte
+`tweak` in hex, and complete `outputs` containing `vout` and the 32-byte hex
+`output_key`. Dust and duplicate candidates remain. An empty transaction list
+means complete ineligibility, including pre-Taproot blocks, never missing inputs.
+A candidate establishes neither ownership nor unspentness: verify it against
+complete transaction/block data and subsequent spends.
 
-## Owners and coverage
-
-Current UTXOs cannot answer historic spent prevouts. `TxLookup` stores
-transaction locators, not coins; resolving a funding transaction additionally
-needs its retained body and a ready watermark. A birthday scan can spend
-funding outputs older than the birthday, and separate per-input queries do
-not establish one coherent complete block view.
-
-The existing `utxo::contract::BlockUndoSource`, implemented directly by
-`Chainstate`, is the retained-window source. It authenticates body/witness
-commitments, certifies native undo against durable receipts, resolves same-block
-inputs from earlier transactions, and rechecks applied hash/receipt/retention
-lease after reading. See the
-[retained input contract](contracts/external-api.md#retained-block-inputs).
-Call this owner directly with a captured applied hash, then project its
-`BlockSpends`. No forwarding reader, availability store, txindex capability
-or second UTXO owner is needed.
-
-The codec checks row counts and outpoint alignment and returns the body's exact
-hash. It makes no unverified height or active-tip claim. A future adapter must
-resolve height/hash and Taproot activation on one applied ancestry and recheck
-publication after projection; `BlockSpends` does not carry activation context or
-height, and a completed source read cannot prevent a subsequent tip move.
-
-| Situation | Coverage and error policy |
+| Condition | RPC outcome |
 | --- | --- |
-| Certified retained body/undo | One-block projection works without txindex or new durable rows. |
-| Birthday / full Taproot-era scan | Every requested body and undo must be retained and certified. Being unpruned today does not prove an old missing prefix. |
-| Pruned/reserved/missing history | Preserve the owner's typed history/read failure even for empty blocks; restore/replay required data before promising coverage. |
-| Missing/unready txindex | No effect on the certified-undo codec path; cannot mask missing undo. |
-| Snapshot prefix | Retained bytes are insufficient without certified archived validation progress. |
-| Reorg/restart/full rescan | Recompute from the chosen body. Source receipts/leases own readiness; a future cache must key full block identity and invalidate active-chain assignments. |
+| Unknown hash | `-5` |
+| Stale/header-only hash or height above the applied tip | `-8` |
+| Incomplete history/ancestry, resource refusal, busy slot, recovery or changed chain | `-1`, with the reason; no partial or empty success |
+| Storage/undo/integrity read failure | `-32603`; internal read diagnostics stay in the node log |
+| Runtime disabled / feature absent / IBD | `-32603` / `-32601` / `-10` |
 
-Partial-success lists are not returned. `None` means complete transaction
-ineligibility or coinbase, never missing history. Source commit, recovery,
-snapshot and lock/lease behavior remains covered by
-`crates/chainstate/tests/unit/block_spends_tests.rs`; those paths are unchanged.
-Codec replay tests do not prove lifecycle behavior of a future durable index.
+Selection uses one captured applied publication and the requested height's native
+Taproot activation rule. After projection and JSON construction, a nonwaiting
+transition check revalidates recovery state and the exact applied hash. This is
+the response's consistency point; clients retain block identities and rewind
+when the chain changes. Restart recomputes from certified data.
 
-## Resources and consumer assessment
+One nonqueued work slot spans computation, JSON rendering and publication.
+The shared full-block permit covers source materialization and `block_tweaks`;
+the adapter drops the owned `BlockSpends`, then the permit, before rendering the
+derived JSON. Existing full-body responses retain their permit through rendering.
+Body I/O and CPU projection hold no tree/transition guard. Ancestry fallback is
+limited to 4,096 parent hops; IBD is refused before history I/O. These are resource
+bounds, not measured throughput, latency or global-RSS guarantees.
 
-The codec stores zero durable bytes and admits at most 4,000,000 serialized
-body bytes and 64 MiB aggregate prevout script bytes per projection. The existing
-source separately bounds body/undo copies and spent-coin projection. Work scans
-inputs/outputs, aggregates keys and multiplies one point per eligible transaction;
-P2PKH extraction hashes 33-byte scriptSig windows. CPU, temporary memory and
-mainnet throughput are unmeasured. These are input bounds, not latency or global
-memory guarantees. Tweak points alone cost `33 * eligible_transaction_count`
-bytes: hypothetically 115,500 bytes for 3,500 eligible transactions, before
-framing/txids/candidates. Full history also retains native bodies/undo. No
-mainnet disk-cost estimate follows from this arithmetic. A durable cache needs
-measured benefit and the existing writer/fence/reconciliation/replay owners.
+## Input owner, limits and semantics
 
-The evaluated target is [BlindBit Oracle](https://github.com/setavenger/blindbit-oracle/blob/f9ab7fd8bc35467c492324f743ba1b69049a2bb6/internal/server/README.md),
-pinned to `f9ab7fd8bc35467c492324f743ba1b69049a2bb6`. It deprecates HTTP
-block-data APIs and directs clients to gRPC `OracleService`; HTTP `/info`
-remains supported. Its legacy tweak response has `block_identifier`/`index`,
-whereas the draft describes `/getinfo` and `/tweaks/:height` with
-`height`/`hash`/`tweaks`. Implementing only the draft examples would not
-establish unmodified-client interoperability. This is a documented WIP
-protocol incompatibility, not a successful wallet run.
+`Chainstate` implements the existing `utxo::contract::BlockUndoSource` directly.
+It authenticates body/witness commitments, certifies native undo against durable
+receipts, resolves same-block inputs, and rechecks applied hash, receipt and
+retention lease. The [retained-input contract](contracts/external-api.md#retained-block-inputs)
+owns these rules; the RPC adds no reader or availability authority. Current UTXOs
+or independent transaction lookups cannot establish complete historic prevouts.
 
-An external sidecar speaking the pinned consumer protocol is the deployment
-alternative: existing `getblock` verbosity 3 or `/rest/spenttxouts` supply
-certified inputs, existing APIs supply complete blocks, and PR #1554's optional
-filters can reduce downloads. It must reject missing prevouts and verify
-identity/coverage; wallet scanning stays local. No full duplicate coin database
-or wallet fork is justified by this stage. Funded regtest wallet discovery and
-confirmation has **not** been run.
+Every requested body and undo must be retained and certified, including inputs
+funded before a wallet birthday. Missing/pruned history needs restore/replay or
+another complete source; snapshots require archived validation progress. Txindex
+is not required and cannot substitute for missing certified inputs.
 
-A production adapter still needs a pinned consumer contract, proven coverage
-and bounded CPU admission. It must use existing node/RPC/REST serving and
-materialization permits, bound ranges/responses, limit concurrency, rate-limit
-callers and keep validation/IBD responsive. No HTTP scheduler/rate limiter is
-introduced for this library-only stage.
+The source bounds body copies to 4,000,000 bytes and undo copies to 64 MiB,
+with decoded counts and script lengths bounded by the block and record. It does
+not estimate verbose JSON expansion. The codec separately bounds body bytes and
+aggregate prevout scripts (64 MiB). A raw-read or codec limit still requires
+another complete source; unchanged retries cannot bypass it. `getblock`
+verbosity 3 and `/rest/spenttxouts` share the input owner and its raw-read limits.
+These are not heap or JSON-size caps. Complete BIP352 scanning and mainnet CPU
+and memory costs remain unverified.
 
-## Evidence, privacy and API status
+[BIP352 and its reference vectors](https://github.com/bitcoin/bips/blob/8754690b725e9aa93ca8bd91bf0ac85dc44ce096/bip-0352.mediawiki)
+are pinned to `8754690b725e9aa93ca8bd91bf0ac85dc44ce096`; the
+[WIP server specification](https://github.com/silent-payments/BIP0352-index-server-specification/blob/dc705a055e72024e332e232cf038c96afd42d50e/README.md)
+is pinned separately to `dc705a055e72024e332e232cf038c96afd42d50e`.
+The codec owns eligibility, key aggregation, the lowest serialized outpoint
+among all inputs, input hashing and complete candidate indices. Its public API
+requires consensus-validated transactions and exact input-ordered prevout scripts;
+it does not execute consensus scripts or authenticate caller-supplied prevouts.
+The receiver performs ECDH and discovery locally.
 
-The Rust test checks 29 public receiving-vector projections against pinned
-sums/tweaks, including labels/multiple outputs, NUMS, malleated P2PKH, invalid
-P2SH, uncompressed keys and infinity cases. The unmodified pinned Python
-reference passed the full vectors locally (WSL, Python 3.12.3). Additional
-tests cover future witness versions, missing material/history, empty blocks,
-output indices, limits and deterministic hash-scoped replay. Extraction is
-recorded in `crates/index/tests/data/bip352-PROVENANCE.md`.
+## Evidence and interoperability
 
-No parameter accepts wallet private keys, addresses, subscriptions or payment
-history, and the codec performs no I/O/logging. Network metadata, height queries
-and logs can still reveal birthdays/access times/ranges: keyless computation
-alone is not anonymity. Spent/dust filtering and scan-interest parameters are
-absent. Query-log and traffic privacy policies remain deployment concerns.
+The codec's 29 receiving-vector projections and pinned Python reference run are
+recorded in [vector provenance](../crates/index/tests/data/bip352-PROVENANCE.md).
+The adapter's owner-local tests cover unavailable history, read failures,
+publication/recovery races, IBD and backpressure. The
+`bin/bitcoin-rs/tests/silent_payments.rs` ProcessNode case applies a signed mature
+P2PKH spend with three P2TR candidates and checks the exact tweak and each
+candidate through authenticated HTTP, reorg and restart. The 100 funding blocks
+are required for coinbase maturity. Source commit/recovery and lease tests remain
+with `crates/chainstate/tests/unit/block_spends_tests.rs`. The separate
+`bin/bitcoin-rs/tests/block_inputs.rs` regression applies a signed spend with
+12,500 P2TR outputs, which exceeded the removed JSON estimate. It checks complete
+`getblock` verbosity 3, binary spent-output REST and BIP352 candidates using real
+certified undo; it adds no lifecycle or external consumer scenarios.
 
-`REGISTRY`/`MANIFEST` gain no network entries: `/getinfo` and `/tweaks/:height`
-are not served and Core behavior is unchanged. The
-[ecosystem inventory](api/ecosystem-compat.toml) marks the codec experimental,
-not a Core RPC or finalized index-server protocol. Compact filters inherited
-from PR #1554 remain a separate capability, not a codec requirement.
+A recorded standalone REST probe ran unmodified
+[BlindBit Oracle](https://github.com/setavenger/blindbit-oracle/blob/f9ab7fd8bc35467c492324f743ba1b69049a2bb6/internal/server/README.md),
+pinned to `f9ab7fd8bc35467c492324f743ba1b69049a2bb6`, through existing REST.
+It used no native tweak feature or runtime option. Oracle consumed
+`/rest/chaininfo.json`, `/rest/blockhashbyheight/101.bin`,
+`/rest/block/<hash>.bin` and `/rest/spenttxouts/<hash>.bin`. Its `/tweaks/101`
+published the confirmed block hash and independently expected nonempty tweak.
+The recorded configuration, logs and response were stored in `target/process-harness/e2e/run-*/blindbit*`.
+The pinned binary passed the REST probe on 2026-10-16 under WSL/Linux
+(Go 1.25.0, Rust 1.99.0); its SHA256 was
+`0d386c6920ed3582c38b9f541cf9e57c761e3c9979c63f07193ad42af6bde4f4`.
+
+The Oracle runner is not part of this PR's active tests. Reproduce the recorded
+probe from its immutable historical checkout (Go and a C compiler required):
+
+```sh
+git clone https://github.com/setavenger/blindbit-oracle target/consumer-evidence/blindbit-oracle
+git -C target/consumer-evidence/blindbit-oracle checkout --detach f9ab7fd8bc35467c492324f743ba1b69049a2bb6
+go -C target/consumer-evidence/blindbit-oracle build -o ../blindbit-oracle-bin ./cmd/blindbit-oracle
+git worktree add --detach target/consumer-evidence/l1-rest 12116e7390fc88d3f3dcbe570f051152c864716b
+BLINDBIT_ORACLE="$PWD/target/consumer-evidence/blindbit-oracle-bin" cargo test --manifest-path target/consumer-evidence/l1-rest/Cargo.toml --locked -p bitcoin-rs --no-default-features --features fjall --test silent_payments_interop -- --ignored
+```
+
+This proves the L1 REST-to-sidecar path. The probe pays a P2TR candidate, not a
+wallet-derived Silent Payment. Oracle's wallet-facing API prefers gRPC; its
+legacy `block_identifier`/`index` shape also differs from the WIP specification.
+The native RPC implements neither protocol. A complete scan-service claim needs
+a real wallet's required protocol, funded discovery/confirmation, measured
+benefit and a coverage decision. REST shares the source limit; the sidecar does
+not resolve it. No unmodified wallet interoperability is claimed.
+
+The API registry and [ecosystem inventory](api/ecosystem-compat.toml) retain
+experimental status. No wallet secret, address subscription or per-user history
+is accepted. Keyless computation is not anonymity: height queries and network
+or query logs can reveal birthdays/access patterns. Compact filters are a
+separate capability, not a codec requirement.

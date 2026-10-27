@@ -125,10 +125,18 @@ existing external tool -> generic Bitcoin implementation interface -> Core | bit
 - Compatibility surfaces are tracked independently: Network (P2P v1, BIP324
   /v2, tx/block relay, compact blocks and filters, peer lifecycle);
   Application APIs (JSON-RPC, REST, ZMQ); Mining (GBT, block
-  submission/proposal, future mining IPC or Stratum V2 adapters);
+  submission/proposal, the experimental regtest Stratum V2 adapter described in
+  [../../tools/stratum-sv2/README.md](../../tools/stratum-sv2/README.md), and
+  future mining IPC);
   Observability (Core-compatible USDT, bpftrace/BCC, bitcoin-dev-tools);
   Process/component interfaces (optional Core IPC as a narrowly scoped
   adapter).
+- Proof (Stratum V2 adapter surface only): localhost Noise and embedded-Node
+  tests in `tools/stratum-sv2/template-provider` (for example
+  `tight_budget_gets_a_fitting_job_and_budgets_stay_independent`,
+  `partial_noise_frame_survives_a_job_refresh`, and
+  `embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown`)
+  plus the retained functional compose run the owner matrix row names.
 - This matrix is a different axis from
   `crates/rpc/core-compat.toml` (Core reference identity pins) and
   `crates/rpc/src/registry.rs` (per-method Core-schema status): those own
@@ -166,8 +174,8 @@ tests or benchmark/diagnostic tooling.
   current row is honestly downgraded to `implemented` or weaker wherever only
   in-tree proof exists.
 - `scripts/run-p2p-core-interop.sh` with `crates/p2p/tests/core_interop_live.rs`
-  (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`): the one
-  real-consumer lane today — an unmodified Bitcoin Core 31.1 peer.
+  (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`, `CORE-06`): the
+  one real-consumer lane today — an unmodified Bitcoin Core 31.1 peer.
 - Acceptance items that need real external validation runs (a representative
   real-world consumer per verified surface, an upstreamed or out-of-repo
   integration, thin CI separation of ecosystem lanes) are tracked in issue

@@ -8,7 +8,7 @@
 use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
-use crate::ScriptHash;
+use crate::{IndexCapability, ScriptHash};
 
 /// Optional BIP157/158 queries shared by RPC and P2P adapters.
 pub trait CompactFilterQuery: Send + Sync {
@@ -50,10 +50,86 @@ pub enum TxQueryError {
     Retry,
     /// The index cannot currently prove a complete answer.
     #[error("transaction index unavailable: {0}")]
-    Unavailable(CompactString),
+    Unavailable(TxUnavailableCause),
     /// Durable index storage failed.
     #[error("transaction index storage error: {0}")]
     Storage(CompactString),
+}
+
+/// Why a transaction-index query could not prove a complete answer.
+///
+/// `Display` reproduces the exact refusal text the crate already emitted, so
+/// wire-visible error strings do not change. Matchers MUST use the variant,
+/// never the rendered text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TxUnavailableCause {
+    /// Row scan budget ran out mid-query.
+    RowBudgetExhausted,
+    /// Row scan budget exceeded.
+    RowBudgetExceeded,
+    /// Historical prefix scan hit the scan-count cap.
+    PrefixScanTruncated,
+    /// Live prefix scan hit the scan-count cap.
+    LivePrefixScanTruncated,
+    /// Body-read count budget ran out.
+    BodyReadBudgetExhausted,
+    /// Body-byte budget exceeded.
+    BodyBudgetExceeded,
+    /// Coverage starts at `floor`; the pruned prefix below it is unproven
+    /// (txindex and other generic-family refusals).
+    PrunedPrefixUnproven { family: &'static str, floor: u32 },
+    /// Script-history coverage starts at `floor`; history cannot be
+    /// proven complete below it.
+    HistoryUnproven { floor: u32 },
+    /// A required capability is disabled in this engine.
+    CapabilityDisabled(IndexCapability),
+    /// The index worker reported a failure.
+    WorkerFailed(CompactString),
+    /// The index worker stopped.
+    WorkerStopped,
+    /// The compact-filter worker reported a failure.
+    CompactFilterFailed(CompactString),
+    /// A required authority handle is absent (UTXO view, chain-transition lock,
+    /// `ScriptLive` locator). `detail` is the existing static refusal text.
+    MissingAuthority(&'static str),
+    /// Block body bytes could not be read at `height`.
+    BlockBodyMissing { height: u32 },
+    /// Compact filter data row is missing.
+    FilterDataMissing,
+    /// Unavailability with no dedicated variant: index lifecycle states
+    /// (opening, abandoned at shutdown), RPC helpers, and test fakes.
+    Other(CompactString),
+}
+
+impl core::fmt::Display for TxUnavailableCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RowBudgetExhausted => f.write_str("txindex query work budget exhausted"),
+            Self::RowBudgetExceeded => f.write_str("txindex query work budget exceeded"),
+            Self::PrefixScanTruncated => f.write_str("txindex prefix scan truncated"),
+            Self::LivePrefixScanTruncated => f.write_str("txindex live prefix scan truncated"),
+            Self::BodyReadBudgetExhausted => f.write_str("txindex query body budget exhausted"),
+            Self::BodyBudgetExceeded => f.write_str("txindex query body budget exceeded"),
+            Self::PrunedPrefixUnproven { family, floor } => write!(
+                f,
+                "{family} coverage starts at height {floor}; the pruned prefix is unproven"
+            ),
+            Self::HistoryUnproven { floor } => write!(
+                f,
+                "script history coverage starts at height {floor}; history cannot be proven complete"
+            ),
+            Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
+            Self::WorkerFailed(message)
+            | Self::CompactFilterFailed(message)
+            | Self::Other(message) => f.write_str(message),
+            Self::WorkerStopped => f.write_str("txindex worker stopped"),
+            Self::MissingAuthority(detail) => f.write_str(detail),
+            Self::BlockBodyMissing { height } => {
+                write!(f, "block body missing for txindex query at height {height}")
+            }
+            Self::FilterDataMissing => f.write_str("compact filter data is missing"),
+        }
+    }
 }
 
 /// Lockless read-only adapter for complete transaction-index queries.
@@ -201,6 +277,137 @@ pub trait ScriptIndexQuery: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for the byte-identical wire-text constraint: every
+    /// variant must render the exact refusal text the crate emitted before
+    /// the typed-cause retag. A later edit that drifts wire text fails here.
+    fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
+        for (cause, expected) in cases {
+            assert_eq!(cause.to_string(), expected, "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn fixed_unavailable_causes_render_pinned_wire_text() {
+        assert_renders(vec![
+            (
+                TxUnavailableCause::RowBudgetExhausted,
+                "txindex query work budget exhausted",
+            ),
+            (
+                TxUnavailableCause::RowBudgetExceeded,
+                "txindex query work budget exceeded",
+            ),
+            (
+                TxUnavailableCause::PrefixScanTruncated,
+                "txindex prefix scan truncated",
+            ),
+            (
+                TxUnavailableCause::LivePrefixScanTruncated,
+                "txindex live prefix scan truncated",
+            ),
+            (
+                TxUnavailableCause::BodyReadBudgetExhausted,
+                "txindex query body budget exhausted",
+            ),
+            (
+                TxUnavailableCause::BodyBudgetExceeded,
+                "txindex query body budget exceeded",
+            ),
+            (TxUnavailableCause::WorkerStopped, "txindex worker stopped"),
+            (
+                TxUnavailableCause::FilterDataMissing,
+                "compact filter data is missing",
+            ),
+            (
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::TxLookup),
+                "txindex is disabled",
+            ),
+            (
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
+                "script history is disabled",
+            ),
+            (
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive),
+                "script live is disabled",
+            ),
+            (
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::CompactFilters),
+                "blockfilterindex is disabled",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn carried_unavailable_causes_render_pinned_wire_text() {
+        assert_renders(vec![
+            (
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: 100,
+                },
+                "transaction index coverage starts at height 100; the pruned prefix is unproven",
+            ),
+            (
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "script history",
+                    floor: 7,
+                },
+                "script history coverage starts at height 7; the pruned prefix is unproven",
+            ),
+            (
+                TxUnavailableCause::HistoryUnproven { floor: 5 },
+                "script history coverage starts at height 5; history cannot be proven complete",
+            ),
+            (
+                TxUnavailableCause::WorkerFailed("injected worker failure".into()),
+                "injected worker failure",
+            ),
+            (
+                TxUnavailableCause::WorkerFailed("txindex worker failed".into()),
+                "txindex worker failed",
+            ),
+            (
+                TxUnavailableCause::CompactFilterFailed("filter worker broke".into()),
+                "filter worker broke",
+            ),
+            (
+                TxUnavailableCause::MissingAuthority(
+                    "chain transition authority missing for ScriptLive",
+                ),
+                "chain transition authority missing for ScriptLive",
+            ),
+            (
+                TxUnavailableCause::MissingAuthority(
+                    "authoritative UTXO view is unavailable for ScriptLive",
+                ),
+                "authoritative UTXO view is unavailable for ScriptLive",
+            ),
+            (
+                TxUnavailableCause::MissingAuthority(
+                    "ScriptLive locator is absent from authoritative UTXO",
+                ),
+                "ScriptLive locator is absent from authoritative UTXO",
+            ),
+            (
+                TxUnavailableCause::BlockBodyMissing { height: 9 },
+                "block body missing for txindex query at height 9",
+            ),
+            (
+                TxUnavailableCause::Other("txindex is opening".into()),
+                "txindex is opening",
+            ),
+            (
+                TxUnavailableCause::WorkerFailed("txindex is unavailable".into()),
+                "txindex is unavailable",
+            ),
+            (
+                TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
+                "txindex was abandoned at shutdown",
+            ),
+        ]);
+    }
+
     use bitcoin_rs_primitives::Hash256;
 
     struct History(Vec<ScriptHistoryRecord>);
@@ -210,7 +417,9 @@ mod tests {
             &self,
             _script: ScriptHash,
         ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-            Err(TxQueryError::Unavailable("unexpected live query".into()))
+            Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+                "unexpected live query".into(),
+            )))
         }
 
         fn history_snapshot(
@@ -224,7 +433,9 @@ mod tests {
         }
 
         fn spender(&self, _outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-            Err(TxQueryError::Unavailable("unexpected spender query".into()))
+            Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+                "unexpected spender query".into(),
+            )))
         }
     }
 

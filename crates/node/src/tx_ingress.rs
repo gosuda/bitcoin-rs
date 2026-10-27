@@ -107,7 +107,11 @@ impl TxIngressConsumer {
         // request slot before a Held outcome queues missing parent requests.
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
-        self.dispatch_outcome(txid, wtxid, source, outcome);
+        if self.dispatch_outcome(txid, wtxid, source, outcome) {
+            // Core credits a peer only here, not when a retried orphan of it
+            // is accepted later.
+            self.peer_table.note_useful_transaction(inbound.source);
+        }
         self.peer_table
             .poll_transaction_response(self.mempool_gateway.as_ref(), txid, wtxid);
     }
@@ -130,40 +134,46 @@ impl TxIngressConsumer {
         made_progress
     }
 
+    /// Acts on a classified peer transaction and returns whether `txid`
+    /// itself entered the mempool.
     fn dispatch_outcome(
         &self,
         txid: Txid,
         wtxid: Wtxid,
         source: PeerToken,
         outcome: Result<SubmitOutcome, SubmitError>,
-    ) {
+    ) -> bool {
         match outcome {
             Ok(SubmitOutcome::Committed(result)) => {
-                if let Some(sequence) = result
-                    .changes
-                    .iter()
-                    .position(|change| {
-                        change.txid == Hash256::from(txid)
-                            && matches!(
-                                change.outcome,
-                                bitcoin_rs_mempool::MutationOutcome::Accepted
-                            )
-                    })
-                    .and_then(|index| result.sequence_of(index))
-                {
+                let Some(index) = result.changes.iter().position(|change| {
+                    change.txid == Hash256::from(txid)
+                        && matches!(
+                            change.outcome,
+                            bitcoin_rs_mempool::MutationOutcome::Accepted
+                        )
+                }) else {
+                    return false;
+                };
+                if let Some(sequence) = result.sequence_of(index) {
                     self.relay
                         .announce(txid, wtxid, Some(source.connection_id), sequence);
                     self.mining_control.publish_generation();
                 }
+                true
             }
             Ok(SubmitOutcome::Held { missing_parents }) => {
                 bitcoin_rs_p2p::request_missing_parents(&self.peer_table, source, &missing_parents);
+                false
             }
             Ok(SubmitOutcome::AlreadyConfirmed) => {
                 self.peer_table.forget_known_transaction(txid, wtxid);
+                false
             }
-            Ok(SubmitOutcome::AlreadyKnown) => {}
-            Err(error) => tracing::debug!(%txid, ?error, "peer transaction not admitted"),
+            Ok(SubmitOutcome::AlreadyKnown) => false,
+            Err(error) => {
+                tracing::debug!(%txid, ?error, "peer transaction not admitted");
+                false
+            }
         }
     }
 }

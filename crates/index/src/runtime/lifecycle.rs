@@ -5,7 +5,6 @@ use super::DerivedIndexOpenSpec;
 use super::DerivedIndexRuntime;
 use super::DerivedIndexWorker;
 use super::Generation;
-use super::IndexBlockSource;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
 use super::startup::fail_worker;
@@ -42,7 +41,6 @@ impl DerivedIndexWorker {
         block_tree: BlockTreeReader,
         body_store: Option<Arc<dyn BlockBodyStore>>,
         history: HistoryAccess,
-        block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
         reporter: Arc<dyn crate::runtime::IndexAheadSink>,
@@ -70,7 +68,6 @@ impl DerivedIndexWorker {
                         block_tree,
                         body_store,
                         history,
-                        block_source,
                         body_source,
                         &chain_events,
                         reporter,

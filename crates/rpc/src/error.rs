@@ -125,8 +125,8 @@ impl From<crate::context::TxQueryError> for RpcError {
             crate::context::TxQueryError::Retry => {
                 Self::Internal("transaction index is still catching up; retry later".to_owned())
             }
-            crate::context::TxQueryError::Unavailable(reason) => {
-                Self::Internal(format!("transaction index unavailable: {reason}"))
+            crate::context::TxQueryError::Unavailable(cause) => {
+                Self::Internal(format!("transaction index unavailable: {cause}"))
             }
             crate::context::TxQueryError::Storage(reason) => {
                 Self::Internal(format!("transaction index storage error: {reason}"))
