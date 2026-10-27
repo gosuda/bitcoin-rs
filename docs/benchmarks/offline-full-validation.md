@@ -28,10 +28,19 @@ One `offline-full-validation-config-v1` document binds every arm:
   (`000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f`
   from Core `CMainParams`), not only against synthetic fixture bytes hashed
   with the same algorithm.
-- **Manifest**: `core-framed-archive-manifest-v1` names network, magic,
-  inclusive height range, archive digest and size, and one packed entry per
-  height (`hash`, `offset`, `payload_length`). Heights are contiguous. The
-  packed records must consume the archive exactly.
+- **Manifest**: either `core-framed-archive-manifest-v1` (top-level
+  `start_height`/`stop_height`, `archive_sha256`/`archive_bytes`, `blocks`)
+  or the producer `bitcoin-rs-corpus-manifest` version 1 (`range`
+  `{start_height,stop_height}`, `archive` `{sha256,size}`, `entries`; only
+  version 1 is accepted and unknown schemas are refused). Both readers parse
+  both shapes directly with no converted or duplicate manifest. Both shapes
+  name network, magic, inclusive height range, archive digest and size, and
+  one packed entry per height (`height`, `hash`, `offset`, `payload_length`).
+  Heights are contiguous from `start_height`. The packed records must
+  consume the archive exactly. The manifest `network` must equal the
+  configured node network identity (`config.network.identity_name()`, so a
+  regtest run accepts `regtest`) and its magic must equal that network's
+  magic; there is no mainnet-only literal.
 - **Indexed parity (harness)**: an optional `indexed` block names a
   producer-owned `bitcoin-rs-corpus-index-v1` document, a directory of Core
   `blkNNNNN.dat` sources, and the freeze file that binds them. At config

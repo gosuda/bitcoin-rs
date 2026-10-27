@@ -41,7 +41,19 @@ use sha2::Digest as _;
 
 use crate::NodeConfig;
 
-/// Manifest document `core-framed-archive-manifest-v1` (subset used here).
+/// Accepted manifest schemas (subsets used here).
+///
+/// The authoritative C150 archive producer writes
+/// `bitcoin-rs-corpus-manifest` version 1 with `archive {sha256,size}`,
+/// `range {start_height,stop_height}`, and `entries`; the comparator-facing
+/// shape is `core-framed-archive-manifest-v1` with `archive_sha256`,
+/// `archive_bytes`, `start_height`/`stop_height`, and `blocks`. Both
+/// normalize into the internal [`Manifest`]; unknown schemas and
+/// unsupported corpus versions are refused at the boundary.
+const CORE_FRAMED_SCHEMA: &str = "core-framed-archive-manifest-v1";
+const CORPUS_SCHEMA: &str = "bitcoin-rs-corpus-manifest";
+const CORPUS_VERSION: u32 = 1;
+
 #[derive(Debug, serde::Deserialize)]
 struct ManifestBlock {
     height: u32,
@@ -52,7 +64,6 @@ struct ManifestBlock {
 
 #[derive(Debug, serde::Deserialize)]
 struct Manifest {
-    schema: String,
     network: String,
     network_magic: String,
     start_height: u32,
@@ -60,6 +71,46 @@ struct Manifest {
     archive_sha256: String,
     archive_bytes: u64,
     blocks: Vec<ManifestBlock>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CorpusRange {
+    start_height: u32,
+    stop_height: u32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CorpusArchive {
+    sha256: String,
+    size: u64,
+}
+
+/// Typed untagged view over the two accepted on-disk shapes. Extra
+/// producer members (`corpus_id`, `genesis_hash`, `manifest_sha256`,
+/// `source_tip_hash`) are ignored here; pinning beyond archive identity
+/// stays with the producer and the comparator.
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum RawManifest {
+    Framed {
+        schema: String,
+        network: String,
+        network_magic: String,
+        start_height: u32,
+        stop_height: u32,
+        archive_sha256: String,
+        archive_bytes: u64,
+        blocks: Vec<ManifestBlock>,
+    },
+    Corpus {
+        schema: String,
+        version: u32,
+        network: String,
+        network_magic: String,
+        range: CorpusRange,
+        archive: CorpusArchive,
+        entries: Vec<ManifestBlock>,
+    },
 }
 
 /// Certified state written to `{state_path}` (matches the comparator).
@@ -107,9 +158,7 @@ pub fn run_offline_import(
     if manifest_magic != expected_magic {
         bail!("manifest network magic does not match the node network");
     }
-    if manifest_doc.schema != "core-framed-archive-manifest-v1" {
-        bail!("manifest schema must be core-framed-archive-manifest-v1");
-    }
+    check_manifest_network(&manifest_doc, config.network.identity_name())?;
     check_manifest_shape(&manifest_doc)?;
 
     let node = crate::state::NodeState::open(config, None)?;
@@ -121,12 +170,10 @@ pub fn run_offline_import(
         None => 0usize,
         Some(tip) => {
             let height = tip.height;
-            let entry = manifest_doc
-                .blocks
-                .get(usize::try_from(height).context("tip height does not fit")?)
-                .with_context(|| {
-                    format!("applied tip height {height} is outside the manifest range")
-                })?;
+            let entry_index = block_index_for_height(manifest_doc.start_height, height)?;
+            let entry = manifest_doc.blocks.get(entry_index).with_context(|| {
+                format!("applied tip height {height} is outside the manifest range")
+            })?;
             if entry.height != height {
                 bail!("applied tip height does not match the manifest entry");
             }
@@ -137,8 +184,8 @@ pub fn run_offline_import(
                 verify_and_certify(&node, &manifest_doc, state)?;
                 return Ok(());
             }
-            usize::try_from(height.checked_add(1).context("applied tip overflow")?)
-                .context("applied tip does not fit")?
+            let next = height.checked_add(1).context("applied tip overflow")?;
+            block_index_for_height(manifest_doc.start_height, next)?
         }
     };
 
@@ -288,9 +335,84 @@ fn read_manifest(path: &Path) -> Result<Manifest> {
     // No duplicate-key `Value` is used here: the manifest is decoded into
     // typed structs with contiguous-height and packed-offset checks, so a
     // duplicated key cannot smuggle a second chain view.
-    let doc: Manifest = sonic_rs::from_slice(&raw)
+    let raw_doc: RawManifest = sonic_rs::from_slice(&raw)
         .with_context(|| format!("manifest {} is not valid JSON", path.display()))?;
-    Ok(doc)
+    raw_doc.normalize()
+}
+
+impl RawManifest {
+    fn normalize(self) -> Result<Manifest> {
+        match self {
+            Self::Framed {
+                schema,
+                network,
+                network_magic,
+                start_height,
+                stop_height,
+                archive_sha256,
+                archive_bytes,
+                blocks,
+            } => {
+                if schema != CORE_FRAMED_SCHEMA {
+                    bail!("manifest schema must be {CORE_FRAMED_SCHEMA}");
+                }
+                Ok(Manifest {
+                    network,
+                    network_magic,
+                    start_height,
+                    stop_height,
+                    archive_sha256,
+                    archive_bytes,
+                    blocks,
+                })
+            }
+            Self::Corpus {
+                schema,
+                version,
+                network,
+                network_magic,
+                range,
+                archive,
+                entries,
+            } => {
+                if schema != CORPUS_SCHEMA {
+                    bail!("manifest schema must be {CORPUS_SCHEMA}");
+                }
+                if version != CORPUS_VERSION {
+                    bail!("manifest version {version} is not supported");
+                }
+                Ok(Manifest {
+                    network,
+                    network_magic,
+                    start_height: range.start_height,
+                    stop_height: range.stop_height,
+                    archive_sha256: archive.sha256,
+                    archive_bytes: archive.size,
+                    blocks: entries,
+                })
+            }
+        }
+    }
+}
+
+fn check_manifest_network(doc: &Manifest, expected_network: &str) -> Result<()> {
+    if doc.network != expected_network {
+        bail!("manifest network does not match the node network");
+    }
+    Ok(())
+}
+
+/// Maps an absolute block height to its position in the packed
+/// `blocks`/`entries` array. Both the reopen entry lookup and the skip
+/// count after a tip at `height` go through this coordinate, so a resume
+/// at height `H` over a range starting at `S` reads entry `H - S` and
+/// skips `H + 1 - S` records. For `S == 0` this is the old `height` /
+/// `height + 1` behavior exactly.
+fn block_index_for_height(start_height: u32, height: u32) -> Result<usize> {
+    let offset = height
+        .checked_sub(start_height)
+        .with_context(|| format!("applied tip height {height} is outside the manifest range"))?;
+    usize::try_from(offset).context("tip height does not fit")
 }
 
 fn parse_magic_hex(text: &str) -> Result<[u8; 4]> {
@@ -307,9 +429,6 @@ fn parse_magic_hex(text: &str) -> Result<[u8; 4]> {
 }
 
 fn check_manifest_shape(doc: &Manifest) -> Result<()> {
-    if doc.network != "mainnet" {
-        bail!("manifest network is not mainnet");
-    }
     if doc.blocks.is_empty() {
         bail!("manifest blocks must list every height exactly once");
     }
@@ -495,7 +614,6 @@ mod tests {
     #[test]
     fn manifest_shape_rejects_gaps() {
         let doc = Manifest {
-            schema: "core-framed-archive-manifest-v1".to_owned(),
             network: "mainnet".to_owned(),
             network_magic: "f9beb4d9".to_owned(),
             start_height: 0,
@@ -513,7 +631,6 @@ mod tests {
     #[test]
     fn manifest_shape_rejects_unpacked_offset() {
         let doc = Manifest {
-            schema: "core-framed-archive-manifest-v1".to_owned(),
             network: "mainnet".to_owned(),
             network_magic: "f9beb4d9".to_owned(),
             start_height: 0,
@@ -564,5 +681,121 @@ mod tests {
         };
         write_state(&path, &state).expect("first write");
         assert!(write_state(&path, &state).is_err());
+    }
+
+    fn corpus_manifest_bytes(network: &str, magic: &str) -> Vec<u8> {
+        format!(
+            concat!(
+                r#"{{"archive":{{"sha256":"{archive}","size":196}},"corpus_id":"C150","entries":"#,
+                r#"[{{"height":100,"hash":"{h0}","offset":0,"payload_length":90}},"#,
+                r#"{{"height":101,"hash":"{h1}","offset":98,"payload_length":90}}],"#,
+                r#""genesis_hash":"{h0}","manifest_sha256":"{msha}","#,
+                r#""network":"{network}","network_magic":"{magic}","#,
+                r#""range":{{"start_height":100,"stop_height":101}},"#,
+                r#""schema":"bitcoin-rs-corpus-manifest","#,
+                r#""source_tip_hash":"{h1}","version":1}}"#
+            ),
+            archive = "ab".repeat(32),
+            h0 = "ab".repeat(32),
+            h1 = "cd".repeat(32),
+            msha = "00".repeat(32),
+            network = network,
+            magic = magic,
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn corpus_schema_normalizes_to_internal_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, corpus_manifest_bytes("regtest", "fabfb5da")).expect("write");
+        let doc = read_manifest(&path).expect("corpus manifest parses");
+        assert_eq!(doc.network, "regtest");
+        assert_eq!(doc.start_height, 100);
+        assert_eq!(doc.stop_height, 101);
+        assert_eq!(doc.archive_bytes, 196);
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.blocks[0].height, 100);
+        assert_eq!(doc.blocks[1].offset, 98);
+        assert!(check_manifest_shape(&doc).is_ok());
+    }
+
+    #[test]
+    fn manifest_reader_rejects_unknown_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            br#"{"schema":"unknown-manifest-v9","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":0,"archive_sha256":"ab","archive_bytes":0,"blocks":[]}"#,
+        )
+        .expect("write");
+        assert!(read_manifest(&path).is_err());
+    }
+
+    #[test]
+    fn manifest_reader_rejects_unsupported_corpus_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.json");
+        let mut raw = corpus_manifest_bytes("regtest", "fabfb5da");
+        let text = String::from_utf8(raw.clone()).expect("utf8");
+        raw = text
+            .replace(r#""version":1"#, r#""version":2"#)
+            .into_bytes();
+        std::fs::write(&path, raw).expect("write");
+        assert!(read_manifest(&path).is_err());
+    }
+
+    #[test]
+    fn manifest_network_matches_configured_identity() {
+        let regtest = bitcoin_rs_primitives::Network::Regtest.identity_name();
+        assert_eq!(regtest, "regtest");
+        let doc = Manifest {
+            network: "regtest".to_owned(),
+            network_magic: "fabfb5da".to_owned(),
+            start_height: 100,
+            stop_height: 101,
+            archive_sha256: "ab".repeat(32),
+            archive_bytes: 196,
+            blocks: vec![
+                entry(100, &"ab".repeat(32), 0, 90),
+                entry(101, &"cd".repeat(32), 98, 90),
+            ],
+        };
+        assert!(check_manifest_network(&doc, regtest).is_ok());
+        assert!(check_manifest_network(&doc, "mainnet").is_err());
+    }
+
+    #[test]
+    fn nonzero_start_height_maps_index_and_skip() {
+        let doc = Manifest {
+            network: "regtest".to_owned(),
+            network_magic: "fabfb5da".to_owned(),
+            start_height: 100,
+            stop_height: 102,
+            archive_sha256: "ab".repeat(32),
+            archive_bytes: 294,
+            blocks: vec![
+                entry(100, &"ab".repeat(32), 0, 90),
+                entry(101, &"cd".repeat(32), 98, 90),
+                entry(102, &"ef".repeat(32), 196, 90),
+            ],
+        };
+        assert!(check_manifest_shape(&doc).is_ok());
+        // Resume at H=101 reads entry 101-100=1 and skips 101+1-100=2 records.
+        assert_eq!(
+            block_index_for_height(doc.start_height, 101).expect("index"),
+            1
+        );
+        let next = 101u32.checked_add(1).expect("next");
+        assert_eq!(
+            block_index_for_height(doc.start_height, next).expect("skip"),
+            2
+        );
+        // Below-range heights are refused rather than underflowing.
+        assert!(block_index_for_height(doc.start_height, 99).is_err());
+        // Start-at-zero behavior is unchanged.
+        assert_eq!(block_index_for_height(0, 1).expect("index"), 1);
+        assert_eq!(block_index_for_height(0, 2).expect("skip"), 2);
     }
 }

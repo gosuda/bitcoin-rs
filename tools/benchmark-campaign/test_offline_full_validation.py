@@ -809,5 +809,126 @@ class IndexedParityHarnessTests(unittest.TestCase):
             run_campaign(config, root / "arms")
 
 
+class ProducerManifestTests(unittest.TestCase):
+    """Producer-shaped manifests map to the core-framed representation.
+
+    The producer schema is read-only here: no converter file is written and
+    every FileRef, magic, contiguity, packing, and exact-consumption check
+    still applies.
+    """
+
+    def _archive_fixture(self, root: Path) -> tuple[bytes, Path, list[str]]:
+        payloads = (_payload(1), _payload(2))
+        records = [_record(payload) for payload in payloads]
+        archive_bytes = b"".join(records)
+        archive_path = root / "blocks.dat"
+        archive_path.write_bytes(archive_bytes)
+        hashes = [header_hash(payload) for payload in payloads]
+        return archive_bytes, archive_path, hashes
+
+    def _core_doc(self, archive_bytes: bytes, hashes: list[str]) -> JsonObject:
+        offset = 0
+        entries: list[JsonObject] = []
+        for height, digest in enumerate(hashes):
+            entries.append(
+                {
+                    "height": height,
+                    "hash": digest,
+                    "offset": offset,
+                    "payload_length": 81,
+                }
+            )
+            offset += 8 + 81
+        return {
+            "schema": MANIFEST_SCHEMA,
+            "network": "mainnet",
+            "network_magic": MAGIC,
+            "start_height": 0,
+            "stop_height": 1,
+            "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "archive_bytes": len(archive_bytes),
+            "blocks": entries,
+        }
+
+    def _producer_doc(self, archive_bytes: bytes, hashes: list[str]) -> JsonObject:
+        offset = 0
+        entries: list[JsonObject] = []
+        for height, digest in enumerate(hashes):
+            entries.append(
+                {
+                    "height": height,
+                    "hash": digest,
+                    "offset": offset,
+                    "payload_length": 81,
+                }
+            )
+            offset += 8 + 81
+        return {
+            "schema": "bitcoin-rs-corpus-manifest",
+            "version": 1,
+            "corpus_id": "C150",
+            "network": "mainnet",
+            "network_magic": MAGIC,
+            "genesis_hash": hashes[0],
+            "range": {"start_height": 0, "stop_height": 1},
+            "source_tip_hash": hashes[-1],
+            "archive": {
+                "size": len(archive_bytes),
+                "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            },
+            "entries": entries,
+            "manifest_sha256": HASH64,
+        }
+
+    def test_producer_manifest_matches_core_manifest(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-producer-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        archive_bytes, archive_path, hashes = self._archive_fixture(root)
+        ref = offline.FileRef(
+            archive_path,
+            hashlib.sha256(archive_bytes).hexdigest(),
+            len(archive_bytes),
+        )
+        magic = bytes.fromhex(MAGIC)
+        core_parsed = offline._parse_manifest(
+            self._core_doc(archive_bytes, hashes), ref, magic
+        )
+        producer_parsed = offline._parse_manifest(
+            self._producer_doc(archive_bytes, hashes), ref, magic
+        )
+        self.assertEqual(producer_parsed, core_parsed)
+        offline._verify_archive(ref, producer_parsed, magic)
+
+    def test_producer_version_mismatch_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-producer-ver-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        archive_bytes, archive_path, hashes = self._archive_fixture(root)
+        ref = offline.FileRef(
+            archive_path,
+            hashlib.sha256(archive_bytes).hexdigest(),
+            len(archive_bytes),
+        )
+        document = self._producer_doc(archive_bytes, hashes)
+        assert isinstance(document, dict)
+        document["version"] = 2
+        with self.assertRaises(ContractError):
+            offline._parse_manifest(document, ref, bytes.fromhex(MAGIC))
+
+    def test_unknown_schema_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-producer-schema-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        archive_bytes, archive_path, hashes = self._archive_fixture(root)
+        ref = offline.FileRef(
+            archive_path,
+            hashlib.sha256(archive_bytes).hexdigest(),
+            len(archive_bytes),
+        )
+        document = self._core_doc(archive_bytes, hashes)
+        assert isinstance(document, dict)
+        document["schema"] = "unknown-manifest-v9"
+        with self.assertRaises(ContractError):
+            offline._parse_manifest(document, ref, bytes.fromhex(MAGIC))
+
+
 if __name__ == "__main__":
     unittest.main()

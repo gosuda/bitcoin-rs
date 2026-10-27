@@ -48,6 +48,8 @@ from p2p_loopback import _ChildSubreaperScope, _direct_children_pids
 
 CONFIG_SCHEMA = "offline-full-validation-config-v1"
 MANIFEST_SCHEMA = "core-framed-archive-manifest-v1"
+PRODUCER_MANIFEST_SCHEMA = "bitcoin-rs-corpus-manifest"
+PRODUCER_MANIFEST_VERSION = 1
 RESULT_SCHEMA = "offline-full-validation-result-v1"
 PAIR_COUNT = 7
 HEADER_BYTES = 80
@@ -173,6 +175,24 @@ _MANIFEST_KEYS = frozenset(
     }
 )
 _BLOCK_ENTRY_KEYS = frozenset({"height", "hash", "offset", "payload_length"})
+_PRODUCER_MANIFEST_KEYS = frozenset(
+    {
+        "archive",
+        "corpus_id",
+        "entries",
+        "genesis_hash",
+        "manifest_sha256",
+        "network",
+        "network_magic",
+        "range",
+        "schema",
+        "source_tip_hash",
+        "version",
+    }
+)
+_PRODUCER_ARCHIVE_KEYS = frozenset({"sha256", "size"})
+_PRODUCER_RANGE_KEYS = frozenset({"start_height", "stop_height"})
+_PRODUCER_ENTRY_KEYS = frozenset({"height", "hash", "offset", "payload_length"})
 _CONFIG_KEYS = frozenset(
     {
         "schema",
@@ -608,57 +628,97 @@ def header_hash(payload: bytes) -> str:
 
 
 def _parse_manifest(value: object, archive: FileRef, magic: bytes) -> Manifest:
-    root = _object(value, "manifest", _MANIFEST_KEYS)
-    if root["schema"] != MANIFEST_SCHEMA:
-        raise ContractError(f"manifest.schema must be {MANIFEST_SCHEMA}")
-    network = _text(root["network"], "manifest.network")
-    documented_magic = _magic(root["network_magic"], "manifest.network_magic")
-    if documented_magic != magic:
-        raise ContractError("manifest network magic does not match the config")
-    start = _uint(root["start_height"], "manifest.start_height")
-    stop = _uint(root["stop_height"], "manifest.stop_height")
-    if stop < start:
-        raise ContractError("manifest stop_height is before start_height")
-    archive_digest = _hash(root["archive_sha256"], "manifest.archive_sha256")
-    archive_bytes = _uint(
-        root["archive_bytes"], "manifest.archive_bytes", MAX_ARCHIVE_BYTES
-    )
-    if archive_digest != archive.sha256 or archive_bytes != archive.size:
-        raise ContractError(
-            "manifest archive identity does not match the corpus FileRef"
+    if not _is_object(value):
+        raise ContractError("manifest must be a JSON object")
+    schema = value.get("schema")
+    if schema == MANIFEST_SCHEMA:
+        root = _object(value, "manifest", _MANIFEST_KEYS)
+        network = _text(root["network"], "manifest.network")
+        documented_magic = _magic(root["network_magic"], "manifest.network_magic")
+        if documented_magic != magic:
+            raise ContractError("manifest network magic does not match the config")
+        start = _uint(root["start_height"], "manifest.start_height")
+        stop = _uint(root["stop_height"], "manifest.stop_height")
+        if stop < start:
+            raise ContractError("manifest stop_height is before start_height")
+        archive_digest = _hash(root["archive_sha256"], "manifest.archive_sha256")
+        archive_bytes = _uint(
+            root["archive_bytes"], "manifest.archive_bytes", MAX_ARCHIVE_BYTES
         )
-    raw_blocks = _array(root["blocks"], "manifest.blocks")
+        if archive_digest != archive.sha256 or archive_bytes != archive.size:
+            raise ContractError(
+                "manifest archive identity does not match the corpus FileRef"
+            )
+        raw_blocks = _array(root["blocks"], "manifest.blocks")
+        blocks_field = "manifest.blocks"
+        entry_keys = _BLOCK_ENTRY_KEYS
+    elif schema == PRODUCER_MANIFEST_SCHEMA:
+        root = _object(value, "manifest", _PRODUCER_MANIFEST_KEYS)
+        version = _uint(root["version"], "manifest.version")
+        if version != PRODUCER_MANIFEST_VERSION:
+            raise ContractError(f"manifest.version must be {PRODUCER_MANIFEST_VERSION}")
+        network = _text(root["network"], "manifest.network")
+        documented_magic = _magic(root["network_magic"], "manifest.network_magic")
+        if documented_magic != magic:
+            raise ContractError("manifest network magic does not match the config")
+        range_obj = _object(root["range"], "manifest.range", _PRODUCER_RANGE_KEYS)
+        start = _uint(range_obj["start_height"], "manifest.range.start_height")
+        stop = _uint(range_obj["stop_height"], "manifest.range.stop_height")
+        if stop < start:
+            raise ContractError("manifest stop_height is before start_height")
+        archive_obj = _object(
+            root["archive"], "manifest.archive", _PRODUCER_ARCHIVE_KEYS
+        )
+        archive_digest = _hash(archive_obj["sha256"], "manifest.archive.sha256")
+        archive_bytes = _uint(
+            archive_obj["size"], "manifest.archive.size", MAX_ARCHIVE_BYTES
+        )
+        if archive_digest != archive.sha256 or archive_bytes != archive.size:
+            raise ContractError(
+                "manifest archive identity does not match the corpus FileRef"
+            )
+        _text(root["corpus_id"], "manifest.corpus_id")
+        _hash(root["genesis_hash"], "manifest.genesis_hash")
+        _hash(root["source_tip_hash"], "manifest.source_tip_hash")
+        _hash(root["manifest_sha256"], "manifest.manifest_sha256")
+        raw_blocks = _array(root["entries"], "manifest.entries")
+        blocks_field = "manifest.entries"
+        entry_keys = _PRODUCER_ENTRY_KEYS
+    else:
+        raise ContractError(
+            f"manifest.schema must be {MANIFEST_SCHEMA} or {PRODUCER_MANIFEST_SCHEMA}"
+        )
     expected = stop - start + 1
     if not raw_blocks or len(raw_blocks) != expected or len(raw_blocks) > MAX_BLOCKS:
-        raise ContractError("manifest.blocks must list every height exactly once")
+        raise ContractError(f"{blocks_field} must list every height exactly once")
     blocks: list[BlockEntry] = []
     cursor = 0
     for index, raw in enumerate(raw_blocks):
-        item = _object(raw, f"manifest.blocks[{index}]", _BLOCK_ENTRY_KEYS)
-        height = _uint(item["height"], f"manifest.blocks[{index}].height")
+        item = _object(raw, f"{blocks_field}[{index}]", entry_keys)
+        height = _uint(item["height"], f"{blocks_field}[{index}].height")
         if height != start + index:
             raise ContractError("manifest heights must be contiguous from start_height")
         offset = _uint(
-            item["offset"], f"manifest.blocks[{index}].offset", MAX_ARCHIVE_BYTES
+            item["offset"], f"{blocks_field}[{index}].offset", MAX_ARCHIVE_BYTES
         )
         payload_length = _uint(
             item["payload_length"],
-            f"manifest.blocks[{index}].payload_length",
+            f"{blocks_field}[{index}].payload_length",
             MAX_PAYLOAD_BYTES,
         )
         if payload_length < HEADER_BYTES:
             raise ContractError(
-                f"manifest.blocks[{index}] payload is shorter than a header"
+                f"{blocks_field}[{index}] payload is shorter than a header"
             )
         if offset != cursor:
-            raise ContractError(f"manifest.blocks[{index}] offset is not packed")
+            raise ContractError(f"{blocks_field}[{index}] offset is not packed")
         record_length = 8 + payload_length
         if offset + record_length > archive.size:
-            raise ContractError(f"manifest.blocks[{index}] overruns the archive")
+            raise ContractError(f"{blocks_field}[{index}] overruns the archive")
         blocks.append(
             BlockEntry(
                 height,
-                _hash(item["hash"], f"manifest.blocks[{index}].hash"),
+                _hash(item["hash"], f"{blocks_field}[{index}].hash"),
                 offset,
                 payload_length,
             )
@@ -1397,7 +1457,9 @@ def _require_stream_match(path: Path, archive: FileRef) -> None:
         raise ContractError("indexed stream changed after its pin")
 
 
-def _write_indexed_stream(config: Config, pinned: PinnedCorpus, root: Path, dest: Path) -> None:
+def _write_indexed_stream(
+    config: Config, pinned: PinnedCorpus, root: Path, dest: Path
+) -> None:
     """Materialize the pinned indexed logical stream to one custody file."""
 
     indexed = config.indexed
@@ -1413,7 +1475,9 @@ def _write_indexed_stream(config: Config, pinned: PinnedCorpus, root: Path, dest
     module = _campaign_corpus()
     sources_dir = root / "custody" / "sources"
     try:
-        dest_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400)
+        dest_fd = os.open(
+            dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400
+        )
     except OSError as error:
         raise ContractError(f"cannot create indexed stream {dest}: {error}") from error
     hasher = hashlib.sha256()
@@ -1435,7 +1499,9 @@ def _write_indexed_stream(config: Config, pinned: PinnedCorpus, root: Path, dest
         try:
             os.close(dest_fd)
         except OSError as close_error:
-            raise ContractError(f"cannot close indexed stream: {close_error}") from close_error
+            raise ContractError(
+                f"cannot close indexed stream: {close_error}"
+            ) from close_error
         dest.unlink(missing_ok=True)
         raise ContractError(f"cannot write indexed stream: {error}") from error
     try:
@@ -1495,7 +1561,7 @@ def _run_arm(
         program.command,
         binary_path=binary_path,
         data_dir=data_dir,
-        corpus_path=_corpus_path_for_arm(pinned),
+        corpus_path=_corpus_path_for_arm(config, pinned, root),
         manifest_path=pinned.manifest.path,
         state_path=state_path,
     )
@@ -1520,7 +1586,7 @@ def _run_arm(
             program.reopen_command,
             binary_path=binary_path,
             data_dir=data_dir,
-            corpus_path=_corpus_path_for_arm(pinned),
+            corpus_path=_corpus_path_for_arm(config, pinned, root),
             manifest_path=pinned.manifest.path,
             state_path=reopen_path,
         )
