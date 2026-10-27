@@ -454,8 +454,8 @@ impl<'t> SighashCache<'t> {
             msg.extend_from_slice(&input_index.to_le_bytes());
         }
         if let Some(annex) = annex {
-            let annex_len = varint::encode(compact_len(annex.len())).as_slice().to_vec();
-            msg.extend_from_slice(&sha256_parts(&[&annex_len, annex]));
+            let annex_len = varint::encode(compact_len(annex.len()));
+            msg.extend_from_slice(&sha256_parts(&[annex_len.as_slice(), annex]));
         }
         if base == 0x03 {
             let output = &self.tx.outputs[input_index];
@@ -570,9 +570,7 @@ impl Sighash {
 /// (`0xc0` for BIP342 tapscript).
 #[must_use]
 pub fn tapleaf_hash(leaf_version: u8, script: &[u8]) -> Hash256 {
-    let len = varint::encode(compact_len(script.len()))
-        .as_slice()
-        .to_vec();
+    let len = varint::encode(compact_len(script.len()));
     let msg = [&[leaf_version][..], len.as_slice(), script].concat();
     tagged_hash(b"TapLeaf", &msg)
 }

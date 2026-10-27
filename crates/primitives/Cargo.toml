@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+bytes.workspace = true
 ruint.workspace = true
 sha2.workspace = true
 sha3.workspace = true

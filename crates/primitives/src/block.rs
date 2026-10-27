@@ -1,6 +1,11 @@
 //! Native block type and block-level hashing helpers.
 
-use crate::{BlockHash, Header, Tx, Txid, encode::ConsensusEncode};
+use bytes::Bytes;
+
+use crate::{
+    BlockHash, Header, Tx, Txid,
+    encode::{ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, deserialize},
+};
 
 /// A Bitcoin block in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,6 +77,77 @@ impl Block {
             total = total.saturating_add(tx.retained_heap_bytes());
         }
         total
+    }
+}
+
+/// Exact wire/storage block payload: one decoded [`Block`] plus the exact bytes it carries.
+///
+/// `BlockPayload` owns one decoded [`Block`] plus the exact bytes it carries. Raw ingress
+/// claims decode once via [`BlockPayload::from_raw`]; locally assembled blocks encode once
+/// via [`BlockPayload::from_local`]; the Core-compatible RPC submit path keeps its
+/// ignore-trailing-bytes semantics via [`BlockPayload::from_prefix`]. It introduces no
+/// unchecked pair constructor, no generic buffer, no new parser, and no shared-pointer
+/// wrapper. Cloning is by value: the `Block` is cloned and the `Bytes` handle is shared
+/// by reference count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockPayload {
+    block: Block,
+    bytes: Bytes,
+}
+
+impl BlockPayload {
+    /// Decodes `raw` once through the existing consensus decode and retains the input bytes.
+    ///
+    /// Trailing bytes are rejected with [`DecodeError::TrailingBytes`]. No re-encode
+    /// comparison is performed; canonicality is inherited from the existing
+    /// `ParsedBlock`/`deserialize` contract as it stands today.
+    pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
+        let block = deserialize::<Block>(&raw)?;
+        Ok(Self { block, bytes: raw })
+    }
+
+    /// Encodes `block` once through the existing consensus encoder and retains that encoding.
+    pub fn from_local(block: Block) -> Self {
+        let bytes = Bytes::from(consensus_bytes(&block));
+        Self { block, bytes }
+    }
+
+    /// Decodes one block from the front of `raw`, retaining only the consumed prefix bytes.
+    ///
+    /// Runs the one existing decode shared with [`BlockPayload::from_raw`] through a
+    /// borrow of `raw`, shortens the owned buffer to the consumed prefix in place, and
+    /// returns the consumed length. No payload bytes are copied and nothing is
+    /// re-encoded. This exists only for the Core-compatible RPC `submitblock` boundary,
+    /// which ignores
+    /// bytes after the block; every other boundary uses [`BlockPayload::from_raw`] or
+    /// [`BlockPayload::from_local`].
+    pub fn from_prefix(mut raw: Bytes) -> Result<(Self, usize), DecodeError> {
+        let mut reader: &[u8] = &raw;
+        let block = Block::consensus_decode(&mut reader)?;
+        let consumed = raw.len() - reader.len();
+        raw.truncate(consumed);
+        Ok((Self { block, bytes: raw }, consumed))
+    }
+
+    /// Borrows the decoded block.
+    #[must_use]
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// Borrows the exact retained bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
+    /// Consumes the payload, returning the decoded block and discarding the retained bytes.
+    ///
+    /// Exists for the block-template proposal path, which dry-validates the decoded block
+    /// and never persists bytes.
+    #[must_use]
+    pub fn into_block(self) -> Block {
+        self.block
     }
 }
 
@@ -407,5 +483,127 @@ mod tests {
         let extra_txs_cap = block.txs.capacity() - 3;
         let expected_after_reserve = expected_block + extra_txs_cap * core::mem::size_of::<Tx>();
         assert_eq!(block.retained_heap_bytes(), expected_after_reserve);
+    }
+
+    #[test]
+    fn payload_from_raw_retains_exact_fixture_bytes() -> Result<()> {
+        use super::BlockPayload;
+
+        let bytes = read_test_fixture("363731.bin")?;
+        let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes.clone()))?;
+
+        // Full decoded-block equality and byte-exact retention, never hash-only.
+        assert_eq!(payload.bytes().as_ref(), bytes.as_slice());
+        assert_eq!(payload.block(), &deserialize::<Block>(&bytes)?);
+        assert_eq!(crate::encode::consensus_bytes(payload.block()), bytes);
+        assert_eq!(payload.into_block(), deserialize::<Block>(&bytes)?);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_raw_rejects_trailing_bytes() -> Result<()> {
+        use super::BlockPayload;
+
+        let mut bytes = read_test_fixture("0.bin")?;
+        assert!(BlockPayload::from_raw(bytes::Bytes::from(bytes.clone())).is_ok());
+        bytes.push(0xFF);
+
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::from(bytes)),
+                Err(DecodeError::TrailingBytes { remaining: 1 })
+            ),
+            "exactly one trailing byte must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_raw_rejects_malformed_bytes() {
+        use super::BlockPayload;
+
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::new()),
+                Err(DecodeError::EndOfData { .. })
+            ),
+            "empty input must fail, not decode to a default block"
+        );
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::from(vec![0x01_u8; 100])),
+                Err(DecodeError::EndOfData { .. })
+            ),
+            "truncated body must fail instead of materializing a short block"
+        );
+    }
+
+    #[test]
+    fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
+        use super::BlockPayload;
+
+        let mut bytes = read_test_fixture("0.bin")?;
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
+
+        let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(bytes.clone()))?;
+
+        // Consumed length is exactly the block; retained bytes exclude the remainder.
+        assert_eq!(consumed, bytes.len() - 3);
+        assert_eq!(payload.bytes().as_ref(), &bytes[..consumed]);
+        assert_eq!(payload.block(), &deserialize::<Block>(&bytes[..consumed])?);
+        assert_eq!(payload.bytes().len(), consumed);
+
+        // Exact input with no remainder consumes everything.
+        let exact = read_test_fixture("363731.bin")?;
+        let exact_len = exact.len();
+        let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(exact.clone()))?;
+        assert_eq!(consumed, exact_len);
+        assert_eq!(payload.bytes().as_ref(), exact.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
+        use super::BlockPayload;
+
+        let block = block_with_tx(witness_tx(
+            vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
+        ));
+        let payload = BlockPayload::from_local(block.clone());
+
+        let expected = crate::encode::consensus_bytes(&block);
+        assert_eq!(payload.bytes().as_ref(), expected.as_slice());
+        assert_eq!(payload.block(), &block);
+        // Witness material is byte-identical in the retained encoding.
+        assert!(
+            payload.bytes().windows(64).any(|w| w == [0x21_u8; 64]),
+            "retained bytes must carry the full witness item"
+        );
+        // Strict re-decode of the retained bytes reproduces the full block value.
+        let roundtrip = BlockPayload::from_raw(payload.bytes().clone())?;
+        assert_eq!(roundtrip.block(), &block);
+        assert_eq!(roundtrip.bytes(), payload.bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_witness_identity_is_byte_exact_not_txid_only() {
+        use super::BlockPayload;
+
+        // Same base transaction with different witness items: identical txids but
+        // different consensus bytes. Identity must come from bytes, not txid.
+        let left = block_with_tx(witness_tx(vec![vec![0x11_u8; 32]].into()));
+        let right = block_with_tx(witness_tx(vec![vec![0x22_u8; 32]].into()));
+        assert_eq!(left.txs[0].txid(), right.txs[0].txid());
+
+        let left_payload = BlockPayload::from_local(left.clone());
+        let right_payload = BlockPayload::from_local(right.clone());
+        assert_ne!(
+            left_payload.bytes().as_ref(),
+            right_payload.bytes().as_ref()
+        );
+        assert_ne!(left_payload.block(), right_payload.block());
+        assert_eq!(left_payload.block(), &left);
+        assert_eq!(right_payload.block(), &right);
     }
 }

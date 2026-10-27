@@ -545,6 +545,7 @@ name = "bitcoin-rs-primitives"
 version = "0.14.0"
 dependencies = [
  "bytemuck",
+ "bytes",
  "ruint",
  "serde_json",
  "sha2",
