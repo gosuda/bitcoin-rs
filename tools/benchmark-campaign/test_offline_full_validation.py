@@ -8,6 +8,7 @@ import hashlib
 import json
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,9 @@ from pathlib import Path
 from typing import TypeIs
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "campaign-corpus"))
 
+import corpus as campaign_corpus  # ty: ignore[unresolved-import]  # pyright: ignore[reportMissingImports]
 import offline_full_validation as offline
 from evidence import (
     ContractError,
@@ -136,7 +139,9 @@ def _command(*, reopen: bool = False) -> list[str]:
     return command
 
 
-def _build_workspace(root: Path, *, reopen: bool = False) -> tuple[Path, CertifiedState]:
+def _build_workspace(
+    root: Path, *, reopen: bool = False
+) -> tuple[Path, CertifiedState]:
     payloads = (_payload(1), _payload(2))
     records = [_record(payload) for payload in payloads]
     archive_bytes = b"".join(records)
@@ -202,6 +207,177 @@ def _build_workspace(root: Path, *, reopen: bool = False) -> tuple[Path, Certifi
                 "path": str(manifest_path),
                 "sha256": _sha256_file(manifest_path),
                 "bytes": manifest_path.stat().st_size,
+            },
+        },
+        "expected_state": state_json(expected),
+        "core": program(),
+        "candidate": program(),
+        "lifecycle": {
+            "mode": "reopen" if reopen else "fresh",
+            "expected_reopen_state": state_json(expected) if reopen else None,
+        },
+    }
+    config_path = root / "config.json"
+    config_path.write_bytes(canonical_bytes(config) + b"\n")
+    return config_path, expected
+
+
+HARNESS_CORPUS_ID = "HARNESS"
+
+
+def _linked_payloads() -> tuple[bytes, bytes]:
+    """Two linked 81-byte payloads for dual packed/indexed parity.
+
+    Headers wire prev linkage so producer ``verify_index`` passes, while the
+    trailing suffix byte keeps the packed two-block shape. Harness-only and
+    not a C150/Cmodern identity.
+    """
+    header_one = (
+        struct.pack("<I", 1)
+        + bytes(32)
+        + bytes([1]) * 32
+        + struct.pack("<III", 1231006505, 0x1D00FFFF, 1)
+    )
+    first_digest = hashlib.sha256(hashlib.sha256(header_one).digest()).digest()
+    header_two = (
+        struct.pack("<I", 1)
+        + first_digest
+        + bytes([2]) * 32
+        + struct.pack("<III", 1231006506, 0x1D00FFFF, 2)
+    )
+    return (header_one + b"\x01", header_two + b"\x02")
+
+
+def _write_harness_products(root: Path, genesis: str, stop: str) -> Path:
+    document = {
+        "schema": "bitcoin-rs-campaign-corpora-v1",
+        "network": "mainnet",
+        "network_magic": MAGIC,
+        "genesis_hash": genesis,
+        "validation": {"assume_valid_height": 0},
+        "census_specials": ["taproot_key_path_spends"],
+        "core_oracle": {
+            "hash_type": "muhash",
+            "implementation": "Bitcoin Core 31.1",
+            "use_index": True,
+        },
+        "products": {
+            HARNESS_CORPUS_ID: {
+                "stop_height": 1,
+                "stop_hash": stop,
+                "block_count": 2,
+                "census": {"specials": "none"},
+                "state": {
+                    "txouts": 1,
+                    "total_amount_sat": 50,
+                    "muhash": "ab" * 32,
+                    "bestblock": stop,
+                    "oracle": "core_gettxoutsetinfo_muhash_at_stop",
+                },
+            }
+        },
+    }
+    path = root / "harness-products.json"
+    path.write_bytes(json.dumps(document, indent=2).encode("utf-8"))
+    return path
+
+
+def _build_dual_workspace(
+    root: Path, *, reopen: bool = False
+) -> tuple[Path, CertifiedState]:
+    """Packed archive plus indexed blk stream over the same linked bytes.
+
+    Proves harness custody and refusal mechanics only, not live C150/Cmodern
+    performance and not a live campaign.
+    """
+    payloads = _linked_payloads()
+    records = [_record(payload) for payload in payloads]
+    archive_bytes = b"".join(records)
+    archive_path = root / "blocks.dat"
+    archive_path.write_bytes(archive_bytes)
+    hashes = [header_hash(payload) for payload in payloads]
+    offset = 0
+    entries: list[JsonObject] = []
+    for height, (payload, digest, record) in enumerate(
+        zip(payloads, hashes, records, strict=True)
+    ):
+        entries.append(
+            {
+                "height": height,
+                "hash": digest,
+                "offset": offset,
+                "payload_length": len(payload),
+            }
+        )
+        offset += len(record)
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "network": "mainnet",
+        "network_magic": MAGIC,
+        "start_height": 0,
+        "stop_height": 1,
+        "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "archive_bytes": len(archive_bytes),
+        "blocks": entries,
+    }
+    manifest_path = root / "manifest.json"
+    manifest_path.write_bytes(canonical_bytes(manifest) + b"\n")
+    expected = _state(height=1, bestblock=hashes[-1])
+    node = _write_executable(root / "node.py", _node_source(expected, reopen=reopen))
+    digest = _sha256_file(node)
+
+    def program() -> JsonObject:
+        return {
+            "binary": str(node),
+            "binary_sha256": digest,
+            "command": _command(),
+            "reopen_command": _command(reopen=True) if reopen else None,
+        }
+
+    products_path = _write_harness_products(root, hashes[0], hashes[-1])
+    freeze = campaign_corpus.load_freeze(path=products_path)
+    source_dir = root / "blks"
+    source_dir.mkdir()
+    (source_dir / "blk00000.dat").write_bytes(records[0])
+    (source_dir / "blk00001.dat").write_bytes(records[1])
+    index_path = root / "harness.index"
+    campaign_corpus.build_index_from_scan(
+        freeze, HARNESS_CORPUS_ID, source_dir, index_path
+    )
+    config = {
+        "schema": CONFIG_SCHEMA,
+        "network_magic": MAGIC,
+        "arm_timeout_ns": 10_000_000_000,
+        "posture": {
+            "assume_valid": False,
+            "txindex": False,
+            "blockfilterindex": False,
+            "coinstatsindex": False,
+            "cache_policy": "process-cold/page-cache-unspecified",
+        },
+        "corpus": {
+            "archive": {
+                "path": str(archive_path),
+                "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                "bytes": len(archive_bytes),
+            },
+            "manifest": {
+                "path": str(manifest_path),
+                "sha256": _sha256_file(manifest_path),
+                "bytes": manifest_path.stat().st_size,
+            },
+        },
+        "indexed": {
+            "index": {
+                "path": str(index_path),
+                "sha256": _sha256_file(index_path),
+                "bytes": index_path.stat().st_size,
+            },
+            "source_dir": str(source_dir),
+            "products": {
+                "path": str(products_path),
+                "sha256": _sha256_file(products_path),
+                "bytes": products_path.stat().st_size,
             },
         },
         "expected_state": state_json(expected),
@@ -397,7 +573,9 @@ class CampaignTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root)
         output = root / OUTPUT_NAME
-        self.assertEqual(main(["--config", str(config_path), "--output", str(output)]), 0)
+        self.assertEqual(
+            main(["--config", str(config_path), "--output", str(output)]), 0
+        )
         result = json.loads(output.read_bytes())
         self.assertEqual(result["schema"], RESULT_SCHEMA)
         self.assertEqual(result["pair_count"], PAIR_COUNT)
@@ -407,7 +585,7 @@ class CampaignTests(unittest.TestCase):
         arms = result["arms"]
         assert isinstance(arms, list)
         self.assertEqual(len(arms), 14)
-        roles = [ _object(arm)["role"] for arm in arms ]
+        roles = [_object(arm)["role"] for arm in arms]
         self.assertEqual(
             roles,
             ["core", "candidate", "candidate", "core"] * 3 + ["core", "candidate"],
@@ -415,7 +593,10 @@ class CampaignTests(unittest.TestCase):
         for arm in arms:
             record = _object(arm)
             self.assertEqual(record["exit_code"], 0)
-            self.assertGreater(record["wall_ns"], 0)
+            wall_ns = record["wall_ns"]
+            if not isinstance(wall_ns, int):
+                self.fail(f"wall_ns must be an integer, got {type(wall_ns).__name__}")
+            self.assertGreater(wall_ns, 0)
             self.assertEqual(record["final_state"], state_json(expected))
         body = {key: value for key, value in result.items() if key != "result_sha256"}
         self.assertEqual(result["result_sha256"], canonical_sha256(body))
@@ -427,7 +608,9 @@ class CampaignTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root, reopen=True)
         output = root / OUTPUT_NAME
-        self.assertEqual(main(["--config", str(config_path), "--output", str(output)]), 0)
+        self.assertEqual(
+            main(["--config", str(config_path), "--output", str(output)]), 0
+        )
         result = json.loads(output.read_bytes())
         for arm in result["arms"]:
             record = _object(arm)
@@ -458,7 +641,9 @@ class CampaignTests(unittest.TestCase):
         config_path, expected = _build_workspace(root)
         failing = _write_executable(
             root / "fail.py",
-            _node_source(expected).replace("raise SystemExit(0)", "raise SystemExit(9)"),
+            _node_source(expected).replace(
+                "raise SystemExit(0)", "raise SystemExit(9)"
+            ),
         )
         config = json.loads(config_path.read_text())
         config["core"]["binary"] = str(failing)
@@ -543,6 +728,85 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(summary["samples"], 7)
         self.assertEqual(summary["p50_ns"], 40)
         self.assertEqual(summary["max_ns"], 70)
+
+
+class IndexedParityHarnessTests(unittest.TestCase):
+    """Dual packed/indexed parity over a synthetic two-block stream.
+
+    Proves harness custody and refusal mechanics only, not live C150/Cmodern
+    performance and not a live campaign.
+    """
+
+    def test_indexed_parity_publishes_a_gated_result(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-indexed-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, expected = _build_dual_workspace(root)
+        output = root / OUTPUT_NAME
+        self.assertEqual(
+            main(["--config", str(config_path), "--output", str(output)]), 0
+        )
+        result = json.loads(output.read_bytes())
+        self.assertEqual(result["schema"], RESULT_SCHEMA)
+        self.assertEqual(result["pair_count"], PAIR_COUNT)
+        self.assertEqual(result["arm_count"], 14)
+        correctness = _object(result["correctness"])
+        self.assertTrue(all(correctness.values()))
+        for arm in result["arms"]:
+            record = _object(arm)
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["final_state"], state_json(expected))
+
+    def test_indexed_source_mutation_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-indexed-mut-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_dual_workspace(root)
+        victim = root / "blks" / "blk00001.dat"
+        raw = bytearray(victim.read_bytes())
+        raw[10] ^= 0x01
+        victim.write_bytes(bytes(raw))
+        with self.assertRaises(ContractError):
+            load_config(config_path)
+
+    def test_indexed_truncation_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-indexed-trunc-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_dual_workspace(root)
+        victim = root / "blks" / "blk00001.dat"
+        data = victim.read_bytes()
+        victim.write_bytes(data[:-1])
+        with self.assertRaises(ContractError):
+            load_config(config_path)
+
+    def test_indexed_index_tamper_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-indexed-idx-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_dual_workspace(root)
+        index_path = root / "harness.index"
+        document = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = document["entries"]
+        assert isinstance(entries, list)
+        second = entries[1]
+        assert isinstance(second, dict)
+        second["hash"] = HASH64
+        index_path.write_bytes(canonical_bytes(document) + b"\n")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["indexed"]["index"]["sha256"] = _sha256_file(index_path)
+        config["indexed"]["index"]["bytes"] = index_path.stat().st_size
+        config_path.write_bytes(canonical_bytes(config) + b"\n")
+        with self.assertRaises(ContractError):
+            load_config(config_path)
+
+    def test_indexed_source_mutation_after_load_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-indexed-pin-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_dual_workspace(root)
+        config = load_config(config_path)
+        victim = root / "blks" / "blk00000.dat"
+        raw = bytearray(victim.read_bytes())
+        raw[20] ^= 0xFF
+        victim.write_bytes(bytes(raw))
+        with self.assertRaises(ContractError):
+            run_campaign(config, root / "arms")
 
 
 if __name__ == "__main__":

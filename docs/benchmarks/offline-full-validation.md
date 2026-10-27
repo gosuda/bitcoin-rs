@@ -7,8 +7,10 @@ and implements the frozen parity contract from issue #46.
 Both Bitcoin Core 31.1 and bitcoin-rs construct chainstate from the **same**
 hash-pinned Core-framed archive. The comparator never reaches inside either
 node. A ratio is computed only after every custody and correctness gate
-passes. This repository does not claim a live C150 or Cmodern campaign: CI
-proves the harness with fixture nodes.
+passes. The harness also accepts a dual packed/indexed input for custody
+parity: the packed archive plus a producer-owned indexed blk stream over the
+same verified logical bytes. This repository does not claim a live C150 or
+Cmodern campaign: CI proves the harness with fixture nodes only.
 
 ## What is held identical
 
@@ -30,11 +32,26 @@ One `offline-full-validation-config-v1` document binds every arm:
   inclusive height range, archive digest and size, and one packed entry per
   height (`hash`, `offset`, `payload_length`). Heights are contiguous. The
   packed records must consume the archive exactly.
+- **Indexed parity (harness)**: an optional `indexed` block names a
+  producer-owned `bitcoin-rs-corpus-index-v1` document, a directory of Core
+  `blkNNNNN.dat` sources, and the freeze file that binds them. At config
+  load the comparator runs producer `verify_index` once, then fully exhausts
+  `iter_indexed_framed` and requires the streamed framed bytes to equal the
+  packed archive digest and size. Magic must match, order and stop hash are
+  bound through the freeze tip plus the packed manifest tip, and any source
+  or index mutation refuses before any child starts.
 - **Pinned corpus**: after config load, the campaign copies archive and
   manifest into a private campaign directory, re-hashes both, and
-  chmod's them `0o400`. Every arm reads those pins. Before and after every
-  child, the controller re-hashes both pins and checks device, inode, size,
-  and mtime. A same-user child that chmod's and rewrites a pin fails closed.
+  chmod's them `0o400`. When `indexed` is present it also copies the index
+  document and every declared `blkNNNNN.dat` source into private custody at
+  `0o400`. Arms read the archive pin (`{corpus_path}` still resolves to the
+  packed archive pin); the index and blk pins are custody-only, verified but
+  not consumed through arm argv. Before and after every child, the
+  controller re-hashes every pin (archive, manifest, index, each blk source)
+  and checks device, inode, size, and mtime. A same-user child that chmod's
+  and rewrites a pin fails closed. Dual custody transiently holds the corpus
+  twice (packed bytes plus indexed sources); moving `{corpus_path}` to the
+  indexed pin belongs to the unresolved arm-invocation slice.
 - **Posture**: `assume_valid` must be false. `txindex`, `blockfilterindex`,
   and `coinstatsindex` must be off. Cache policy is the closed set
   `process-cold/page-cache-unspecified`. The sibling MuHash comparator
@@ -105,7 +122,10 @@ digests, posture, lifecycle), a `correctness` block (every gate `true` —
 the document cannot exist otherwise), every arm's wall/CPU/RSS, exit code,
 and certified state, per-role percentile summaries, and
 `candidate_over_core_p50_ratio`. `result_sha256` is the canonical hash of
-the document without that field.
+the document without that field. The indexed index digest and per-source
+digests are bound through `config_sha256` (the indexed block is part of the
+hashed config); the custody block keeps the packed archive/manifest shape so
+the result schema is unchanged.
 
 Raw argv is never published. Public command digests use the same
 category-only projection as the P2P loopback comparator.
@@ -119,16 +139,23 @@ python3 -m unittest test_offline_full_validation   # from tools/benchmark-campai
 ```
 
 Tests use a two-block Core-framed archive and deterministic fixture nodes
-that read the archive and write the certified state file. They prove the
+that read the archive and write the certified state file. Indexed harness
+tests add a dual packed/indexed case over the same two linked bytes with a
+synthetic harness freeze (not C150/Cmodern): an indexed golden plus source,
+truncation, index-tamper, and post-load pin refusals. They prove the
 harness, not live node performance. A live seven-pair campaign still needs
 hash-pinned `bitcoind` and bitcoin-rs binaries plus an exported archive of
 a corpus frozen by issue #42
 ([`docs/contracts/campaign-corpora.md`](../contracts/campaign-corpora.md));
-archive bytes are not stored in git.
+archive bytes are not stored in git. Indexed-only arm execution (no packed
+archive for arms) remains unresolved and is not claimed here.
 
 ## Limits
 
-Campaign ceilings: archive 1 TiB, manifest 512 MiB, 2 000 000 blocks.
+Campaign ceilings: archive 1 TiB, manifest 512 MiB, index 512 MiB,
+2 000 000 blocks, at most 10 000 blk sources. The 1 TiB bound covers both
+the packed archive and the indexed logical stream via byte-parity size
+equality; the index bound covers Cmodern metadata (tens of megabytes).
 Those bounds admit the Cmodern corpus (genesis .. 709,635); they are not a
 promise to ingest the live full-tip chain (~760 GiB), which is not a
 product corpus under issue #42.

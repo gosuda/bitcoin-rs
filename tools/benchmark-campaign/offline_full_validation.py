@@ -16,34 +16,35 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
-
-from p2p_loopback import _ChildSubreaperScope, _direct_children_pids
+from typing import NoReturn, Protocol, runtime_checkable
 
 from evidence import (
     ContractError,
-    _is_object,
+    JsonObject,
     _array,
+    _is_object,
+    _publish_result,
     _text,
     _uint,
+    _validate_json_depth,
     canonical_bytes,
     canonical_sha256,
-    _validate_json_depth,
     summarize,
-    _publish_result,
-    JsonObject,
 )
+from p2p_loopback import _ChildSubreaperScope, _direct_children_pids
 
 CONFIG_SCHEMA = "offline-full-validation-config-v1"
 MANIFEST_SCHEMA = "core-framed-archive-manifest-v1"
@@ -58,6 +59,14 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_BINARY_BYTES = 1024 * 1024 * 1024
 MAX_COMMAND_ARGS = 256
 MAX_BLOCKS = 2_000_000
+# Indexed representation ceilings, rejustified for Cmodern alongside the packed
+# ceilings above. The packed archive ceiling (1 TiB) still bounds the indexed
+# logical byte stream via byte-parity size equality. The index document is
+# metadata only (one small entry per block plus per-source fingerprints):
+# Cmodern needs tens of megabytes, well within the 512 MiB manifest-scale
+# bound reused here. Source count matches the producer bound.
+MAX_INDEX_BYTES = 512 * 1024 * 1024
+MAX_SOURCES = 10000
 MAX_ARM_TIMEOUT_NS = 4 * 60 * 60 * 1_000_000_000
 MIN_ARM_TIMEOUT_NS = 1_000_000_000
 CHILD_TERMINATE_GRACE_NS = 1_000_000_000
@@ -144,11 +153,13 @@ _POSTURE_KEYS = frozenset(
         "cache_policy",
     }
 )
-_PROGRAM_KEYS = frozenset(
-    {"binary", "binary_sha256", "command", "reopen_command"}
-)
+_PROGRAM_KEYS = frozenset({"binary", "binary_sha256", "command", "reopen_command"})
 _CORPUS_KEYS = frozenset({"archive", "manifest"})
 _FILE_REF_KEYS = frozenset({"path", "sha256", "bytes"})
+_INDEXED_KEYS = frozenset({"index", "source_dir", "products"})
+_INDEXED_SOURCE_KEYS = frozenset({"name", "sha256", "size"})
+_SOURCE_NAME_RE = re.compile(r"blk\d{5}\.dat")
+_INDEXED_CONFIG_KEY = "indexed"
 _MANIFEST_KEYS = frozenset(
     {
         "schema",
@@ -195,11 +206,39 @@ class FileIdentity:
 
 
 @dataclass(frozen=True)
+class IndexedInput:
+    """Dual-parity indexed inputs, distinct from the packed archive/manifest.
+
+    The packed corpus stays required for arm execution. When present, the
+    indexed block adds a producer-owned index document plus a directory of
+    Core blk files plus the freeze file that binds them to C150/Cmodern (or
+    to a synthetic harness freeze). Verification runs producer
+    ``verify_index`` once before exhausting ``iter_indexed_framed`` and
+    requires byte parity with the packed archive. Custody copies the index
+    file and every declared blk file with FileRef discipline.
+    """
+
+    index: FileRef
+    source_dir: Path
+    products: FileRef
+
+
+@dataclass(frozen=True)
+class PinnedIndexedSource:
+    name: str
+    ref: FileRef
+    identity: FileIdentity
+
+
+@dataclass(frozen=True)
 class PinnedCorpus:
     archive: FileRef
     archive_identity: FileIdentity
     manifest: FileRef
     manifest_identity: FileIdentity
+    index: FileRef | None
+    index_identity: FileIdentity | None
+    sources: tuple[PinnedIndexedSource, ...]
 
 
 @dataclass(frozen=True)
@@ -260,6 +299,7 @@ class Config:
     archive_identity: FileIdentity
     manifest: FileRef
     manifest_document: Manifest
+    indexed: IndexedInput | None
     expected_state: CertifiedState
     core: Program
     candidate: Program
@@ -386,6 +426,172 @@ def _identity_from_stat(info: os.stat_result, digest: str) -> FileIdentity:
     )
 
 
+@runtime_checkable
+class _IndexedFreeze(Protocol):
+    network_magic: bytes
+
+
+@runtime_checkable
+class _CampaignCorpusReader(Protocol):
+    def load_freeze(self, path: Path) -> _IndexedFreeze: ...
+    def verify_index(
+        self, freeze: _IndexedFreeze, index_path: Path, source_dir: Path
+    ) -> object: ...
+    def iter_indexed_framed(
+        self, freeze: _IndexedFreeze, index_path: Path, source_dir: Path
+    ) -> Iterator[bytes]: ...
+
+
+_CAMPAIGN_CORPUS: _CampaignCorpusReader | None = None
+
+
+def _campaign_corpus() -> _CampaignCorpusReader:
+    """Load the producer-owned indexed corpus reader without a new dependency.
+
+    The module lives in the sibling ``tools/campaign-corpus`` directory and
+    is loaded by path so the comparator needs no packaging change. The result
+    is cached. Callers use only the public handoff (``load_freeze``,
+    ``verify_index``, ``iter_indexed_framed``); all refusal semantics are
+    converted to the comparator ``ContractError`` at the call sites.
+    """
+    global _CAMPAIGN_CORPUS
+    if _CAMPAIGN_CORPUS is not None:
+        return _CAMPAIGN_CORPUS
+    path = Path(__file__).resolve().parent.parent / "campaign-corpus" / "corpus.py"
+    spec = importlib.util.spec_from_file_location("campaign_corpus", path)
+    if spec is None or spec.loader is None:
+        raise ContractError(f"cannot load campaign corpus reader: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except OSError as error:
+        del sys.modules[spec.name]
+        raise ContractError(f"cannot load campaign corpus reader: {error}") from error
+    except Exception as error:
+        del sys.modules[spec.name]
+        raise ContractError(
+            f"campaign corpus reader failed to load: {error}"
+        ) from error
+    if not isinstance(module, _CampaignCorpusReader):
+        del sys.modules[spec.name]
+        raise ContractError("campaign corpus reader lacks the indexed handoff")
+    _CAMPAIGN_CORPUS = module
+    return module
+
+
+def _parse_indexed(value: object) -> IndexedInput:
+    root = _object(value, "indexed", _INDEXED_KEYS)
+    index = _file_ref(root["index"], "indexed.index", MAX_INDEX_BYTES)
+    source_dir = Path(_text(root["source_dir"], "indexed.source_dir")).absolute()
+    if source_dir.is_symlink():
+        raise ContractError("indexed source_dir must not be a symlink")
+    if not source_dir.is_dir():
+        raise ContractError("indexed source_dir is not a directory")
+    products = _file_ref(root["products"], "indexed.products", MAX_CONFIG_BYTES)
+    return IndexedInput(index, source_dir, products)
+
+
+def _check_file_ref_binding(ref: FileRef, field: str) -> None:
+    """Refuse when a FileRef's live bytes do not match its declared identity."""
+    info, observed = _hash_regular(ref.path, field)
+    if info.st_size != ref.size or observed != ref.sha256:
+        raise ContractError(f"{field} changed before the campaign pin")
+
+
+def _load_indexed_freeze(products: FileRef) -> _IndexedFreeze:
+    _check_file_ref_binding(products, "indexed products")
+    module = _campaign_corpus()
+    try:
+        return module.load_freeze(path=products.path)
+    except (ValueError, OSError) as error:
+        raise ContractError(
+            f"indexed products freeze is not usable: {error}"
+        ) from error
+
+
+def _verify_indexed_parity(
+    archive: FileRef,
+    magic: bytes,
+    indexed: IndexedInput,
+) -> None:
+    """Verify the indexed stream and require byte parity with the packed archive.
+
+    Runs producer ``verify_index`` once before exhausting producer
+    ``iter_indexed_framed`` fully. The exhausted framed bytes are hashed
+    streaming and must equal the packed archive digest and size, which
+    preserves exact bytes, order, stop hash (via the freeze tip plus the
+    packed manifest tip), and mutation detection. Every producer refusal
+    becomes a comparator refusal with no result JSON.
+    """
+    _check_file_ref_binding(indexed.index, "indexed index")
+    freeze = _load_indexed_freeze(indexed.products)
+    freeze_magic = freeze.network_magic
+    if not isinstance(freeze_magic, (bytes, bytearray)) or bytes(freeze_magic) != magic:
+        raise ContractError("indexed freeze network magic does not match the config")
+    module = _campaign_corpus()
+    try:
+        module.verify_index(freeze, indexed.index.path, indexed.source_dir)
+    except (ValueError, OSError) as error:
+        raise ContractError(f"indexed verification refused: {error}") from error
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        framed = module.iter_indexed_framed(
+            freeze, indexed.index.path, indexed.source_dir
+        )
+        for chunk in framed:
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise ContractError("indexed stream yielded non-bytes")
+            hasher.update(chunk)
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ContractError("indexed logical stream exceeds MAX_ARCHIVE_BYTES")
+    except (ValueError, OSError) as error:
+        raise ContractError(f"indexed stream refused: {error}") from error
+    if total != archive.size:
+        raise ContractError("indexed logical size does not match the packed archive")
+    if hasher.hexdigest() != archive.sha256:
+        raise ContractError("indexed logical digest does not match the packed archive")
+
+
+def _indexed_sources_from_pinned_index(
+    index_path: Path,
+) -> list[tuple[str, str, int]]:
+    """List declared blk sources from a pinned index copy for custody pinning.
+
+    Full acceptance already ran via producer ``verify_index``; this parsing
+    only enumerates which files custody must copy. Entries are validated
+    minimally (basename shape, lowercase digest, positive size, no
+    duplicates, count bound) and returned in index order.
+    """
+    raw = _load_json(index_path, "indexed index", MAX_INDEX_BYTES)
+    if not _is_object(raw):
+        raise ContractError("indexed index must be a JSON object")
+    sources_raw = raw.get("sources")
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise ContractError("indexed index declares no sources")
+    if len(sources_raw) > MAX_SOURCES:
+        raise ContractError("indexed index declares too many sources")
+    seen: set[str] = set()
+    declared: list[tuple[str, str, int]] = []
+    for position, item in enumerate(sources_raw):
+        field = f"indexed sources[{position}]"
+        entry = _object(item, field, _INDEXED_SOURCE_KEYS)
+        name = _text(entry["name"], f"{field}.name")
+        if _SOURCE_NAME_RE.fullmatch(name) is None:
+            raise ContractError(f"{field}.name is not a blkNNNNN.dat basename")
+        if name in seen:
+            raise ContractError(f"duplicate indexed source {name!r}")
+        seen.add(name)
+        digest = _hash(entry["sha256"], f"{field}.sha256")
+        size = _uint(entry["size"], f"{field}.size", MAX_ARCHIVE_BYTES)
+        if size == 0:
+            raise ContractError(f"{field}.size must be positive")
+        declared.append((name, digest, size))
+    return declared
+
+
 def header_hash(payload: bytes) -> str:
     """Display-hex of double-SHA256 of the 80-byte header.
 
@@ -414,9 +620,13 @@ def _parse_manifest(value: object, archive: FileRef, magic: bytes) -> Manifest:
     if stop < start:
         raise ContractError("manifest stop_height is before start_height")
     archive_digest = _hash(root["archive_sha256"], "manifest.archive_sha256")
-    archive_bytes = _uint(root["archive_bytes"], "manifest.archive_bytes", MAX_ARCHIVE_BYTES)
+    archive_bytes = _uint(
+        root["archive_bytes"], "manifest.archive_bytes", MAX_ARCHIVE_BYTES
+    )
     if archive_digest != archive.sha256 or archive_bytes != archive.size:
-        raise ContractError("manifest archive identity does not match the corpus FileRef")
+        raise ContractError(
+            "manifest archive identity does not match the corpus FileRef"
+        )
     raw_blocks = _array(root["blocks"], "manifest.blocks")
     expected = stop - start + 1
     if not raw_blocks or len(raw_blocks) != expected or len(raw_blocks) > MAX_BLOCKS:
@@ -428,14 +638,18 @@ def _parse_manifest(value: object, archive: FileRef, magic: bytes) -> Manifest:
         height = _uint(item["height"], f"manifest.blocks[{index}].height")
         if height != start + index:
             raise ContractError("manifest heights must be contiguous from start_height")
-        offset = _uint(item["offset"], f"manifest.blocks[{index}].offset", MAX_ARCHIVE_BYTES)
+        offset = _uint(
+            item["offset"], f"manifest.blocks[{index}].offset", MAX_ARCHIVE_BYTES
+        )
         payload_length = _uint(
             item["payload_length"],
             f"manifest.blocks[{index}].payload_length",
             MAX_PAYLOAD_BYTES,
         )
         if payload_length < HEADER_BYTES:
-            raise ContractError(f"manifest.blocks[{index}] payload is shorter than a header")
+            raise ContractError(
+                f"manifest.blocks[{index}] payload is shorter than a header"
+            )
         if offset != cursor:
             raise ContractError(f"manifest.blocks[{index}] offset is not packed")
         record_length = 8 + payload_length
@@ -479,16 +693,22 @@ def _verify_archive(archive: FileRef, manifest: Manifest, magic: bytes) -> FileI
                 raise ContractError("archive ended inside a record header")
             digest.update(header)
             if header[:4] != magic:
-                raise ContractError(f"archive record {index} has the wrong network magic")
+                raise ContractError(
+                    f"archive record {index} has the wrong network magic"
+                )
             payload_length = int.from_bytes(header[4:], "little")
             if payload_length != entry.payload_length:
-                raise ContractError(f"archive record {index} length does not match the manifest")
+                raise ContractError(
+                    f"archive record {index} length does not match the manifest"
+                )
             payload = os.read(descriptor, payload_length)
             if len(payload) != payload_length:
                 raise ContractError("archive ended inside a block payload")
             digest.update(payload)
             if header_hash(payload) != entry.block_hash:
-                raise ContractError(f"archive record {index} header hash does not match the manifest")
+                raise ContractError(
+                    f"archive record {index} header hash does not match the manifest"
+                )
         trailing = os.read(descriptor, 1)
         if trailing:
             raise ContractError("archive contains trailing bytes after the last record")
@@ -535,6 +755,10 @@ def _require_pin(path: Path, expected: FileIdentity, field: str) -> None:
 def _assert_pins(pinned: PinnedCorpus) -> None:
     _require_pin(pinned.archive.path, pinned.archive_identity, "archive")
     _require_pin(pinned.manifest.path, pinned.manifest_identity, "manifest")
+    if pinned.index is not None and pinned.index_identity is not None:
+        _require_pin(pinned.index.path, pinned.index_identity, "indexed index")
+    for source in pinned.sources:
+        _require_pin(source.ref.path, source.identity, f"indexed source {source.name}")
 
 
 def _certified_state(value: object, field: str) -> CertifiedState:
@@ -550,7 +774,9 @@ def _certified_state(value: object, field: str) -> CertifiedState:
         _boolean(item["disconnect_ready"], f"{field}.disconnect_ready"),
     )
     if not state.bodies_available or not state.disconnect_ready:
-        raise ContractError(f"{field} must prove body availability and disconnect readiness")
+        raise ContractError(
+            f"{field} must prove body availability and disconnect readiness"
+        )
     return state
 
 
@@ -651,7 +877,20 @@ def _program(raw: object, role: str, reopen_required: bool) -> Program:
 
 
 def parse_config(value: object) -> Config:
-    root = _object(value, "config", _CONFIG_KEYS)
+    if not _is_object(value):
+        raise ContractError("config must be a JSON object")
+    actual_keys = frozenset(value)
+    if _INDEXED_CONFIG_KEY in actual_keys:
+        expected_keys = _CONFIG_KEYS | frozenset({_INDEXED_CONFIG_KEY})
+    else:
+        expected_keys = _CONFIG_KEYS
+    if actual_keys != expected_keys:
+        raise ContractError(
+            "config has wrong keys; "
+            f"missing_count={len(expected_keys - actual_keys)}, "
+            f"unknown_count={len(actual_keys - expected_keys)}"
+        )
+    root = value
     if root["schema"] != CONFIG_SCHEMA:
         raise ContractError(f"config.schema must be {CONFIG_SCHEMA}")
     magic = _magic(root["network_magic"], "network_magic")
@@ -687,11 +926,17 @@ def parse_config(value: object) -> Config:
     finally:
         os.close(descriptor)
     archive_identity = _verify_archive(archive, manifest, magic)
+    indexed: IndexedInput | None = None
+    if _INDEXED_CONFIG_KEY in root:
+        indexed = _parse_indexed(root[_INDEXED_CONFIG_KEY])
+        _verify_indexed_parity(archive, magic, indexed)
     expected = _certified_state(root["expected_state"], "expected_state")
     if expected.height != manifest.stop_height:
         raise ContractError("expected_state.height must equal the manifest stop height")
     if expected.bestblock != manifest.blocks[-1].block_hash:
-        raise ContractError("expected_state.bestblock must equal the final archive block hash")
+        raise ContractError(
+            "expected_state.bestblock must equal the final archive block hash"
+        )
     lifecycle_raw = _object(root["lifecycle"], "lifecycle", _LIFECYCLE_KEYS)
     mode = _text(lifecycle_raw["mode"], "lifecycle.mode")
     if mode not in {"fresh", "reopen"}:
@@ -699,9 +944,13 @@ def parse_config(value: object) -> Config:
     reopen_state_raw = lifecycle_raw["expected_reopen_state"]
     reopen_state: CertifiedState | None = None
     if mode == "reopen":
-        reopen_state = _certified_state(reopen_state_raw, "lifecycle.expected_reopen_state")
+        reopen_state = _certified_state(
+            reopen_state_raw, "lifecycle.expected_reopen_state"
+        )
         if reopen_state != expected:
-            raise ContractError("reopen state must equal the timed-trial certified state")
+            raise ContractError(
+                "reopen state must equal the timed-trial certified state"
+            )
     elif reopen_state_raw is not None:
         raise ContractError("fresh lifecycle forbids expected_reopen_state")
     core = _program(root["core"], "core", mode == "reopen")
@@ -714,7 +963,9 @@ def parse_config(value: object) -> Config:
         projected = dict(raw_value)
         projected["command"] = _public_argv(program.command)
         projected["reopen_command"] = (
-            None if program.reopen_command is None else _public_argv(program.reopen_command)
+            None
+            if program.reopen_command is None
+            else _public_argv(program.reopen_command)
         )
         public_root[role] = projected
     return Config(
@@ -725,6 +976,7 @@ def parse_config(value: object) -> Config:
         archive_identity,
         manifest_ref,
         manifest,
+        indexed,
         expected,
         core,
         candidate,
@@ -893,6 +1145,54 @@ def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
         config.manifest.size,
         "manifest",
     )
+    index_ref: FileRef | None = None
+    index_identity: FileIdentity | None = None
+    pinned_sources: list[PinnedIndexedSource] = []
+    if config.indexed is not None:
+        custody_index = custody / "index"
+        index_identity = _copy_readonly(
+            config.indexed.index.path,
+            custody_index,
+            config.indexed.index.sha256,
+            config.indexed.index.size,
+            "indexed index",
+        )
+        index_ref = FileRef(
+            custody_index,
+            config.indexed.index.sha256,
+            config.indexed.index.size,
+        )
+        declared = _indexed_sources_from_pinned_index(custody_index)
+        sources_dir = custody / "sources"
+        try:
+            sources_dir.mkdir()
+        except OSError as error:
+            raise ContractError(f"cannot pin indexed sources: {error}") from error
+        for name, digest, size in declared:
+            original = config.indexed.source_dir / name
+            dest = sources_dir / name
+            identity = _copy_readonly(
+                original,
+                dest,
+                digest,
+                size,
+                f"indexed source {name}",
+            )
+            pinned_sources.append(
+                PinnedIndexedSource(name, FileRef(dest, digest, size), identity)
+            )
+        try:
+            sources_fd = os.open(
+                sources_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            )
+        except OSError as error:
+            raise ContractError(
+                f"cannot dirsync indexed sources pin: {error}"
+            ) from error
+        try:
+            os.fsync(sources_fd)
+        finally:
+            os.close(sources_fd)
     try:
         dirfd = os.open(custody, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as error:
@@ -906,6 +1206,9 @@ def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
         archive_identity,
         FileRef(manifest_path, config.manifest.sha256, config.manifest.size),
         manifest_identity,
+        index_ref,
+        index_identity,
+        tuple(pinned_sources),
     )
 
 
@@ -955,8 +1258,7 @@ def _wait_child(
         sample = _sample_child(process.pid)
         if sample is not None:
             cpu_ns, rss = sample
-            if rss > peak_rss:
-                peak_rss = rss
+            peak_rss = max(peak_rss, rss)
         remaining = deadline_ns - time.monotonic_ns()
         if remaining <= 0:
             _kill_tree(process)
@@ -1199,12 +1501,16 @@ def _require_comparable(config: Config, arms: Sequence[ArmObservation]) -> None:
         expected_first = "core" if pair_index % 2 == 0 else "candidate"
         expected_second = "candidate" if expected_first == "core" else "core"
         if first.role != expected_first or second.role != expected_second:
-            raise ContractError("pair order must alternate Core-first then candidate-first")
+            raise ContractError(
+                "pair order must alternate Core-first then candidate-first"
+            )
         if first.pair_index != pair_index or second.pair_index != pair_index:
             raise ContractError("pair index is inconsistent")
         for arm in (first, second):
             if not arm.durability_ok or not arm.state_ok or arm.error is not None:
-                raise ContractError(f"{arm.role} arm {arm.order_index} failed its gates")
+                raise ContractError(
+                    f"{arm.role} arm {arm.order_index} failed its gates"
+                )
             if arm.binary_sha256 != (
                 config.core.binary_sha256
                 if arm.role == "core"
@@ -1229,15 +1535,11 @@ def run_campaign(config: Config, output_root: Path) -> JsonObject:
             first = config.core if pair_index % 2 == 0 else config.candidate
             second = config.candidate if first is config.core else config.core
             arms.append(
-                _run_arm(
-                    config, first, pair_index, order_index, output_root, pinned
-                )
+                _run_arm(config, first, pair_index, order_index, output_root, pinned)
             )
             order_index += 1
             arms.append(
-                _run_arm(
-                    config, second, pair_index, order_index, output_root, pinned
-                )
+                _run_arm(config, second, pair_index, order_index, output_root, pinned)
             )
             order_index += 1
     _require_comparable(config, arms)
