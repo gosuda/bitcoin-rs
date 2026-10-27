@@ -62,9 +62,16 @@ fn status(setup: &mut Setup<'_>, prefix: &str) -> io::Result<String> {
         if prefix == "STREAM STATUS " && line.starts_with(prefix) && result == "INVALID_ID" {
             return Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession));
         }
-        if prefix == "STREAM STATUS "
-            && line.starts_with(prefix)
-            && matches!(result, "CANT_REACH_PEER" | "TIMEOUT")
+        // Naming is part of dialing: an unresolved destination must reach the
+        // same AddrMan attempt owner as an explicit stream refusal. Only the
+        // documented naming miss qualifies; router errors and malformed replies
+        // are still local failures, not evidence against the requested peer.
+        if line.starts_with(prefix)
+            && matches!(
+                (prefix, result),
+                ("STREAM STATUS ", "CANT_REACH_PEER" | "TIMEOUT")
+                    | ("NAMING REPLY ", "KEY_NOT_FOUND")
+            )
         {
             return Err(super::remote_failure(message));
         }
@@ -342,6 +349,66 @@ mod tests {
     use base64::Engine as _;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::TcpListener;
+
+    #[test]
+    fn naming_failure_attribution_preserves_peer_retry_accounting() {
+        for (reply, remote) in [
+            ("NAMING REPLY RESULT=KEY_NOT_FOUND\n", true),
+            ("NAMING REPLY RESULT=INVALID_KEY\n", false),
+            ("NAMING REPLY RESULT=I2P_ERROR\n", false),
+            ("NAMING REPLY RESULT=TIMEOUT\n", false),
+            ("STREAM STATUS RESULT=KEY_NOT_FOUND\n", false),
+            ("NAMING REPLY RESULT=KEY_NOT_FOUND RESULT=OK\n", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("SAM");
+            let address = listener.local_addr().expect("address");
+            let endpoint = PeerEndpoint::new(PeerAddress::I2p([1; 32]), 8333);
+            let fixture = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("naming connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("hello");
+                stream
+                    .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                    .expect("hello reply");
+                line.clear();
+                reader.read_line(&mut line).expect("lookup");
+                assert_eq!(line, format!("NAMING LOOKUP NAME={}\n", endpoint.address()));
+                stream.write_all(reply.as_bytes()).expect("naming reply");
+                line.clear();
+                assert_eq!(reader.read_line(&mut line).expect("closed"), 0);
+                listener.set_nonblocking(true).expect("nonblocking");
+                assert_eq!(
+                    listener.accept().expect_err("no stream connection").kind(),
+                    io::ErrorKind::WouldBlock
+                );
+            });
+            let transport = OverlayTransport::new(Arc::new(crate::OverlayConfig {
+                i2p_sam: Some(address),
+                ..crate::OverlayConfig::default()
+            }));
+            let alive = Arc::new(AtomicBool::new(true));
+            *transport.sam.write() = Some(Session {
+                id: "fixture".to_owned(),
+                alive: Arc::clone(&alive),
+                local_address: endpoint,
+            });
+            let error = match transport.sam_connect(endpoint, &|| false) {
+                Ok(_) => panic!("failed naming opened a stream"),
+                Err(error) => error,
+            };
+            fixture.join().expect("fixture");
+            assert_eq!(
+                super::super::remote_connect_failed(&error),
+                remote,
+                "{reply}"
+            );
+            assert!(alive.load(Ordering::Acquire));
+        }
+    }
 
     #[test]
     fn naming_mismatch_or_invalid_destination_never_opens_a_stream() {
