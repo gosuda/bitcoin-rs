@@ -799,9 +799,21 @@ impl NodeConfig {
     /// an onion/general proxy, an I2P target without a SAM bridge, or
     /// an onlynet naming an overlay without its route is refused
     /// before any worker starts.
+    ///
+    /// A configured privacy route (general/onion proxy or I2P SAM bridge)
+    /// additionally forbids local DNS: DNS seeds resolve through the system
+    /// resolver and ordinary hostname `--connect` peers resolve via
+    /// `resolve()` on the dial path, so both would bypass the overlay.
+    /// They fail fast here instead of leaking or silently downgrading
+    /// privacy; typed IP, Tor, and I2P endpoints stay supported.
     fn validate_overlay(&self) -> Result<()> {
         let overlay = &self.p2p.overlay;
         let onion_route = overlay.onion.is_some() || overlay.proxy.is_some();
+        let privacy_route = onion_route || overlay.i2p_sam.is_some();
+        anyhow::ensure!(
+            !privacy_route || !self.p2p.dns_seeds_enabled,
+            "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
+        );
         anyhow::ensure!(
             !overlay
                 .onlynet
@@ -839,8 +851,13 @@ impl NodeConfig {
                         "--connect I2P target requires an I2P SAM bridge (--i2psam)"
                     );
                 }
-                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..))
-                | ClassifiedEndpoint::NonOverlay => {}
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..)) => {}
+                ClassifiedEndpoint::NonOverlay => {
+                    anyhow::ensure!(
+                        !privacy_route,
+                        "--connect target `{target}` is a hostname that would resolve via local DNS; with a proxy/overlay route configured, use a literal IP or overlay endpoint"
+                    );
+                }
             }
         }
         Ok(())

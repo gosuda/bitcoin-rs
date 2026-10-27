@@ -371,6 +371,7 @@ fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
     // resolved overlay carries them through.
     let routed = UserConfig {
         p2p: P2pOverrides {
+            dns_seeds: Some(false),
             onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
             i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
             i2pacceptincoming: Some(true),
@@ -421,6 +422,7 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
 
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
+            dns_seeds: Some(false),
             onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
             ..P2pOverrides::default()
         },
@@ -481,6 +483,7 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
     let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
+            dns_seeds: Some(false),
             i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
             ..P2pOverrides::default()
         },
@@ -571,6 +574,7 @@ fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
     let routed = UserConfig {
         p2p: P2pOverrides {
             onion: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            dns_seeds: Some(false),
             i2psam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
             connect: Some(vec![good_tor.clone(), good_i2p.clone()]),
             ..P2pOverrides::default()
@@ -583,6 +587,7 @@ fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
     // Tor also routes through a general proxy.
     let proxy_routed = UserConfig {
         p2p: P2pOverrides {
+            dns_seeds: Some(false),
             proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
             connect: Some(vec![good_tor.clone()]),
             ..P2pOverrides::default()
@@ -592,6 +597,165 @@ fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
     let proxy_config = super::resolve(&[&proxy_routed])?;
     assert_eq!(proxy_config.p2p.connect, vec![good_tor]);
 
+    Ok(())
+}
+
+#[test]
+fn privacy_routes_with_default_dns_seeds_are_rejected() {
+    // DNS seeds resolve through the local system resolver, so leaving them
+    // enabled behind a privacy route would leak intent around the overlay.
+    // Resolution must fail fast instead of bypassing the proxy/bridge.
+    let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
+    let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
+    for p2p in [
+        P2pOverrides {
+            proxy: Some(proxy),
+            ..P2pOverrides::default()
+        },
+        P2pOverrides {
+            onion: Some(proxy),
+            ..P2pOverrides::default()
+        },
+        P2pOverrides {
+            i2psam: Some(sam),
+            ..P2pOverrides::default()
+        },
+    ] {
+        let layer = UserConfig {
+            p2p,
+            ..UserConfig::default()
+        };
+        let Err(error) = super::resolve(&[&layer]) else {
+            panic!("a privacy route with default DNS seeds must fail validation");
+        };
+        assert!(
+            error.to_string().contains("--dns-seeds-enabled=false"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn privacy_route_with_dns_disabled_accepts_literal_ip() -> anyhow::Result<()> {
+    // Explicitly disabling DNS seeds opts into private routing; a literal
+    // IP fixed peer needs no resolution and stays supported.
+    let layer = UserConfig {
+        p2p: P2pOverrides {
+            proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            dns_seeds: Some(false),
+            connect: Some(vec!["127.0.0.1:8333".to_owned()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = super::resolve(&[&layer])?;
+    assert!(!config.p2p.dns_seeds_enabled);
+    assert_eq!(config.p2p.connect, vec!["127.0.0.1:8333".to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn hostname_connect_targets_are_rejected_with_privacy_route() {
+    // Ordinary hostnames resolve via `resolve()` on the dial path, bypassing
+    // any proxy/bridge, so they are refused while a privacy route stands.
+    let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
+    let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
+    for p2p in [
+        P2pOverrides {
+            proxy: Some(proxy),
+            dns_seeds: Some(false),
+            connect: Some(vec!["seed.bitcoin.sipa.be:8333".to_owned()]),
+            ..P2pOverrides::default()
+        },
+        P2pOverrides {
+            onion: Some(proxy),
+            dns_seeds: Some(false),
+            connect: Some(vec!["seed.bitcoin.sipa.be:8333".to_owned()]),
+            ..P2pOverrides::default()
+        },
+        P2pOverrides {
+            i2psam: Some(sam),
+            dns_seeds: Some(false),
+            connect: Some(vec!["seed.bitcoin.sipa.be:8333".to_owned()]),
+            ..P2pOverrides::default()
+        },
+    ] {
+        let layer = UserConfig {
+            p2p,
+            ..UserConfig::default()
+        };
+        let Err(error) = super::resolve(&[&layer]) else {
+            panic!("a hostname --connect target with a privacy route must fail validation");
+        };
+        assert!(error.to_string().contains("--connect"), "{error}");
+    }
+}
+
+#[test]
+fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> anyhow::Result<()> {
+    // Typed endpoints need no DNS: Tor/I2P names validate locally and dial
+    // through their route, so they stay supported with seeds disabled.
+    let good_tor =
+        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+            key: [9u8; 32],
+            port: 8333,
+        });
+    let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+    let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
+    let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
+
+    let onion_routed = UserConfig {
+        p2p: P2pOverrides {
+            dns_seeds: Some(false),
+            onion: Some(proxy),
+            connect: Some(vec![good_tor.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert_eq!(
+        super::resolve(&[&onion_routed])?.p2p.connect,
+        vec![good_tor.clone()]
+    );
+
+    let proxy_routed = UserConfig {
+        p2p: P2pOverrides {
+            dns_seeds: Some(false),
+            proxy: Some(proxy),
+            connect: Some(vec![good_tor.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert_eq!(
+        super::resolve(&[&proxy_routed])?.p2p.connect,
+        vec![good_tor]
+    );
+
+    let i2p_routed = UserConfig {
+        p2p: P2pOverrides {
+            dns_seeds: Some(false),
+            i2psam: Some(sam),
+            connect: Some(vec![good_i2p.clone()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert_eq!(super::resolve(&[&i2p_routed])?.p2p.connect, vec![good_i2p]);
+
+    // A literal IP fixed peer alongside a privacy route needs no DNS either.
+    let ip_routed = UserConfig {
+        p2p: P2pOverrides {
+            dns_seeds: Some(false),
+            proxy: Some(proxy),
+            connect: Some(vec!["192.0.2.1:8333".to_owned()]),
+            ..P2pOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = super::resolve(&[&ip_routed])?;
+    assert!(!config.p2p.dns_seeds_enabled);
+    assert_eq!(config.p2p.connect, vec!["192.0.2.1:8333".to_owned()]);
     Ok(())
 }
 
