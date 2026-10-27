@@ -926,7 +926,10 @@ fn scale_digits_to_sats(
         .ok_or(RpcError::InvalidParams(message))?;
 
     let digits_len = i32::try_from(digits.len()).map_err(|_| RpcError::InvalidParams(message))?;
-    if digits_len - point > 8 {
+    let frac_digits = digits_len
+        .checked_sub(point)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if frac_digits > 8 {
         return Err(RpcError::InvalidParams(message));
     }
 
@@ -3210,6 +3213,13 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("184467440737.09551616"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("18446744073709551616"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1e25"), "Invalid amount").is_err());
+        // Regression: `digits_len - point` overflows i32 for this input
+        // (point = -2147483646); it must return `InvalidParams`, not panic
+        // in an overflow-checking build.
+        assert!(matches!(
+            sats_from_btc(&json!("1.1e-2147483647"), "Invalid amount"),
+            Err(RpcError::InvalidParams("Invalid amount"))
+        ));
 
         // parse_btc_amount routes through sats_from_btc
         assert_eq!(parse_btc_amount(&json!("1e-8"))?, 1);
