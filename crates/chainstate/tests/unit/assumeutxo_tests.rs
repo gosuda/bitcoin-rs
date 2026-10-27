@@ -1321,3 +1321,47 @@ fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
     assert_eq!(known_progress(Some(&tip), 0.5), Some(0.5));
     Ok(())
 }
+
+/// P1 acceptance row 11 (C4 offer discipline at the manager seam): only full
+/// activation success stages a witness. The take-and-drop below exercises the
+/// exact manager seam the post-start offer path calls on every error path
+/// (`SnapshotControl::activate` takes and drops; that node-crate invocation
+/// itself is not executable from these chainstate tests and is reported as
+/// the residual gap): once taken, nothing survives for a later call to pair
+/// with. Restart recovery still mints from the durable `Validating` state.
+#[test]
+fn activation_offer_only_on_full_success() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+
+    // Settlement failure after manager success: take and drop the staged
+    // witness. The take proves staging happened; the drop proves nothing
+    // survives for a later call to pair with.
+    let staged = manager.take_pending_activation_witness();
+    assert!(staged.is_some(), "activation must stage a witness");
+    let _ = staged;
+    assert!(manager.take_pending_activation_witness().is_none());
+
+    // A later activation call is refused and stages nothing.
+    let retry = fixture.load()?;
+    assert!(matches!(
+        manager.activate_pinned_snapshot(retry.set, retry.tip_hash, &fixture.pinned),
+        Err(AssumeUtxoError::AlreadyActive)
+    ));
+    assert!(manager.take_pending_activation_witness().is_none());
+
+    // Restart recovery still mints from the durable `Validating` state,
+    // without the dropped witness.
+    drop(manager);
+    let reopened = fixture.manager(dir.path())?;
+    assert!(matches!(
+        reopened.status()?,
+        AssumeUtxoDiskStatus::Validating { .. }
+    ));
+    let initial =
+        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
+    assert!(initial.script_live_seed.is_some());
+    Ok(())
+}

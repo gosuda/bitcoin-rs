@@ -1146,3 +1146,76 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
     }
     Ok(())
 }
+
+/// P1 acceptance row 10 (C3 plus the section 7 open-fd row): restart recovery
+/// mints the seed from the durable `Validating` archive through the witnessed
+/// decode; the sealed descriptor keeps traversing after finalization and
+/// archive removal. Activation failure stages no witness, so no token exists.
+///
+/// "Pause" here is the C3 mint/traversal separation: the sealed artifact is
+/// held un-traversed across convergence and archive removal. The traversal
+/// exercised is `for_each_coin_raw`, the exact seam the index worker's seed
+/// path calls; worker dispatch itself (`SeedSlot` take, lease, streaming
+/// commits, pause barriers) lives in the index harness rows, not this file.
+#[test]
+fn import_finalize_remove_archive_seed_completes() -> TestResult {
+    // Negative first, on an untouched manager: a refused activation stages no
+    // witness, so no token exists to seed from.
+    let bad = Fixture::new()?;
+    let bad_dir = tempfile::tempdir()?;
+    let bad_manager = bad.manager(bad_dir.path())?;
+    let wrong = Hash256::default();
+    assert_ne!(wrong, bad.pinned.block_hash);
+    let rejected = bad.load()?;
+    assert!(matches!(
+        bad_manager.activate_pinned_snapshot(rejected.set, wrong, &bad.pinned),
+        Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
+    ));
+    assert!(bad_manager.take_pending_activation_witness().is_none());
+
+    // Positive: real activation commits the durable `Validating` root and its
+    // archive files.
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let archive = dir
+        .path()
+        .join("assumeutxo")
+        .join(fixture.pinned.block_hash.to_string());
+    assert!(archive.join("coins.dat").is_file());
+
+    // C3 restart mint: the witnessed decode seals the same descriptor it
+    // consumed. Hold it open (the pause) while the test converges the
+    // background chain and then removes the archive underneath it.
+    let initial =
+        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
+    assert!(matches!(
+        initial.resume_source,
+        crate::recovery::ResumeSource::Snapshot
+    ));
+    let mut seed = initial
+        .script_live_seed
+        .ok_or("restart recovery must mint a seed")?;
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    assert!(matches!(
+        manager.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    let _ = std::fs::remove_dir_all(&archive);
+    assert!(!archive.exists(), "the seed must not need its path");
+
+    // The held descriptor still traverses every accepted coin.
+    let expected = u64::try_from(initial.utxo.len())
+        .map_err(|error| format!("coin count does not fit u64: {error}"))?;
+    assert!(expected > 0, "the fixture must hold live coins");
+    let mut seen = 0_u64;
+    seed.for_each_coin_raw(&mut |_, _| {
+        seen += 1;
+        Ok::<(), std::convert::Infallible>(())
+    })?;
+    assert_eq!(seen, expected);
+    Ok(())
+}

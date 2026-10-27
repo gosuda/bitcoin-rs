@@ -648,6 +648,28 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 /// truncation, or trailing-byte append between the accepted load and a later
 /// raw traversal fails the length/digest comparison in
 /// [`VerifiedSnapshotArtifact::for_each_coin_raw`].
+///
+/// Every field is private to this module, so no code outside `utxo::snapshot`
+/// can spell a struct literal: the witnessed codec paths are the sole
+/// constructors. The rejected literal below names every field with its real
+/// type, so making foreign construction possible (visible fields plus a
+/// nameable origin) is what turns this `compile_fail` assertion red. The
+/// fence is deliberately unpinned: the refusal must hold for any compiler
+/// diagnostic, and only successful compilation fails the test.
+///
+/// ```compile_fail
+/// // No public constructor and no visible fields: a witness cannot be
+/// // spelled outside `utxo::snapshot`.
+/// let _foreign = bitcoin_rs_utxo::V4Witness {
+///     len: 0,
+///     sha256: [0; 32],
+///     tip_hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&[0; 32]),
+///     height: 0,
+///     record_count: 0,
+///     output_count: 0,
+///     origin: loop {},
+/// };
+/// ```
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V4Witness {
@@ -1035,5 +1057,180 @@ impl<R: Read + ?Sized> Read for TeeReader<'_, R> {
         self.hasher.update(&buf[..read]);
         self.len = count_bytes(self.len, read)?;
         Ok(read)
+    }
+}
+
+/// P1 acceptance row 5: malformed snapshots mint no witness.
+///
+/// Duplicate-txid and empty-record fixtures are rejected by both strict
+/// loaders, so [`read_snapshot_strict_v4_witnessed`] yields no [`V4Witness`]
+/// for them; a valid set mints through exactly one public path per direction
+/// (encode versus decode), pinned by [`V4Witness::is_decoded`].
+///
+/// Foreign construction (a struct literal outside `utxo::snapshot`) is barred
+/// by the private fields: the `compile_fail` doctest on [`V4Witness`] above
+/// asserts exactly that refusal, while this module asserts the runtime halves
+/// (rejection variants plus mint-direction provenance).
+#[cfg(test)]
+mod seed_no_token_tests {
+    use super::{
+        read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
+    };
+    use crate::{
+        UtxoError, UtxoKey, UtxoSet,
+        contract::{BlockChanges, UtxoAdd, commit_block_changes},
+    };
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+    use std::io::Cursor;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn txid(seed: u64) -> Hash256 {
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        bytes[8..16].copy_from_slice(&seed.rotate_left(23).to_le_bytes());
+        bytes[16..24].copy_from_slice(&seed.wrapping_mul(0x94d0_49bb_1331_11eb).to_le_bytes());
+        bytes[24..32].copy_from_slice(&seed.wrapping_add(0x0123_4567_89ab_cdef).to_le_bytes());
+        Hash256::from_le_bytes(&bytes)
+    }
+
+    fn txout(seed: u64) -> TestResult<TxOut> {
+        Ok(TxOut {
+            value: Amount::from_sat(2_000 + seed),
+            script_pubkey: vec![0x51, u8::try_from(seed % 256)?].into(),
+        })
+    }
+
+    /// Real two-record set through the public contract API: the positive
+    /// control every malformed fixture below is measured against.
+    fn fixture_set() -> TestResult<(UtxoSet, Hash256, u32)> {
+        let set = UtxoSet::new();
+        let first = txid(7_001);
+        let second = txid(7_002);
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(first.into(), 0),
+            txout(7_010)?,
+            false,
+            100,
+        ));
+        changes.add(UtxoAdd::new(
+            OutPoint::new(first.into(), 3),
+            TxOut {
+                value: Amount::from_sat(7_011),
+                script_pubkey: Script::new(),
+            },
+            true,
+            101,
+        ));
+        changes.add(UtxoAdd::new(
+            OutPoint::new(second.into(), 1),
+            txout(7_012)?,
+            false,
+            102,
+        ));
+        commit_block_changes(&set, &changes, &txid(7_003))?;
+        Ok((set, txid(7_004), 103))
+    }
+
+    /// Fixed 52-byte v4 header: magic, version 4, tip, height, record count.
+    fn header(tip: Hash256, height: u32, record_count: u64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&tip.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&record_count.to_le_bytes());
+        bytes
+    }
+
+    /// 45-byte record head with authoritative shard and prefix: the loader
+    /// must reach the semantic check, never an identity rejection.
+    fn record_head(record_txid: Hash256, output_count: u32) -> Vec<u8> {
+        let key = UtxoKey::from_txid(&Txid::from(record_txid));
+        let mut bytes = Vec::with_capacity(45);
+        bytes.push(key.shard());
+        bytes.extend_from_slice(&key.to_prefix());
+        bytes.extend_from_slice(&record_txid.to_le_bytes());
+        bytes.extend_from_slice(&output_count.to_le_bytes());
+        bytes
+    }
+
+    /// 19-byte vout header plus script, matching the strict output parser.
+    fn output(vout: u32, height: u32, script: &[u8]) -> TestResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&vout.to_le_bytes());
+        bytes.extend_from_slice(&1_000_u64.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&u16::try_from(script.len())?.to_le_bytes());
+        bytes.extend_from_slice(script);
+        Ok(bytes)
+    }
+
+    #[test]
+    fn seed_no_token_from_bad_bytes_and_no_foreign_mint() -> TestResult {
+        // Positive control: a valid set mints exactly one witness per public
+        // path, and the direction bit records which path minted it.
+        let (set, tip, height) = fixture_set()?;
+        let mut good = Vec::new();
+        let (_, (), encode_witness) = write_snapshot_witnessed(&set, &tip, height, &mut good, ())?;
+        let encode_witness = encode_witness.ok_or("valid encode must mint a witness")?;
+        assert_eq!(encode_witness.byte_len(), u64::try_from(good.len())?);
+        assert_eq!(encode_witness.record_count(), 2);
+        assert_eq!(encode_witness.output_count(), 3);
+        assert!(!encode_witness.is_decoded(), "encode must not claim decode");
+        let (load, (), decode_witness) =
+            read_snapshot_strict_v4_witnessed(&mut Cursor::new(good), ())?;
+        assert_eq!((load.tip_hash, load.height), (tip, height));
+        assert!(decode_witness.is_decoded(), "decode must claim decode");
+        assert_eq!(decode_witness.sha256(), encode_witness.sha256());
+        assert_eq!(decode_witness.byte_len(), encode_witness.byte_len());
+
+        // Duplicate txid: both records parse, the second insert replaces the
+        // first, and the declared/actual count agreement fails. No witness.
+        let duplicate = txid(11);
+        let mut duplicate_bytes = header(tip, height, 2);
+        for vout in [0_u32, 1] {
+            duplicate_bytes.extend_from_slice(&record_head(duplicate, 1));
+            duplicate_bytes.extend_from_slice(&output(vout, height, &[0x51])?);
+        }
+        duplicate_bytes.extend_from_slice(&[0_u8; 384]);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(duplicate_bytes.clone())),
+            Err(UtxoError::SnapshotRecordCountMismatch {
+                declared: 2,
+                actual: 1
+            })
+        ));
+        assert!(matches!(
+            read_snapshot_strict_v4_witnessed(&mut Cursor::new(duplicate_bytes), ()),
+            Err(UtxoError::SnapshotRecordCountMismatch {
+                declared: 2,
+                actual: 1
+            })
+        ));
+
+        // Empty record: the insert skips zero-output records, so the stranded
+        // declaration fails the same agreement. No witness.
+        let empty = txid(22);
+        let mut empty_bytes = header(tip, height, 1);
+        empty_bytes.extend_from_slice(&record_head(empty, 0));
+        empty_bytes.extend_from_slice(&[0_u8; 384]);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(empty_bytes.clone())),
+            Err(UtxoError::SnapshotRecordCountMismatch {
+                declared: 1,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            read_snapshot_strict_v4_witnessed(&mut Cursor::new(empty_bytes), ()),
+            Err(UtxoError::SnapshotRecordCountMismatch {
+                declared: 1,
+                actual: 0
+            })
+        ));
+        Ok(())
     }
 }
