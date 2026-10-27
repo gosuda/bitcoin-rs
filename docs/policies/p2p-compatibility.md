@@ -717,6 +717,18 @@ while dialing a destination, do update the existing address-book attempt
 and retry policy. Undocumented naming results (including `TIMEOUT`),
 authentication, malformed replies, local I/O and control
 session failures remain local errors.
+
+The existing outbound drain owns one retry policy for all `--connect` and
+persistent `addnode` destinations, including direct IP, SOCKS and SAM routes.
+The fixed-peer worker only resolves configured names and publishes desired
+destinations. It never schedules a connection. The drain canonicalizes pins,
+keeps at most one active dial per endpoint, and waits 1–60 seconds after
+completion or local admission refusal before retrying. Observing a ready
+connection resets its backoff; removing a pin removes its retry state.
+One-shot manual requests do not create retained retry state. Remote-vs-local
+failure attribution remains with the transport/listener and AddrMan owners
+described above; there is no overlay-specific peer retry loop.
+
 Control-session loss revokes I2P stream epochs, including late registrations,
 and the worker restores the selected stable destination with bounded backoff.
 

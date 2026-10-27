@@ -20,6 +20,8 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
+mod pinned;
+
 use crate::listener::ListenerError;
 
 /// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
@@ -392,6 +394,8 @@ pub struct P2pService {
     banned: BannedReader,
     address_book: Arc<crate::addrman::AddressBook>,
     added_nodes: Arc<RwLock<Vec<PeerEndpoint>>>,
+    /// Current fixed-peer resolution, published only by the resolver worker.
+    fixed_destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     outbound_tx: Sender<OutboundDial>,
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
@@ -455,6 +459,7 @@ impl P2pService {
             session_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             banned,
             added_nodes: Arc::new(RwLock::new(Vec::new())),
+            fixed_destinations: Arc::new(RwLock::new(Vec::new())),
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             inbound_headers_tx,
@@ -615,6 +620,7 @@ impl P2pService {
     ) -> Result<JoinHandle<()>, io::Error> {
         let address_book = Arc::clone(&self.address_book);
         let manual_nodes = Arc::clone(&self.added_nodes);
+        let fixed_destinations = Arc::clone(&self.fixed_destinations);
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
@@ -632,15 +638,17 @@ impl P2pService {
                 // full, retried in order once a slot opens.
                 let mut parked: VecDeque<OutboundDial> = VecDeque::new();
                 let mut handles = Vec::new();
-                let mut manual_retry: HashMap<PeerEndpoint, (Instant, Duration)> = HashMap::new();
+                let mut pinned = pinned::PinnedPeers::default();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 let mut next_feeler = Instant::now() + feeler_delay(bitcoin::secp256k1::rand::thread_rng().next_u64());
                 while !shutdown.load(Ordering::Acquire)
                     && !shared.session_cancel.load()
                     && !process_shutdown.is_triggered()
                 {
-                    reap_finished_outbound_connections(&mut active, &mut handles, &address_book);
                     let now = Instant::now();
+                    for endpoint in reap_finished_outbound_connections(&mut active, &mut handles, &address_book) {
+                        pinned.finished(endpoint, now);
+                    }
                     if now >= next_extra_peer_check {
                         next_extra_peer_check = now + EXTRA_PEER_CHECK_INTERVAL;
                         retire_extra_full_relay_connection(
@@ -695,14 +703,13 @@ impl P2pService {
                     }
                     {
                         let manual = manual_nodes.read();
-                        manual_retry.retain(|endpoint, _| manual.contains(endpoint));
-                        for &endpoint in manual.iter().filter(|endpoint| endpoint.address().ip().is_none() || shared.overlay.config.proxy.is_some()) {
-                            if peer_table.is_connected(endpoint) { manual_retry.remove(&endpoint); continue; }
-                            let (next, delay) = manual_retry.entry(endpoint).or_insert((Instant::now() + Duration::from_secs(1), Duration::from_secs(1)));
-                            if Instant::now() < *next || active.contains_key(&crate::addrman::canonical(endpoint)) { continue; }
+                        let fixed = fixed_destinations.read();
+                        let mut configured = manual.clone();
+                        configured.extend_from_slice(&fixed);
+                        for endpoint in pinned.due(&configured, &active, &peer_table, now) {
                             spawn_outbound_dial(&OutboundDial::pinned(endpoint), &shared, &mut active, &mut handles,
                                 full_relay_slots, block_relay_slots, extra_dial, max_peer_connections);
-                            *delay = (*delay * 2).min(Duration::from_secs(60)); *next = Instant::now() + *delay;
+                            if !active.contains_key(&endpoint) { pinned.finished(endpoint, now); }
                         }
                     }
                     let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
@@ -727,6 +734,8 @@ impl P2pService {
                         continue;
                     }
                     let manual = manual_nodes.read();
+                    let fixed = fixed_destinations.read();
+                    if dial.manual && (is_manual_endpoint(&manual, dial.addr) || is_manual_endpoint(&fixed, dial.addr)) { continue; }
                     if !dial.manual && is_manual_endpoint(&manual, dial.addr) {
                         defer_rejected_dial(&dial, &address_book, &active);
                         continue;
@@ -754,18 +763,16 @@ impl P2pService {
         if !self.config.fixed_peers.is_empty() {
             let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
-            let peer_table = Arc::clone(&self.peer_table);
-            let outbound_tx = self.outbound_tx.clone();
+            let destinations = Arc::clone(&self.fixed_destinations);
             let endpoints = self.config.fixed_peers.clone();
             let overlay = Arc::clone(&self.overlay);
             return thread::Builder::new()
                 .name("bitcoin-rs-fixed-peer-bootstrap".to_owned())
                 .spawn(move || {
-                    run_fixed_peer_bootstrap(
+                    run_fixed_peer_resolution(
                         shutdown,
                         network_active,
-                        peer_table,
-                        outbound_tx,
+                        destinations,
                         endpoints,
                         overlay,
                     );
@@ -1097,7 +1104,8 @@ fn reap_finished_outbound_connections(
     active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
     handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
     book: &crate::addrman::AddressBook,
-) {
+) -> Vec<PeerEndpoint> {
+    let mut finished = Vec::new();
     let mut index = 0;
     while index < handles.len() {
         if !handles[index].1.is_finished() {
@@ -1105,8 +1113,12 @@ fn reap_finished_outbound_connections(
             continue;
         }
         let (addr, handle) = handles.swap_remove(index);
-        if active.remove(&addr).is_some_and(|dial| !dial.manual) {
-            book.unqueue(addr);
+        if let Some(dial) = active.remove(&addr) {
+            if dial.manual {
+                finished.push(addr);
+            } else {
+                book.unqueue(addr);
+            }
         }
         match handle.join() {
             Ok(Ok(())) => tracing::debug!(addr = %addr, "p2p outbound connection exited cleanly"),
@@ -1116,6 +1128,7 @@ fn reap_finished_outbound_connections(
             Err(_) => tracing::warn!(addr = %addr, "p2p outbound connection panicked"),
         }
     }
+    finished
 }
 
 /// Use the existing outbound owner for one bounded probe; a feeler bypasses
@@ -1193,11 +1206,10 @@ fn wait_for_shutdown(shutdown: &AtomicBool, delay: Duration) -> bool {
 }
 
 #[expect(clippy::needless_pass_by_value)]
-fn run_fixed_peer_bootstrap(
+fn run_fixed_peer_resolution(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
-    peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<OutboundDial>,
+    destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     endpoints: Vec<String>,
     overlay: Arc<crate::overlay::OverlayTransport>,
 ) {
@@ -1208,34 +1220,23 @@ fn run_fixed_peer_bootstrap(
             }
             continue;
         }
-        'endpoints: for endpoint in &endpoints {
-            if !network_active.load(Ordering::Acquire) {
-                break 'endpoints;
-            }
-            let addresses = match overlay.resolve(endpoint, &|| {
+        let mut resolved = Vec::new();
+        for endpoint in &endpoints {
+            match overlay.resolve(endpoint, &|| {
                 shutdown.load(Ordering::Acquire) || !network_active.load(Ordering::Acquire)
             }) {
-                Ok(addresses) => addresses,
-                Err(error) => {
-                    tracing::warn!(endpoint, %error, "fixed peer resolution failed");
-                    continue;
-                }
-            };
-            for addr in addresses {
-                if peer_table.is_connected(addr) || !network_active.load(Ordering::Acquire) {
-                    continue;
-                }
-                if outbound_tx.try_send(OutboundDial::pinned(addr)).is_err() {
-                    break 'endpoints;
-                }
+                Ok(addresses) => resolved.extend(addresses),
+                Err(error) => tracing::warn!(endpoint, %error, "fixed peer resolution failed"),
             }
         }
+        // Resolution owns desired destinations; the outbound drain owns all
+        // connection eligibility, active handles and retry timing.
+        *destinations.write() = resolved;
         if wait_for_shutdown(&shutdown, Duration::from_secs(2)) {
             break;
         }
     }
 }
-
 /// Chooses the role of one dial, pinned or automatic.
 ///
 /// PRE: `dial` is a dequeued outbound request; the remaining arguments are
@@ -3145,7 +3146,7 @@ mod tests {
             handles.push((address, thread::spawn(|| Ok(()))));
             let deadline = Instant::now() + Duration::from_secs(5);
             while !handles.is_empty() && Instant::now() < deadline {
-                reap_finished_outbound_connections(&mut active, &mut handles, &book);
+                let _ = reap_finished_outbound_connections(&mut active, &mut handles, &book);
                 thread::sleep(Duration::from_millis(1));
             }
             assert_eq!(handles.len(), 0);
