@@ -1050,6 +1050,7 @@ echo "==> starting node A (onion service + i2p accept)"
 start_node "${A_DATADIR}" "${A_RPC_PORT}" "${A_P2P_PORT}" "${A_LOG}" \
   --onion-proxy "127.0.0.1:${TOR_SOCKS_PORT}" \
   --tor-control "127.0.0.1:${TOR_CONTROL_PORT}" \
+  --tor-cookie "${TORNET_DIR}/client/control_auth_cookie" \
   --i2p-sam "127.0.0.1:${REC_SAM_PORT_A}" \
   --i2p-accept
 A_PID=$!
@@ -1283,6 +1284,7 @@ echo "==> Restarting Node A with preserved data directory"
 start_node "${A_DATADIR}" "${A_RPC_PORT}" "${A_P2P_PORT}" "${A_LOG2}" \
   --onion-proxy "127.0.0.1:${TOR_SOCKS_PORT}" \
   --tor-control "127.0.0.1:${TOR_CONTROL_PORT}" \
+  --tor-cookie "${TORNET_DIR}/client/control_auth_cookie" \
   --i2p-sam "127.0.0.1:${REC_SAM_PORT_A}" \
   --i2p-accept
 A_PID=$!
