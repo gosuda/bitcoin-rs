@@ -16,6 +16,9 @@ use crate::{
 const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
 const SNAPSHOT_WRITE_VERSION: u32 = 4;
 const MUHASH_TRAILER_LEN: usize = 384;
+/// Bounded read buffer for raw seed traversal: large enough to coalesce the
+/// decoder's per-field reads, small enough to stay flat in snapshot size.
+const SEED_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -847,7 +850,7 @@ impl VerifiedSnapshotArtifact {
         // digest still cover exactly what the parser reads while the file
         // sees bulk reads; prefetch never reaches the hash.
         let capped = Read::by_ref(&mut self.file).take(limit);
-        let mut buffered = BufReader::new(capped);
+        let mut buffered = BufReader::with_capacity(SEED_READ_BUFFER_BYTES, capped);
         let mut tee = TeeReader::new(&mut buffered);
         let stream = read_raw_snapshot_stream(&mut tee, emit, cancelled)?;
         let (digest, len) = tee.finish();

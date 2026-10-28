@@ -1,18 +1,23 @@
 //! Chain identity capture and exact-identity transaction reads for bundles.
 //!
 //! Both export and restore resolve a recorded locator the same way: take the
-//! block hash at the row's height from the applied-tip ancestry, read the
-//! transaction bytes at the recorded position through the existing body
-//! source, decode them, and compare the full 32-byte transaction id. A
-//! prefix match alone never resolves a locator.
+//! block hash at the row's height from the applied-tip ancestry, load the
+//! whole body, and require the recorded offset and length to equal one parsed
+//! top-level transaction span before comparing the full 32-byte transaction
+//! id. Bytes that merely decode to a transaction elsewhere in the block (an
+//! embedded serialization inside a script or witness) never resolve a
+//! locator. A prefix match alone never resolves a locator.
 
 use super::artifact::CANCEL_POLL_RECORDS;
 use super::{IndexBundleError, Withheld};
+use std::collections::{HashMap, VecDeque};
 use crate::types::TxPosition;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, ChainTxCount, ChainWork, NodeId, NodeStatus, TipSnapshot,
 };
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, deserialize, varint};
+use bitcoin_rs_primitives::{
+    BlockHash, Hash256, Header, Tx, deserialize, layout::ParsedBlock, varint,
+};
 
 /// The applied-tip ancestry up to a bundle base, with the base's identity.
 ///
@@ -279,55 +284,168 @@ fn block_tx_count(
 
 /// How one recorded locator resolved.
 pub(super) enum Located {
-    /// The bytes at the position decode to this transaction.
+    /// The position equals the top-level span of this transaction.
     Found(Tx),
     /// The block body is not available: absent or pruned, not corrupt.
     BodyMissing,
-    /// The body exists but the position is out of range or does not decode.
+    /// The body exists but the position is not a top-level transaction span.
     Mismatch,
 }
 
-/// Reads single transactions through the existing body source, with a
-/// one-body memo, keyed by block identity, for sources that cannot slice.
+/// Reports whether `position` equals the top-level transaction span
+/// `[start, start + len)`. Offsets inside a transaction (an embedded
+/// serialization in a script or witness) and overlapping or truncated spans
+/// never match, even when the bytes there decode to a transaction.
+pub(super) fn is_top_level_span(position: TxPosition, start: u32, len: u32) -> bool {
+    position.offset() == start && position.byte_len() == len
+}
+
+/// Reads single transactions through the existing body source, with a small
+/// bounded LRU of parsed bodies keyed by block identity. The strict span rule
+/// needs the whole body, so each entry keeps the body together with its
+/// parsed top-level transaction spans: a block is read and parsed once per
+/// cache fill, and each lookup is a binary search plus one transaction
+/// decode.
+///
+/// Stored locator order is transaction-id order, so consecutive records
+/// usually name different heights and a one-body memo reloads and reparses a
+/// block per record. The window keeps recently used bodies resident across
+/// those interleaved lookups.
+///
+/// How many parsed block bodies are kept resident. The bound is on body
+/// count, not bytes: each body is at most `MAX_SERIALIZED_BLOCK_BYTES`
+/// (4 MiB), so eight bodies pin at most ~32 MiB transiently on the bundle
+/// worker.
+const BODY_CACHE_BLOCKS: usize = 8;
+
 pub(super) struct BodyReader<'a> {
     source: &'a dyn BlockBodySource,
-    whole_body: Option<(u32, Hash256, Vec<u8>)>,
+    /// Parsed bodies, most-recently-used first, capped at
+    /// [`BODY_CACHE_BLOCKS`] entries.
+    bodies: VecDeque<HeldBody>,
+    /// Transaction counts observed per `(height, hash)`, retained after the
+    /// body itself is evicted so the completeness pass reuses the first
+    /// parse instead of re-reading the block.
+    counts: HashMap<(u32, Hash256), u64>,
+}
+
+/// One memoized block body and its top-level transaction spans.
+struct HeldBody {
+    height: u32,
+    hash: Hash256,
+    body: Vec<u8>,
+    /// `(start, len)` of every top-level transaction, ascending by start.
+    spans: Vec<(u32, u32)>,
 }
 
 impl<'a> BodyReader<'a> {
     pub(super) fn new(source: &'a dyn BlockBodySource) -> Self {
         Self {
             source,
-            whole_body: None,
+            bodies: VecDeque::with_capacity(BODY_CACHE_BLOCKS),
+            counts: HashMap::new(),
         }
     }
 
-    /// Resolves `position` inside the block `(height, hash)`.
+    /// Resolves `position` to the top-level transaction at that exact span.
     ///
-    /// A ranged read answering `None` is ambiguous (unsupported, out of
-    /// range, or missing), so it falls back to the whole body, which alone can
-    /// tell a missing body from an out-of-range position.
+    /// A ranged read that merely decodes is not enough: the offset and length
+    /// must equal one parsed transaction span of the whole body. An
+    /// out-of-range position or bytes that decode away from any boundary
+    /// report `Mismatch`; an absent or pruned body reports `BodyMissing`.
     pub(super) fn transaction(
         &mut self,
         height: u32,
         hash: Hash256,
         position: TxPosition,
     ) -> Result<Located, IndexBundleError> {
-        let (offset, len) = (position.offset(), position.byte_len());
-        if let Some(bytes) =
-            self.source
-                .block_body_range(height, BlockHash::from(hash), offset, len)
-        {
-            return Ok(decode(&bytes, len));
+        let Some(held) = self.held_body(height, hash)? else {
+            return Ok(Located::BodyMissing);
+        };
+        let Ok(index) = held
+            .spans
+            .binary_search_by_key(&position.offset(), |&(start, _)| start)
+        else {
+            return Ok(Located::Mismatch);
+        };
+        let (start, len) = held.spans[index];
+        if !is_top_level_span(position, start, len) {
+            return Ok(Located::Mismatch);
         }
-        if self
-            .whole_body
-            .as_ref()
-            .is_none_or(|(held_height, held_hash, _)| *held_height != height || *held_hash != hash)
+        let bytes = usize::try_from(start)
+            .ok()
+            .zip(usize::try_from(len).ok())
+            .and_then(|(start, len)| held.body.get(start..start.checked_add(len)?))
+            .unwrap_or_else(|| unreachable!("parsed span lies inside its body"));
+        deserialize::<Tx>(bytes)
+            .map(Located::Found)
+            .map_err(|error| IndexBundleError::BodyRead {
+                height,
+                reason: format!("parsed transaction does not decode: {error}"),
+            })
+    }
+
+    /// Transactions the block `(height, hash)` holds, or `None` when the body
+    /// is absent or pruned. A count observed while resolving a locator is
+    /// reused without re-reading the block; otherwise metadata answers
+    /// without I/O when the source keeps it, else the cached spans give the
+    /// count.
+    pub(super) fn block_tx_count(
+        &mut self,
+        height: u32,
+        hash: Hash256,
+    ) -> Result<Option<u64>, IndexBundleError> {
+        if let Some(&count) = self.counts.get(&(height, hash)) {
+            return Ok(Some(count));
+        }
+        if let Some(metadata) = self
+            .source
+            .block_body_metadata(height, BlockHash::from(hash))
+        {
+            let count = u64::try_from(metadata.tx_count).map_err(|_| {
+                IndexBundleError::BodyRead {
+                    height,
+                    reason: "the transaction count does not fit u64".to_owned(),
+                }
+            })?;
+            self.counts.insert((height, hash), count);
+            return Ok(Some(count));
+        }
+        let count = self
+            .held_body(height, hash)?
+            .map(|held| u64::try_from(held.spans.len()).unwrap_or(u64::MAX));
+        if let Some(count) = count {
+            self.counts.insert((height, hash), count);
+        }
+        Ok(count)
+    }
+
+    /// Cached body and spans for `(height, hash)`, or `None` when the
+    /// source has no body. Hits move the entry to the front of the bounded
+    /// LRU; misses load, parse, count, and evict the least-recently-used
+    /// entry past [`BODY_CACHE_BLOCKS`]. A read or parse failure is
+    /// `BodyRead`, never `BodyMissing`.
+    fn held_body(
+        &mut self,
+        height: u32,
+        hash: Hash256,
+    ) -> Result<Option<&HeldBody>, IndexBundleError> {
+        if let Some(index) = self
+            .bodies
+            .iter()
+            .position(|held| held.height == height && held.hash == hash)
+        {
+            let held = self
+                .bodies
+                .remove(index)
+                .unwrap_or_else(|| unreachable!("cached body index is in bounds"));
+            self.bodies.push_front(held);
+            return Ok(self.bodies.front());
+        }
         {
             let body = match self.source.block_body(height, BlockHash::from(hash)) {
                 Ok(Some(body)) => body,
-                Ok(None) => return Ok(Located::BodyMissing),
+                Ok(None) => return Ok(None),
                 Err(error) => {
                     return Err(IndexBundleError::BodyRead {
                         height,
@@ -335,25 +453,32 @@ impl<'a> BodyReader<'a> {
                     });
                 }
             };
-            self.whole_body = Some((height, hash, body));
+            let spans = ParsedBlock::parse_exact(&body)
+                .map_err(|error| IndexBundleError::BodyRead {
+                    height,
+                    reason: format!("block does not parse: {error}"),
+                })?
+                .transactions()
+                .iter()
+                .map(|tx| (tx.span().start(), tx.span().len()))
+                .collect::<Vec<_>>();
+            self.counts
+                .entry((height, hash))
+                .or_insert_with(|| u64::try_from(spans.len()).unwrap_or(u64::MAX));
+            self.bodies.push_front(HeldBody {
+                height,
+                hash,
+                body,
+                spans,
+            });
+            while self.bodies.len() > BODY_CACHE_BLOCKS {
+                self.bodies.pop_back();
+            }
         }
-        let Some((_, _, body)) = self.whole_body.as_ref() else {
-            return Ok(Located::BodyMissing);
-        };
-        let slice = usize::try_from(offset)
-            .ok()
-            .zip(usize::try_from(len).ok())
-            .and_then(|(start, len)| body.get(start..start.checked_add(len)?));
-        Ok(slice.map_or(Located::Mismatch, |bytes| decode(bytes, len)))
+        Ok(self.bodies.front())
     }
 }
 
-pub(super) fn decode(bytes: &[u8], expected_len: u32) -> Located {
-    if usize::try_from(expected_len) != Ok(bytes.len()) {
-        return Located::Mismatch;
-    }
-    deserialize::<Tx>(bytes).map_or(Located::Mismatch, Located::Found)
-}
 
 #[cfg(test)]
 mod tests {
@@ -362,7 +487,8 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
-    use bitcoin_rs_chain::BlockTree;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin_rs_chain::{BlockBodyReadError, BlockTree};
     use bitcoin_rs_primitives::CompactTarget;
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -426,6 +552,136 @@ mod tests {
                 Err(IndexBundleError::Cancelled)
             ));
         }
+        Ok(())
+    }
+
+    struct OneBody {
+        height: u32,
+        hash: Hash256,
+        body: Vec<u8>,
+    }
+
+    impl BlockBodySource for OneBody {
+        fn block_body(
+            &self,
+            height: u32,
+            hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+            if height == self.height && hash == BlockHash::from(self.hash) {
+                return Ok(Some(self.body.clone()));
+            }
+            Ok(None)
+        }
+    }
+
+    fn find_needle(haystack: &[u8], needle: &[u8]) -> Option<u32> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    fn unique_tx(seed: u8) -> bitcoin::Transaction {
+        let mut prev = [seed; 32];
+        prev[0] = 0x9e;
+        bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array(prev),
+                    vout: u32::from(seed),
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+
+    /// An embedded transaction serialization must not resolve a locator, even
+    /// though its bytes decode to a valid transaction, while every exact
+    /// top-level span still resolves to its own transaction id. Export and
+    /// restore share this `BodyReader`, so one fixture proves the rule once
+    /// for both paths.
+    #[test]
+    fn strict_resolution_rejects_embedded_serialization() -> TestResult {
+        use bitcoin::consensus::encode::serialize;
+        use bitcoin::hashes::Hash as _;
+        let inner = unique_tx(0x7e);
+        let inner_bytes = serialize(&inner);
+        let _: Tx = deserialize(&inner_bytes)?;
+
+        let mut outer = unique_tx(0x3a);
+        outer.output[0].script_pubkey = bitcoin::ScriptBuf::from_bytes(inner_bytes.clone());
+        let coinbase = unique_tx(0x01);
+        let block = bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::from_byte_array([0_u8; 32]),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: bitcoin::pow::CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            },
+            txdata: vec![coinbase, outer],
+        };
+        let body = serialize(&block);
+        let parsed = ParsedBlock::parse_exact(&body)?;
+        assert_eq!(
+            parsed.tx_count(),
+            2,
+            "fixture holds two top-level transactions"
+        );
+
+        let height = 7_u32;
+        let hash = Hash256::from_le_bytes(&[0xab_u8; 32]);
+        let source = OneBody {
+            height,
+            hash,
+            body: body.clone(),
+        };
+        let mut reader = BodyReader::new(&source);
+        for tx in parsed.transactions() {
+            let span = tx.span();
+            let position = TxPosition::new(span.start(), span.len());
+            let expected = tx.materialize().txid().0.to_le_bytes();
+            match reader.transaction(height, hash, position)? {
+                Located::Found(found) => assert_eq!(
+                    found.txid().0.to_le_bytes(),
+                    expected,
+                    "exact top-level span must resolve to its own transaction"
+                ),
+                Located::BodyMissing => panic!("fixture body must be available"),
+                Located::Mismatch => panic!("exact top-level span must resolve"),
+            }
+        }
+
+        let inner_len = u32::try_from(inner_bytes.len())?;
+        let offset = find_needle(&body, &inner_bytes).ok_or("embedded bytes not in the body")?;
+        let embedded = TxPosition::new(offset, inner_len);
+        assert!(
+            !parsed
+                .transactions()
+                .iter()
+                .map(|tx| (tx.span().start(), tx.span().len()))
+                .any(|span| span == (offset, inner_len)),
+            "embedded position must differ from every top-level span"
+        );
+        let start = usize::try_from(offset)?;
+        let len = usize::try_from(inner_len)?;
+        let _: Tx = deserialize(&body[start..start + len])?;
+        assert!(
+            matches!(
+                reader.transaction(height, hash, embedded)?,
+                Located::Mismatch
+            ),
+            "bytes that merely decode inside a script must not resolve"
+        );
         Ok(())
     }
 }

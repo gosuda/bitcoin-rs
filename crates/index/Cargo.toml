@@ -39,6 +39,7 @@ compact_str.workspace = true
 crossbeam-channel.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 bitcoin.workspace = true
 bitcoin_hashes.workspace = true
 secp256k1 = { workspace = true, optional = true }

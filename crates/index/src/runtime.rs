@@ -36,9 +36,9 @@ use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use crate::query_api::{
-    AtPrefix, DerivedIndexInfo, DerivedIndexQuery, HistoricalQueryError,
-    HistoricalUnavailableCause, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
+    AtPrefix, DerivedIndexInfo, DerivedIndexQuery, HistoricalQueryError, ScriptHistoryRecord,
+    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    TxUnavailableCause,
 };
 
 use bitcoin_rs_storage::{
@@ -84,8 +84,8 @@ pub use startup::open_derived_index_store_on_worker;
 
 pub use capability::DerivedIndexCapability;
 pub use query::DerivedIndexQueryEngine;
-use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
+use query::{IndexProgress, map_historical_error};
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
@@ -421,16 +421,6 @@ pub struct DerivedIndexQueryAdapter {
     lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
 }
 
-fn map_historical_load_error(error: TxQueryError) -> HistoricalQueryError {
-    match error {
-        TxQueryError::Retry => HistoricalQueryError::Retry,
-        TxQueryError::Storage(message) => HistoricalQueryError::Storage(message),
-        TxQueryError::Unavailable(cause) => {
-            HistoricalQueryError::Unavailable(HistoricalUnavailableCause::Shared(cause))
-        }
-    }
-}
-
 impl DerivedIndexQueryAdapter {
     /// Constructs the stable adapter over the lifecycle publication cell.
     #[must_use]
@@ -445,7 +435,7 @@ impl DerivedIndexQueryAdapter {
         &self,
         txid: &Txid,
     ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        let engine = self.load_engine().map_err(map_historical_error)?;
         engine.transaction_at_prefix(txid)
     }
 
@@ -456,7 +446,7 @@ impl DerivedIndexQueryAdapter {
         &self,
         script: ScriptHash,
     ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        let engine = self.load_engine().map_err(map_historical_error)?;
         engine.script_history_at_prefix(script)
     }
 
@@ -467,7 +457,7 @@ impl DerivedIndexQueryAdapter {
         &self,
         outpoint: OutPoint,
     ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_load_error)?;
+        let engine = self.load_engine().map_err(map_historical_error)?;
         engine.spender_at_prefix(outpoint)
     }
 
@@ -892,5 +882,4 @@ mod supervisor_tests;
 mod recovery_tests;
 
 #[cfg(all(test, feature = "fjall"))]
-#[expect(clippy::expect_used, clippy::panic)]
-mod seed_paused_tests;
+mod tests;

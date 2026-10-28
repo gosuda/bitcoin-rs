@@ -4,15 +4,14 @@
 
 use super::{
     Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
-    DerivedIndexRuntime, Hash256, HistoricalQueryError, HistoricalUnavailableCause,
-    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES,
-    Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT,
-    QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryRecord,
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
-    TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue,
-    TxQueryError, TxUnavailableCause, Txid, deserialize,
+    DerivedIndexRuntime, Hash256, HistoricalQueryError, IndexCapabilities, IndexCapability,
+    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
+    QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT,
+    ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+    ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    TxPosition, TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
-use crate::query_api::CoveredPrefix;
+use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause};
 use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
@@ -66,12 +65,12 @@ impl QueryBudget {
         &mut self,
         scan: TxIndexScan,
     ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
-        if !scan.complete {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::PrefixScanTruncated,
-            ));
-        }
-        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        self.accept_completed_scan(
+            scan.complete,
+            TxUnavailableCause::PrefixScanTruncated,
+            scan.rows.len(),
+            scan.encoded_bytes,
+        )?;
         Ok(scan.rows)
     }
 
@@ -79,13 +78,26 @@ impl QueryBudget {
         &mut self,
         scan: ScriptLiveScan,
     ) -> Result<Vec<crate::ScriptLiveRow>, TxQueryError> {
-        if !scan.complete {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::LivePrefixScanTruncated,
-            ));
-        }
-        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        self.accept_completed_scan(
+            scan.complete,
+            TxUnavailableCause::LivePrefixScanTruncated,
+            scan.rows.len(),
+            scan.encoded_bytes,
+        )?;
         Ok(scan.rows)
+    }
+
+    fn accept_completed_scan(
+        &mut self,
+        complete: bool,
+        truncated: TxUnavailableCause,
+        rows: usize,
+        encoded_bytes: usize,
+    ) -> Result<(), TxQueryError> {
+        if !complete {
+            return Err(TxQueryError::Unavailable(truncated));
+        }
+        self.charge_scan(rows, encoded_bytes)
     }
 
     fn charge_scan(&mut self, rows: usize, encoded_bytes: usize) -> Result<(), TxQueryError> {

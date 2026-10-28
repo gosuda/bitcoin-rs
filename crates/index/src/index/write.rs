@@ -305,6 +305,20 @@ impl<S: KvStore> IndexWriter<S> {
         let mut add = |row: PortableImportRow<'_>| -> Result<(), IndexError> {
             match row {
                 PortableImportRow::Header(header) => {
+                    // Block headers are shared identity: another capability
+                    // may have committed this height already, and the reset
+                    // keeps them when any cursor remains. Rewriting every
+                    // covered header would turn each restore into a full
+                    // 800k-key rewrite; a point lookup per header skips the
+                    // covered ones with no extra memory.
+                    if self
+                        .indexer
+                        .store
+                        .get(ColumnFamily::BlockHeaders, header)?
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
                     batch.put(ColumnFamily::BlockHeaders, header, &[]);
                     in_bytes = in_bytes.saturating_add(header.len());
                 }

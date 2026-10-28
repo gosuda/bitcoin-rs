@@ -30,7 +30,7 @@ use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
     RowAssembler, TxLookupRecord, into_digest, open_hashed,
 };
-use super::chain::{BaseCount, ChainBase};
+use super::chain::{BaseCount, BodyReader, ChainBase, Located};
 use super::manifest::{
     BundleFamily, IndexBundleManifestV1, MANIFEST_FILE, MAX_MANIFEST_BYTES, ValidatedManifest,
 };
@@ -45,9 +45,9 @@ use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
     TxIndexFamily,
 };
-use bitcoin_rs_chain::{BlockBodySource, BlockTreeReader, TipSnapshot};
-use bitcoin_rs_primitives::{BlockHash, Hash256, layout::ParsedBlock};
-use bitcoin_rs_storage::PrefixScanLimit;
+use bitcoin_rs_chain::BlockTreeReader;
+use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_primitives::Hash256;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -146,7 +146,7 @@ pub(crate) fn reset_interrupted_import(
     let probe = reader.snapshot()?.scan_family_page(
         TxIndexFamily::TxConfirmed,
         None,
-        PrefixScanLimit {
+        bitcoin_rs_storage::PrefixScanLimit {
             max_rows: 1,
             max_bytes: usize::MAX,
         },
@@ -258,7 +258,7 @@ enum LocatorOutcome {
 struct LocatorCheck<'a> {
     chain: &'a ChainBase,
     tree: &'a BlockTreeReader,
-    source: &'a dyn BlockBodySource,
+    bodies: BodyReader<'a>,
     /// Bundle positions grouped by height for the height-ordered pass.
     /// Streaming collects; verification drains in ascending height so each
     /// body is read and parsed once. This holds one small entry per bundle
@@ -329,57 +329,29 @@ impl LocatorCheck<'_> {
         hash: Hash256,
         positions: &[(TxPosition, [u8; 32])],
     ) -> Result<Option<u64>, IndexBundleError> {
-        let body = match self.source.block_body(height, BlockHash::from(hash)) {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(IndexBundleError::BodyRead {
-                    height,
-                    reason: error.to_string(),
-                });
-            }
-        };
-        let parsed =
-            ParsedBlock::parse_exact(&body).map_err(|error| IndexBundleError::BodyRead {
-                height,
-                reason: format!("block does not parse: {error}"),
-            })?;
         for &(position, expected) in positions {
-            if Self::position_matches(&parsed, position, expected) {
-                *self.counts.entry(height).or_default() += 1;
-            } else {
-                self.outcome = LocatorOutcome::Mismatch { height };
-                return Ok(None);
+            match self.bodies.transaction(height, hash, position)? {
+                Located::Found(tx) if tx.txid().0.to_le_bytes() == expected => {
+                    *self.counts.entry(height).or_default() += 1;
+                }
+                Located::Found(_) | Located::Mismatch => {
+                    self.outcome = LocatorOutcome::Mismatch { height };
+                    return Ok(None);
+                }
+                Located::BodyMissing => {
+                    self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
+                    return Ok(None);
+                }
             }
         }
-        Ok(Some(u64::try_from(parsed.tx_count()).unwrap_or(u64::MAX)))
-    }
-
-    /// Resolves one collected position against the parsed block's spans.
-    ///
-    /// A ranged read that merely decodes is not enough: the offset and length
-    /// must equal one parsed transaction span, and the full id there must
-    /// equal the expected one. An out-of-range position, bytes that decode
-    /// away from any boundary, or an id mismatch never resolves.
-    fn position_matches(
-        parsed: &ParsedBlock,
-        position: TxPosition,
-        expected: [u8; 32],
-    ) -> bool {
-        for tx in parsed.transactions() {
-            let span = tx.span();
-            if is_top_level_span(position, span.start(), span.len()) {
-                return tx.materialize().txid().0.to_le_bytes() == expected;
+        match self.bodies.block_tx_count(height, hash)? {
+            Some(count) => Ok(Some(count)),
+            None => {
+                self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
+                Ok(None)
             }
         }
-        false
     }
-
-    /// Verifies every collected locator in height order, then compares all
-    /// transactions in the covered range.
     ///
     /// Strict checks run for every height before any completeness check, so
     /// the reported fault order keeps locator mismatch ahead of omitted
@@ -426,7 +398,6 @@ impl LocatorCheck<'_> {
         }
         Ok(())
     }
-
     /// Returns one height's transaction count for the completeness check:
     /// collected positions are verified against a single parse of the body,
     /// while a height without positions reuses the metadata count when the
@@ -440,58 +411,13 @@ impl LocatorCheck<'_> {
         if let Some(positions) = self.pending.remove(&height) {
             self.pending_positions = self.pending_positions.saturating_sub(positions.len());
             self.verify_height_positions(height, hash, &positions)
-        } else if let Some(count) = self.block_tx_count(height, hash)? {
+        } else if let Some(count) = self.bodies.block_tx_count(height, hash)? {
             Ok(Some(count))
         } else {
             self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
             Ok(None)
         }
     }
-
-    /// Transactions the receiver holds in `(height, hash)`, or `None` when the
-    /// body is absent or pruned. Metadata answers without I/O when the source
-    /// keeps it; otherwise the whole body is parsed for its count.
-    fn block_tx_count(
-        &self,
-        height: u32,
-        hash: Hash256,
-    ) -> Result<Option<u64>, IndexBundleError> {
-        if let Some(metadata) = self
-            .source
-            .block_body_metadata(height, BlockHash::from(hash))
-        {
-            return u64::try_from(metadata.tx_count).map(Some).map_err(|_| {
-                IndexBundleError::BodyRead {
-                    height,
-                    reason: "the transaction count does not fit u64".to_owned(),
-                }
-            });
-        }
-        let body = match self.source.block_body(height, BlockHash::from(hash)) {
-            Ok(Some(body)) => body,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                return Err(IndexBundleError::BodyRead {
-                    height,
-                    reason: error.to_string(),
-                });
-            }
-        };
-        let parsed =
-            ParsedBlock::parse_exact(&body).map_err(|error| IndexBundleError::BodyRead {
-                height,
-                reason: format!("block does not parse: {error}"),
-            })?;
-        Ok(Some(u64::try_from(parsed.tx_count()).unwrap_or(u64::MAX)))
-    }
-}
-
-/// Reports whether `position` equals the top-level transaction span
-/// `[start, start + len)`. Offsets inside a transaction (an embedded
-/// serialization in a script or witness) and overlapping or truncated spans
-/// never match, even when the bytes there decode to a transaction.
-fn is_top_level_span(position: TxPosition, start: u32, len: u32) -> bool {
-    position.offset() == start && position.byte_len() == len
 }
 
 /// Reports the first height where the bundle's position count differs from
@@ -537,7 +463,7 @@ fn validate_artifact(
         (Some(chain), Some(source)) => Some(LocatorCheck {
             chain,
             tree: host.block_tree,
-            source,
+            bodies: BodyReader::new(source),
             pending: HashMap::new(),
             pending_positions: 0,
             counts: HashMap::new(),
@@ -835,6 +761,8 @@ fn discard_partial_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::chain::is_top_level_span;
+    use crate::types::TxPosition;
     use std::cell::Cell;
 
     /// The invalid-bundle drain is a bounded chunked copy that polls

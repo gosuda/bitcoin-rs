@@ -3,7 +3,7 @@
 //!
 //! Contract: `.outline/requirements/immutable-snapshot-scriptlive-seed.md`
 //! section 8, rows 1, 2, 3, 4, 6, 7, 15. This module is the S3 seed harness
-//! (`crates/index/src/runtime/seed_paused_tests.rs`). It needs the S2 worker
+//! (`crates/index/src/runtime/tests/seed_paused.rs`). It needs the S2 worker
 //! dispatch (`Worker.seed_slot` / `Worker.seed_bundle`, the
 //! `script_live_failure` seam) and is registered by the `P1WorkerSeed` owner;
 //! the parent gates the union after S2 lands.
@@ -15,7 +15,7 @@
 //! lives in a real `SeedSlot`, and leases come from a real
 //! `RetentionRegistry`.
 
-use super::*;
+use super::super::*;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::{

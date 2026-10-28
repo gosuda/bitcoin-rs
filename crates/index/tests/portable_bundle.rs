@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -292,6 +293,14 @@ impl IndexAheadSink for NoIndexAhead {
 }
 
 /// The node's body source: restore locator checks, export reads, queries.
+/// Counts whole-body reads per height, so export tests can prove each covered
+/// body is read and parsed exactly once.
+#[derive(Debug, Default)]
+struct BodyLoadCounter {
+    total: AtomicU64,
+    per_height: Mutex<HashMap<u32, u64>>,
+}
+
 struct SourceBodies {
     bodies: Arc<BodyMap>,
     hidden: HashSet<u32>,
@@ -300,6 +309,8 @@ struct SourceBodies {
     trip: Option<Arc<AtomicBool>>,
     /// Records whether this path existed at the first body read.
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
+    /// Whole-body read counter, if the test counts body loads.
+    loads: Option<Arc<BodyLoadCounter>>,
 }
 
 impl SourceBodies {
@@ -327,6 +338,15 @@ impl BlockBodySource for SourceBodies {
         height: u32,
         hash: BlockHash,
     ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+        if let Some(loads) = &self.loads {
+            loads.total.fetch_add(1, Ordering::Relaxed);
+            *loads
+                .per_height
+                .lock()
+                .expect("body load counts are readable")
+                .entry(height)
+                .or_default() += 1;
+        }
         Ok(self.body(height, hash).map(<[u8]>::to_vec))
     }
 
@@ -529,6 +549,8 @@ struct Start {
     crash_after_bulk_import: bool,
     /// Path whose existence is recorded on body-source reads.
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
+    /// Whole-body read counter attached to the body source, if any.
+    body_loads: Option<Arc<BodyLoadCounter>>,
 }
 
 struct Node {
@@ -605,6 +627,7 @@ impl Node {
                 },
                 trip: start.cancel_on_body_read.then(|| Arc::clone(&shutdown)),
                 witness: start.witness,
+                loads: start.body_loads.clone(),
             })),
         };
         let chain_events: Arc<dyn ChainCursorSource> = probe.clone();
@@ -1110,6 +1133,87 @@ fn export_preserves_a_preexisting_destination() {
 
     let fresh = root.path().join("fresh");
     exported_bundle(&fixture, &source, &fresh);
+}
+
+/// Exporting a multi-page artifact reads and parses each covered block body
+/// exactly once, no matter how the stored (transaction-id) order scatters one
+/// block's rows across pages. The export stages rows across pages by height
+/// before touching bodies, so the bounded body cache never reloads a body it
+/// already resolved; emission still follows stored order, so the bundle
+/// restores exactly like a backfilled index.
+#[test]
+fn export_loads_each_block_body_once_across_pages() {
+    // More stored rows than one 1,024-row page, spread over more blocks than
+    // the 8-body cache holds, so each page mixes every block's transactions
+    // in stored order and no cache can hide a cross-page reload.
+    let fixture = ChainFixture::new(15, 150);
+    let rows = fixture.tx_row_keys();
+    assert!(
+        rows > CANCEL_POLL_RECORDS / 4,
+        "fixture holds {rows} rows, too few to span export pages"
+    );
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, receiver, bundle) = (
+        root.path().join("source"),
+        root.path().join("receiver"),
+        root.path().join("bundle"),
+    );
+    let source_state = backfilled_source(&fixture, &source);
+
+    let loads = Arc::new(BodyLoadCounter::default());
+    let node = Node::start(
+        &fixture,
+        &source,
+        Start {
+            bundle: export(&bundle),
+            backfill: true,
+            body_loads: Some(Arc::clone(&loads)),
+            ..Start::default()
+        },
+    );
+    node.wait_reconciling();
+    node.stop();
+    assert!(
+        bundle.join(MANIFEST).is_file(),
+        "export published no manifest"
+    );
+    assert!(
+        bundle.join(ARTIFACT).is_file(),
+        "export published no artifact"
+    );
+
+    let per_height = loads
+        .per_height
+        .lock()
+        .expect("body load counts are readable");
+    let covered: Vec<u32> = (0..=fixture.tip.height).collect();
+    assert_eq!(
+        per_height.len(),
+        covered.len(),
+        "export touched {} bodies for {} covered heights: {per_height:?}",
+        per_height.len(),
+        covered.len(),
+    );
+    for height in covered {
+        assert_eq!(
+            per_height.get(&height),
+            Some(&1),
+            "block body at height {height} was loaded {:?} times, want exactly once",
+            per_height.get(&height),
+        );
+    }
+
+    let node = Node::start(
+        &fixture,
+        &receiver,
+        Start {
+            bundle: restore(&bundle),
+            ..Start::default()
+        },
+    );
+    node.wait_synced(fixture.tip.height);
+    node.stop();
+    assert_eq!(durable(&receiver), source_state);
 }
 
 /// Shutdown while an export is streaming removes the artifact the export
