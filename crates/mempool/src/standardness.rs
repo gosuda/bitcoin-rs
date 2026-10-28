@@ -137,7 +137,7 @@ pub struct TxAcceptanceFact {
     /// Modified fee rate in sat/kvB from the captured policy state.
     pub effective_fee_rate: Option<u64>,
     /// Modified fee in sats from the captured policy state; the caller's
-    /// fee cap compares against it unrounded, like Core's `GetFeeRate`.
+    /// fee cap compares against it unrounded, like Core's `CFeeRate::GetFee`.
     pub modified_fee: Option<u64>,
     /// Rejection reason when `allowed` is false.
     pub reject_reason: Option<AcceptanceRejectReason>,

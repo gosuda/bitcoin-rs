@@ -205,7 +205,11 @@ pub(crate) fn finish_package(
     }
     // Core runs the combined package fee check before package RBF, cluster
     // limits, and ephemeral-spend checks (validation.cpp `PreChecks` order).
-    if let Some(error) = aggregate_error {
+    // Only the aggregate fee failure takes that precedence; other planner
+    // errors (capacity, arithmetic, insert preflight) keep the ordering
+    // they had before it was introduced and report after the ephemeral
+    // check below.
+    if let Some(error @ AcceptanceRejectReason::MinRelayFeeNotMet) = aggregate_error {
         facts.package_error = Some(error);
         return facts;
     }
@@ -240,6 +244,10 @@ pub(crate) fn finish_package(
     if let Some(index) = checks.dust_child {
         facts.results[index].allowed = Some(false);
         facts.results[index].reject_reason = Some(AcceptanceRejectReason::MissingEphemeralSpends);
+        return facts;
+    }
+    if let Some(error) = aggregate_error {
+        facts.package_error = Some(error);
         return facts;
     }
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
