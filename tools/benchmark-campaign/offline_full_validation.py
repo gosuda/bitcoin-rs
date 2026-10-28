@@ -1495,7 +1495,7 @@ def _run_arm(
         program.command,
         binary_path=binary_path,
         data_dir=data_dir,
-        corpus_path=_corpus_path_for_arm(pinned),
+        corpus_path=_corpus_path_for_arm(config, pinned, root),
         manifest_path=pinned.manifest.path,
         state_path=state_path,
     )
@@ -1520,7 +1520,7 @@ def _run_arm(
             program.reopen_command,
             binary_path=binary_path,
             data_dir=data_dir,
-            corpus_path=_corpus_path_for_arm(pinned),
+            corpus_path=_corpus_path_for_arm(config, pinned, root),
             manifest_path=pinned.manifest.path,
             state_path=reopen_path,
         )

@@ -1187,11 +1187,24 @@ impl PeerTable {
     }
 
     /// Metadata of the one connection at `addr`, if it completed its handshake.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn info_of(&self, addr: PeerEndpoint) -> Option<PeerInfo> {
         self.entries
             .read()
             .get(&SessionKey::Endpoint(addr))
+            .and_then(|entry| entry.info.clone())
+    }
+
+    /// Metadata of the connection stamped `source`, if it is still current
+    /// and completed its handshake. Anonymous inbound sessions have no
+    /// endpoint, so they are keyed by their connection identity.
+    #[must_use]
+    pub(crate) fn info_of_source(&self, source: PeerSource) -> Option<PeerInfo> {
+        self.entries
+            .read()
+            .get(&SessionKey::from_source(source))
+            .filter(|entry| entry.lease.is_current(source))
             .and_then(|entry| entry.info.clone())
     }
 
