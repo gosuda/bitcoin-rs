@@ -789,7 +789,9 @@ pub(crate) fn canonical(addr: PeerEndpoint) -> PeerEndpoint {
 }
 
 fn routable(addr: PeerEndpoint, allow_local: bool) -> bool {
-    if addr.port() == 0 {
+    // Core-compatible: I2P port `0` is an explicit unspecified service and
+    // stays routable; IP and TorV3 port `0` remain unroutable.
+    if addr.port() == 0 && !matches!(addr, PeerEndpoint::I2p { .. }) {
         return false;
     }
     // Overlay endpoints are never local and have no IP routability test.

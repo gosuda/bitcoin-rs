@@ -190,7 +190,9 @@ pub fn format_endpoint(endpoint: PeerEndpoint) -> String {
 #[must_use]
 pub fn endpoint_from_addrv2(message: &AddrV2Message) -> Option<PeerEndpoint> {
     let port = message.port;
-    if port == 0 {
+    // Core-compatible: I2P carries no port concept and `0` is an explicit
+    // unspecified service port; IP and TorV3 `0` remain malformed.
+    if port == 0 && !matches!(message.addr, AddrV2::I2p(_)) {
         return None;
     }
     match message.addr {
@@ -722,6 +724,52 @@ mod tests {
             port: 8333,
         };
         assert_eq!(endpoint_from_addrv2(&unknown), None);
+    }
+
+    #[test]
+    fn i2p_port_zero_addrv2_accepted_text_still_refused() {
+        // Core-compatible: explicit I2P port `0` (unspecified service) is a
+        // valid addrv2 row; IP and TorV3 port `0` stay malformed.
+        let i2p_zero = AddrV2Message {
+            time: 1,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::I2p([9u8; 32]),
+            port: 0,
+        };
+        assert_eq!(
+            endpoint_from_addrv2(&i2p_zero),
+            Some(PeerEndpoint::I2p {
+                hash: [9u8; 32],
+                port: 0
+            })
+        );
+        let ip_zero = AddrV2Message {
+            time: 1,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::Ipv4([8, 8, 8, 8].into()),
+            port: 0,
+        };
+        assert_eq!(endpoint_from_addrv2(&ip_zero), None);
+        let tor_zero = AddrV2Message {
+            time: 1,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::TorV3([3u8; 32]),
+            port: 0,
+        };
+        assert_eq!(endpoint_from_addrv2(&tor_zero), None);
+        // Round-trip preserves the explicit zero for I2P.
+        let endpoint = PeerEndpoint::I2p {
+            hash: [9u8; 32],
+            port: 0,
+        };
+        let row = endpoint_to_addrv2(endpoint, 1, ServiceFlags::NETWORK);
+        assert_eq!(row.port, 0);
+        assert_eq!(endpoint_from_addrv2(&row), Some(endpoint));
+        // Bare-text rules are unchanged: textual `:0` stays refused locally
+        // and never becomes a dialable endpoint.
+        let text = format!("{}.b32.i2p:0", "a".repeat(52));
+        assert_eq!(classify_endpoint(&text), ClassifiedEndpoint::InvalidOverlay);
+        assert_eq!(parse_endpoint(&text), None);
     }
 
     #[test]
