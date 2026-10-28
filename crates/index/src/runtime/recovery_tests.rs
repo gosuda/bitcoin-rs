@@ -1124,20 +1124,20 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             Undo::Missing => {
                 f.bodies
                     .undo
-                    .remove_archived(key.0, Hash256::from_le_bytes(key.1));
+                    .remove_archived(key.0, Hash256::from_le_bytes(&key.1));
             }
             Undo::Corrupt => {
                 let mut record = f
                     .bodies
                     .undo
-                    .load_undo(key.0, Hash256::from_le_bytes(key.1))
+                    .load_undo(key.0, Hash256::from_le_bytes(&key.1))
                     .expect("undo load")
                     .expect("fixture undo");
                 // An unsupported version byte can never decode.
                 record[0] ^= 0xff;
                 f.bodies
                     .undo
-                    .persist_undo(key.0, Hash256::from_le_bytes(key.1), &record)
+                    .persist_undo(key.0, Hash256::from_le_bytes(&key.1), &record)
                     .expect("fixture undo");
             }
         }
@@ -1178,7 +1178,7 @@ fn anchor_failure_outranks_an_earlier_preparation_failure() {
         let key = f.a_key(5);
         f.bodies
             .undo
-            .remove_archived(key.0, Hash256::from_le_bytes(key.1));
+            .remove_archived(key.0, Hash256::from_le_bytes(&key.1));
     }
     h.set_tip(&f.tip(f.a[5]));
 
@@ -1237,7 +1237,7 @@ fn undo_read_failure_is_not_a_missing_undo() {
         let key = f.a_key(5);
         f.bodies
             .undo
-            .remove_archived(key.0, Hash256::from_le_bytes(key.1));
+            .remove_archived(key.0, Hash256::from_le_bytes(&key.1));
     }
     h.set_tip(&f.tip(f.a[4]));
 

@@ -1282,7 +1282,7 @@ fn confirmed_history_orders_funding_rows_by_height_then_txid()
         funded.push((1, tx.txid()));
     }
     funded.sort();
-    let occurrences = |block: &Block, height: u32| -> Result<_, std::io::Error> {
+    let occurrences = |block: &Block, _height: u32| -> Result<_, std::io::Error> {
         let mut entries = Vec::new();
         for (index, tx) in block.txs.iter().enumerate() {
             entries.push(crate::types::ScriptHistoryOccurrence {
