@@ -19,6 +19,11 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
     MempoolLimits, SubmitOutcome,
 };
+use bitcoin_rs_mining::pool::{
+    BIP320_VERSION_MASK, BlockStatus, Extranonce, ExtranonceLayout, Job, JobBook, JobBookConfig,
+    JobError, JobId, Session, SessionId, ShareClass, ShareError, ShareOutcome, ShareSubmission,
+    ShareTarget, ShareWork, StaleReason, fetch_template,
+};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, Candidate, CandidateContext, CoinbaseBudget, GenerateRequest,
@@ -29,11 +34,6 @@ use bitcoin_rs_primitives::{
     Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
 };
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_stratum::{
-    BIP320_VERSION_MASK, BlockStatus, Extranonce, ExtranonceLayout, Job, JobBook, JobBookConfig,
-    JobError, JobId, Session, SessionId, ShareClass, ShareError, ShareOutcome, ShareSubmission,
-    ShareTarget, ShareWork, StaleReason, fetch_template,
-};
 use compact_str::CompactString;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};

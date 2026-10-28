@@ -380,10 +380,7 @@ impl BlockSync {
         // too: header-drain fetches and stripe retries reach this function
         // without passing the selector, so the gate is enforced at the one
         // path every body request takes (net_processing.cpp:6521-6525).
-        let Some(info) = source
-            .endpoint
-            .and_then(|endpoint| self.peer_table.info_of(endpoint))
-        else {
+        let Some(info) = self.peer_table.info_of_source(source) else {
             return GetdataRequestOutcome::default();
         };
         let policy = BlockDownloadPolicy {

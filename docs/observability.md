@@ -29,10 +29,10 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs` and
-`node.sync.no_progress_ticks{reason}` in `crates/p2p/src/sync.rs`
-for the pattern), the closed RPC `surface` (`shared`, `management`, `public`)
-and `route` labels of the connection-isolation signals documented below,
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`,
+`node.sync.no_progress_ticks{reason}` in `crates/p2p/src/sync.rs`,
+and the closed `surface` and `route` taxonomies of the RPC isolation metrics
+described below),
 the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
 `family` in `{tx_lookup, script_history, script_live, headers, filters}`.

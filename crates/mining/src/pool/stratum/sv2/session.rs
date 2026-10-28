@@ -7,17 +7,17 @@
 //!
 //! The session is a *wire* adapter. It owns channel identity, the message
 //! layouts, and the per-channel share target. Everything else is delegated to
-//! the one owner, [`bitcoin_rs_stratum::JobBook`]:
+//! the one owner, [`crate::pool::JobBook`]:
 //!
 //! - job projection (coinbase split, merkle branch, header facts) comes from
-//!   [`bitcoin_rs_stratum::Job`];
+//!   [`crate::pool::Job`];
 //! - extranonce uniqueness and session identity come from
 //!   [`JobBook::open_session`] / [`JobBook::close_session`];
 //! - every share verdict (stale, duplicate, version mask, time window, target,
 //!   network target) comes from [`JobBook::validate`], whose rejection is only
 //!   *mapped* here to an official SV2 error code;
 //! - a block candidate is handed to the host as the owner's
-//!   [`bitcoin_rs_stratum::FoundBlock`]; the node's authoritative submit path is
+//!   [`crate::pool::FoundBlock`]; the node's authoritative submit path is
 //!   called by the host through [`FoundBlock::submit`], never from here.
 //!
 //! One wire rule is checked here before delegating, because it is a rule about
@@ -37,12 +37,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
-use binary_sv2::{B032, B064K, Decodable, Encodable, GetSize, Seq0255, Str0255, Sv2Option, U256};
-use bitcoin_rs_mining::{MiningControl, MiningControlError};
-use bitcoin_rs_stratum::{
+use crate::pool::{
     AcceptedShare, BlockReceipt, Extranonce, FoundBlock, Job, JobBook, JobError, JobId, Session,
     SessionId, ShareError, ShareOutcome, ShareSubmission, ShareTarget,
 };
+use crate::{MiningControl, MiningControlError};
+use binary_sv2::{B032, B064K, Decodable, Encodable, GetSize, Seq0255, Str0255, Sv2Option, U256};
 use common_messages_sv2::{
     CHANNEL_BIT_RECONNECT, CHANNEL_BIT_SETUP_CONNECTION, CHANNEL_BIT_SETUP_CONNECTION_ERROR,
     CHANNEL_BIT_SETUP_CONNECTION_SUCCESS, ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
@@ -96,7 +96,7 @@ use mining_sv2::{
 use ruint::Uint;
 use thiserror::Error;
 
-use crate::{ConfigError, Frame, MAX_EXTRANONCE_WIRE_LEN, PROTOCOL_VERSION, U24_MAX};
+use super::{ConfigError, Frame, MAX_EXTRANONCE_WIRE_LEN, PROTOCOL_VERSION, U24_MAX};
 
 /// `SetupConnection.flags` bit 0: the client can only process standard jobs.
 pub const FLAG_REQUIRES_STANDARD_JOBS: u32 = 1 << 0;
@@ -668,7 +668,7 @@ fn code_str(code: &str) -> Result<Str0255<'_>, SessionError> {
 ///
 /// Spec §5.3.13: `SubmitShares.Success.new_shares_sum` is the sum of the
 /// *difficulty* of the jobs the shares were submitted against, NOT the raw
-/// hash count ([`bitcoin_rs_stratum::ShareWork`]), which is scaled by 2^32.
+/// hash count ([`crate::pool::ShareWork`]), which is scaled by 2^32.
 /// Targets easier than difficulty 1 clamp to 1 so that acknowledged shares
 /// always contribute at least 1 unit to the acknowledged shares sum.
 pub fn target_difficulty(target: ShareTarget) -> u64 {
@@ -1335,10 +1335,7 @@ impl ProtocolSession {
     /// immediately on the last announced previous hash. Connections that did
     /// not set `REQUIRES_STANDARD_JOBS` receive one group-addressed
     /// `NewExtendedMiningJob`; the others, one job per channel.
-    pub fn announce(
-        &mut self,
-        installed: &bitcoin_rs_stratum::Installed,
-    ) -> Result<(), SessionError> {
+    pub fn announce(&mut self, installed: &crate::pool::Installed) -> Result<(), SessionError> {
         if self.phase != Phase::Open || !installed.fresh {
             return Ok(());
         }

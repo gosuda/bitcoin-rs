@@ -428,20 +428,35 @@ dependencies = [
 name = "bitcoin-rs-mining"
 version = "0.14.0"
 dependencies = [
+ "binary_sv2",
  "bitcoin",
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-mempool",
+ "bitcoin-rs-mining",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
+ "bitcoin-rs-storage",
+ "codec_sv2",
+ "common_messages_sv2",
  "compact_str",
  "criterion",
+ "framing_sv2",
  "hashbrown 0.17.1",
+ "mining_sv2",
+ "noise_sv2",
  "parking_lot",
  "proptest",
+ "rand 0.8.8",
+ "ruint",
+ "secp256k1 0.28.2",
  "serde_json",
+ "sha2",
+ "sonic-rs",
+ "tempfile",
  "thiserror",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -460,13 +475,10 @@ dependencies = [
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
- "bitcoin-rs-pool-ledger",
  "bitcoin-rs-primitives",
  "bitcoin-rs-rpc",
  "bitcoin-rs-script",
  "bitcoin-rs-storage",
- "bitcoin-rs-stratum",
- "bitcoin-rs-stratum-v2",
  "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
@@ -532,15 +544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-pool-ledger"
-version = "0.14.0"
-dependencies = [
- "bitcoin-rs-storage",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "bitcoin-rs-primitives"
 version = "0.14.0"
 dependencies = [
@@ -571,7 +574,6 @@ dependencies = [
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
- "bitcoin-rs-pool-ledger",
  "bitcoin-rs-primitives",
  "bitcoin-rs-rpc",
  "bitcoin-rs-script",
@@ -667,50 +669,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "bitcoin-rs-stratum"
-version = "0.14.0"
-dependencies = [
- "bitcoin-rs-chain",
- "bitcoin-rs-consensus",
- "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "compact_str",
- "parking_lot",
- "ruint",
- "sha2",
- "sonic-rs",
- "thiserror",
-]
-
-[[package]]
-name = "bitcoin-rs-stratum-v2"
-version = "0.14.0"
-dependencies = [
- "binary_sv2",
- "bitcoin-rs-chain",
- "bitcoin-rs-consensus",
- "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "bitcoin-rs-stratum",
- "codec_sv2",
- "common_messages_sv2",
- "framing_sv2",
- "mining_sv2",
- "noise_sv2",
- "parking_lot",
- "rand 0.8.8",
- "ruint",
- "secp256k1 0.28.2",
- "sha2",
- "thiserror",
- "zeroize",
 ]
 
 [[package]]

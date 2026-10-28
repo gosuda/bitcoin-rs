@@ -64,16 +64,8 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        "bitcoin-rs-chain"
-        | CHAINSTATE_CRATE
-        | "bitcoin-rs-utxo"
-        | "bitcoin-rs-p2p"
-        | "bitcoin-rs-mempool"
-        | "bitcoin-rs-index"
-        | "bitcoin-rs-mining"
-        | "bitcoin-rs-stratum"
-        | "bitcoin-rs-stratum-v2"
-        | "bitcoin-rs-pool-ledger" => 2,
+        "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
+        | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
         NODE_CRATE
         | BIN_CRATE

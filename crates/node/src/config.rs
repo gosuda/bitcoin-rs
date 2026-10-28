@@ -5,6 +5,8 @@ use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_index::IndexCapabilities;
+#[cfg(feature = "pool")]
+use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
@@ -146,7 +148,7 @@ pub struct PoolConfig {
     pub share_difficulty: String,
     /// Target resolved by the authoritative share arithmetic owner.
     #[cfg(feature = "pool")]
-    pub share_target: bitcoin_rs_stratum::ShareTarget,
+    pub share_target: bitcoin_rs_mining::pool::ShareTarget,
     /// Immutable PPLNS work window.
     pub window_work: u64,
     /// Immutable fee basis points.
@@ -269,7 +271,7 @@ impl PoolConfig {
         #[cfg(feature = "pool")]
         {
             self.ledger_config().validate()?;
-            let target = bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal(
+            let target = bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
                 &self.share_difficulty,
             )
             .map_err(|error| anyhow::anyhow!("invalid pool share difficulty: {error}"))?;
@@ -350,7 +352,7 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,
         #[cfg(feature = "pool")]
-        share_target: bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal(
+        share_target: bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
             pool.share_difficulty
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,

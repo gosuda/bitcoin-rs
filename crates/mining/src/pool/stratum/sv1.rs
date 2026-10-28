@@ -6,11 +6,11 @@
 //!   decode ([`decode_line`], [`ClientRequest`]), exact response and
 //!   notification encoders, the prevhash word swap, BIP310 parameter parsing,
 //!   decimal difficulty ([`Difficulty`]), explicit account resolution
-//!   ([`AccountResolver`]) and the accounting boundary ([`ShareLedger`]);
-//! * [`session`]: the per-connection state machine, the shared [`PoolCore`]
-//!   over [`crate::JobBook`], and the bounded TCP [`Server`].
+//!   ([`AccountResolver`]) and account admission;
+//! * [`session`]: the per-connection state machine and bounded TCP [`Server`]
+//!   over the shared [`crate::pool::PoolCore`].
 //!
-//! Division of ownership. The parent crate owns job projection, the coinbase
+//! Division of ownership. The mining pool owns job projection, the coinbase
 //! split, extranonce allocation, the share predicate, stale and duplicate state,
 //! and block assembly. This adapter never hashes a header, never builds a
 //! coinbase, never compares a hash with a target. It owns what only SV1 has:
@@ -28,15 +28,13 @@ mod session;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::{AcceptedShare, BlockReceipt, FoundBlock, Job, JobError, JobId, ShareTarget};
-use bitcoin_rs_mining::MiningControlError;
+use crate::pool::{Job, JobError, JobId, ShareTarget, WorkerIdentity};
 use bitcoin_rs_primitives::Hash256;
 use sonic_rs::{Array, JsonContainerTrait, JsonValueTrait, Value};
 
 pub use session::{
-    BlockOutcome, ConfigError, ConnectionLimiter, ConnectionPermit, Observer, PoolCore,
-    RefreshError, Refreshed, RefusalReason, Server, ServerConfig, ServerDeps, ServerEvent,
-    SessionEnd, ShutdownReport,
+    ConfigError, ConnectionLimiter, ConnectionPermit, Observer, RefusalReason, Server,
+    ServerConfig, ServerDeps, ServerEvent, SessionEnd, ShutdownReport,
 };
 
 /// Longest accepted JSON-RPC request id string.
@@ -624,15 +622,6 @@ impl fmt::Debug for Password {
     }
 }
 
-/// Who a share is credited to: the pool account and the rig under it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WorkerIdentity {
-    /// Account that is paid.
-    pub account: String,
-    /// Rig name under the account.
-    pub worker: String,
-}
-
 /// Authentication failed. Carries no reason, so unknown account and wrong
 /// password are indistinguishable to the miner and to logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -833,44 +822,6 @@ impl DifficultyPolicy {
 // ---------------------------------------------------------------------------
 // Accounting boundary
 // ---------------------------------------------------------------------------
-
-/// The ledger could not take the record right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LedgerUnavailable;
-
-/// Whether a share row was new.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecordOutcome {
-    /// New row written.
-    Recorded,
-    /// A row with this header hash already exists; nothing changed.
-    AlreadyRecorded,
-}
-
-/// Pool accounting, separate from this adapter.
-///
-/// Implementations must be idempotent on `share.hash`: the adapter retries a
-/// failed call, and the common owner's duplicate set makes every first delivery
-/// unique.
-pub trait ShareLedger: Send + Sync {
-    /// Records one accepted share (`share.class` may be `Block`) credited to
-    /// `worker`. `share.hash` is the unique key; `share.work` is the work.
-    fn record_share(
-        &self,
-        worker: &WorkerIdentity,
-        share: &AcceptedShare,
-    ) -> Result<RecordOutcome, LedgerUnavailable>;
-
-    /// Records what the node answered when `block` was submitted. `Err` or an
-    /// `Undetermined` receipt means the chain outcome is unknown: keep the
-    /// block pending and reconcile from chain observation.
-    fn record_block(
-        &self,
-        worker: &WorkerIdentity,
-        block: &FoundBlock,
-        submission: &Result<BlockReceipt, MiningControlError>,
-    ) -> Result<(), LedgerUnavailable>;
-}
 
 // ---------------------------------------------------------------------------
 // Typed client requests

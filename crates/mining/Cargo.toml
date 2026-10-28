@@ -22,10 +22,27 @@ compact_str.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+bitcoin-rs-storage = { workspace = true, optional = true }
+ruint = { workspace = true, optional = true }
+sonic-rs = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+# Pinned SRI release family; only the optional SV2 adapter uses Noise.
+binary_sv2 = { workspace = true, optional = true }
+framing_sv2 = { workspace = true, optional = true }
+codec_sv2 = { workspace = true, features = ["noise_sv2"], optional = true }
+noise_sv2 = { workspace = true, optional = true }
+mining_sv2 = { workspace = true, optional = true }
+common_messages_sv2 = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [features]
 default = []
 test-seam = []
+pool = ["dep:bitcoin-rs-storage", "dep:ruint", "dep:sonic-rs", "dep:sha2"]
+pool-sv2 = [
+    "pool", "dep:binary_sv2", "dep:framing_sv2", "dep:codec_sv2",
+    "dep:noise_sv2", "dep:mining_sv2", "dep:common_messages_sv2", "dep:zeroize",
+]
 
 
 [dev-dependencies]
@@ -37,6 +54,28 @@ criterion.workspace = true
 # gateway replacement seam must arrive through the test-seam feature, the same
 # way bitcoin-rs-p2p and bitcoin-rs-rpc opt in.
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-storage = { workspace = true, features = ["test-seam", "redb", "fjall"] }
+tempfile.workspace = true
+# Miner-side key generation uses the same version as the optional Noise graph.
+secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+
+[[test]]
+name = "pool_jobs"
+required-features = ["pool"]
+
+[[test]]
+name = "pool_sv1"
+required-features = ["pool"]
+
+[[test]]
+name = "pool_sv2"
+required-features = ["pool-sv2"]
+
+[[test]]
+name = "pool_ledger"
+required-features = ["pool", "test-seam"]
 
 [[bench]]
 name = "candidate"

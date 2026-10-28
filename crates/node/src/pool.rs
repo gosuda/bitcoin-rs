@@ -1,5 +1,6 @@
 //! Node-owned native pool lifecycle. No wallet or signing capability enters this module.
 
+use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -8,12 +9,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use bitcoin_rs_mining::pool::stratum::sv1::{
+    ConnectionLimiter, DifficultyPolicy, Server, ServerConfig, ServerDeps,
+};
+use bitcoin_rs_mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
 use bitcoin_rs_mining::{CoinbaseBudget, MiningControl};
 use bitcoin_rs_storage::KvStore;
-use bitcoin_rs_stratum::{
-    ConnectionLimiter, DifficultyPolicy, ExtranonceLayout, JobBookConfig, PoolCore, Server,
-    ServerConfig, ServerDeps,
-};
 
 #[cfg(feature = "pool-sv2")]
 mod authority;
@@ -97,8 +98,8 @@ impl PoolService {
                     },
                     extranonce: ExtranonceLayout::new(4, 4),
                     coinbase_tag: b"/btcrs/".to_vec(),
-                    version_mask: bitcoin_rs_stratum::BIP320_VERSION_MASK,
-                    ntime_forward_secs: bitcoin_rs_stratum::MAX_NTIME_FORWARD_SECS,
+                    version_mask: bitcoin_rs_mining::pool::BIP320_VERSION_MASK,
+                    ntime_forward_secs: bitcoin_rs_mining::pool::MAX_NTIME_FORWARD_SECS,
                     max_jobs: 64,
                     max_sessions: sessions,
                     max_shares_per_job: 65_536,

@@ -95,7 +95,7 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<
     assert_eq!(pool.share_difficulty, "2.5");
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_stratum::ShareTarget::from_pool_difficulty_decimal("2.5")?
+        bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("2.5")?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);
@@ -1235,4 +1235,37 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
         bitcoin_rs_primitives::Network::Regtest.magic(),
         "a field no layer set still fills from the winning profile"
     );
+}
+
+#[test]
+fn rpc_public_bind_rejects_equality_with_rpc_bind() {
+    let bind = SocketAddr::from(([127, 0, 0, 1], 8332));
+    let conflicting = UserConfig {
+        rpc: RpcOverrides {
+            bind: Some(bind),
+            public_bind: Some(bind),
+            ..RpcOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let Err(error) = super::resolve(&[&conflicting]) else {
+        panic!("public RPC bind equal to rpc.bind must fail validation");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("public-bind and rpc-bind must not overlap"),
+        "{error}"
+    );
+
+    let separate = SocketAddr::from(([127, 0, 0, 1], 8334));
+    let valid = UserConfig {
+        rpc: RpcOverrides {
+            bind: Some(bind),
+            public_bind: Some(separate),
+            ..RpcOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    assert!(super::resolve(&[&valid]).is_ok());
 }

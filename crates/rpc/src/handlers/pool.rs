@@ -2,7 +2,8 @@
 //!
 //! BRPR/BRPT bytes are the ledger's canonical codecs. Recording a receipt
 //! validates and persists an externally signed transaction; it never broadcasts it.
-use pool_ledger::{
+use bitcoin_rs_mining::pool::ledger as pool_ledger;
+use bitcoin_rs_mining::pool::ledger::{
     CancelBasis, Hash32, Ledger, LedgerError, MinerId, PayoutBatch, PayoutPolicy, PayoutReceipt,
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};

@@ -538,23 +538,9 @@ pinned source).
 - Administrative RPC stays private and authenticated by default. Public
   read and broadcast exposure, allowed hosts and origins, and rate and
   concurrency limits are independently configured.
-- When `public_bind` (`--public-bind`, env `BITCOIN_RS_PUBLIC_BIND`,
-  TOML `public_bind`) is configured, public queries are isolated onto a
-  dedicated public listener while the management listener becomes restricted
-  to JSON-RPC. `rpc_max_connections` and `public_max_connections`
-  independently default to 128 and must be positive, so neither binding can
-  consume the other's permits. The binds must not overlap: the same socket
-  address, or a same-family wildcard covering a concrete address on the same
-  port, is rejected, while distinct concrete addresses sharing a port,
-  distinct ports, and ephemeral port-zero binds are accepted. Cross-family
-  dual-stack conflicts remain OS-checked at bind.
-  Route filtering runs after reading the request head and before
-  authentication: `Public` allows REST (when enabled), Esplora GET/POST,
-  preflight, and not-found, never JSON-RPC; `Management` allows JSON-RPC
-  and not-found only; `Shared` preserves legacy unified listener behavior
-  when `public_bind` is unset. Public `POST /` returns 404, never 401 or
-  dispatch. Both listeners operate over the same `Context` with independent
-  `ActiveConnections` pools and blocking quotas.
+- With `public_bind`, the public listener serves REST and Esplora while
+  `rpc_bind` serves authenticated JSON-RPC. Each binding owns its connection
+  budget and cancellation latch; see `API-34` and `WF-02`.
 - Request bodies, batch size, response assembly, scan rows, in-flight
   work, and long-poll clients are bounded. A public explorer read cannot
   consume the CPU or memory quota needed to validate new blocks.

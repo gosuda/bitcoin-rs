@@ -1,6 +1,6 @@
 # bitcoin-rs-mining
 
-Transport-neutral block-candidate assembly for solo mining.
+Block-candidate assembly and optional native mining pools.
 
 `assemble_candidate` builds a [`Candidate`](crate::Candidate) from a
 [`CandidateContext`](crate::CandidateContext) and the live mempool.
@@ -165,3 +165,13 @@ against live fixture pools. It is a measurement seam, not a budget.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
+
+## Native pool
+
+The `pool` feature adds `pool::JobBook`, `pool::PoolCore`, the SV1 server
+in `pool::stratum::sv1`, and durable PPLNS accounting in `pool::ledger`.
+`pool-sv2` additionally enables the Noise transport and SV2 protocol session
+in `pool::stratum::sv2`. Both protocols use the same job/share owner and
+`MiningControl` submission boundary. The node owns listener composition,
+chain observations, storage construction, and shutdown. Neither feature
+enables the runtime by itself. See [pool operation](../../docs/pool.md).

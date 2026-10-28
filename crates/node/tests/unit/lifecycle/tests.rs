@@ -1062,55 +1062,7 @@ fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
     let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
     assert_eq!(bindings.listeners.len(), 1);
     Ok(bindings.listeners.remove(0).0)
-}
 
-#[test]
-fn dual_rpc_listeners_bind_and_join_on_shutdown() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = isolated_config(dir.path());
-    let public_ephemeral = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
-    config.rpc.public_bind = Some(public_ephemeral);
-    let state = NodeState::open(config, None)?;
-
-    let coordinator = Arc::new(crate::MiningCoordinator::new(
-        state.mempool_reader(),
-        state.chainstate(),
-        state.stable_read(),
-        state.chain_followers(),
-        state.config().mining.payout_script.clone(),
-    ));
-    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
-    let mut bindings = bind_rpc(&state, &mining_control, state.block_body_source()?)?;
-    assert_eq!(bindings.listeners.len(), 2);
-    let (mgmt_server, mgmt_surface) = bindings.listeners.remove(0);
-    let (public_server, public_surface) = bindings.listeners.remove(0);
-    assert_eq!(mgmt_surface, bitcoin_rs_rpc::RpcSurface::Management);
-    assert_eq!(public_surface, bitcoin_rs_rpc::RpcSurface::Public);
-    assert_eq!(
-        mgmt_server.max_connections,
-        state.config().rpc.max_connections
-    );
-    assert_eq!(
-        public_server.max_connections,
-        state.config().rpc.public_max_connections
-    );
-
-    let shutdown = state.shutdown_reader();
-    let sd1 = shutdown.clone();
-    let mgmt_thread =
-        std::thread::spawn(move || mgmt_server.serve_surface_with_shutdown(sd1, mgmt_surface));
-    let sd2 = shutdown;
-    let pub_thread =
-        std::thread::spawn(move || public_server.serve_surface_with_shutdown(sd2, public_surface));
-
-    state.request_shutdown();
-    mgmt_thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("management RPC thread panicked"))??;
-    pub_thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("public RPC thread panicked"))??;
-    Ok(())
 }
 
 #[test]
