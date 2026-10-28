@@ -6875,6 +6875,108 @@ mod v2_transport_tests;
 mod getdata_pause_tests;
 
 #[cfg(test)]
+#[expect(clippy::expect_used)]
+mod block_not_found_tests {
+    use super::*;
+    use crate::sync::BlockSync;
+    use crate::sync::chain::SyncChain;
+    use crate::sync::tests::{
+        TestChain, connect_peer, current_source, mined_chain, synthetic_peer, test_addr,
+    };
+    use crate::{Message, PeerState};
+    use arc_swap::ArcSwapOption;
+    use bitcoin::p2p::message_blockdata::Inventory;
+    use bitcoin_rs_primitives::Hash256;
+    use parking_lot::RwLock;
+
+    #[test]
+    fn wire_notfound_releases_only_the_owners_body_request_and_wakes_sync() {
+        let (mut tree, blocks) = mined_chain(2, 0).expect("fixture chain");
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let (_sync_headers_tx, sync_headers_rx) = crossbeam_channel::unbounded();
+        let (_sync_blocks_tx, sync_blocks_rx) = crossbeam_channel::unbounded();
+        let chain: Arc<dyn SyncChain> = Arc::new(TestChain::new(
+            chain_tip,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::clone(&block_tree),
+        ));
+        let table = Arc::new(crate::PeerTable::new());
+        let sync = Arc::new(BlockSync::new(
+            chain,
+            Arc::clone(&table),
+            sync_headers_rx,
+            sync_blocks_rx,
+            crate::sync::syncing_ibd_latch(),
+        ));
+        let addr = test_addr(9830, 0).expect("test address");
+        let peer_rx = connect_peer(&table, synthetic_peer(addr, 100));
+        sync.tick();
+        let source = current_source(&table, addr);
+        let first = Hash256::from(blocks[0].block_hash());
+        let second = Hash256::from(blocks[1].block_hash());
+        assert!(
+            sync.owns_body_fetch(source, first) && sync.owns_body_fetch(source, second),
+            "fixture: the peer owns both body requests"
+        );
+        while peer_rx.try_recv().is_ok() {}
+
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        shared.block_sync = Some(Arc::clone(&sync));
+        shared.wake_tx = Some(wake_tx);
+        let lease = table.lease(addr).expect("peer registered");
+
+        let feed = |message: Message| {
+            let mut input = Vec::new();
+            crate::wire::write_message(&mut input, shared.magic, &message).expect("frame");
+            let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
+            peer.state = PeerState::Ready;
+            let _ = run_message_loop(&mut peer, addr, &lease, &shared, None);
+        };
+
+        // A `notfound` that names only a transaction leaves block state alone
+        // and wakes nothing: the transaction lifecycle owns it.
+        feed(Message::NotFound(vec![Inventory::Transaction(
+            bitcoin::Txid::from_byte_array([9; 32]),
+        )]));
+        assert!(sync.owns_body_fetch(source, first));
+        assert!(sync.owns_body_fetch(source, second));
+        assert!(wake_rx.try_recv().is_err());
+
+        // One `notfound` that mixes a transaction vector with the first body.
+        feed(Message::NotFound(vec![
+            Inventory::Transaction(bitcoin::Txid::from_byte_array([9; 32])),
+            Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(*first.as_byte_array())),
+        ]));
+
+        assert!(
+            !sync.owns_body_fetch(source, first),
+            "the wire notfound must release the owner's body request"
+        );
+        assert!(
+            sync.owns_body_fetch(source, second),
+            "a body the notfound did not name stays with its owner"
+        );
+        assert!(
+            wake_rx.try_recv().is_ok(),
+            "the sync loop must be woken to replan"
+        );
+
+        // The only peer lacks the body: the replanned request is withheld
+        // rather than polled back at wake-up pace.
+        sync.tick();
+        assert!(
+            !std::iter::from_fn(|| peer_rx.try_recv().ok())
+                .any(|message| matches!(message, Message::GetData(_))),
+            "an owner that answered notfound is not asked for the body again"
+        );
+    }
+}
+
+#[cfg(test)]
 mod aggregate_budget_tests;
 
 #[cfg(test)]
