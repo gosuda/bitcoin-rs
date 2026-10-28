@@ -2065,11 +2065,19 @@ impl TorControlOwner {
     fn read_key_blob(&self) -> io::Result<Option<String>> {
         match &self.key_path {
             Some(path) => match crate::sam::read_key_file(path) {
-                Ok(blob) if crate::tor_control::valid_key_blob(&blob) => Ok(Some(blob)),
-                Ok(_) => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "persisted onion v3 key is corrupt",
-                )),
+                Ok(blob) => {
+                    // Accept Core-form `ED25519-V3:<blob>`; persist and reuse
+                    // the bare blob so `add_onion` emits exactly one prefix.
+                    let bare = blob.strip_prefix("ED25519-V3:").unwrap_or(&blob).to_owned();
+                    if crate::tor_control::valid_key_blob(&bare) {
+                        Ok(Some(bare))
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "persisted onion v3 key is corrupt",
+                        ))
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error),
             },

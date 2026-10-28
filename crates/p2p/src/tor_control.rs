@@ -511,7 +511,8 @@ impl TorController {
         target: SocketAddr,
     ) -> io::Result<OnionService> {
         if let Some(blob) = key_blob {
-            if !valid_key_blob(blob) {
+            let bare = blob.strip_prefix("ED25519-V3:").unwrap_or(blob);
+            if !valid_key_blob(bare) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "provided key blob is not a valid ED25519-V3 key blob",
@@ -519,7 +520,12 @@ impl TorController {
             }
         }
         let key = match key_blob {
-            Some(blob) => format!("ED25519-V3:{blob}"),
+            Some(blob) => {
+                format!(
+                    "ED25519-V3:{}",
+                    blob.strip_prefix("ED25519-V3:").unwrap_or(blob)
+                )
+            }
             None => "NEW:ED25519-V3".to_owned(),
         };
         let lines = self.command(&format!(
@@ -673,6 +679,10 @@ fn rfc4648_base64_decode(text: &str) -> Option<Vec<u8>> {
 
 /// Validate a persisted ED25519-V3 key blob: RFC 4648 base64 decoding to 64 bytes
 /// (32-byte Ed25519 secret scalar + 32-byte Ed25519 PRF secret).
+///
+/// Bare blobs only; Core-form `ED25519-V3:<blob>` is normalized to bare by the
+/// key-file and control callers before validation so a doubled prefix stays
+/// corrupt.
 #[must_use]
 pub(crate) fn valid_key_blob(text: &str) -> bool {
     rfc4648_base64_decode(text).is_some_and(|bytes| bytes.len() == 64)
