@@ -237,7 +237,7 @@ pub(crate) fn header_request_live(
     now: Instant,
 ) -> bool {
     header_request.is_some_and(|request| {
-        now.saturating_duration_since(request.requested_at) < request.timeout()
+        request.is_live(now)
             && usable_peers
                 .iter()
                 .any(|peer| peer.source == request.source)

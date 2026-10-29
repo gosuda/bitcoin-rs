@@ -224,6 +224,7 @@ fn empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement() -> 
         super::super::HeaderRequestState::AwaitingResponse
     );
 
+    sync.note_header_response_received(first);
     inbound_headers_tx.send(InboundHeaders {
         headers: Vec::new(),
         source: Some(first),
@@ -361,6 +362,42 @@ fn unowned_below_floor_peer_receives_one_tracked_chain_sync_probe() -> TestResul
 }
 
 #[test]
+fn late_or_foreign_receipts_do_not_redeem_silent_header_sources() -> TestResult {
+    let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE)?);
+    let (genesis, sync, _inbound_headers_tx, peers) = presync_fixture(floor)?;
+    let (addr, _lease, rx) = connect(&peers, 9740, 100_000);
+    let source = current_source(&peers, addr);
+    let (other_addr, _other_lease, _other_rx) = connect(&peers, 9741, 100_000);
+    sync.tick();
+    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
+    sync.note_header_response_received(current_source(&peers, other_addr));
+    expire_request(&sync, source)?;
+    sync.note_header_response_received(source);
+    sync.retire_timed_out_header_syncs(Instant::now());
+    assert!(!peers.is_connected(addr));
+    assert!(peers.is_connected(other_addr));
+
+    let (_addr, _replacement, replacement_rx) = connect(&peers, 9740, 100_000);
+    let replacement_source = current_source(&peers, addr);
+    assert_eq!(
+        sync.send_getheaders(
+            replacement_source,
+            0,
+            100_000,
+            vec![Hash256::from(genesis.compute_hash())],
+        ),
+        super::super::GetheadersOutcome::Sent,
+    );
+    assert!(matches!(replacement_rx.try_recv()?, Message::GetHeaders(_)));
+    sync.note_header_response_received(source);
+    expire_request(&sync, replacement_source)?;
+    sync.retire_timed_out_header_syncs(Instant::now());
+    assert!(!peers.is_connected(addr));
+    assert!(pending_request(&sync, replacement_source).is_none());
+    Ok(())
+}
+
+#[test]
 fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
@@ -422,6 +459,10 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "verify queued receipt across both sync passes"
+)]
 fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);
@@ -455,11 +496,36 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
             wire_response: false,
         })?;
     }
-    let pending = pending_request(&sync, source).ok_or("missing continuation request")?;
     let cursor = with_sync_state(&sync, source, |state| state.next_locator()[0]);
+    sync.note_header_response_received(source);
     deliver_headers(&inbound_headers_tx, chain[PAGE..].to_vec(), source)?;
+    expire_request(&sync, source)?;
+    let pending = pending_request(&sync, source).ok_or("missing continuation request")?;
+    assert_competing_requests_suppressed(
+        &sync,
+        source,
+        &rx,
+        vec![Hash256::from(genesis.compute_hash())],
+        9,
+    )?;
+    let (silent_addr, _silent_lease, _silent_rx) = connect(&peers, 9742, 100_000);
+    let silent_source = current_source(&peers, silent_addr);
+    assert_eq!(
+        sync.send_getheaders(silent_source, 0, 100_000, vec![pending.locator_tip_hash]),
+        super::super::GetheadersOutcome::Sent,
+    );
+    assert_eq!(sync.scheduler.lock().header_request_owner, Some(source));
+    expire_request(&sync, silent_source)?;
     sync.tick();
+    assert!(
+        !peers.is_connected(silent_addr),
+        "silent sources still expire"
+    );
     assert_eq!(sync.inbound_headers_rx.len(), 1);
+    assert!(
+        peers.is_connected(addr),
+        "queued responses are not peer silence"
+    );
     assert_request_unchanged(&sync, source, pending);
     assert_eq!(
         with_sync_state(&sync, source, |state| state.next_locator()[0]),

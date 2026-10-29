@@ -499,6 +499,16 @@ impl BlockSync {
                 .count();
             let mut outcomes = Vec::new();
             for peer in &frontier.usable_peers {
+                if scheduler
+                    .headers_sync
+                    .get(&peer.source)
+                    .and_then(|owned| owned.request)
+                    .is_some_and(|request| {
+                        request.state == super::HeaderRequestState::ResponseQueued
+                    })
+                {
+                    continue;
+                }
                 if !chain_sync_subject(peer, now) {
                     continue;
                 }

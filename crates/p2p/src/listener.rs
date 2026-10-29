@@ -337,6 +337,12 @@ impl ConnectionShared {
         headers: Vec<bitcoin_rs_primitives::Header>,
         wire_response: bool,
     ) {
+        if self.is_session_cancelled() || lease.is_cancelled() {
+            return;
+        }
+        if wire_response && let Some(sync) = &self.block_sync {
+            sync.note_header_response_received(source);
+        }
         let mut inbound = crate::InboundHeaders {
             headers,
             source: Some(source),

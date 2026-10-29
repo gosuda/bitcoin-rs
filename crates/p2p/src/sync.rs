@@ -239,6 +239,11 @@ pub(super) enum HeaderRequestKind {
 }
 
 impl HeaderRequest {
+    fn is_live(self, now: Instant) -> bool {
+        self.state == HeaderRequestState::ResponseQueued
+            || now.saturating_duration_since(self.requested_at) < self.timeout()
+    }
+
     fn timeout(self) -> Duration {
         match (self.kind, self.state) {
             (HeaderRequestKind::ChainSyncProbe, HeaderRequestState::AwaitingResponse) => {
@@ -252,6 +257,7 @@ impl HeaderRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HeaderRequestState {
     AwaitingResponse,
+    ResponseQueued,
     Answered,
 }
 
