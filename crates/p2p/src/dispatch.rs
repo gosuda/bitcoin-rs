@@ -17,6 +17,7 @@ use crate::packages::{
 };
 use crate::peer::{PackageRequest, Peer, PeerState};
 use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, MAX_MESSAGE_PAYLOAD, Message, PeerError};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedTip {
@@ -484,6 +485,42 @@ fn package_request(
     Some(PackageRequest { subject, wtxids })
 }
 
+/// Holds the broadcast marks for one served response.
+///
+/// The mark must be visible before the bytes reach the peer, so it is taken
+/// before the send. The guard reverts it on every exit that does not commit,
+/// including unwinding, so only a process death can leave a mark behind.
+struct BroadcastMarks<'a> {
+    inventory: &'a dyn TxInventory,
+    wtxids: SmallVec<[Wtxid; 1]>,
+}
+
+impl<'a> BroadcastMarks<'a> {
+    fn mark(inventory: &'a dyn TxInventory, wtxids: &[Wtxid]) -> Self {
+        let mut guard = Self {
+            inventory,
+            wtxids: SmallVec::with_capacity(wtxids.len()),
+        };
+        for wtxid in wtxids {
+            inventory.transaction_sent(*wtxid);
+            guard.wtxids.push(*wtxid);
+        }
+        guard
+    }
+
+    fn commit(mut self) {
+        self.wtxids.clear();
+    }
+}
+
+impl Drop for BroadcastMarks<'_> {
+    fn drop(&mut self) {
+        for wtxid in &self.wtxids {
+            self.inventory.transaction_send_failed(*wtxid);
+        }
+    }
+}
+
 fn serve_getpkgtxns(
     tx_inventory: Option<&dyn TxInventory>,
     request: &GetPkgTxns,
@@ -505,17 +542,11 @@ fn serve_getpkgtxns(
             hash: combined_package_hash(&request.wtxids),
         }]));
     };
-    for wtxid in &request.wtxids {
-        inventory.transaction_sent(*wtxid);
-    }
+    let marks = BroadcastMarks::mark(inventory, &request.wtxids);
     send(Message::PkgTxns(PkgTxns {
         txs: bodies.iter().map(|tx| Tx::clone(tx)).collect(),
-    }))
-    .inspect_err(|_error| {
-        for wtxid in &request.wtxids {
-            inventory.transaction_send_failed(*wtxid);
-        }
-    })?;
+    }))?;
+    marks.commit();
     Ok(())
 }
 
@@ -672,8 +703,9 @@ fn serve_tx_item(
     };
     match found {
         Some((wtxid, tx)) => {
-            inv.transaction_sent(wtxid);
-            send(Message::Tx(tx)).inspect_err(|_error| inv.transaction_send_failed(wtxid))?;
+            let marks = BroadcastMarks::mark(inv, &[wtxid]);
+            send(Message::Tx(tx))?;
+            marks.commit();
         }
         None => not_found.push(*item),
     }
