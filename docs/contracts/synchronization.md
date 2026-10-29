@@ -166,7 +166,7 @@ live UTXO stable-view lock. It consumes an accepted immutable snapshot
 artifact or replays retained block bodies and undo records through the
 existing worker. Missing history produces a scoped `ScriptLive`
 `Unavailable`; it does not block the worker, other indexes, or authoritative
-chain commits. This closes the former `seed_live_from_utxo` lock-hold gap.
+chain commits.
 
 - Proof: `EVT-02` step 1–7 fencing tests; the event-loop tick tests
   (`crates/node/src/event_loop.rs`, `EMB-10`); paused-seed apply/lease

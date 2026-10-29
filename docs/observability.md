@@ -252,7 +252,7 @@ if verification runs. Consumers must not require every field on a single event.
 
 ### Call-site audit
 
-Audited base: `73f9ee62` (upstream/main). Total `metrics::counter!`/`histogram!`/`gauge!` call sites: 121. The table covers macro call sites; the separate scrape-surface audit also removed the high-cardinality global evidence labels listed above.
+Audited base: `73f9ee62` (upstream/main). Rows name the file only; search it for the metric name, since line numbers drift. Total `metrics::counter!`/`histogram!`/`gauge!` call sites: 121. The table covers macro call sites; the separate scrape-surface audit also removed the high-cardinality global evidence labels listed above.
 
 The retained classifications answer a stable operator question; the macro
 kind alone never makes a signal operational:
@@ -270,129 +270,129 @@ Per-event stage decomposition and internal scheduling choices (probe, hedge,
 winner, cursor rewind) are diagnostic even when expressed as a count. Their
 fields stay in tracing, where they can change with the implementation.
 
-| # | file:line | macro | signal | classification | action |
+| # | file | macro | signal | classification | action |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `crates/chainstate/src/connect.rs:115` | `histogram!` | `node.apply_block.contextual_header_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("apply_block: profile")` field `contextual_header_us` |
-| 2 | `crates/chainstate/src/connect.rs:127` | `counter!` | `node.chainstate_journal.backpressure_total` | operational signal (rate/total) | kept (name unchanged) |
-| 3 | `crates/chainstate/src/connect.rs:143` | `histogram!` | `node.apply_block.pow_self_consistency_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `pow_self_us` |
-| 4 | `crates/chainstate/src/connect.rs:235` | `histogram!` | `node.apply_block.block_rules_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 5 | `crates/chainstate/src/connect.rs:244` | `histogram!` | `node.apply_block.bip30_bip34_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 6 | `crates/chainstate/src/connect.rs:267` | `histogram!` | `node.apply_block.script_verify_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 7 | `crates/chainstate/src/connect.rs:278` | `histogram!` | `node.apply_block.script_verify_{coinbase_only,serial_overlay,parallel}_seconds` (one call site, three dispatch names) | diagnostic (per-event dispatch split) | moved to `tracing::debug!("apply_block: profile")` field `script_dispatch={coinbase_only,serial_overlay,parallel}` |
-| 8 | `crates/chainstate/src/connect.rs:285` | `histogram!` | `node.apply_block.coinbase_maturity_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `coinbase_maturity_us` |
-| 9 | `crates/chainstate/src/connect.rs:304` | `histogram!` | `node.apply_block.bip68_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `bip68_us` |
-| 10 | `crates/chainstate/src/connect.rs:334` | `histogram!` | `node.apply_block.utxo_changes_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `utxo_changes_us` |
-| 11 | `crates/chainstate/src/connect.rs:374` | `histogram!` | `node.apply_block.undo_persist_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 12 | `crates/chainstate/src/connect.rs:416` | `histogram!` | `node.apply_block.block_body_persist_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 13 | `crates/chainstate/src/connect.rs:429` | `histogram!` | `node.apply_block.block_tree_insert_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 14 | `crates/chainstate/src/connect.rs:436` | `histogram!` | `node.apply_block.utxo_commit_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 15 | `crates/chainstate/src/connect.rs:463` | `histogram!` | `node.apply_block.coin_stats_finish_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 16 | `crates/chainstate/src/connect.rs:466` | `histogram!` | `node.apply_block.total_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 17 | `crates/chainstate/src/connect.rs:467` | `counter!` | `node.apply_block.txs_applied` | operational signal (rate/total) | kept (name unchanged) |
-| 18 | `crates/chainstate/src/connect.rs:523` | `histogram!` | `node.apply_block.durable_sync_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("apply_block: publish profile")` field `durable_sync_us` |
-| 19 | `crates/chainstate/src/connect.rs:546` | `histogram!` | `node.apply_block.durable_commit_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: publish profile"` field `durable_commit_us` |
-| 20 | `crates/chainstate/src/connect.rs:1041` | `counter!` | `node.chainstate_journal.append_failures` | operational signal (rate/total) | kept (name unchanged) |
-| 21 | `crates/chainstate/src/connect.rs:1051` | `counter!` | `node.chainstate_journal.append_failures` | operational signal (rate/total) | kept (name unchanged) |
-| 22 | `crates/chainstate/src/disconnect.rs:178` | `counter!` | `node.chainstate_journal.reorg_failures` | operational signal (rate/total) | kept (name unchanged) |
-| 23 | `crates/chainstate/src/durable.rs:149` | `counter!` | `node.durable_head.commits` | operational signal (rate/total) | kept (name unchanged) |
-| 24 | `crates/chainstate/src/durable.rs:214` | `counter!` | `node.durable_head.commits` | operational signal (rate/total) | kept (name unchanged) |
-| 25 | `crates/chainstate/src/durable.rs:884` | `counter!` | `node.durable_head.recovery_gaps_replayed` | operational signal (rate/total) | kept (name unchanged) |
-| 26 | `crates/chainstate/src/durable.rs:885` | `counter!` | `node.durable_head.recovery_gaps` | operational signal (rate/total) | kept (name unchanged) |
-| 27 | `crates/chainstate/src/maintenance.rs:87` | `counter!` | `node.chainstate_journal.flush_failures` | operational signal (rate/total) | kept (name unchanged) |
-| 28 | `crates/chainstate/src/maintenance.rs:93` | `counter!` | `node.chainstate_journal.maintenance_failures` | operational signal (rate/total) | kept (name unchanged) |
-| 29 | `crates/chainstate/src/prepare.rs:352` | `histogram!` | `node.apply_block.script_resolution_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("script_verify: profile")` field `script_resolution_us` |
-| 30 | `crates/chainstate/src/prepare.rs:368` | `histogram!` | `node.apply_block.script_prepare_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"script_verify: profile"` field `script_prepare_us` |
-| 31 | `crates/chainstate/src/prepare.rs:370` | `histogram!` | `node.apply_block.script_parallel_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"script_verify: profile"` field `script_parallel_us` |
-| 32 | `crates/chainstate/src/recovery.rs:162` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
-| 33 | `crates/chainstate/src/recovery.rs:178` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
-| 34 | `crates/chainstate/src/recovery.rs:218` | `histogram!` | `node.chainstate_journal.replay_seconds` | diagnostic (per-event/dev-only decomposition) | redundant: removed; already traced as `replay_seconds` on `chainstate restore selected` |
-| 35 | `crates/chainstate/src/recovery.rs:259` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
-| 36 | `crates/chainstate/src/recovery.rs:265` | `counter!` | `node.chainstate_journal.checksum_failures_total` | operational signal (rate/total) | kept (name unchanged) |
-| 37 | `crates/chainstate/src/window.rs:153` | `histogram!` | `node.durable_head.group_sync_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("durable_head: group commit")` field `sync_us` |
-| 38 | `crates/chainstate/src/window.rs:188` | `histogram!` | `node.durable_head.group_commit_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"durable_head: group commit"` field `commit_us` |
-| 39 | `crates/chainstate/src/window.rs:191` | `histogram!` | `node.durable_head.group_blocks` | diagnostic (per-event/dev-only decomposition) | moved to `"durable_head: group commit"` field `blocks` |
-| 40 | `crates/chainstate/src/window.rs:222` | `counter!` | `node.durable_head.group_flushes` | operational signal (rate/total) | kept (name unchanged) |
-| 41 | `crates/chainstate/src/window.rs:540` | `histogram!` | `node.window.context_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 42 | `crates/chainstate/src/window.rs:554` | `histogram!` | `node.window.parse_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 43 | `crates/chainstate/src/window.rs:589` | `histogram!` | `node.window.prepare_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 44 | `crates/chainstate/src/window.rs:690` | `histogram!` | `node.window.checks_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("prove_window: profile")` field `checks_us` |
-| 45 | `crates/chainstate/src/window.rs:694` | `histogram!` | `node.window.verify_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 46 | `crates/chainstate/src/window.rs:700` | `counter!` | `node.window.verify_success_total` | operational signal (rate/total) | kept (name unchanged) |
-| 47 | `crates/mempool/src/gateway.rs:485` | `counter!` | `mempool_observer_leg_failed_total{leg}` | operational fault count, but `leg` is embedder-chosen and not a closed taxonomy | renamed to aggregate `node.mempool.observer_failures_total`; leg stays in the warning event |
-| 48 | `crates/node/src/event_loop.rs:62` | `gauge!` | `node.shutdown.requested` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 49 | `crates/node/src/event_loop.rs:74` | `counter!` | `node.event_loop.sync_wakes` | operational signal (rate/total) | kept (name unchanged) |
-| 50 | `crates/node/src/event_loop.rs:90` | `counter!` | `node.event_loop.sync_ticks` | operational signal (rate/total) | kept (name unchanged) |
-| 51 | `crates/node/src/event_loop.rs:92` | `histogram!` | `node.event_loop.tick_seconds` | stable operator latency and HPA-04 ledger hook | kept (name unchanged) |
-| 52 | `crates/node/src/metrics.rs:380` | `gauge!` | `TXINDEX_READINESS_GAUGE` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 53 | `crates/node/tests/unit/metrics/tests.rs:96` | `counter!` | `node_metrics_retry_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
-| 54 | `crates/node/tests/unit/metrics/tests.rs:112` | `counter!` | `node_metrics_scrape_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
-| 55 | `crates/node/tests/unit/metrics/tests.rs:132` | `counter!` | `node_metrics_sequential_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
-| 56 | `crates/node/tests/unit/metrics/tests.rs:140` | `counter!` | `node_metrics_sequential_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
-| 57 | `crates/p2p/src/download_window.rs:757` | `counter!` | `node.sync.stall_episodes_cleared` | operational signal (count) | kept (name unchanged) |
-| 58 | `crates/p2p/src/download_window.rs:1454` | `counter!` | `node.sync.stall_episodes_started` | operational signal (count) | kept (name unchanged) |
-| 59 | `crates/p2p/src/download_window.rs:1513` | `histogram!` | `node.sync.apply_idle_seconds` | stable operator starvation latency and HPA-04 ledger hook | kept (name unchanged) |
-| 60 | `crates/p2p/src/download_window.rs:1522` | `histogram!` | `node.sync.download_blocked_by_apply_seconds` | stable operator backpressure latency and HPA-04 ledger hook | kept (name unchanged) |
-| 61 | `crates/p2p/src/download_window.rs:2133` | `counter!` | `node.sync.frontier_rewinds` | diagnostic (internal request-cursor correction) | moved to `tracing::debug!("block sync: rewound unowned request frontier")` |
-| 62 | `crates/p2p/src/download_window.rs:2394` | `counter!` | `node.sync.prefix_probe_wins` | diagnostic (internal peer-selection outcome) | existing `tracing::info!("block sync: prefix probe elected winner")` |
-| 63 | `crates/p2p/src/download_window.rs:2425` | `counter!` | `node.sync.cold_front_wins` | diagnostic (internal hedge outcome) | moved to `tracing::info!("block sync: cold-front hedge elected alternate")` |
-| 64 | `crates/p2p/src/listener.rs:332` | `counter!` | `node.sync.dropped_unsolicited_blocks` | operational ingress-pressure/safety count (P2P-05) | kept (name unchanged) |
-| 65 | `crates/p2p/src/service.rs:1104` | `counter!` | `node.sync.extra_peer_disconnects` | diagnostic (internal extra-slot retirement decision) | existing `tracing::info!("p2p retiring the extra full-relay connection: the tip is moving again")` |
-| 66 | `crates/p2p/src/sync.rs:725` | `counter!` | `node.sync.no_progress_ticks` | operational signal (count) | kept (name unchanged) |
-| 67 | `crates/p2p/src/sync/commit.rs:73` | `counter!` | `node.sync.invalid_block_disconnects` | operational signal (count) | kept (name unchanged) |
-| 68 | `crates/p2p/src/sync/commit.rs:110` | `counter!` | `node.sync.apply_halted_ticks` | operational signal (count) | kept (name unchanged) |
-| 69 | `crates/p2p/src/sync/commit.rs:231` | `counter!` | `node.sync.invalidated_blocks` | operational consensus-failure count | kept (name unchanged) |
-| 70 | `crates/p2p/src/sync/commit.rs:271` | `histogram!` | `node.sync.apply_buffered_blocks_seconds` | operational signal (latency/backlog distribution) | kept (name unchanged) |
-| 71 | `crates/p2p/src/sync/headers.rs:758` | `counter!` | `node.sync.idle_frontier_probes` | diagnostic (internal capability-probe dispatch) | moved to `tracing::debug!("block sync: sent idle-frontier capability probe")` |
-| 72 | `crates/p2p/src/sync/headers.rs:800` | `counter!` | `node.sync.chain_sync_probes` | diagnostic (internal eviction-probe dispatch) | moved to `tracing::debug!("block sync: sent chain-sync eviction probe")` |
-| 73 | `crates/p2p/src/sync/peers.rs:398` | `gauge!` | `node.sync.stall_seconds` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 74 | `crates/p2p/src/sync/peers.rs:451` | `counter!` | `node.sync.staller_disconnects` | operational signal (count) | kept (name unchanged) |
-| 75 | `crates/p2p/src/sync/peers.rs:461` | `counter!` | `node.sync.pending_timeout_disconnects` | operational signal (count) | kept (name unchanged) |
-| 76 | `crates/p2p/src/sync/peers.rs:526` | `counter!` | `node.sync.apply_side_stall_escalations` | operational signal (count) | kept (name unchanged) |
-| 77 | `crates/p2p/src/sync/peers.rs:751` | `counter!` | `node.sync.chain_sync_disconnects` | operational signal (count) | kept (name unchanged) |
-| 78 | `crates/p2p/src/sync/receive.rs:533` | `counter!` | `node.sync.body_binding_drops` | operational signal (count) | kept (name unchanged) |
-| 79 | `crates/p2p/src/sync/receive.rs:655` | `counter!` | `node.sync.duplicate_deliveries` | operational signal (count) | kept (name unchanged) |
-| 80 | `crates/p2p/src/sync/receive.rs:746` | `counter!` | `node.sync.retry_count` | operational signal (count) | kept (name unchanged) |
-| 81 | `crates/p2p/src/sync/requests.rs:76` | `counter!` | `node.sync.prefix_probe_peers` | diagnostic (internal probe fan-out) | existing `tracing::info!("block sync: started common-prefix peer probe")` field `alternates` |
-| 82 | `crates/p2p/src/sync/requests.rs:229` | `histogram!` | `node.sync.getdata_batch_size` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
-| 83 | `crates/p2p/src/sync/requests.rs:315` | `counter!` | `node.sync.cold_front_hedges` | diagnostic (internal hedge dispatch) | existing `tracing::info!("block sync: hedged cold-start stalled front")` |
-| 84 | `crates/p2p/src/sync/telemetry.rs:87` | `gauge!` | `node.sync.pending_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 85 | `crates/p2p/src/sync/telemetry.rs:88` | `gauge!` | `node.sync.pending_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 86 | `crates/p2p/src/sync/telemetry.rs:89` | `gauge!` | `node.sync.received_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 87 | `crates/p2p/src/sync/telemetry.rs:90` | `gauge!` | `node.sync.received_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 88 | `crates/p2p/src/sync/telemetry.rs:92` | `gauge!` | `node.sync.pending_blocks_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 89 | `crates/p2p/src/sync/telemetry.rs:94` | `gauge!` | `node.sync.pending_bytes_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 90 | `crates/p2p/src/sync/telemetry.rs:96` | `gauge!` | `node.sync.staged_blocks_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 91 | `crates/p2p/src/sync/telemetry.rs:98` | `gauge!` | `node.sync.staged_bytes_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 92 | `crates/p2p/src/sync/telemetry.rs:105` | `gauge!` | `node.sync.pending_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 93 | `crates/p2p/src/sync/telemetry.rs:106` | `gauge!` | `node.sync.pending_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 94 | `crates/storage/src/chainstate_journal/writer.rs:432` | `gauge!` | `node.chainstate_journal.append_gap` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 95 | `crates/storage/src/chainstate_journal/writer/durability.rs:102` | `histogram!` | `node.chainstate_journal.storage_flush_seconds` | operational signal (latency/backlog distribution) | kept (name unchanged) |
-| 96 | `crates/storage/src/chainstate_journal/writer/open.rs:111` | `gauge!` | `node.chainstate_journal.append_gap` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 97 | `crates/storage/src/chainstate_journal/writer/retention.rs:95` | `gauge!` | `node.chainstate_journal.lag_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 98 | `crates/storage/src/chainstate_journal/writer/retention.rs:96` | `gauge!` | `node.chainstate_journal.head_height` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 99 | `crates/storage/src/chainstate_journal/writer/retention.rs:104` | `gauge!` | `node.chainstate_journal.size_mib` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 100 | `crates/storage/src/fjall_impl.rs:39` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 101 | `crates/storage/src/fjall_impl.rs:99` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 102 | `crates/storage/src/fjall_impl.rs:101` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 103 | `crates/storage/src/fjall_impl.rs:263` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 104 | `crates/storage/src/redb_impl.rs:58` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 105 | `crates/storage/src/redb_impl.rs:90` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 106 | `crates/storage/src/redb_impl.rs:92` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 107 | `crates/storage/src/redb_impl.rs:244` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 108 | `crates/storage/src/redb_impl.rs:246` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 109 | `crates/storage/src/redb_impl.rs:255` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 110 | `crates/storage/src/redb_impl.rs:369` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 111 | `crates/storage/src/redb_impl.rs:371` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 112 | `crates/storage/src/redb_impl.rs:513` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 113 | `crates/storage/src/redb_impl.rs:515` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 114 | `crates/storage/src/redb_impl.rs:524` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 115 | `crates/storage/src/redb_impl.rs:572` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 116 | `crates/storage/src/rocksdb_impl.rs:46` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
-| 117 | `crates/storage/src/rocksdb_impl.rs:224` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 118 | `crates/storage/src/rocksdb_impl.rs:245` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
-| 119 | `crates/storage/src/rocksdb_impl.rs:247` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
-| 120 | `crates/utxo/src/set.rs:517` | `histogram!` | `node.utxo.listener.event_batches_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("utxo listener: event batches")` field `listener_us` |
-| 121 | `crates/utxo/src/set.rs:551` | `histogram!` | `node.utxo.listener.event_batches_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("utxo listener: event batches")` field `listener_us` |
+| 1 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.contextual_header_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("apply_block: profile")` field `contextual_header_us` |
+| 2 | `crates/chainstate/src/connect.rs` | `counter!` | `node.chainstate_journal.backpressure_total` | operational signal (rate/total) | kept (name unchanged) |
+| 3 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.pow_self_consistency_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `pow_self_us` |
+| 4 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.block_rules_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 5 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.bip30_bip34_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 6 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.script_verify_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 7 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.script_verify_{coinbase_only,serial_overlay,parallel}_seconds` (one call site, three dispatch names) | diagnostic (per-event dispatch split) | moved to `tracing::debug!("apply_block: profile")` field `script_dispatch={coinbase_only,serial_overlay,parallel}` |
+| 8 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.coinbase_maturity_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `coinbase_maturity_us` |
+| 9 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.bip68_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `bip68_us` |
+| 10 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.utxo_changes_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: profile"` field `utxo_changes_us` |
+| 11 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.undo_persist_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 12 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.block_body_persist_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 13 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.block_tree_insert_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 14 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.utxo_commit_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 15 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.coin_stats_finish_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 16 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.total_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 17 | `crates/chainstate/src/connect.rs` | `counter!` | `node.apply_block.txs_applied` | operational signal (rate/total) | kept (name unchanged) |
+| 18 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.durable_sync_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("apply_block: publish profile")` field `durable_sync_us` |
+| 19 | `crates/chainstate/src/connect.rs` | `histogram!` | `node.apply_block.durable_commit_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"apply_block: publish profile"` field `durable_commit_us` |
+| 20 | `crates/chainstate/src/connect.rs` | `counter!` | `node.chainstate_journal.append_failures` | operational signal (rate/total) | kept (name unchanged) |
+| 21 | `crates/chainstate/src/connect.rs` | `counter!` | `node.chainstate_journal.append_failures` | operational signal (rate/total) | kept (name unchanged) |
+| 22 | `crates/chainstate/src/disconnect.rs` | `counter!` | `node.chainstate_journal.reorg_failures` | operational signal (rate/total) | kept (name unchanged) |
+| 23 | `crates/chainstate/src/durable.rs` | `counter!` | `node.durable_head.commits` | operational signal (rate/total) | kept (name unchanged) |
+| 24 | `crates/chainstate/src/durable.rs` | `counter!` | `node.durable_head.commits` | operational signal (rate/total) | kept (name unchanged) |
+| 25 | `crates/chainstate/src/durable.rs` | `counter!` | `node.durable_head.recovery_gaps_replayed` | operational signal (rate/total) | kept (name unchanged) |
+| 26 | `crates/chainstate/src/durable.rs` | `counter!` | `node.durable_head.recovery_gaps` | operational signal (rate/total) | kept (name unchanged) |
+| 27 | `crates/chainstate/src/maintenance.rs` | `counter!` | `node.chainstate_journal.flush_failures` | operational signal (rate/total) | kept (name unchanged) |
+| 28 | `crates/chainstate/src/maintenance.rs` | `counter!` | `node.chainstate_journal.maintenance_failures` | operational signal (rate/total) | kept (name unchanged) |
+| 29 | `crates/chainstate/src/prepare.rs` | `histogram!` | `node.apply_block.script_resolution_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("script_verify: profile")` field `script_resolution_us` |
+| 30 | `crates/chainstate/src/prepare.rs` | `histogram!` | `node.apply_block.script_prepare_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"script_verify: profile"` field `script_prepare_us` |
+| 31 | `crates/chainstate/src/prepare.rs` | `histogram!` | `node.apply_block.script_parallel_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"script_verify: profile"` field `script_parallel_us` |
+| 32 | `crates/chainstate/src/recovery.rs` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
+| 33 | `crates/chainstate/src/recovery.rs` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
+| 34 | `crates/chainstate/src/recovery.rs` | `histogram!` | `node.chainstate_journal.replay_seconds` | diagnostic (per-event/dev-only decomposition) | redundant: removed; already traced as `replay_seconds` on `chainstate restore selected` |
+| 35 | `crates/chainstate/src/recovery.rs` | `counter!` | `node.chainstate_journal.fallback_total` | operational signal (count) | kept (name unchanged) |
+| 36 | `crates/chainstate/src/recovery.rs` | `counter!` | `node.chainstate_journal.checksum_failures_total` | operational signal (rate/total) | kept (name unchanged) |
+| 37 | `crates/chainstate/src/window.rs` | `histogram!` | `node.durable_head.group_sync_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("durable_head: group commit")` field `sync_us` |
+| 38 | `crates/chainstate/src/window.rs` | `histogram!` | `node.durable_head.group_commit_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `"durable_head: group commit"` field `commit_us` |
+| 39 | `crates/chainstate/src/window.rs` | `histogram!` | `node.durable_head.group_blocks` | diagnostic (per-event/dev-only decomposition) | moved to `"durable_head: group commit"` field `blocks` |
+| 40 | `crates/chainstate/src/window.rs` | `counter!` | `node.durable_head.group_flushes` | operational signal (rate/total) | kept (name unchanged) |
+| 41 | `crates/chainstate/src/window.rs` | `histogram!` | `node.window.context_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 42 | `crates/chainstate/src/window.rs` | `histogram!` | `node.window.parse_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 43 | `crates/chainstate/src/window.rs` | `histogram!` | `node.window.prepare_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 44 | `crates/chainstate/src/window.rs` | `histogram!` | `node.window.checks_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("prove_window: profile")` field `checks_us` |
+| 45 | `crates/chainstate/src/window.rs` | `histogram!` | `node.window.verify_seconds` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 46 | `crates/chainstate/src/window.rs` | `counter!` | `node.window.verify_success_total` | operational signal (rate/total) | kept (name unchanged) |
+| 47 | `crates/mempool/src/gateway.rs` | `counter!` | `mempool_observer_leg_failed_total{leg}` | operational fault count, but `leg` is embedder-chosen and not a closed taxonomy | renamed to aggregate `node.mempool.observer_failures_total`; leg stays in the warning event |
+| 48 | `crates/node/src/event_loop.rs` | `gauge!` | `node.shutdown.requested` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 49 | `crates/node/src/event_loop.rs` | `counter!` | `node.event_loop.sync_wakes` | operational signal (rate/total) | kept (name unchanged) |
+| 50 | `crates/node/src/event_loop.rs` | `counter!` | `node.event_loop.sync_ticks` | operational signal (rate/total) | kept (name unchanged) |
+| 51 | `crates/node/src/event_loop.rs` | `histogram!` | `node.event_loop.tick_seconds` | stable operator latency and HPA-04 ledger hook | kept (name unchanged) |
+| 52 | `crates/node/src/metrics.rs` | `gauge!` | `TXINDEX_READINESS_GAUGE` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 53 | `crates/node/tests/unit/metrics/tests.rs` | `counter!` | `node_metrics_retry_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
+| 54 | `crates/node/tests/unit/metrics/tests.rs` | `counter!` | `node_metrics_scrape_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
+| 55 | `crates/node/tests/unit/metrics/tests.rs` | `counter!` | `node_metrics_sequential_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
+| 56 | `crates/node/tests/unit/metrics/tests.rs` | `counter!` | `node_metrics_sequential_probe` | test-only fixture (not a shipped signal) | kept (test-only) |
+| 57 | `crates/p2p/src/download_window.rs` | `counter!` | `node.sync.stall_episodes_cleared` | operational signal (count) | kept (name unchanged) |
+| 58 | `crates/p2p/src/download_window.rs` | `counter!` | `node.sync.stall_episodes_started` | operational signal (count) | kept (name unchanged) |
+| 59 | `crates/p2p/src/download_window.rs` | `histogram!` | `node.sync.apply_idle_seconds` | stable operator starvation latency and HPA-04 ledger hook | kept (name unchanged) |
+| 60 | `crates/p2p/src/download_window.rs` | `histogram!` | `node.sync.download_blocked_by_apply_seconds` | stable operator backpressure latency and HPA-04 ledger hook | kept (name unchanged) |
+| 61 | `crates/p2p/src/download_window.rs` | `counter!` | `node.sync.frontier_rewinds` | diagnostic (internal request-cursor correction) | moved to `tracing::debug!("block sync: rewound unowned request frontier")` |
+| 62 | `crates/p2p/src/download_window.rs` | `counter!` | `node.sync.prefix_probe_wins` | diagnostic (internal peer-selection outcome) | existing `tracing::info!("block sync: prefix probe elected winner")` |
+| 63 | `crates/p2p/src/download_window.rs` | `counter!` | `node.sync.cold_front_wins` | diagnostic (internal hedge outcome) | moved to `tracing::info!("block sync: cold-front hedge elected alternate")` |
+| 64 | `crates/p2p/src/listener.rs` | `counter!` | `node.sync.dropped_unsolicited_blocks` | operational ingress-pressure/safety count (P2P-05) | kept (name unchanged) |
+| 65 | `crates/p2p/src/service.rs` | `counter!` | `node.sync.extra_peer_disconnects` | diagnostic (internal extra-slot retirement decision) | existing `tracing::info!("p2p retiring the extra full-relay connection: the tip is moving again")` |
+| 66 | `crates/p2p/src/sync.rs` | `counter!` | `node.sync.no_progress_ticks` | operational signal (count) | kept (name unchanged) |
+| 67 | `crates/p2p/src/sync/commit.rs` | `counter!` | `node.sync.invalid_block_disconnects` | operational signal (count) | kept (name unchanged) |
+| 68 | `crates/p2p/src/sync/commit.rs` | `counter!` | `node.sync.apply_halted_ticks` | operational signal (count) | kept (name unchanged) |
+| 69 | `crates/p2p/src/sync/commit.rs` | `counter!` | `node.sync.invalidated_blocks` | operational consensus-failure count | kept (name unchanged) |
+| 70 | `crates/p2p/src/sync/commit.rs` | `histogram!` | `node.sync.apply_buffered_blocks_seconds` | operational signal (latency/backlog distribution) | kept (name unchanged) |
+| 71 | `crates/p2p/src/sync/headers.rs` | `counter!` | `node.sync.idle_frontier_probes` | diagnostic (internal capability-probe dispatch) | moved to `tracing::debug!("block sync: sent idle-frontier capability probe")` |
+| 72 | `crates/p2p/src/sync/headers.rs` | `counter!` | `node.sync.chain_sync_probes` | diagnostic (internal eviction-probe dispatch) | moved to `tracing::debug!("block sync: sent chain-sync eviction probe")` |
+| 73 | `crates/p2p/src/sync/peers.rs` | `gauge!` | `node.sync.stall_seconds` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 74 | `crates/p2p/src/sync/peers.rs` | `counter!` | `node.sync.staller_disconnects` | operational signal (count) | kept (name unchanged) |
+| 75 | `crates/p2p/src/sync/peers.rs` | `counter!` | `node.sync.pending_timeout_disconnects` | operational signal (count) | kept (name unchanged) |
+| 76 | `crates/p2p/src/sync/peers.rs` | `counter!` | `node.sync.apply_side_stall_escalations` | operational signal (count) | kept (name unchanged) |
+| 77 | `crates/p2p/src/sync/peers.rs` | `counter!` | `node.sync.chain_sync_disconnects` | operational signal (count) | kept (name unchanged) |
+| 78 | `crates/p2p/src/sync/receive.rs` | `counter!` | `node.sync.body_binding_drops` | operational signal (count) | kept (name unchanged) |
+| 79 | `crates/p2p/src/sync/receive.rs` | `counter!` | `node.sync.duplicate_deliveries` | operational signal (count) | kept (name unchanged) |
+| 80 | `crates/p2p/src/sync/receive.rs` | `counter!` | `node.sync.retry_count` | operational signal (count) | kept (name unchanged) |
+| 81 | `crates/p2p/src/sync/requests.rs` | `counter!` | `node.sync.prefix_probe_peers` | diagnostic (internal probe fan-out) | existing `tracing::info!("block sync: started common-prefix peer probe")` field `alternates` |
+| 82 | `crates/p2p/src/sync/requests.rs` | `histogram!` | `node.sync.getdata_batch_size` | diagnostic ledger hook required by HPA-04 | kept under OBS-04 (name unchanged) |
+| 83 | `crates/p2p/src/sync/requests.rs` | `counter!` | `node.sync.cold_front_hedges` | diagnostic (internal hedge dispatch) | existing `tracing::info!("block sync: hedged cold-start stalled front")` |
+| 84 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 85 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 86 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.received_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 87 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.received_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 88 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_blocks_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 89 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_bytes_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 90 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.staged_blocks_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 91 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.staged_bytes_high_water` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 92 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 93 | `crates/p2p/src/sync/telemetry.rs` | `gauge!` | `node.sync.pending_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 94 | `crates/storage/src/chainstate_journal/writer.rs` | `gauge!` | `node.chainstate_journal.append_gap` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 95 | `crates/storage/src/chainstate_journal/writer/durability.rs` | `histogram!` | `node.chainstate_journal.storage_flush_seconds` | operational signal (latency/backlog distribution) | kept (name unchanged) |
+| 96 | `crates/storage/src/chainstate_journal/writer/open.rs` | `gauge!` | `node.chainstate_journal.append_gap` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 97 | `crates/storage/src/chainstate_journal/writer/retention.rs` | `gauge!` | `node.chainstate_journal.lag_blocks` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 98 | `crates/storage/src/chainstate_journal/writer/retention.rs` | `gauge!` | `node.chainstate_journal.head_height` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 99 | `crates/storage/src/chainstate_journal/writer/retention.rs` | `gauge!` | `node.chainstate_journal.size_mib` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 100 | `crates/storage/src/fjall_impl.rs` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 101 | `crates/storage/src/fjall_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 102 | `crates/storage/src/fjall_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 103 | `crates/storage/src/fjall_impl.rs` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 104 | `crates/storage/src/redb_impl.rs` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 105 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 106 | `crates/storage/src/redb_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 107 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 108 | `crates/storage/src/redb_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 109 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 110 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 111 | `crates/storage/src/redb_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 112 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 113 | `crates/storage/src/redb_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 114 | `crates/storage/src/redb_impl.rs` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 115 | `crates/storage/src/redb_impl.rs` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 116 | `crates/storage/src/rocksdb_impl.rs` | `gauge!` | `storage.cache_capacity_bytes` | operational signal (state/backlog gauge) | kept (name unchanged) |
+| 117 | `crates/storage/src/rocksdb_impl.rs` | `counter!` | `storage.flushes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 118 | `crates/storage/src/rocksdb_impl.rs` | `counter!` | `storage.writes_total` | operational signal (rate/total) | kept (name unchanged) |
+| 119 | `crates/storage/src/rocksdb_impl.rs` | `histogram!` | `storage.write_bytes` | operational storage batch-size distribution | kept (name unchanged) |
+| 120 | `crates/utxo/src/set.rs` | `histogram!` | `node.utxo.listener.event_batches_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("utxo listener: event batches")` field `listener_us` |
+| 121 | `crates/utxo/src/set.rs` | `histogram!` | `node.utxo.listener.event_batches_seconds` | diagnostic (per-event/dev-only decomposition) | moved to `tracing::debug!("utxo listener: event batches")` field `listener_us` |
 
 ## Evidence and checks
 

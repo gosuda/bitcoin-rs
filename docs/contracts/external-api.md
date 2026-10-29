@@ -225,7 +225,8 @@ scanning and wallet interoperability remain unverified.
   levels clamp to 0–4.
 
   Proof: `handlers::chain::verifychain_tests::parameters_follow_core_signed_ranges`,
-  `empty_window_is_verified_without_a_verifier` and
+  `handlers::chain::verifychain_tests::empty_window_through_attached_control_is_verified`
+  and
   `handlers::chain::verifychain_tests::tip_without_control_is_not_verified`;
   `node::lifecycle::tests::verifychain_arguments_select_the_check_core_asks_for`
   pins the level/depth mapping against the real verifier;
