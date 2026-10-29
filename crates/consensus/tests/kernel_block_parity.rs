@@ -1,6 +1,5 @@
 #![cfg(feature = "kernel")]
 
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 

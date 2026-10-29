@@ -74,31 +74,31 @@ Server daemon lifecycle in-process.
 The absence of a `[lib]` section is only a surface obstacle. Even if a
 library target were declared, the codebase lacks any public serving API.
 
-`NodeService` is private. Defined in [`ldk-server/src/service.rs:115-139`](https://github.com/lightningdevkit/ldk-server/blob/c17dc11dde38f88c53457039ddf30c6b90a63ba2/ldk-server/src/service.rs#L115-L139),
+`NodeService` is private. Defined in [`ldk-server/src/service.rs`](https://github.com/lightningdevkit/ldk-server/blob/c17dc11dde38f88c53457039ddf30c6b90a63ba2/ldk-server/src/service.rs#L115-L139),
 `NodeService`, its constructor `NodeService::new`, and its inner `Context`
 (which holds `Arc<Node>`) are declared `pub(crate)`. Neither can be constructed
 or accessed outside the `ldk-server` binary crate.
 
-In [`ldk-server/src/main.rs:78-835`](https://github.com/lightningdevkit/ldk-server/blob/c17dc11dde38f88c53457039ddf30c6b90a63ba2/ldk-server/src/main.rs#L78-L835),
+In [`ldk-server/src/main.rs`](https://github.com/lightningdevkit/ldk-server/blob/c17dc11dde38f88c53457039ddf30c6b90a63ba2/ldk-server/src/main.rs#L78-L835),
 the complete runtime, networking, and event lifecycle is hardcoded within private
 functions:
 - Node construction is private: `fn build_node(...) -> Result<Node, BuildError>`
-  (`main.rs:822-835`).
-- Node startup is called directly inside `main()`: `node.start()` (`main.rs:325`).
+  (`main.rs`).
+- Node startup is called directly inside `main()`: `node.start()` (`main.rs`).
 - Service instantiation happens exclusively inside the private socket accept loop:
-  `NodeService::new(...)` (`main.rs:730-737`).
-- The serving loop is a private inline Tokio event loop (`main.rs:680-773`) driving
-  `grpc_listener.accept()` on a local `TcpListener` (`main.rs:726`), in-line TLS
-  handshake via `acceptor.accept(stream)` (`main.rs:740`), HTTP/2 serving via
+  `NodeService::new(...)` (`main.rs`).
+- The serving loop is a private inline Tokio event loop (`main.rs`) driving
+  `grpc_listener.accept()` on a local `TcpListener` (`main.rs`), in-line TLS
+  handshake via `acceptor.accept(stream)` (`main.rs`), HTTP/2 serving via
   `http2::Builder::new(TokioExecutor::new()).serve_connection(io_stream, node_service)`
-  (`main.rs:742-745`), and LDK event polling via `event_node.next_event_async()`
-  (`main.rs:683`). Events are processed internally and emitted via a private
-  broadcast channel (`event_sender: broadcast::Sender<EventEnvelope>` at `service.rs:120`),
+  (`main.rs`), and LDK event polling via `event_node.next_event_async()`
+  (`main.rs`). Events are processed internally and emitted via a private
+  broadcast channel (`event_sender: broadcast::Sender<EventEnvelope>` at `service.rs`),
   with no public API for external consumers to subscribe to, poll, or process
   these events directly.
 - Shutdown handling is coupled to system signals (`SIGTERM`/`Ctrl-C`), systemd
   notification (`systemd::notify_stopping()`), and immediate `node.stop()`
-  (`main.rs:775-780`). There is no public interface for an orderly shutdown
+  (`main.rs`). There is no public interface for an orderly shutdown
   sequence that stops incoming connections, drains active gRPC calls and event
   dispatch queues, and then closes the node safely.
 
@@ -149,7 +149,7 @@ into `bitcoin-rs`, or substituting a loopback HTTP probe is explicitly rejected.
 #### 1. Closed builder chain-source setters
 The builder in `ldk-node` exposes only concrete, remote chain-source setters, with signatures that differ across the two baselines.
 
-At tag `v0.7.1` (peeled commit `edc8916e`, [`src/builder.rs:328-410`](https://github.com/lightningdevkit/ldk-node/blob/edc8916e289d39a4135b6eda66978a9f765396bb/src/builder.rs#L328-L410)), `set_chain_source_bitcoind_rpc` is a four-parameter setter:
+At tag `v0.7.1` (peeled commit `edc8916e`, [`src/builder.rs`](https://github.com/lightningdevkit/ldk-node/blob/edc8916e289d39a4135b6eda66978a9f765396bb/src/builder.rs#L328-L410)), `set_chain_source_bitcoind_rpc` is a four-parameter setter:
 ```rust
 pub fn set_chain_source_esplora(&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>) -> &mut Self;
 pub fn set_chain_source_esplora_with_headers(&mut self, server_url: String, headers: HashMap<String, String>, sync_config: Option<EsploraSyncConfig>) -> &mut Self;
@@ -158,7 +158,7 @@ pub fn set_chain_source_bitcoind_rpc(&mut self, rpc_host: String, rpc_port: u16,
 pub fn set_chain_source_bitcoind_rest(&mut self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String) -> &mut Self;
 ```
 
-At commit `179b4b2` ([`src/builder.rs:396-503`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/builder.rs#L396-L503)), `wallet_rescan_from_height: Option<u32>` was added, yielding a five-parameter RPC setter (and seven-parameter REST setter):
+At commit `179b4b2` ([`src/builder.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/builder.rs#L396-L503)), `wallet_rescan_from_height: Option<u32>` was added, yielding a five-parameter RPC setter (and seven-parameter REST setter):
 ```rust
 pub fn set_chain_source_esplora(&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>) -> &mut Self;
 pub fn set_chain_source_esplora_with_headers(&mut self, server_url: String, headers: HashMap<String, String>, sync_config: Option<EsploraSyncConfig>) -> &mut Self;
@@ -171,8 +171,8 @@ In both revisions, there is no generic setter, no trait object parameter (`Box<d
 
 #### 2. Closed ChainSourceKind enumeration
 Internal dispatch is mediated by a private enum at `179b4b2`
-([`src/chain/mod.rs:153-158`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/mod.rs#L153-L158))
-and `v0.7.1` ([`src/chain/mod.rs:93-97`](https://github.com/lightningdevkit/ldk-node/blob/edc8916e289d39a4135b6eda66978a9f765396bb/src/chain/mod.rs#L93-L97)):
+([`src/chain/mod.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/mod.rs#L153-L158))
+and `v0.7.1` ([`src/chain/mod.rs`](https://github.com/lightningdevkit/ldk-node/blob/edc8916e289d39a4135b6eda66978a9f765396bb/src/chain/mod.rs#L93-L97)):
 
 ```rust
 enum ChainSourceKind {
@@ -196,7 +196,7 @@ supply chain services:
 
 | Chain capability | Implementation in `ldk-node` | Extension status |
 | :--- | :--- | :--- |
-| Full-block and wallet sync | `sync_onchain_wallet` and `sync_lightning_wallet` ([`src/chain/mod.rs:445-485`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/mod.rs#L445-L485)) dispatch via `match &self.kind` to concrete clients. Bitcoind mode delegates to internal `lightning-block-sync::SpvClient` / `ChainPoller` polling over HTTP REST/RPC ([`src/chain/bitcoind.rs:460-520`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/bitcoind.rs#L460-L520)). | Closed |
+| Full-block and wallet sync | `sync_onchain_wallet` and `sync_lightning_wallet` ([`src/chain/mod.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/mod.rs#L445-L485)) dispatch via `match &self.kind` to concrete clients. Bitcoind mode delegates to internal `lightning-block-sync::SpvClient` / `ChainPoller` polling over HTTP REST/RPC ([`src/chain/bitcoind.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/chain/bitcoind.rs#L460-L520)). | Closed |
 | Fee estimation | `OnchainFeeEstimator` ([`src/fee_estimator.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/fee_estimator.rs)) is an internal concrete struct, not an open trait. Concrete clients poll remote endpoints and mutate an internal fee rate cache. | Closed |
 | Transaction broadcast | `TransactionBroadcaster` ([`src/tx_broadcaster.rs`](https://github.com/lightningdevkit/ldk-node/blob/179b4b263762155a7ff515ddad7e757a80807fd5/src/tx_broadcaster.rs)) queues packages and broadcasts directly through concrete clients via bitcoind RPC `sendrawtransaction`/`submitpackage`, Esplora HTTP, or Electrum TCP. | Closed |
 | Tip and filter observation | Driven strictly within internal `SpvClient` and `ChainPoller` polling loops. External listeners cannot attach to the node native chain feed. | Closed |

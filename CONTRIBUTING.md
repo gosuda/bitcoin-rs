@@ -141,10 +141,10 @@ cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
 
 # Run differential kernel parity verification (requires kernel feature)
 cargo test -p bitcoin-rs-consensus --features kernel \
-  --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+  --test suite -- kernel_block_parity:: kernel_vector_parity:: --nocapture
 ```
 
-The two parity test targets are not ignored. Passing `--ignored` would skip
+The tests in both parity modules are not ignored. Passing `--ignored` would skip
 them rather than run the oracle checks.
 
 ### Benchmark compilation check
@@ -318,3 +318,5 @@ are redesigned, the stronger the external validation evidence must be.
 - [docs/getting-started.md](docs/getting-started.md): node setup and configuration
 - [CONSTRAINTS.md](CONSTRAINTS.md): repository-wide project invariants
 - [CONCEPTS.md](CONCEPTS.md): domain terminology and concepts
+
+Documentation follows the [ownership policy](docs/policies/documentation.md): keep requirements with their enforcing owners and current execution evidence with CI or the PR.

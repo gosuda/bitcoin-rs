@@ -106,7 +106,7 @@ impl StaleTipState {
     }
 }
 
-/// INVARIANT: this is Core's `TipMayBeStale` (`net_processing.cpp:1434-1448`),
+/// INVARIANT: this is Core's `TipMayBeStale` (`net_processing.cpp`),
 ///   which weighs the last tip update against `3 * nPowTargetSpacing` with
 ///   nothing in flight.
 fn tip_may_be_stale(

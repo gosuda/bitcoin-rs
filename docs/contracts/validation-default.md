@@ -111,21 +111,6 @@
 - The kernel-free default keeps `kernel` out of every manifest default; it is not a C++-free claim: the default build compiles bundled ZeroMQ C++ from source and still needs C/C++ compilers plus `ar` (see [getting-started prerequisites](../getting-started.md#prerequisites)). Changing the production
   default engine under `VAL-01` does not add `kernel` to any manifest default.
 
-## Proven by
+## Verification boundaries
 
-- `scripts/check-feature-matrix.sh` builds the declared feature combinations.
-  Source review owns the manifest default; measurements own engine promotion.
-- `crates/script/tests/core_vectors.rs`: `script_tests_native_column`,
-  `tx_valid_native_column`, `tx_invalid_native_column`
-  (`NATIVE_*_FAILURES = 0`, pinned skip counts and skip-reason allow-lists).
-- `crates/consensus/tests/shared_sighash.rs`: concurrent transaction aggregates,
-  independently signed checks, failure precedence, and signature cache reuse.
-- `crates/script/src/signature_cache.rs`: unit tests for domain separation,
-  algorithm tags, alias prevention, and capacity refusal without eviction.
-- `crates/consensus/tests/kernel_block_parity.rs`:
-  `script_verdict_parity` (Taproot key-path differential),
-  `differential_is_non_vacuous` (script-path non-vacuity).
-- Manifests: `crates/consensus/Cargo.toml` and
-  `crates/chainstate/Cargo.toml` `default = []`,
-  `crates/node/Cargo.toml` `default = ["fjall", "zmq"]`,
-  `bin/bitcoin-rs/Cargo.toml` `default = ["fjall", "redb", "zmq"]`.
+Configuration, backend metadata, native/kernel capability, and startup failure tests own selection and refusal behavior. CI and provisioned reference campaigns own execution evidence; compiling a capability does not select it at runtime or establish consensus parity.

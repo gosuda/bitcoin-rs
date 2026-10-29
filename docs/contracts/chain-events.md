@@ -127,9 +127,6 @@ Owners:
   Unknown headers, unavailable ancestry and missing/pruned bodies are explicit
   errors. Fetch bodies separately with `block_by_hash`; never mark a failed
   body applied. Replay reconstructs a path, not a historical event log.
-- Proof: `chain_feed::tests` (`crates/node/tests/unit/chain_feed.rs`) covers
-  bounded batches, missed commits, stale targets, disconnect-before-connect,
-  restart, refusal and unsettled fences.
 
 ## Startup crash recovery
 
@@ -140,28 +137,9 @@ convergence after crash, lost write, and reorg is owned by
 [recovery.md](recovery.md). The recovery path does not restore an authenticated
 checkpoint or replay a journal as an authority.
 
-## Proven by
+## Verification boundaries
 
-- `crates/chainstate/src/lib.rs` and its connect/disconnect/window modules own
-  the ordered commit protocol and stable publication.
-- `crates/mempool/src/gateway.rs` and `crates/mempool/src/mutation.rs`: own the canonical mempool lifecycle and bounded observer delivery.
-- `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned): tests that
-  canonical estimator accounting stays inside the lifecycle, that slow
-  observers never hold the pool writer, and that queue overflow produces gap
-  counters and a reconcile signal with bounded memory.
-- `crates/node/tests/overhaul_durable_head.rs`: fault-injection matrix for the
-  durable-head commit protocol — batch atomicity across the storage family,
-  durability before publication, monotonic commit ids across restarts, and
-  committed body and undo reachability.
-- `scripts/check_models.py` (manual evidence lane): checks the
-  `ChainAdmission` TLA+ model, which covers the durable commit, mempool
-  reconciliation, and stable publication ordering.
-- `crates/chainstate` checkpoint/journal tests cover durable ordering and
-  disconnect recovery; node mining/sync/reorg tests cover mempool generation
-  fencing and post-commit cross-domain dispatch.
-
-- `crates/node/tests/overhaul_fee_history.rs` (existing):
-  - `reorg_reconfirm_records_exactly_one_observation` (`EVT-02` step 6).
+Chain-feed, applied-chain publication, and index-runtime tests exercise bounded delivery, missed commits, branch changes, refusal, restart, and unsettled fences. The durable/recovery boundaries remain with their storage and chainstate owners.
 
 ## Vocabulary
 
