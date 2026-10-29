@@ -37,25 +37,50 @@ fn overlay_self_announcements_keep_the_advertised_time() {
     ] {
         let book = AddressBook::open(None, [1; 4], false, None);
         let own = PeerEndpoint::new(address, 8333);
-        let other = PeerEndpoint::new(crate::PeerAddress::Onion([5; 32]), 8333);
-        book.learn_peer(
-            crate::PeerRemote::Endpoint(PeerEndpoint::new(address, 8333)),
-            &[(own, 9, EPOCH), (other, 9, EPOCH)],
+        book.learn_peer(crate::PeerRemote::Endpoint(own), &[(own, 9, EPOCH)], EPOCH);
+        assert_eq!(
+            last_seen(&book, own),
             EPOCH,
+            "self announcement keeps its time"
         );
-        let state = book.state.lock();
-        let seen = |endpoint| {
-            state
-                .stored
-                .records
-                .iter()
-                .find(|entry| entry.endpoint == endpoint)
-                .expect("learned endpoint")
-                .last_seen
-        };
-        assert_eq!(seen(own), EPOCH);
-        assert_eq!(seen(other), EPOCH - 2 * 60 * 60);
     }
+
+    let book = AddressBook::open(None, [1; 4], false, None);
+    let source = PeerEndpoint::new(crate::PeerAddress::Onion([3; 32]), 8333);
+    let gossiped = PeerEndpoint::new(crate::PeerAddress::Onion([5; 32]), 8333);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(source),
+        &[(gossiped, 9, EPOCH)],
+        EPOCH,
+    );
+    assert_eq!(
+        last_seen(&book, gossiped),
+        EPOCH - 2 * 60 * 60,
+        "a gossiped address pays the relay penalty"
+    );
+}
+
+/// Reads an endpoint's advertised time, naming every stored record when the
+/// endpoint is absent.
+fn last_seen(book: &AddressBook, endpoint: PeerEndpoint) -> u64 {
+    let state = book.state.lock();
+    state
+        .stored
+        .records
+        .iter()
+        .find(|entry| entry.endpoint == endpoint)
+        .unwrap_or_else(|| {
+            panic!(
+                "{endpoint:?} is not stored; book holds {:#?}",
+                state
+                    .stored
+                    .records
+                    .iter()
+                    .map(|entry| (entry.endpoint, entry.last_seen))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .last_seen
 }
 
 #[test]
