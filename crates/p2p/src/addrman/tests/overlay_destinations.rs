@@ -83,11 +83,18 @@ fn last_seen(book: &AddressBook, endpoint: PeerEndpoint) -> u64 {
         .last_seen
 }
 
+/// Pins the table secret so bucket placement is a fixed property of the test
+/// rather than an entropy draw: these assertions need both endpoints admitted.
+fn pin_layout(book: &AddressBook) {
+    book.state.lock().stored.secret = [7; 32];
+}
+
 #[test]
 fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");
     let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    pin_layout(&book);
     let onion = PeerEndpoint::new(crate::PeerAddress::Onion([1; 32]), 8333);
     let i2p = PeerEndpoint::new(crate::PeerAddress::I2p([2; 32]), 8333);
     book.learn_peer(
