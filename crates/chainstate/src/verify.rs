@@ -436,5 +436,4 @@ fn check_binding(block: &Block, height: u32, ancestor: &Ancestor) -> Result<(), 
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/verify_tests.rs"]
 mod tests;

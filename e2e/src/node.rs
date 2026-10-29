@@ -172,19 +172,8 @@ fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn current_platform_target() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("x86_64-linux-gnu"),
-        ("linux", "aarch64") => Some("aarch64-linux-gnu"),
-        ("macos", "aarch64") => Some("arm64-apple-darwin"),
-        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
-        ("windows", "x86_64") => Some("win64"),
-        _ => None,
-    }
-}
-
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
-    let target = current_platform_target().ok_or_else(|| {
+    let target = crate::reference_set::current_platform_target().ok_or_else(|| {
         Error::Assertion(format!(
             "no pinned Core artifact for {}-{}",
             std::env::consts::OS,

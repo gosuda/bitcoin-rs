@@ -19,8 +19,7 @@ use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
-#[path = "support/fixtures.rs"]
-mod common;
+use crate::support::fixtures as common;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 

@@ -3,9 +3,7 @@
     reason = "process custody failures must name the offending identity"
 )]
 
-#[expect(dead_code, reason = "only the release bitcoind digest is read")]
-#[path = "support/reference_set.rs"]
-mod reference_set;
+use bitcoin_rs_e2e::reference_set;
 
 #[path = "support/script_decode_cases.rs"]
 mod script_decode_cases;

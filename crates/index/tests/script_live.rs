@@ -1,7 +1,6 @@
 //! `ScriptLive` behavior over the prepared/commit path (`IDX-01`, `IDX-07`, #225).
 
-#[path = "support/common.rs"]
-mod common;
+use crate::support::common;
 
 #[cfg(any(feature = "redb", feature = "fjall"))]
 use bitcoin_rs_index::IndexReader;

@@ -3,8 +3,7 @@ use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};
 use std::error::Error;
 
-#[path = "support/regtest_blocks.rs"]
-mod regtest_blocks;
+use crate::support::regtest_blocks;
 use regtest_blocks::{block, coinbase, submit};
 
 #[test]

@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-mining"
 edition.workspace = true
 rust-version.workspace = true
@@ -61,22 +62,16 @@ tempfile.workspace = true
 secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 
-[[test]]
-name = "pool_jobs"
-required-features = ["pool"]
-
-[[test]]
-name = "pool_sv1"
-required-features = ["pool"]
-
-[[test]]
-name = "pool_sv2"
-required-features = ["pool-sv2"]
-
-[[test]]
-name = "pool_ledger"
-required-features = ["pool", "test-seam"]
-
 [[bench]]
 name = "candidate"
 harness = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Self-spawns exact-name backend crash workers; keep their process boundary.
+[[test]]
+name = "pool_ledger"
+path = "tests/pool_ledger.rs"
+required-features = ["pool", "test-seam"]

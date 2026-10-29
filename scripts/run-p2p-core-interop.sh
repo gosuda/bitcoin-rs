@@ -878,7 +878,7 @@ if [[ "${SKIP_VERIFIER}" -ne 1 ]]; then
   echo "==> running the ignored verifier test"
   P2P_CORE_INTEROP_EVIDENCE="${EVIDENCE}" env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR \
     cargo test --locked --profile quickstart -p bitcoin-rs-p2p \
-      --test core_interop_live -- --ignored --nocapture
+      --test suite core_interop_live:: -- --ignored --nocapture
 fi
 
 echo "==> Core differential: PASS"

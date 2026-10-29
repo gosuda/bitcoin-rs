@@ -697,5 +697,4 @@ fn replay_gap_chain(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/durable_replay_tests.rs"]
 mod tests;

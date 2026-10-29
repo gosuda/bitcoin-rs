@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-e2e"
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +14,7 @@ publish = false
 workspace = true
 
 [dependencies]
+thiserror.workspace = true
 bitcoin-rs-rpc = { workspace = true }
 bitcoin.workspace = true
 sonic-rs.workspace = true
@@ -21,3 +23,7 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

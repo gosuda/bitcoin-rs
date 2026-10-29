@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-script"
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +27,7 @@ smallvec.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-e2e.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 proptest.workspace = true
@@ -35,3 +37,7 @@ bitcoin-rs-consensus = { workspace = true }
 [[bench]]
 name = "signature_verification"
 harness = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

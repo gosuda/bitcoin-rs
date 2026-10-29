@@ -3291,7 +3291,7 @@ fn fanout_eligibility_requires_block_service_flags() {
 
     fn policy(requested_height: u32) -> super::BlockDownloadPolicy {
         super::BlockDownloadPolicy {
-            ibd: crate::sync::tests::synced_ibd_latch(),
+            ibd: crate::sync::test_support::synced_ibd_latch(),
             requested_height,
             network: Network::Regtest,
         }

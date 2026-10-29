@@ -82,10 +82,12 @@ clippy_profiles() {
 test_crates_profiles() {
   profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
     cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
-  profile "test: bitcoin-rs (silent-payments and certified inputs process)" \
-    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test silent_payments --test block_inputs
+  profile "test: bitcoin-rs (silent-payments process)" \
+    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite silent_payments::
+  profile "test: bitcoin-rs (certified inputs process)" \
+    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite block_inputs::
   profile "test: bitcoin-rs-index (silent-payments codec)" \
-    cargo_test -p bitcoin-rs-index --features silent-payments --test silent_payments
+    cargo_test -p bitcoin-rs-index --features silent-payments --test suite silent_payments::
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.

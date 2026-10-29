@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-snapshot"
 version.workspace = true
 edition.workspace = true
@@ -23,3 +24,7 @@ rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

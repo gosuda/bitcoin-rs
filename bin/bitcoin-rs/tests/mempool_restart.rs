@@ -10,8 +10,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-#[path = "support/wire_peer.rs"]
-mod wire_peer;
+use crate::support::wire_peer;
 
 fn options(enabled: bool) -> SpawnOptions<'static> {
     SpawnOptions {

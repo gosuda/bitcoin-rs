@@ -3,8 +3,7 @@ use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, NodeStatus, accept_headers, current_unix_seconds,
 };
 
-#[path = "support/pow_oracle.rs"]
-mod pow_oracle;
+use crate::support::pow_oracle;
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 use pow_oracle::pow_is_met;
 

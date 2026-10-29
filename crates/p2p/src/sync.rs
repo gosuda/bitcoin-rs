@@ -697,7 +697,10 @@ impl std::fmt::Display for NoProgressReason {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// INVARIANT: test-only. Production wires the node's chain-owned latch; a test
 ///   that exercises the block-service clause builds its own fixture.

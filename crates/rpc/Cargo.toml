@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-rpc"
 edition.workspace = true
 rust-version.workspace = true
@@ -68,3 +69,7 @@ rustix.workspace = true
 [target.'cfg(windows)'.dev-dependencies]
 cap-std.workspace = true
 cap-fs-ext.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

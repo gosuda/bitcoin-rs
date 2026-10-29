@@ -216,7 +216,7 @@ jobs:
           CORPUS_VERDICTS_WRITE: "1"
         run: |
           set -euo pipefail
-          cargo test -p bitcoin-rs-primitives --test differential
+          cargo test -p bitcoin-rs-primitives --test suite differential::
           git -C ../corpus-repository add corpus/verdicts.json
       - name: Commit and push corpus
         if: steps.apply.outputs.changed == 'true'

@@ -681,6 +681,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "endpoint/tests.rs"]
 #[expect(clippy::expect_used)]
 mod endpoint_main_tests;

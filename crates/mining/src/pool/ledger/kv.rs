@@ -8,7 +8,6 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
-#[path = "../../../tests/support/kv_transactions.rs"]
 mod tests;
 
 const PREFIX: &[u8] = b"pool-ledger/v1/";

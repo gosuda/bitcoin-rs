@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs"
 edition.workspace = true
 rust-version.workspace = true
@@ -52,5 +53,5 @@ pool = ["bitcoin-rs-node/pool"]
 pool-sv2 = ["bitcoin-rs-node/pool-sv2"]
 
 [[test]]
-name = "g17_dependency_direction"
-path = "tests/gates/g17_dependency_direction.rs"
+name = "suite"
+path = "tests/suite.rs"

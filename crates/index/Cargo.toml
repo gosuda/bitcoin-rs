@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-index"
 edition.workspace = true
 rust-version.workspace = true
@@ -59,3 +60,6 @@ proptest.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

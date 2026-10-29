@@ -250,7 +250,7 @@ fn notes_are_markdown_table_safe() {
 #[test]
 fn generated_reference_matches_checked_in() {
     const REGEN: &str = "REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc \
-        --test manifest_coverage -- --ignored regenerate_reference";
+        --test suite manifest_coverage::regenerate_reference -- --ignored";
     assert!(
         std::env::var_os("REGEN_RPC_REFERENCE").is_none(),
         "REGEN_RPC_REFERENCE is set: this is a coverage-only guard. Regenerate with \
@@ -261,7 +261,7 @@ fn generated_reference_matches_checked_in() {
     let checked_in = std::fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
             "cannot read {}: {err}; regenerate with \
-             REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage \
+             REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage:: \
              -- --ignored regenerate_reference",
             doc_path.display()
         )
@@ -274,7 +274,7 @@ fn generated_reference_matches_checked_in() {
             .unwrap_or_else(|| rendered.lines().count().min(checked_in.lines().count()));
         panic!(
             "docs/rpc-reference.md drifted from the manifest at line {}:\n  generated: {:?}\n  checked in: {:?}\n\
-             regenerate with REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference",
+             regenerate with REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored",
             first_diff + 1,
             rendered.lines().nth(first_diff),
             checked_in.lines().nth(first_diff)

@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-chain"
 edition.workspace = true
 rust-version.workspace = true
@@ -32,3 +33,7 @@ bitcoin.workspace = true
 # `cfg(test)`, so the regtest fixture seam must arrive through the
 # `test-seam` feature, the same way `bitcoin-rs-mempool` opts its tests in.
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

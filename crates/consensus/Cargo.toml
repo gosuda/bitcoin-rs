@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-consensus"
 edition.workspace = true
 rust-version.workspace = true
@@ -50,3 +51,12 @@ harness = false
 [[bench]]
 name = "block_facts"
 harness = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Inspects its own ELF/USDT notes; retain an independent artifact boundary.
+[[test]]
+name = "sdt_notes"
+path = "tests/sdt_notes.rs"

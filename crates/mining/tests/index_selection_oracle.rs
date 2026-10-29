@@ -3,8 +3,7 @@
     reason = "integration fixtures fail loudly on a broken precondition"
 )]
 
-#[path = "support/fixtures.rs"]
-mod common;
+use crate::support::fixtures as common;
 
 use std::collections::HashSet;
 use std::ops::Range;

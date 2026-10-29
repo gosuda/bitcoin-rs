@@ -1,8 +1,7 @@
 //! Tests for the persisted transaction-position row values.
 #![allow(clippy::expect_used)]
 
-#[path = "support/common.rs"]
-mod common;
+use crate::support::common;
 
 use std::sync::Arc;
 

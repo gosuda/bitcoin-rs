@@ -1,5 +1,7 @@
 //! Transaction, block, and chain helpers for scenario tests.
 
+pub mod taproot;
+
 use std::time::Duration;
 
 use bitcoin::absolute::LockTime;

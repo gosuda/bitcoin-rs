@@ -21,7 +21,7 @@ use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
-mod mining_fixture;
+use crate::mining_fixture;
 
 #[test]
 fn required_handlers_report_the_fixture_chain_mempool_and_network_facts()

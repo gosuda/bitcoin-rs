@@ -261,7 +261,7 @@ mod tests {
     fn usable(source: PeerSource) -> UsablePeer {
         UsablePeer {
             source,
-            info: crate::sync::tests::synthetic_peer(addr(9001), 100),
+            info: crate::test_support::synthetic_peer(addr(9001), 100),
             demonstrated_tips: Vec::new(),
             active_height: None,
             headers_horizon: None,

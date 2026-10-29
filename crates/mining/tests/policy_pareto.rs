@@ -1,7 +1,6 @@
 #![allow(clippy::expect_used)]
 
-#[path = "support/fixtures.rs"]
-mod common;
+use crate::support::fixtures as common;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

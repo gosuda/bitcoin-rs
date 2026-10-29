@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-utxo"
 edition.workspace = true
 rust-version.workspace = true
@@ -48,3 +49,7 @@ bitcoin.workspace = true
 [[bench]]
 name = "utxo_commit"
 harness = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

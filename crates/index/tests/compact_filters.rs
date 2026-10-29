@@ -1,6 +1,5 @@
 //! Atomic filter publication, selective reset, rollback and backend persistence.
-#[path = "support/common.rs"]
-mod common;
+use crate::support::common;
 
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
 use bitcoin_rs_index::{

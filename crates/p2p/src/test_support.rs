@@ -1,6 +1,7 @@
-//! Shared unit-test helpers.
-
+use crate::{PeerInfo, PeerLease, PeerRemote, PeerSource, PeerTable};
 use core::fmt::Display;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 pub(crate) trait OrFail<T> {
     #[track_caller]
@@ -136,4 +137,63 @@ impl std::io::Write for StallingStream {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: PeerRemote) -> PeerSource {
+    peer_table.lease(addr).map_or_else(
+        || panic!("test peer {addr} must be connected"),
+        |lease| lease.source(addr.endpoint()),
+    )
+}
+
+pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
+    PeerInfo {
+        addr,
+        endpoint: addr.endpoint(),
+        network: addr.network().into(),
+        version: 70_016,
+        wtxid_relay: false,
+        relay_transactions: true,
+        compact_block_relay: false,
+        send_headers: false,
+        services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
+            | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
+        user_agent: String::from("/test/"),
+        start_height,
+        best_known_height: start_height,
+        conn_time: 0,
+        inbound: false,
+        addr_bind: crate::TransportRemote::new(
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        ),
+        time_offset: 0,
+        counters: std::sync::Arc::new(crate::PeerCounters::default()),
+        transport: crate::TransportProtocol::V1,
+    }
+}
+
+pub(crate) fn test_addr(
+    base_port: usize,
+    idx: usize,
+) -> Result<PeerRemote, Box<dyn std::error::Error>> {
+    Ok(PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        u16::try_from(base_port + idx)?,
+    )))
+}
+
+pub(crate) fn connect_peer(
+    peer_table: &Arc<PeerTable>,
+    info: PeerInfo,
+) -> crate::test_support::MessageReceiver {
+    let (tx, rx) = crate::test_support::message_channel();
+    let lease = PeerLease::new(tx);
+    let Some(endpoint) = info.endpoint else {
+        panic!("identified peer endpoint");
+    };
+    peer_table.register(endpoint, lease.clone());
+    peer_table.publish_info(endpoint, &lease, info);
+    rx
 }

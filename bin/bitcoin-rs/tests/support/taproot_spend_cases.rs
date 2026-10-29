@@ -1,6 +1,5 @@
 //! Actual unmodified Core and native daemon block-validation comparisons.
-#[path = "../../../../crates/script/tests/support/taproot_spends.rs"]
-mod fixture;
+use bitcoin_rs_e2e::helpers::taproot as fixture;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin_rs_e2e::{Kind, SpawnOptions};

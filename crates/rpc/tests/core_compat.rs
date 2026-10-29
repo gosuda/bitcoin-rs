@@ -1,13 +1,9 @@
 //! Bitcoin Core wire-contract compatibility tests.
 extern crate alloc;
 
-#[expect(
-    dead_code,
-    reason = "core_compat reaches only the chaininfo decoder from this shared test-support module"
-)]
-mod support;
+use crate::support;
 
-mod mining_fixture;
+use crate::mining_fixture;
 
 use alloc::sync::Arc;
 

@@ -1507,45 +1507,7 @@ impl UtxoView for BlockLocalUtxoView<'_> {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/test_fixtures.rs"]
 mod test_fixtures;
 
 #[cfg(test)]
-#[path = "../tests/unit/apply/admission_tests.rs"]
-mod admission_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/chain_tx_count_tests.rs"]
-mod chain_tx_count_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/persistence_tests.rs"]
-mod persistence_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/pow_valid_hook_tests.rs"]
-mod pow_valid_hook_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/observability_tests.rs"]
-mod observability_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/window_disposition_tests.rs"]
-mod window_disposition_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/window_tx_count_tests.rs"]
-mod window_tx_count_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/apply/window_invalidation_tests.rs"]
-mod window_invalidation_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/checkpoint_debt_tests.rs"]
-mod checkpoint_debt_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/recovery_marker_order_tests.rs"]
-mod recovery_marker_order_tests;
+mod tests;

@@ -3,7 +3,7 @@
 # Only `[reference]` is machine-read: it pins the Bitcoin Core identities
 # every claim is made against -- the released product, the kernel tree the
 # oracle lane links, the replay corpora, and the formal model checker.
-# `bin/bitcoin-rs/tests/support/reference_set.rs` parses and validates them;
+# `e2e/src/reference_set.rs` parses and validates them;
 # `scripts/provision-ci-reference-fixtures.sh` consumes the release pins;
 # `scripts/check_models.py` fingerprints this file into each model-check run.
 #
@@ -70,7 +70,7 @@ differential_harness = false
 #     Oracle evidence only: not a release, and never a policy pin.
 #
 # A reference carrying only a version label or a digest that does not match is
-# rejected by `bin/bitcoin-rs/tests/support/reference_set.rs`. `docs/contracts/reference-set.md` is a
+# rejected by `e2e/src/reference_set.rs`. `docs/contracts/reference-set.md` is a
 # readable projection; on conflict, this file and that parser govern.
 # ---------------------------------------------------------------------------
 

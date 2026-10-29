@@ -1243,7 +1243,6 @@ impl AssumeUtxoManager {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/assumeutxo_tests.rs"]
 mod tests;
 
 fn known_progress(tip: Option<&TipSnapshot>, progress: f64) -> Option<f64> {

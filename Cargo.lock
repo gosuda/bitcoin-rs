@@ -368,6 +368,7 @@ dependencies = [
  "bitcoin-rs-rpc",
  "sonic-rs",
  "tempfile",
+ "thiserror",
  "toml 1.1.8+spec-1.1.0",
  "windows-sys 0.61.2",
 ]
@@ -606,6 +607,7 @@ version = "0.14.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-e2e",
  "bitcoin-rs-primitives",
  "bitcoin_hashes 0.14.101",
  "criterion",

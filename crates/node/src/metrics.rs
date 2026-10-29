@@ -387,5 +387,4 @@ pub(crate) fn spawn_readiness_sampler(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/metrics/tests.rs"]
 mod tests;

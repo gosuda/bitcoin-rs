@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use crate::support::wire_peer;
 use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, PrefilledTransaction};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash as _;
@@ -15,8 +16,6 @@ use bitcoin_rs_e2e::helpers::{
 };
 use bitcoin_rs_e2e::process_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
-#[path = "support/wire_peer.rs"]
-mod wire_peer;
 use wire_peer::Peer;
 
 use sonic_rs::{JsonValueTrait as _, json};

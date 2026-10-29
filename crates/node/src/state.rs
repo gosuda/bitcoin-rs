@@ -463,5 +463,4 @@ struct TxIndexSpawn {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/state/tests/mod.rs"]
 mod tests;

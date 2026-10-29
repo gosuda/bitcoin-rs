@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-primitives"
 edition.workspace = true
 rust-version.workspace = true
@@ -24,3 +25,7 @@ zerocopy.workspace = true
 
 [dev-dependencies]
 sonic-rs.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

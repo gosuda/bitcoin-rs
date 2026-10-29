@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-mempool"
 edition.workspace = true
 rust-version.workspace = true
@@ -43,3 +44,7 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 [[bench]]
 name = "insert_fill"
 harness = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

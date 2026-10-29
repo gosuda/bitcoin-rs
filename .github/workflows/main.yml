@@ -135,7 +135,7 @@ jobs:
         run: |
           cargo test --locked -p bitcoin-rs-consensus \
             --no-default-features --features kernel \
-            --test witness_sigop_activation --test validation_engine
+            --test suite -- witness_sigop_activation:: validation_engine::
       # The `--no-run` passes below are compile-and-link gates only --
       # measured executions remain release evidence outside CI. They build
       # under the `quickstart` profile (opt-level 3, no fat LTO, 16
@@ -182,7 +182,7 @@ jobs:
             sha256sum Cargo.lock
           } | tee target/script-kernel-evidence/context.txt
           cargo test --locked -p bitcoin-rs-script --no-default-features \
-            --features kernel --test segwit_v0_sighash_edges -- --nocapture \
+            --features kernel --test suite segwit_v0_sighash_edges:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/tests.log
       - name: Core-vectors kernel oracle
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
@@ -193,7 +193,7 @@ jobs:
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
           cargo test --locked -p bitcoin-rs-script --no-default-features \
-            --features kernel --test core_vectors -- --nocapture \
+            --features kernel --test suite core_vectors:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/core_vectors.log
       - name: SegWit-v0 kernel Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
@@ -204,7 +204,7 @@ jobs:
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
           cargo clippy --locked -p bitcoin-rs-script --no-default-features \
-            --features kernel --test segwit_v0_sighash_edges -- -D warnings \
+            --features kernel --test suite -- -D warnings \
             2>&1 | tee target/script-kernel-evidence/clippy.log
       - name: Preserve kernel script evidence
         if: ${{ always() }}
@@ -301,7 +301,7 @@ jobs:
       - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_vector_parity:: --nocapture
 
   # Main-only (issues #174 / #1389 / #1503; CORE-02/CORE-03/CORE-05/CORE-06): a running Bitcoin Core 31.1 node vs
   # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)

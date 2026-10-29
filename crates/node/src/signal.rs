@@ -57,7 +57,6 @@ impl Drop for ShutdownHandler {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/signal_counters.rs"]
 pub(crate) mod testing;
 
 #[cfg(test)]

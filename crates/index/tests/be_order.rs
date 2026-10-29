@@ -1,7 +1,6 @@
 //! Big-endian key-order vs numeric-height-order contract tests.
 
-#[path = "support/common.rs"]
-mod common;
+use crate::support::common;
 
 use std::sync::Arc;
 

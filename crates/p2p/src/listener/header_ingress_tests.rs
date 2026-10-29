@@ -99,7 +99,8 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
 /// metadata, in-flight senders, bodies, allocator overhead and process RSS.
 #[test]
 fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
-    use crate::sync::tests::{TestChain, connect_peer, mined_chain, synthetic_peer, test_addr};
+    use crate::sync::test_support::{TestChain, mined_chain};
+    use crate::test_support::{connect_peer, synthetic_peer, test_addr};
     use arc_swap::ArcSwapOption;
     use parking_lot::RwLock;
 

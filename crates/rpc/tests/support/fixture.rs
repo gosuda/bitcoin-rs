@@ -11,12 +11,7 @@ use super::compare::EnvelopeCheck;
 use super::limits::{MAX_CORPUS_BYTES, MAX_FIXTURE_BYTES, MAX_FIXTURE_COUNT, MAX_JSON_DEPTH};
 use super::manifest_check;
 
-#[expect(
-    dead_code,
-    reason = "the RPC fixture gate consumes only the release identity"
-)]
-#[path = "../../../../bin/bitcoin-rs/tests/support/reference_set.rs"]
-mod reference_set;
+use bitcoin_rs_e2e::reference_set;
 
 fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)

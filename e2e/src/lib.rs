@@ -6,6 +6,7 @@ pub mod helpers;
 pub mod live_peer;
 pub mod node;
 pub mod process_peer;
+pub mod reference_set;
 pub mod rpc;
 
 pub use error::{Error, Result, ValueExt};

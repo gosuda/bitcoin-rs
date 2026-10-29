@@ -1,0 +1,560 @@
+use super::*;
+
+#[test]
+fn a_short_write_counts_what_the_socket_took() {
+    struct ShortWriter;
+    impl Write for ShortWriter {
+        fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+            Ok(buffer.len().min(3))
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(ShortWriter, Arc::clone(&counters));
+    let written = stream
+        .write(&[0_u8; 10])
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+
+    assert_eq!(written, 3);
+    assert_eq!(counters.bytes_sent(), 3);
+    assert_eq!(counters.bytes_recv(), 0);
+}
+
+#[test]
+fn reads_accumulate() {
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream =
+        CountingStream::new(std::io::Cursor::new(vec![7_u8; 5]), Arc::clone(&counters));
+
+    let mut buffer = [0_u8; 2];
+    for expected in [2_u64, 4, 5] {
+        let _read = stream
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(counters.bytes_recv(), expected);
+    }
+    assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
+}
+
+#[test]
+fn leftover_bytes_do_not_revisit_the_socket() {
+    struct OneShot {
+        remaining: Vec<u8>,
+        reads: u8,
+    }
+    impl Read for OneShot {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            self.reads = self.reads.saturating_add(1);
+            if self.reads > 1 {
+                return Err(std::io::Error::other("socket read more than once"));
+            }
+            let take = self.remaining.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&self.remaining[..take]);
+            self.remaining.drain(..take);
+            Ok(take)
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(
+        OneShot {
+            remaining: vec![1, 2, 3, 4, 5],
+            reads: 0,
+        },
+        Arc::clone(&counters),
+    );
+    let mut first = [0_u8; 2];
+    let read = stream
+        .read(&mut first)
+        .unwrap_or_else(|error| panic!("first read failed: {error}"));
+    assert_eq!(read, 2);
+    assert_eq!(first, [1, 2]);
+    let mut second = [0_u8; 3];
+    let read = stream
+        .read(&mut second)
+        .unwrap_or_else(|error| panic!("leftover read failed: {error}"));
+    assert_eq!(read, 3);
+    assert_eq!(second, [3, 4, 5]);
+    assert_eq!(counters.bytes_recv(), 5);
+}
+
+#[test]
+fn a_timed_out_refill_does_not_replay_consumed_bytes() {
+    struct TimeoutAfterFirst {
+        remaining: Vec<u8>,
+        reads: u8,
+    }
+    impl Read for TimeoutAfterFirst {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            self.reads = self.reads.saturating_add(1);
+            if self.reads > 1 {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            let take = self.remaining.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&self.remaining[..take]);
+            self.remaining.drain(..take);
+            Ok(take)
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(
+        TimeoutAfterFirst {
+            remaining: vec![1, 2, 3],
+            reads: 0,
+        },
+        Arc::clone(&counters),
+    );
+    let mut first = [0_u8; 3];
+    let read = stream
+        .read(&mut first)
+        .unwrap_or_else(|error| panic!("first read failed: {error}"));
+    assert_eq!(read, 3);
+    assert_eq!(first, [1, 2, 3]);
+
+    let mut retry = [0_u8; 3];
+    let error = match stream.read(&mut retry) {
+        Ok(n) => panic!("refill must time out, got {n} bytes"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    let error = match stream.read(&mut retry) {
+        Ok(n) => panic!("retry after timeout must not replay, got {n} bytes"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(counters.bytes_recv(), 3);
+}
+
+#[test]
+fn two_wire_messages_decode_from_one_socket_read() {
+    struct OneShot {
+        remaining: Vec<u8>,
+        reads: u8,
+    }
+    impl Read for OneShot {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            self.reads = self.reads.saturating_add(1);
+            if self.reads > 1 {
+                return Err(std::io::Error::other("socket read more than once"));
+            }
+            let take = self.remaining.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&self.remaining[..take]);
+            self.remaining.drain(..take);
+            Ok(take)
+        }
+    }
+
+    let mut frames = Vec::new();
+    crate::wire::write_message(
+        &mut frames,
+        bitcoin::p2p::Magic::BITCOIN,
+        &crate::wire::Message::Ping(1),
+    )
+    .unwrap_or_else(|error| panic!("encode ping 1: {error}"));
+    crate::wire::write_message(
+        &mut frames,
+        bitcoin::p2p::Magic::BITCOIN,
+        &crate::wire::Message::Ping(2),
+    )
+    .unwrap_or_else(|error| panic!("encode ping 2: {error}"));
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(
+        OneShot {
+            remaining: frames,
+            reads: 0,
+        },
+        counters,
+    );
+    let (first, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+        .unwrap_or_else(|error| panic!("decode ping 1: {error}"));
+    let (second, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+        .unwrap_or_else(|error| panic!("decode ping 2: {error}"));
+    assert_eq!(first, crate::wire::Message::Ping(1));
+    assert_eq!(second, crate::wire::Message::Ping(2));
+}
+
+#[test]
+fn an_empty_read_stamps_nothing() {
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(std::io::Cursor::new(Vec::new()), Arc::clone(&counters));
+
+    let mut buffer = [0_u8; 4];
+    let read = stream
+        .read(&mut buffer)
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+
+    assert_eq!(read, 0);
+    assert_eq!(counters.bytes_recv(), 0);
+    assert_eq!(counters.last_recv(), 0, "an empty read is not activity");
+}
+
+#[test]
+fn a_vectored_write_counts_every_slice() {
+    struct VectoredSink {
+        calls: usize,
+        bytes: Vec<u8>,
+    }
+    impl Write for VectoredSink {
+        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+            panic!("write_vectored must not fall back to write");
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            self.calls += 1;
+            let mut written = 0;
+            for buffer in buffers {
+                self.bytes.extend_from_slice(buffer);
+                written += buffer.len();
+            }
+            Ok(written)
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(
+        VectoredSink {
+            calls: 0,
+            bytes: Vec::new(),
+        },
+        Arc::clone(&counters),
+    );
+    let header = [1_u8, 2, 3, 4];
+    let payload = [5_u8, 6, 7];
+    let written = stream
+        .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+    assert_eq!(written, 7);
+    assert_eq!(counters.bytes_sent(), 7);
+    assert_eq!(stream.inner.calls, 1);
+    assert_eq!(stream.inner.bytes, [1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn write_message_through_the_wrapper_is_one_vectored_write() {
+    use bitcoin::p2p::Magic;
+
+    use crate::wire::{Message, write_message};
+
+    struct VectoredSink {
+        calls: usize,
+        writes: usize,
+    }
+    impl Write for VectoredSink {
+        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+            self.writes += 1;
+            panic!("write_message must not fall back to write");
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            self.calls += 1;
+            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(
+        VectoredSink {
+            calls: 0,
+            writes: 0,
+        },
+        Arc::clone(&counters),
+    );
+    let written = write_message(&mut stream, Magic::BITCOIN, &Message::Ping(42))
+        .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+    assert_eq!(
+        u64::try_from(written).unwrap_or_else(|_| panic!("framed ping fits in u64")),
+        counters.bytes_sent()
+    );
+    assert_eq!(stream.inner.calls, 1);
+    assert_eq!(stream.inner.writes, 0);
+    assert!(written > 24, "framed ping is header plus 8-byte payload");
+}
+
+#[test]
+fn from_connected_disables_nagle() {
+    use std::net::{TcpListener, TcpStream};
+
+    let listener =
+        TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("bind failed: {error}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("local_addr failed: {error}"));
+    let accepting = std::thread::spawn(move || listener.accept());
+    let client = TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+    assert!(
+        !client
+            .nodelay()
+            .unwrap_or_else(|error| panic!("nodelay query failed: {error}")),
+        "a raw TcpStream starts with Nagle enabled"
+    );
+
+    let wrapped = CountingStream::from_connected(client, Arc::new(PeerCounters::default()))
+        .unwrap_or_else(|error| panic!("from_connected failed: {error}"));
+    assert!(
+        wrapped
+            .nodelay()
+            .unwrap_or_else(|error| panic!("wrapped nodelay query failed: {error}")),
+        "from_connected owns TCP_NODELAY"
+    );
+
+    drop(wrapped);
+    let _accepted = accepting.join();
+}
+
+#[test]
+fn a_cloned_socket_counts_into_the_same_place() {
+    use std::net::{TcpListener, TcpStream};
+
+    let listener =
+        TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("bind failed: {error}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("local_addr failed: {error}"));
+    let accepting = std::thread::spawn(move || listener.accept());
+
+    let client = TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+    let counters = Arc::new(PeerCounters::default());
+    let mut original = CountingStream::new(client, Arc::clone(&counters));
+    let mut clone = original
+        .try_clone()
+        .unwrap_or_else(|error| panic!("try_clone failed: {error}"));
+
+    let _written = original
+        .write(&[0_u8; 4])
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+    let _written = clone
+        .write(&[0_u8; 6])
+        .unwrap_or_else(|error| panic!("clone write failed: {error}"));
+
+    assert_eq!(
+        counters.bytes_sent(),
+        10,
+        "both halves must land in one count"
+    );
+    assert_eq!(clone.counters().bytes_sent(), 10);
+
+    drop(original);
+    drop(clone);
+    let _accepted = accepting.join();
+}
+
+#[test]
+fn a_vectored_write_counts_every_slice_in_one_inner_call() {
+    struct RecordingWriter {
+        writes: usize,
+        vectored: usize,
+    }
+    impl Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+            self.writes += 1;
+            Ok(buffer.len())
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            self.vectored += 1;
+            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let inner = RecordingWriter {
+        writes: 0,
+        vectored: 0,
+    };
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(inner, Arc::clone(&counters));
+    let header = [0_u8; 24];
+    let payload = [1_u8; 8];
+    let written = stream
+        .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+    assert_eq!(written, 32);
+    assert_eq!(counters.bytes_sent(), 32);
+    assert_eq!(stream.inner.vectored, 1);
+    assert_eq!(stream.inner.writes, 0);
+}
+
+#[test]
+fn a_zero_byte_read_stamps_nothing_while_a_single_byte_write_counts() {
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream =
+        CountingStream::new(std::io::Cursor::new(vec![7_u8; 8]), Arc::clone(&counters));
+
+    let mut empty: [u8; 0] = [];
+    let read = stream
+        .read(&mut empty)
+        .unwrap_or_else(|error| panic!("zero-length read failed: {error}"));
+    assert_eq!(read, 0);
+    assert_eq!(counters.bytes_sent(), 0);
+    assert_eq!(counters.bytes_recv(), 0);
+    assert_eq!(counters.last_send(), 0);
+    assert_eq!(counters.last_recv(), 0);
+
+    let written = stream
+        .write_vectored(&[IoSlice::new(&[9_u8; 1])])
+        .unwrap_or_else(|error| panic!("single-byte write failed: {error}"));
+    assert_eq!(written, 1);
+    assert_eq!(counters.bytes_sent(), 1);
+    assert_ne!(counters.last_send(), 0);
+}
+
+#[test]
+fn a_vectored_write_counts_every_slice_the_socket_took() {
+    struct VectoredWriter;
+    impl Write for VectoredWriter {
+        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+            Err(std::io::Error::other(
+                "write_vectored must not fall back to write",
+            ))
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
+    let written = stream
+        .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+    assert_eq!(written, 10);
+    assert_eq!(counters.bytes_sent(), 10);
+}
+
+#[test]
+fn a_short_vectored_write_counts_what_the_socket_took() {
+    struct ShortVectoredWriter;
+    impl Write for ShortVectoredWriter {
+        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+            Err(std::io::Error::other(
+                "write_vectored must not fall back to write",
+            ))
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            Ok(buffers
+                .iter()
+                .map(|buffer| buffer.len())
+                .sum::<usize>()
+                .min(3))
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(ShortVectoredWriter, Arc::clone(&counters));
+    let written = stream
+        .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+    assert_eq!(written, 3);
+    assert_eq!(counters.bytes_sent(), 3);
+}
+
+#[test]
+fn write_message_through_counting_stream_stays_vectored() {
+    struct FailOnUnvectored {
+        calls: Arc<AtomicU64>,
+    }
+    impl Write for FailOnUnvectored {
+        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+            Err(std::io::Error::other(
+                "write_message must not fall back to write",
+            ))
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+        }
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let counters = Arc::new(PeerCounters::default());
+    let calls = Arc::new(AtomicU64::new(0));
+    let mut stream = CountingStream::new(
+        FailOnUnvectored {
+            calls: Arc::clone(&calls),
+        },
+        Arc::clone(&counters),
+    );
+    let written = crate::wire::write_message(
+        &mut stream,
+        bitcoin::p2p::Magic::BITCOIN,
+        &crate::wire::Message::Ping(42),
+    )
+    .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "header and payload in one writev"
+    );
+    assert_eq!(
+        counters.bytes_sent(),
+        u64::try_from(written).unwrap_or(u64::MAX)
+    );
+}
+
+#[test]
+fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
+    use std::sync::atomic::AtomicBool;
+    for transport_failure in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+        let (server, _) = listener.accept()?;
+        let alive = Arc::new(AtomicBool::new(true));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx).with_transport_alive(Some(Arc::clone(&alive)));
+        let mut stream = CountingStream::new(server, Arc::new(PeerCounters::default()))
+            .stop_reading_when(lease.clone());
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if client.write_all(&[0]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let canceller = {
+            let alive = Arc::clone(&alive);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if transport_failure {
+                    alive.store(false, Ordering::Release);
+                } else {
+                    lease.cancel();
+                }
+            })
+        };
+        let mut payload = Vec::new();
+        let result = crate::recv::fill_growing(&mut stream, &mut payload, 4_000_000);
+        drop(stream);
+        let _ = trickle.join();
+        let _ = canceller.join();
+        assert_eq!(
+            result.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::ConnectionAborted)
+        );
+    }
+    Ok(())
+}

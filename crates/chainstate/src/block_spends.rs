@@ -237,5 +237,4 @@ fn certified(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/block_spends_tests.rs"]
 mod tests;

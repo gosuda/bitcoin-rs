@@ -2,7 +2,7 @@
 
 <!-- GENERATED FILE - do not edit by hand.
      Source of truth: REGISTRY in crates/rpc/src/registry.rs.
-     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference
+     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored
      The generated_reference_matches_checked_in test fails when this file drifts. -->
 
 Surface contract of bitcoin-rs against Bitcoin Core 31.x.

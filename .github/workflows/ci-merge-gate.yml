@@ -71,12 +71,14 @@ jobs:
       - name: Kernel consensus oracle parity tests
         run: |
           cargo test --locked -p bitcoin-rs-consensus --features kernel \
-            --lib --test shared_sighash --test overhaul_parse_parity \
-            --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+            --lib -- --nocapture
+          cargo test --locked -p bitcoin-rs-consensus --features kernel \
+            --test suite -- shared_sighash:: overhaul_parse_parity:: \
+            kernel_block_parity:: kernel_vector_parity:: --nocapture
       - name: Kernel script core-vectors oracle test
         run: |
           cargo test --locked -p bitcoin-rs-script --features kernel \
-            --test core_vectors -- --nocapture
+            --test suite core_vectors:: -- --nocapture
 
   # Match ci-main's production binary lint graph exactly. A cargo check here
   # misses dead-code and other warnings that fail ci-main after merge.

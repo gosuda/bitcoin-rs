@@ -146,7 +146,7 @@ pub fn render_reference() -> String {
     out.push_str("<!-- GENERATED FILE - do not edit by hand.\n");
     out.push_str("     Source of truth: REGISTRY in crates/rpc/src/registry.rs.\n");
     out.push_str(
-        "     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference\n",
+        "     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored\n",
     );
     out.push_str(
         "     The generated_reference_matches_checked_in test fails when this file drifts. -->\n\n",

@@ -362,9 +362,7 @@ fn require_live_coin(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/chainstate_journal_delta.rs"]
 mod delta_tests;
 
 #[cfg(test)]
-#[path = "../tests/unit/chainstate_journal_replay.rs"]
 mod replay_tests;

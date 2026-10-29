@@ -29,6 +29,13 @@ fn reserved(context: &Context) -> anyhow::Result<()> {
 
 #[test]
 fn scan_preserves_control_capacity_and_observes_server_shutdown() -> anyhow::Result<()> {
+    for stop in [false, true] {
+        check_scan_cancellation(stop)?;
+    }
+    Ok(())
+}
+
+fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
     let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
     let context = Arc::new(Context::new().with_chain_transition(transition.clone()));
     let handler = Arc::new(Handler::new(Arc::clone(&context)));
@@ -50,48 +57,47 @@ fn scan_preserves_control_capacity_and_observes_server_shutdown() -> anyhow::Res
             call(&mut control, "getblockcount", json!([]))?["result"],
             json!(0)
         );
-        for stop in [false, true] {
-            let held = transition.lock();
-            let scan = std::thread::spawn(move || {
-                call(
-                    &mut Connection::new(address),
-                    "scantxoutset",
-                    json!(["start", []]),
-                )
-            });
-            let operation = (|| -> anyhow::Result<()> {
-                reserved(&context)?;
-                assert_eq!(
-                    call(&mut control, "scantxoutset", json!(["status"]))?["result"]["progress"],
-                    json!(0)
-                );
-                assert_eq!(
-                    call(&mut control, "getblockcount", json!([]))?["result"],
-                    json!(0)
-                );
+        let held = transition.lock();
+        let scan = std::thread::spawn(move || {
+            call(
+                &mut Connection::new(address),
+                "scantxoutset",
+                json!(["start", []]),
+            )
+        });
+        let operation = (|| -> anyhow::Result<()> {
+            reserved(&context)?;
+            assert_eq!(
+                call(&mut control, "scantxoutset", json!(["status"]))?["result"]["progress"],
+                json!(0)
+            );
+            assert_eq!(
+                call(&mut control, "getblockcount", json!([]))?["result"],
+                json!(0)
+            );
+            if stop {
                 assert_eq!(
                     call(&mut control, "scantxoutset", json!(["start", []]))?["error"]["code"],
                     json!(-8)
                 );
-                if stop {
-                    shutdown.store(true, Ordering::Release);
-                } else {
-                    assert_eq!(
-                        call(&mut control, "scantxoutset", json!(["abort"]))?["result"],
-                        json!(true)
-                    );
-                }
-                let response = scan
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;
-                assert_eq!(response["result"]["success"], json!(false));
-                assert_eq!(response["result"]["txouts"], json!(0));
-                assert_eq!(context.chain.utxo.scan_progress(), None);
-                Ok(())
-            })();
-            drop(held);
-            operation?;
-        }
+                shutdown.store(true, Ordering::Release);
+            } else {
+                assert_eq!(
+                    call(&mut control, "scantxoutset", json!(["abort"]))?["result"],
+                    json!(true)
+                );
+            }
+
+            let response = scan
+                .join()
+                .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;
+            assert_eq!(response["result"]["success"], json!(false));
+            assert_eq!(response["result"]["txouts"], json!(0));
+            assert_eq!(context.chain.utxo.scan_progress(), None);
+            Ok(())
+        })();
+        drop(held);
+        operation?;
         Ok(())
     })();
     shutdown.store(true, Ordering::Release);

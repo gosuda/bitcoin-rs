@@ -59,7 +59,6 @@ const MAX_REPLAY_STEPS: usize = 256;
 const MAX_ANCESTRY_HOPS: usize = 4096;
 
 #[cfg(test)]
-#[path = "../tests/unit/chain_feed.rs"]
 mod tests;
 
 fn metadata(tree: &BlockTree, hash: Hash256) -> Result<BlockHeaderInfo, NodeError> {

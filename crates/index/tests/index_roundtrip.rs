@@ -1,6 +1,5 @@
 //! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
-#[path = "support/common.rs"]
-mod common;
+use crate::support::common;
 
 use common::MemoryStore;
 use std::{

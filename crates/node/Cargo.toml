@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bitcoin-rs-node"
 edition.workspace = true
 rust-version.workspace = true
@@ -138,3 +139,12 @@ harness = false
 [[bench]]
 name = "evidence"
 harness = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Self-spawns exact-name crash workers and installs process-global tracing.
+[[test]]
+name = "crash_recovery"
+path = "tests/crash_recovery.rs"
