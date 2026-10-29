@@ -10,7 +10,7 @@
 //! preparation runs only while a consumer (bpftrace, BCC, DTrace) holds
 //! the probe's semaphore, so an untraced or unattached run pays nothing.
 
-use std::net::SocketAddr;
+use crate::PeerRemote;
 
 use crate::peer_info::PeerRole;
 use crate::wire::Message;
@@ -27,14 +27,14 @@ pub(crate) struct NetTrace {
     /// Process-unique connection id (Core argument 1, `peerid`).
     node_id: u64,
     /// Remote address and port (Core argument 2).
-    peer: SocketAddr,
+    peer: PeerRemote,
     /// Core `ConnectionTypeAsString` label (Core argument 3).
     connection_type: &'static str,
 }
 
 impl NetTrace {
     /// Context for an accepted inbound connection.
-    pub(crate) fn inbound(node_id: u64, peer: SocketAddr) -> Self {
+    pub(crate) fn inbound(node_id: u64, peer: PeerRemote) -> Self {
         Self {
             node_id,
             peer,
@@ -44,7 +44,7 @@ impl NetTrace {
 
     /// Context for a dialed connection, labelled per Core's
     /// `ConnectionTypeAsString` for the dial kind and role.
-    pub(crate) fn outbound(node_id: u64, peer: SocketAddr, role: PeerRole, manual: bool) -> Self {
+    pub(crate) fn outbound(node_id: u64, peer: PeerRemote, role: PeerRole, manual: bool) -> Self {
         let connection_type = if manual {
             "manual"
         } else {
@@ -119,8 +119,8 @@ fn payload_len_u64(len: usize) -> u64 {
 mod tests {
     use super::*;
 
-    fn loopback() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 8333))
+    fn loopback() -> PeerRemote {
+        PeerRemote::from(([127, 0, 0, 1], 8333))
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod tests {
             message_args(&trace, "ping", payload);
 
         assert_eq!(node_id, 7);
-        let peer: SocketAddr = addr
+        let peer: PeerRemote = addr
             .parse()
             .unwrap_or_else(|error| panic!("a consumer parses the addr back: {error}"));
         assert_eq!(peer, loopback());

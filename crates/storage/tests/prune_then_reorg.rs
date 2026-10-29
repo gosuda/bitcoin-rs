@@ -3,6 +3,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
@@ -13,8 +14,9 @@ use bitcoin_rs_storage::pruning::{
 };
 use bitcoin_rs_storage::{
     BatchOp, BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, KvIter,
-    KvSnapshot, KvStore, KvUndoStore, StorageError, UndoStore, WriteCondition,
-    block_file_max_height_key, decode_block_file_max_height, encode_block_file_max_height,
+    KvSnapshot, KvStore, KvUndoStore, PrefixScan, PrefixScanLimit, StorageError, UndoStore,
+    WriteCondition, block_file_max_height_key, decode_block_file_max_height,
+    encode_block_file_max_height,
 };
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -957,6 +959,21 @@ impl KvStore for MemoryStore {
         Ok(Box::new(rows.into_iter()))
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        Ok(scan_family_from(
+            &self.cfs.read()[cf.index()],
+            prefix,
+            start,
+            limit,
+        ))
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -1013,6 +1030,39 @@ impl KvStore for MemoryStore {
 
 type Families = [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()];
 
+/// Ordered continuation scan over one family: seeks the map to the clamped
+/// start key and stops at the prefix end or the first row `limit` refuses.
+fn scan_family_from(
+    rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+    prefix: &[u8],
+    start: &[u8],
+    limit: PrefixScanLimit,
+) -> PrefixScan {
+    let mut taken = Vec::new();
+    let mut bytes = 0usize;
+    for (key, value) in rows.range::<[u8], _>((
+        Bound::Included(std::cmp::max(start, prefix)),
+        Bound::Unbounded,
+    )) {
+        if !key.starts_with(prefix) {
+            break;
+        }
+        let next_bytes = bytes.saturating_add(key.len()).saturating_add(value.len());
+        if taken.len() >= limit.max_rows || (!taken.is_empty() && next_bytes > limit.max_bytes) {
+            return PrefixScan {
+                rows: taken,
+                complete: false,
+            };
+        }
+        bytes = next_bytes;
+        taken.push((key.clone(), value.clone()));
+    }
+    PrefixScan {
+        rows: taken,
+        complete: true,
+    }
+}
+
 fn apply_ops(families: &mut Families, batch: BufferedWriteBatch) {
     for op in batch.into_ops() {
         match op {
@@ -1042,6 +1092,21 @@ struct MemorySnapshot {
 impl KvSnapshot for MemorySnapshot {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.cfs[cf.index()].get(key).cloned())
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        Ok(scan_family_from(
+            &self.cfs[cf.index()],
+            prefix,
+            start,
+            limit,
+        ))
     }
 
     // RATIONALE: the returned `KvIter` must not borrow the caller-owned prefix slice.

@@ -91,6 +91,15 @@ impl KvStore for Unsupported {
     ) -> std::result::Result<bitcoin_rs_storage::KvIter<'a>, bitcoin_rs_storage::StorageError> {
         panic!("unused")
     }
+    fn scan_prefix_from_bounded(
+        &self,
+        _: ColumnFamily,
+        _: &[u8],
+        _: &[u8],
+        _: bitcoin_rs_storage::PrefixScanLimit,
+    ) -> std::result::Result<bitcoin_rs_storage::PrefixScan, bitcoin_rs_storage::StorageError> {
+        panic!("unused")
+    }
     fn new_batch(&self) -> bitcoin_rs_storage::BufferedWriteBatch {
         panic!("unused")
     }

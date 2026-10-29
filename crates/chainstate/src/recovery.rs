@@ -5,6 +5,7 @@ use anyhow::Context as _;
 use anyhow::{Result, bail};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::snapshot::VerifiedSnapshotArtifact;
 use std::path::Path;
 
 /// Threshold for classifying a restored checkpoint as catastrophically stale.
@@ -48,6 +49,9 @@ pub struct InitialChainstate {
     pub resume_source: ResumeSource,
     /// Journal writer bootstrap, when journaling is enabled.
     pub journal_bootstrap: Option<JournalBootstrap>,
+    /// Same-descriptor checkpoint seed minted by the witnessed recovery read.
+    /// `None` on cold starts; the journal path carries the checkpoint token.
+    pub script_live_seed: Option<VerifiedSnapshotArtifact>,
 }
 
 fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
@@ -97,6 +101,8 @@ fn restored_initial(
         applied_tip: Some(restored.applied_tip),
         resume_source: ResumeSource::Checkpoint,
         journal_bootstrap,
+        // C2: the journal replays H to T on the same chain; no new mint.
+        script_live_seed: restored.seed,
     })
 }
 
@@ -158,6 +164,7 @@ fn cold_initial_chainstate(
         tree: bitcoin_rs_chain::BlockTree::new(),
         applied_tip: None,
         resume_source: ResumeSource::Cold,
+        script_live_seed: None,
         journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
             open_existing: false,
             base_generation: 0,
@@ -239,17 +246,24 @@ pub fn prepare_initial_chainstate(
         return restored_initial(restored, journal_config);
     }
 
-    let base_generation = restored.generation;
-    let base_height = restored.applied_tip.height;
+    let crate::checkpoint::RestoredChainstate {
+        generation: base_generation,
+        tree,
+        utxo,
+        coin_stats,
+        applied_tip,
+        seed,
+    } = restored;
+    let base_height = applied_tip.height;
     let journal_dir = open_journal_dir(data_dir)?;
     let replay_started = std::time::Instant::now();
     let replay = crate::journal::replay_from_journal(
         &journal_dir,
         base_generation,
-        restored.tree,
-        restored.utxo,
-        restored.coin_stats,
-        restored.applied_tip,
+        tree,
+        utxo,
+        coin_stats,
+        applied_tip,
     );
     let replay_seconds = replay_started.elapsed().as_secs_f64();
     drop(journal_dir);
@@ -288,6 +302,9 @@ pub fn prepare_initial_chainstate(
                 applied_tip: Some(replayed.applied_tip),
                 resume_source,
                 journal_bootstrap: Some(bootstrap),
+                // C2: the journal replays H to T on the same chain; the
+                // checkpoint token at H is carried through, never reminted.
+                script_live_seed: seed,
             })
         }
         Err(error) => {

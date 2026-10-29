@@ -21,7 +21,7 @@ pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
 /// The durable floor key for a capability, when it carries one.
 ///
-/// `ScriptLive` reseeds from the authoritative UTXO view and can never hold a
+/// `ScriptLive` reseeds from an immutable artifact or retained history and can never hold a
 /// pruned-prefix floor, so it has no key.
 pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u8]> {
     match capability {

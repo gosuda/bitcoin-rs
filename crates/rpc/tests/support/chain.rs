@@ -29,7 +29,9 @@ pub(crate) const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 /// Propagates validation failures.
 pub(crate) fn apply_genesis(state: &NodeState) -> GateResult<()> {
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&genesis).map_err(fail)?;
+    state
+        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))
+        .map_err(fail)?;
     Ok(())
 }
 
@@ -80,7 +82,9 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| fail("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block).map_err(fail)?;
-        state.apply_block(&block).map_err(fail)?;
+        state
+            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))
+            .map_err(fail)?;
         tip = current_tip(state)?;
         if tip.height != height {
             return Err(fail(format!(

@@ -163,13 +163,15 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     config.chainstate_journal.enabled = false;
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
-    state.apply_block(&genesis)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        genesis.clone(),
+    ))?;
     state.publish_checkpoint()?;
     let mut parent = genesis.block_hash();
     for height in 1..=GAP_BLOCKS {
         let block = mined_regtest_child_at(parent, height)?;
         parent = block.block_hash();
-        state.apply_block(&block)?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))?;
     }
     let before = state
         .durable_head()
@@ -247,7 +249,9 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     let mut old_config = test_config(data_dir.clone());
     old_config.chainstate_journal.enabled = false;
     let old = NodeState::open(old_config.clone(), None)?;
-    let genesis_tip = old.apply_block(&genesis)?;
+    let genesis_tip = old.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        genesis.clone(),
+    ))?;
     old.publish_checkpoint()?;
     drop(old);
 
@@ -278,7 +282,8 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
 
     let generation_change = NodeState::open(old_config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
-    let block1_tip = generation_change.apply_block(&block1)?;
+    let block1_tip =
+        generation_change.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
     generation_change.publish_checkpoint()?;
     drop(generation_change);
 
@@ -306,27 +311,34 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
 
     match scenario.as_str() {
         "journal" => {
-            state.apply_block(&block1)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
         }
         "reorg" => {
-            let tip1 = state.apply_block(&block1)?;
+            let tip1 =
+                state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
             let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
-            state.apply_block(&block2)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                block2.clone(),
+            ))?;
             state.chainstate().disconnect_block(&block2)?;
         }
         "publication" => {
-            state.apply_block(&genesis)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
             state.publish_checkpoint()?;
-            state.apply_block(&block1)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
         }
         "disconnect-rolledback" => {
-            state.apply_block(&block1)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                block1.clone(),
+            ))?;
             // The rollback completes; the kill arrives before any
             // publication clears the marker.
             state.chainstate().disconnect_block(&block1)?;
         }
         "inflight-cold" => {
-            state.apply_block(&block1)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                block1.clone(),
+            ))?;
             // The durable head still names this block: recovery replays
             // the certified chain onto the restored state and retires it.
             state
@@ -334,7 +346,9 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
                 .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
         }
         "disconnect-above-head" => {
-            state.apply_block(&block1)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                block1.clone(),
+            ))?;
             // The checkpoint lands above the block the disconnect then
             // rewinds past: the restored tip sits at or above the durable
             // head.
@@ -347,11 +361,15 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             // A chain long enough that the durable checkpoint leaves a real
             // deletion range below the Core reorg margin, then one manual
             // prune whose frontier must outlive the process.
-            state.apply_block(&genesis)?;
+            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                genesis.clone(),
+            ))?;
             let mut previous = genesis.block_hash();
             for height in 1..=300_u32 {
                 let block = mined_regtest_child_at(previous, height)?;
-                state.apply_block(&block)?;
+                state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                    block.clone(),
+                ))?;
                 previous = block.block_hash();
             }
             state.publish_checkpoint()?;
@@ -378,7 +396,9 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     if scenario != "publication" {
         let base = NodeState::open(config.clone(), None)?;
-        base.apply_block(&genesis)?;
+        base.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            genesis.clone(),
+        ))?;
         base.publish_checkpoint()?;
         drop(base);
     }
@@ -466,7 +486,7 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
     let config = crash_config(scenario, data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     let base = NodeState::open(config.clone(), None)?;
-    base.apply_block(&genesis)?;
+    base.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
     base.publish_checkpoint()?;
     drop(base);
 

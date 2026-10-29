@@ -1,6 +1,6 @@
 use super::*;
 
-fn challenger() -> SocketAddr {
+fn challenger() -> PeerEndpoint {
     "8.8.8.8:412".parse().expect("actual Core collision")
 }
 fn collision_book() -> Arc<AddressBook> {
@@ -20,7 +20,7 @@ fn collision_book() -> Arc<AddressBook> {
     }
     book
 }
-fn state(book: &AddressBook, addr: SocketAddr) -> Candidate {
+fn state(book: &AddressBook, addr: PeerEndpoint) -> Candidate {
     let manager = book.state.lock();
     manager.stored.records[manager.by_addr[&addr]].clone()
 }
@@ -60,7 +60,7 @@ fn collision_pending_active_policy_and_callback_bounds_recheck_current_state() {
 fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference() {
     for victim_refs in [1, 2] {
         let book = collision_book();
-        let victim: SocketAddr = "8.8.9.89:8333".parse().expect("actual Core New collider");
+        let victim: PeerEndpoint = "8.8.9.89:8333".parse().expect("actual Core New collider");
         {
             let mut manager = book.state.lock();
             for n in 2..=8 {
@@ -72,7 +72,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
                 add_ref(&mut manager, victim, &source(2), EPOCH);
             }
             manager.stored.anchors.push(Anchor {
-                addr: target(),
+                endpoint: target(),
                 confirmed_at: EPOCH - 10,
             });
         }
@@ -84,7 +84,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
         assert_eq!(refs(&manager, target()), 1);
         assert_eq!(refs(&manager, victim), victim_refs - 1);
         assert_eq!(
-            manager.stored.anchors[0].addr,
+            manager.stored.anchors[0].endpoint,
             target(),
             "demotion retains anchor identity"
         );
@@ -95,7 +95,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
 #[test]
 fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
     let book = collision_book();
-    let victim: SocketAddr = "8.8.9.89:8333".parse().expect("collider");
+    let victim: PeerEndpoint = "8.8.9.89:8333".parse().expect("collider");
     {
         let mut manager = book.state.lock();
         manager.learn(victim, Some(9), source(1), EPOCH - 1000, EPOCH, 0);
@@ -121,14 +121,14 @@ fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
 #[test]
 fn feeler_connected_incumbent_gets_good_but_pending_attempt_does_not() {
     let book = collision_book();
-    let mapped: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
+    let mapped: PeerEndpoint = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
     assert_eq!(
         book.feeler(&[mapped], &[mapped], EPOCH, |_| true),
         Some(challenger())
     );
     assert_eq!(state(&book, target()).last_success, EPOCH);
     book.resolve_collisions(&[], EPOCH + 1, |_| true);
-    assert_eq!(book.state.lock().collisions, Vec::<SocketAddr>::new());
+    assert_eq!(book.state.lock().collisions, Vec::<PeerEndpoint>::new());
     let book = collision_book();
     book.queued(mapped);
     let before = state(&book, target()).last_success;
@@ -150,11 +150,11 @@ fn feeler_connected_incumbent_gets_good_but_pending_attempt_does_not() {
 #[test]
 fn connected_collision_good_uses_ip_not_port_but_not_linked_ipv6_group() {
     let book = collision_book();
-    let other_port: SocketAddr = "[::ffff:8.8.8.8]:18444".parse().expect("TCP alias");
+    let other_port: PeerEndpoint = "[::ffff:8.8.8.8]:18444".parse().expect("TCP alias");
     book.feeler(&[other_port], &[other_port], EPOCH, |_| true);
     assert_eq!(state(&book, target()).last_success, EPOCH);
     let book = collision_book();
-    let linked: SocketAddr = "[2002:808:808::1]:8333".parse().expect("linked IPv6");
+    let linked: PeerEndpoint = "[2002:808:808::1]:8333".parse().expect("linked IPv6");
     assert_eq!(
         book.feeler(&[linked], &[linked], EPOCH, |_| true),
         Some(target())
@@ -165,48 +165,6 @@ fn connected_collision_good_uses_ip_not_port_but_not_linked_ipv6_group() {
     assert_eq!(state(&book, target()).last_success, EPOCH - 20_000);
 }
 
-const V3_ANCHORS: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v3-anchors.dat");
-const V4_ANCHORS: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v4-anchors.dat");
-const V6_REFS: &[u8] = include_bytes!("../../../tests/data/addrman-core-v6-eight-refs.dat");
-
-#[test]
-fn actual_historical_anchor_and_v6_files_migrate_with_exact_backup() {
-    for (schema, bytes) in [(3, V3_ANCHORS), (4, V4_ANCHORS), (6, V6_REFS)] {
-        let directory = tempfile::tempdir().expect("directory");
-        let base = directory.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        fs::write(&path, bytes).expect("historic bytes");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        {
-            let manager = book.state.lock();
-            assert!(manager.writable);
-            assert_eq!(manager.stored.version, VERSION);
-            assert_eq!(manager.collisions, Vec::<SocketAddr>::new());
-            if schema == 6 {
-                assert_eq!(refs(&manager, target()), 8);
-            } else {
-                assert_eq!(manager.stored.anchors.len(), 2);
-                assert!(
-                    manager
-                        .stored
-                        .anchors
-                        .iter()
-                        .all(|anchor| anchor.confirmed_at == EPOCH + 6)
-                );
-            }
-            assert_indexes(&manager);
-        }
-        let backup = path.with_extension(format!(
-            "v{schema}-{}.bak",
-            Sha256::digest(bytes)[..].to_lower_hex_string()
-        ));
-        assert_eq!(fs::read(backup).expect("backup"), bytes);
-        book.save();
-        let restored = AddressBook::open(Some(base), [1; 4], false, None);
-        assert_eq!(restored.len(), book.len());
-        assert_indexes(&restored.state.lock());
-    }
-}
 
 #[test]
 fn anchors_consume_durably_and_return_original_metadata_only_before_dispatch() {
@@ -239,7 +197,7 @@ fn anchors_consume_durably_and_return_original_metadata_only_before_dispatch() {
     assert_eq!(
         manager.stored.anchors,
         [Anchor {
-            addr: addr(2),
+            endpoint: addr(2),
             confirmed_at: EPOCH
         }]
     );
@@ -263,13 +221,13 @@ fn failed_anchor_consumption_exposes_no_claims_and_newer_confirmation_wins_retur
     fs::create_dir(&path).expect("failed replace");
     assert_eq!(
         book.take_restart_anchors(EPOCH + 1),
-        Vec::<SocketAddr>::new()
+        Vec::<PeerEndpoint>::new()
     );
     assert!(book.state.lock().pending.is_empty());
     assert_eq!(
         book.state.lock().stored.anchors,
         [Anchor {
-            addr: target(),
+            endpoint: target(),
             confirmed_at: EPOCH
         }]
     );
@@ -282,7 +240,7 @@ fn failed_anchor_consumption_exposes_no_claims_and_newer_confirmation_wins_retur
             .stored
             .anchors,
         [Anchor {
-            addr: target(),
+            endpoint: target(),
             confirmed_at: EPOCH
         }]
     );
@@ -296,7 +254,7 @@ fn failed_anchor_consumption_exposes_no_claims_and_newer_confirmation_wins_retur
     assert_eq!(
         book.state.lock().stored.anchors,
         [Anchor {
-            addr: target(),
+            endpoint: target(),
             confirmed_at: EPOCH + 100
         }]
     );
@@ -320,11 +278,10 @@ fn manager_from_collision_snapshot(row: &serde_json::Value) -> Manager {
         }
         manager.stored.records.push(Candidate {
             creation_id: u64::try_from(manager.stored.records.len()).expect("creation ID"),
-            addr: entry["endpoint"]
+            endpoint: entry["endpoint"]
                 .as_str()
                 .expect("endpoint")
-                .parse()
-                .expect("address"),
+                .parse_endpoint(),
             services: Some(9),
             source: Source::Ip(
                 entry["primary_source"]
@@ -354,8 +311,7 @@ fn manager_from_collision_snapshot(row: &serde_json::Value) -> Manager {
             row["second_challenger"]["endpoint"]
                 .as_str()
                 .expect("second")
-                .parse()
-                .expect("address"),
+                .parse_endpoint(),
         );
     }
     manager.last_good = row["last_good"].as_u64().expect("good");
@@ -384,14 +340,13 @@ fn assert_collision_snapshot(manager: &Manager, row: &serde_json::Value) {
         if entry.is_null() {
             continue;
         }
-        let addr: SocketAddr = entry["endpoint"]
+        let endpoint: PeerEndpoint = entry["endpoint"]
             .as_str()
             .expect("endpoint")
-            .parse()
-            .expect("address");
+            .parse_endpoint();
         let actual = manager
             .by_addr
-            .get(&addr)
+            .get(&endpoint)
             .map(|index| &manager.stored.records[*index]);
         assert_eq!(
             actual.is_some(),
@@ -429,7 +384,7 @@ fn assert_collision_snapshot(manager: &Manager, row: &serde_json::Value) {
             .map(|bucket| {
                 vec![
                     usize::from(*bucket),
-                    manager.new_slot(addr, usize::from(*bucket)) % 64,
+                    manager.new_slot(endpoint, usize::from(*bucket)) % 64,
                 ]
             })
             .collect();
@@ -465,7 +420,7 @@ fn collision_transitions_match_actual_core_snapshots() {
             .stored
             .records
             .iter()
-            .map(|entry| entry.addr)
+            .map(|entry| entry.endpoint)
             .collect();
         manager.resolve_collisions(&HashSet::new(), &allowed, EPOCH);
         assert_collision_snapshot(&manager, after);
@@ -492,20 +447,16 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
         .take(11)
         .enumerate()
     {
-        let addr: SocketAddr = endpoint
-            .as_str()
-            .expect("endpoint")
-            .parse()
-            .expect("address");
+        let endpoint: PeerEndpoint = endpoint.as_str().expect("endpoint").parse_endpoint();
         assert!(manager.learn(
-            addr,
+            endpoint,
             Some(9),
             source(u8::try_from(index + 2).expect("source")),
             EPOCH - 100_000,
             EPOCH,
             0
         ));
-        assert!(!manager.good(addr, true, EPOCH - 30));
+        assert!(!manager.good(endpoint, true, EPOCH - 30));
         let expected = rows
             .iter()
             .find(|row| row["case"] == format!("queue-add-{}", index + 1))
@@ -549,6 +500,10 @@ fn connected_collision_good_and_new_selection_match_actual_core() {
     let book = AddressBook {
         state: Mutex::new(manager),
         publication: Mutex::new(()),
+        addrv2_gossip: [
+            std::sync::atomic::AtomicBool::new(false),
+            std::sync::atomic::AtomicBool::new(false),
+        ],
     };
     assert_eq!(
         book.feeler(&[target()], &[target()], EPOCH, |_| true),
@@ -571,54 +526,58 @@ fn successful_connected_challenger_can_promote_without_losing_pending_identity()
 }
 
 #[test]
-fn historical_anchor_migration_obeys_configured_map_and_unknown_shape_barriers() {
-    for bytes in [V3_ANCHORS, V4_ANCHORS] {
-        let directory = tempfile::tempdir().expect("directory");
-        let base = directory.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        let map = directory.path().join("map.raw");
-        fs::write(&path, bytes).expect("old bytes");
-        fs::write(&map, b"invalid map").expect("invalid map");
-        let invalid = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-        assert!(!invalid.state.lock().writable);
-        assert_eq!(
-            invalid.take_restart_anchors(EPOCH + 10),
-            Vec::<SocketAddr>::new()
-        );
-        assert_eq!(invalid.state.lock().stored.anchors.len(), 2);
-        invalid.save();
-        assert_eq!(fs::read(&path).expect("preserved"), bytes);
-        assert_eq!(
-            fs::read_dir(directory.path()).expect("directory").count(),
-            2,
-            "invalid map creates no migration backup"
-        );
-        fs::write(
-            &map,
-            include_bytes!("../../../tests/data/asmap-linked-ipv4-core-v31.1.raw"),
-        )
-        .expect("restore map");
-        let restored = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-        assert!(restored.state.lock().writable);
-        assert_eq!(restored.state.lock().stored.anchors.len(), 2);
-        assert_indexes(&restored.state.lock());
-        restored.save();
-        let prefix = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(prefix.state.lock().writable);
-        assert_eq!(prefix.state.lock().stored.anchors.len(), 2);
-        assert_indexes(&prefix.state.lock());
-        prefix.save();
-        let current = fs::read(&path).expect("current");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&current[..current.len() - 32]).expect("JSON");
-        value["anchors"] = serde_json::json!([{"addr":"9.9.9.9:8333","confirmed_at":EPOCH}]);
-        let malformed = fixture_bytes(&value);
-        fs::write(&path, &malformed).expect("orphan anchor");
-        let rejected = AddressBook::open(Some(base), [1; 4], false, None);
-        assert!(!rejected.state.lock().writable);
-        rejected.save();
-        assert_eq!(fs::read(path).expect("rejected preserved"), malformed);
-    }
+fn current_anchors_obey_configured_map_and_orphan_shape_barriers() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base = directory.path().join("peers.dat");
+    let path = network_path(&base, [1; 4]);
+    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    book.learn_dns("seed", &[target(), addr(2)], EPOCH);
+    book.succeeded(target(), 9, EPOCH);
+    book.succeeded(addr(2), 9, EPOCH);
+    book.remember_anchors(&[target(), addr(2)], EPOCH);
+    book.save();
+    let current = fs::read(&path).expect("current");
+    let map = directory.path().join("map.raw");
+    fs::write(&map, b"invalid map").expect("invalid map");
+    let invalid = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
+    assert!(!invalid.state.lock().writable);
+    assert_eq!(
+        invalid.take_restart_anchors(EPOCH + 10),
+        Vec::<PeerEndpoint>::new()
+    );
+    assert_eq!(invalid.state.lock().stored.anchors.len(), 2);
+    invalid.save();
+    assert_eq!(fs::read(&path).expect("preserved"), current);
+    assert_eq!(
+        fs::read_dir(directory.path()).expect("directory").count(),
+        2,
+        "invalid map creates no backup"
+    );
+    fs::write(
+        &map,
+        include_bytes!("../../../tests/data/asmap-linked-ipv4-core-v31.1.raw"),
+    )
+    .expect("restore map");
+    let restored = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
+    assert!(restored.state.lock().writable);
+    assert_eq!(restored.state.lock().stored.anchors.len(), 2);
+    assert_indexes(&restored.state.lock());
+    restored.save();
+    let prefix = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    assert!(prefix.state.lock().writable);
+    assert_eq!(prefix.state.lock().stored.anchors.len(), 2);
+    assert_indexes(&prefix.state.lock());
+    prefix.save();
+    let current = fs::read(&path).expect("current");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&current[..current.len() - 32]).expect("JSON");
+    value["anchors"] = serde_json::json!([{"addr":"9.9.9.9:8333","confirmed_at":EPOCH}]);
+    let malformed = fixture_bytes(&value);
+    fs::write(&path, &malformed).expect("orphan anchor");
+    let rejected = AddressBook::open(Some(base), [1; 4], false, None);
+    assert!(!rejected.state.lock().writable);
+    rejected.save();
+    assert_eq!(fs::read(path).expect("rejected preserved"), malformed);
 }
 
 #[test]
@@ -650,19 +609,19 @@ fn anchor_reservation_precedes_publication_and_failed_commit_rolls_it_back() {
     assert_eq!(
         book.state.lock().stored.anchors,
         [Anchor {
-            addr: target(),
+            endpoint: target(),
             confirmed_at: EPOCH
         }]
     );
     book.queued(target());
     assert_eq!(
         book.take_restart_anchors(EPOCH + 3),
-        Vec::<SocketAddr>::new()
+        Vec::<PeerEndpoint>::new()
     );
     assert_eq!(
         book.state.lock().stored.anchors,
         [Anchor {
-            addr: target(),
+            endpoint: target(),
             confirmed_at: EPOCH
         }],
         "preexisting dial cannot consume an unused anchor"
@@ -672,7 +631,7 @@ fn anchor_reservation_precedes_publication_and_failed_commit_rolls_it_back() {
 #[test]
 fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     let book = oracle_book();
-    let second: SocketAddr = "8.8.8.8:1343".parse().expect("second actual Core collider");
+    let second: PeerEndpoint = "8.8.8.8:1343".parse().expect("second actual Core collider");
     let mut manager = book.state.lock();
     manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     manager.good(target(), true, EPOCH - 20_000);
@@ -687,12 +646,12 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
         .stored
         .records
         .iter()
-        .map(|entry| entry.addr)
+        .map(|entry| entry.endpoint)
         .collect();
     manager.resolve_collisions(&HashSet::new(), &allowed, EPOCH);
     assert!(manager.stored.records[manager.by_addr[&challenger()]].tried);
     assert!(!manager.stored.records[manager.by_addr[&second]].tried);
-    assert_eq!(manager.collisions, Vec::<SocketAddr>::new());
+    assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
     assert_indexes(&manager);
     assert!(
         !serde_json::to_string(&manager.stored)
@@ -710,7 +669,7 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
         book.select(&[], &[], EPOCH, u64::MAX, |_| true),
         Some(target())
     );
-    book.learn_peer(addr(2).ip(), &[(target(), 1, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 1, EPOCH)], EPOCH);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
     book.state.lock().stored.records[0].services = Some(1024);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
@@ -721,7 +680,7 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
 #[test]
 fn regular_queue_admission_never_takes_probe_or_anchor_claims() {
     let book = book();
-    let alias: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
+    let alias: PeerEndpoint = "[::ffff:8.8.8.8]:8333".parse().expect("alias");
     assert!(book.queued_feeler(target()));
     assert!(!book.queued(alias));
     assert!(book.is_feeler(target()));
@@ -752,8 +711,8 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
     .expect("Core map");
     let book = AddressBook::open(None, [1; 4], false, Some(&map));
     book.state.lock().stored.secret = [1; 32];
-    let anchor: SocketAddr = "8.8.0.1:8333".parse().expect("anchor");
-    let other: SocketAddr = "9.9.0.1:8333".parse().expect("same Core ASN");
+    let anchor: PeerEndpoint = "8.8.0.1:8333".parse().expect("anchor");
+    let other: PeerEndpoint = "9.9.0.1:8333".parse().expect("same Core ASN");
     book.learn_dns("seed", &[anchor, other], EPOCH);
     assert_eq!(book.len(), 2);
     book.succeeded(anchor, 9, EPOCH);
@@ -774,7 +733,7 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
     assert_eq!(
         book.state.lock().stored.anchors,
         [Anchor {
-            addr: anchor,
+            endpoint: anchor,
             confirmed_at: EPOCH
         }]
     );

@@ -1,7 +1,7 @@
 {
   "id": "20_batch_two_requests",
   "case_ordinal": "20",
-  "description": "Batch of two JSON-RPC 2.0 requests: the response is an array of two, in request order, each echoing its string id. Known gap GAP-RPC-DIFFICULTY-1ULP: this node's difficulty is exactly one ULP below Core's for the regtest target (core bits 0x3dffffe03fffc081 vs 0x3dffffe03fffc080); the difficulty field is pinned on both sides and compared bit-exactly; this node advertises protocol version 70017 (BIP434 feature negotiation) where the pinned Core replies 70016, a declared wire gap.",
+  "description": "Batch of two JSON-RPC 2.0 requests: the response is an array of two, in request order, each echoing its string id. Known gap GAP-RPC-DIFFICULTY-1ULP: this node's difficulty is exactly one ULP below Core's for the regtest target (core bits 0x3dffffe03fffc081 vs 0x3dffffe03fffc080); the difficulty field is pinned on both sides and compared bit-exactly. Step 18 intentionally adds I2P; Core-only CJDNS remains the declared network-list gap. Documented protocol-version deviation (docs/policies/p2p-compatibility.md section 4 and 7 item 18): this node advertises its own wire PROTOCOL_VERSION 70017, the BIP434 feature-negotiation threshold, where Core 31.1 advertises 70016; getnetworkinfo.protocolversion reports that same constant.",
   "provenance": {
     "core_version": "31.1.0",
     "core_source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
@@ -186,6 +186,13 @@
               },
               {
                 "name": "onion",
+                "limited": true,
+                "reachable": false,
+                "proxy": "",
+                "proxy_randomize_credentials": false
+              },
+              {
+                "name": "i2p",
                 "limited": true,
                 "reachable": false,
                 "proxy": "",

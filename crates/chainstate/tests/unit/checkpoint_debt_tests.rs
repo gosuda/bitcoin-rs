@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 use bitcoin_rs_utxo::UtxoSet;
 
@@ -32,8 +32,8 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
     let network = Network::Regtest;
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
-    handles.apply_block(&network.genesis_block(), None)?;
-    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
+    handles.apply_block(&BlockPayload::from_local(network.genesis_block()))?;
+    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
     assert!(handles.publish_checkpoint()?.is_some());
 
     let checkpoint_root = dir.path().join(CHECKPOINT_ROOT);

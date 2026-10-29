@@ -7,6 +7,7 @@ use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
 use super::catch_up::BatchWait;
+use super::rollback::SeedFlow;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
 use crate::IndexError;
@@ -262,6 +263,25 @@ impl Worker {
                     return Ok(ReconcileAction::Stalled);
                 }
                 Err(error) if error.requires_capability_rebuild() => {
+                    // D2: a `ScriptLive` rollback that surfaces pruned history
+                    // (`MissingBody` from a pruned rollback grant) takes the
+                    // scoped terminal path, never `reset_for_rebuild` (which
+                    // would loop back into seeding). Genuine corruption
+                    // (`MissingWatermarkIdentity`) still rebuilds.
+                    if matches!(error, DerivedIndexWorkerError::MissingBody { .. })
+                        && capabilities.contains(IndexCapability::ScriptLive)
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "ScriptLive rollback history pruned; marking unavailable"
+                        );
+                        self.runtime
+                            .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
+                        if let Some(slot) = self.seed_slot.as_ref() {
+                            slot.want();
+                        }
+                        continue;
+                    }
                     tracing::warn!(
                         error = %error,
                         tx_lookup = capabilities.contains(IndexCapability::TxLookup),
@@ -299,8 +319,8 @@ impl Worker {
     fn finish_reconcile_pass(
         &self,
         target: Option<Arc<TipSnapshot>>,
-        fence: IndexWriteFence,
-        watermarks: IndexWatermarks,
+        mut fence: IndexWriteFence,
+        mut watermarks: IndexWatermarks,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         self.runtime
@@ -308,26 +328,103 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        // Live has no watermark after restoration, an interrupted seed, or a
-        // same-pass `reset_for_rebuild`. Seed from one stable UTXO view
-        // before `forward_selection` would replay it from genesis (`IDX-07`).
-        if self.enabled.contains(IndexCapability::ScriptLive) && watermarks.script_live.is_none() {
-            self.seed_live_from_utxo()?;
-            return Ok(ReconcileAction::Progressed);
+        // `ScriptLive` with no watermark is seeded from one immutable snapshot
+        // artifact, replayed from genesis, or reported Unavailable — never the
+        // removed live guard scan. The worker bundle is the only active holder
+        // besides at most one queued cell artifact.
+        let mut want_on_stall = false;
+        if self.enabled.contains(IndexCapability::ScriptLive) {
+            if watermarks.script_live.is_some() {
+                // Step 1: watermark present. Drop any queued token (a token
+                // that arrived mid-replay is stale: catch-up covers newer
+                // tips) and release the held seed lease exactly once the
+                // watermark has advanced past its floor. Continue normal
+                // reconcile; other families and pending rows are untouched.
+                // A scoped outage still needs a replacement artifact even
+                // though an older watermark remains queryable as stale state.
+                if self.runtime.script_live_failure.read().is_none() {
+                    self.rest_seed_cell();
+                } else {
+                    self.writer
+                        .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                        .map_err(DerivedIndexWorkerError::Index)?;
+                    // The reset cleared the watermark in storage: the
+                    // pre-reset capture above is stale, so reload before
+                    // selecting legs. Running selection on the stale tuple
+                    // would treat the erased watermark as synced and could
+                    // claim caught-up while storage has no watermark.
+                    (fence, watermarks) = self
+                        .writer
+                        .fenced_watermarks()
+                        .map_err(DerivedIndexWorkerError::Index)?;
+                    // The reset erased the watermark: the outage that
+                    // triggered it is stale, so clear it here and let the
+                    // reset family replay from genesis. Terminal
+                    // no-watermark failures (watermark already None on entry)
+                    // stay excluded via `effective_enabled` to avoid a history
+                    // spin; they retry only on a fresh token.
+                    self.runtime.clear_script_live();
+                    match self.seed_dispatch(pending.as_ref())? {
+                        SeedFlow::Return(action) => return Ok(action),
+                        SeedFlow::Seeded => return Ok(ReconcileAction::Progressed),
+                        SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
+                    }
+                }
+                self.release_seed_lease_if_superseded(watermarks.script_live);
+            } else {
+                match self.seed_dispatch(pending.as_ref())? {
+                    SeedFlow::Return(action) => return Ok(action),
+                    SeedFlow::Seeded => return Ok(ReconcileAction::Progressed),
+                    SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
+                }
+            }
         }
+        // First-leg lease: a committed seed lends its pin so the leg it covers
+        // requests no second history grant. An unused pin parks back.
+        let mut seed_lease = self.take_seed_lease();
         let mut after_start = None;
         loop {
             let Some((capabilities, watermark)) =
                 self.forward_selection(watermarks, &target, after_start)
             else {
-                return Ok(if after_start.is_some() {
+                let action = if after_start.is_some() {
                     ReconcileAction::Stalled
                 } else {
                     ReconcileAction::CaughtUp
-                });
+                };
+                self.park_seed_lease(seed_lease.take());
+                if want_on_stall
+                    && matches!(action, ReconcileAction::Stalled)
+                    && watermarks.script_live.is_none()
+                    && self.seed_bundle.lock().is_none()
+                    && !self.runtime.should_stop()
+                {
+                    // Step 4: no token, no bundle, nothing grantable, no
+                    // progress. Keep demand set so a future token retries the
+                    // seed without a history spin. No spin work, no rebuild
+                    // churn; the existing one-second cadence rechecks.
+                    if let Some(slot) = self.seed_slot.as_ref() {
+                        slot.want();
+                    }
+                }
+                return Ok(action);
             };
-            match self.catch_up_to(&target, fence, watermarks, watermark, capabilities, pending)? {
-                ForwardLeg::Settled(action) => return Ok(action),
+            let leg = self.catch_up_to(
+                &target,
+                fence,
+                watermarks,
+                watermark,
+                capabilities,
+                pending,
+                &mut seed_lease,
+            )?;
+            match leg {
+                ForwardLeg::Settled(action) => {
+                    if !matches!(action, ReconcileAction::CaughtUp) {
+                        self.park_seed_lease(seed_lease.take());
+                    }
+                    return Ok(action);
+                }
                 ForwardLeg::BodyAbsent => after_start = Some(forward_start(watermark)),
             }
         }
@@ -356,7 +453,7 @@ impl Worker {
         }
         let endpoint = state.endpoint();
         let Some(target) = target else {
-            return if self.commit_pending(pending)? {
+            return if self.commit_pending_and_clear(pending)? {
                 Ok(ReconcileAction::Progressed)
             } else {
                 Ok(ReconcileAction::Stalled)
@@ -367,7 +464,7 @@ impl Worker {
             if Instant::now() < state.deadline {
                 return Ok(ReconcileAction::Buffered);
             }
-            return if self.commit_pending(pending)? {
+            return if self.commit_pending_and_clear(pending)? {
                 Ok(ReconcileAction::CaughtUp)
             } else {
                 Ok(ReconcileAction::Stalled)
@@ -375,12 +472,15 @@ impl Worker {
         }
         if endpoint.height < target.height && self.watermark_is_on_target_chain(endpoint, target) {
             if Instant::now() >= state.deadline {
-                return if self.commit_pending(pending)? {
+                return if self.commit_pending_and_clear(pending)? {
                     Ok(ReconcileAction::Progressed)
                 } else {
                     Ok(ReconcileAction::Stalled)
                 };
             }
+            // A retained pending batch continues with its own grant: a parked
+            // seed lease stays parked for the first clean leg instead.
+            let mut no_seed_lease = None;
             let leg = self.catch_up_to(
                 target,
                 state.fence,
@@ -388,6 +488,7 @@ impl Worker {
                 state.durable,
                 state.capabilities,
                 pending,
+                &mut no_seed_lease,
             )?;
             return Ok(match leg {
                 ForwardLeg::Settled(action) => action,
@@ -397,7 +498,7 @@ impl Worker {
             });
         }
 
-        if self.commit_pending(pending)? {
+        if self.commit_pending_and_clear(pending)? {
             Ok(ReconcileAction::Progressed)
         } else {
             Ok(ReconcileAction::Stalled)
@@ -417,11 +518,41 @@ impl Worker {
     }
 
     pub(super) fn effective_enabled(&self) -> IndexCapabilities {
+        let mut enabled = self.enabled;
         if self.runtime.compact_filter_failure.read().is_some() {
-            self.enabled.without(IndexCapability::CompactFilters)
-        } else {
-            self.enabled
+            enabled = enabled.without(IndexCapability::CompactFilters);
         }
+        // A terminally pruned `ScriptLive` must not stall the other families:
+        // selection skips it while its scoped flag is set. Seeding still runs
+        // (it checks `self.enabled` directly) so a later token clears the flag
+        // and retries without a history spin.
+        if self.runtime.script_live_failure.read().is_some() {
+            enabled = enabled.without(IndexCapability::ScriptLive);
+        }
+        enabled
+    }
+
+    /// Commits a retained forward batch and clears a scoped `ScriptLive`
+    /// outage when the commit made durable progress. A fresh `Pruned` refusal
+    /// sets the flag again.
+    fn commit_pending_and_clear(
+        &self,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<bool, DerivedIndexWorkerError> {
+        let capabilities = pending
+            .as_ref()
+            .map(|state| state.capabilities)
+            .ok_or(DerivedIndexWorkerError::PendingDurableChanged)?;
+        let endpoint = pending
+            .as_ref()
+            .map(PendingForward::endpoint)
+            .ok_or(DerivedIndexWorkerError::PendingDurableChanged)?;
+        let committed = self.commit_pending(pending)?;
+        if committed && capabilities.contains(IndexCapability::ScriptLive) {
+            self.runtime.clear_script_live();
+            self.release_seed_lease_if_superseded(Some(endpoint));
+        }
+        Ok(committed)
     }
 
     pub(super) fn rollback_selection(
@@ -446,7 +577,11 @@ impl Worker {
             .max_by_key(|watermark| watermark.height)?;
         let selection = IndexCapability::ALL
             .into_iter()
-            .filter(|&capability| enabled_watermark(capability) == Some(selected))
+            .filter(|&capability| {
+                enabled_watermark(capability) == Some(selected)
+                    && !(capability == IndexCapability::ScriptLive
+                        && self.runtime.script_live_failure.read().is_some())
+            })
             .collect();
         Some((selection, selected))
     }

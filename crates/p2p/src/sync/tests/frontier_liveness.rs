@@ -24,13 +24,12 @@ fn answer_requests(
                     headers: headers.to_vec(),
                     source: Some(source),
                     wire_response,
-                    body_fetch_owned: false,
                 })?;
             }
             Message::GetData(inventory) => {
                 for hash in witness_block_inventory(inventory)? {
                     if let Some(block) = bodies.get(&hash.0) {
-                        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+                        let mut inbound = crate::InboundBlock::from_local(block.clone());
                         inbound.source = Some(source);
                         inbound_blocks_tx.send(inbound)?;
                     }
@@ -83,7 +82,7 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     );
 
     // Apply block 1 so the apply frontier needs block 2's body.
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
 
     let s1 = test_addr(9821, 0)?;
     let s2 = test_addr(9821, 1)?;
@@ -95,7 +94,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
             headers: active.clone(),
             source: Some(source),
             wire_response: false,
-            body_fetch_owned: false,
         })?;
     }
 
@@ -106,12 +104,15 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     for _ in 0..24 {
         std::thread::sleep(Duration::from_millis(250));
         sync.tick();
-        if !peers.is_connected(s1) && !peers.is_connected(s2) {
+        if !peers.is_connected(s1)
+            && !peers.is_connected(s2)
+        {
             break;
         }
     }
     assert!(
-        !peers.is_connected(s1) && !peers.is_connected(s2),
+        !peers.is_connected(s1)
+            && !peers.is_connected(s2),
         "both serving peers must be convicted of the block-request timeout"
     );
     assert_eq!(
@@ -180,7 +181,7 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
         inbound_blocks_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.height),
@@ -200,7 +201,6 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
         headers: fork.clone(),
         source: Some(p_source),
         wire_response: false,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 

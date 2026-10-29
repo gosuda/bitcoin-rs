@@ -19,85 +19,23 @@ use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
-use bitcoin_rs_primitives::{Block, ConsensusEncode, Hash256, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
-struct ApplyScratch {
-    txids: Vec<Txid>,
-    raw_txs: Option<Vec<Vec<u8>>>,
-    same_block_spent: Option<SameBlockSpentSet>,
-    utxo_add_capacity: usize,
-    utxo_remove_capacity: usize,
-}
-
-impl ApplyScratch {
-    fn from_prepared_parts(
-        block: &Block,
-        include_raw_txs: bool,
-        txids: Vec<Txid>,
-        tx_plan: crate::BlockTxPlan,
-    ) -> Self {
-        debug_assert_eq!(txids.len(), block.txs.len());
-        let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txs.len()));
-
-        if let Some(raw_txs) = &mut raw_txs {
-            for tx in &block.txs {
-                raw_txs.push(consensus_bytes(tx));
-            }
-        }
-        let same_block_spent_len = tx_plan
-            .same_block_spent
-            .as_ref()
-            .map_or(0_usize, SameBlockSpentSet::len);
-        let utxo_add_capacity = tx_plan
-            .created_output_count
-            .saturating_sub(same_block_spent_len);
-        let utxo_remove_capacity = tx_plan
-            .spent_input_count
-            .saturating_sub(tx_plan.same_block_spent_input_count);
-        Self {
-            txids,
-            raw_txs,
-            same_block_spent: tx_plan.same_block_spent,
-            utxo_add_capacity,
-            utxo_remove_capacity,
-        }
-    }
-
-    fn txids(&self) -> &[Txid] {
-        &self.txids
-    }
-
-    /// Takes the derived-consumer payloads out of scratch after the UTXO commit.
-    fn into_payloads(self) -> (Vec<Txid>, Option<Vec<Vec<u8>>>) {
-        (self.txids, self.raw_txs)
-    }
-
-    fn same_block_spent(&self) -> Option<&SameBlockSpentSet> {
-        self.same_block_spent.as_ref()
-    }
-
-    fn utxo_change_capacity(&self) -> (usize, usize) {
-        (self.utxo_add_capacity, self.utxo_remove_capacity)
-    }
-}
-
 /// Commit path. Callers reach this only through an admitted chain transition.
 pub(super) fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,
-    block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &'b BlockPayload,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
     match apply_block_admitted(
         handles,
-        block,
-        provided_serialized,
+        payload,
         proven,
         provenance,
         ApplyIntent::Commit,
@@ -112,13 +50,13 @@ pub(super) fn apply_committed_block_admitted<'b>(
 #[expect(clippy::too_many_lines)]
 pub(super) fn apply_block_admitted<'b>(
     handles: &Chainstate,
-    block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &'b BlockPayload,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     intent: ApplyIntent,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ApplyFinish, ApplyError> {
+    let block = payload.block();
     let total_started = quanta::Instant::now();
     let block_hash = block.block_hash().0;
     let prev_hash = block.header.prev_blockhash.0;
@@ -252,12 +190,7 @@ pub(super) fn apply_block_admitted<'b>(
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(
-                block,
-                provided_serialized.clone(),
-                handles.utxo.as_ref(),
-                handles.validation_engine,
-            )?,
+            prepare_apply(payload, handles.utxo.as_ref(), handles.validation_engine)?,
             false,
         ),
     };
@@ -411,16 +344,24 @@ pub(super) fn apply_block_admitted<'b>(
         "apply_block: profile"
     );
     bip68_result?;
-    let wants_rawtx = handles.capture_rawtx;
-    let scratch = ApplyScratch::from_prepared_parts(block, wants_rawtx, view.into_txids(), tx_plan);
+    let txids = view.into_txids();
+    let same_block_spent = tx_plan.same_block_spent;
+    let same_block_spent_len = same_block_spent
+        .as_ref()
+        .map_or(0_usize, SameBlockSpentSet::len);
+    let utxo_add_capacity = tx_plan
+        .created_output_count
+        .saturating_sub(same_block_spent_len);
+    let utxo_remove_capacity = tx_plan
+        .spent_input_count
+        .saturating_sub(tx_plan.same_block_spent_input_count);
 
     let utxo_changes_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let (utxo_add_capacity, utxo_remove_capacity) = scratch.utxo_change_capacity();
     let utxo_changes_result = build_block_changes(
         block,
         height,
-        scratch.txids(),
-        scratch.same_block_spent(),
+        &txids,
+        same_block_spent.as_ref(),
         utxo_add_capacity,
         utxo_remove_capacity,
         resolved.as_ref(),
@@ -473,26 +414,15 @@ pub(super) fn apply_block_admitted<'b>(
         .record(undo_persist_started.elapsed().as_secs_f64());
     let undo_record = undo_persist_result?;
 
-    // Serialize the block lazily: only when a consumer actually needs the
-    // full bytes. During IBD with pruning+txindex disabled this avoids a
-    // full-block serialize on every apply.
+    // Share the payload's retained bytes lazily: only when a consumer actually
+    // needs the full body. The constructor already proved these bytes ARE this
+    // block's exact serialization, so there is no length gate, no re-encode,
+    // and no debug-only compare here. During IBD with pruning+txindex
+    // disabled this avoids touching the bytes on every apply.
     let block_bytes: bytes::Bytes = {
         let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
         if needs_body {
-            // Preparation already bound these exact bytes to the decoded block,
-            // including its witness. Retain the release length guard without
-            // allocating and writing another full block merely to count bytes.
-            // The debug assertion remains an independent serialization check.
-            match provided_serialized {
-                Some(provided) if provided.len() == block.consensus_size() => {
-                    #[cfg(debug_assertions)]
-                    {
-                        debug_assert_eq!(provided.as_ref(), consensus_bytes(block).as_slice(),);
-                    }
-                    provided
-                }
-                _ => bytes::Bytes::from(consensus_bytes(block)),
-            }
+            payload.bytes().clone()
         } else {
             // Nothing downstream reads `block_bytes` unless one of the consumers
             // above needs the full body, so skip the serialize entirely.
@@ -569,7 +499,7 @@ pub(super) fn apply_block_admitted<'b>(
         block,
         &block_hash,
         height,
-        scratch.txids(),
+        &txids,
         &resolved,
         verify_flags,
         block_connected_dur,
@@ -588,7 +518,9 @@ pub(super) fn apply_block_admitted<'b>(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    let (txids, raw_txs) = scratch.into_payloads();
+    let raw_txs = handles
+        .capture_rawtx
+        .then(|| block.txs.iter().map(consensus_bytes).collect::<Vec<_>>());
     let mut outcome = ConnectOutcome {
         tip,
         commit_id: 0,

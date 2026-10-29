@@ -38,6 +38,7 @@ const SHORT_IDS: [&str; 38] = [
     "getcfcheckpt",
     "cfcheckpt",
     "addrv2",
+    // IDs 29..=36 are undefined in BIP324.
     "",
     "",
     "",
@@ -45,8 +46,8 @@ const SHORT_IDS: [&str; 38] = [
     "",
     "",
     "",
-    "", // Unimplemented IDs 29–36.
-    "feature",
+    "",
+    crate::feature::FEATURE_COMMAND,
 ];
 
 /// First byte of the long form.
@@ -91,11 +92,11 @@ pub(crate) fn decode(contents: &Bytes) -> Option<(String, Bytes)> {
             .filter(|command| !command.is_empty())?;
         return Some((command, contents.slice(1 + COMMAND_LEN..)));
     }
-    let command = SHORT_IDS.get(usize::from(first))?;
-    if command.is_empty() {
-        return None;
-    }
-    Some(((*command).to_owned(), contents.slice(1..)))
+    let command = SHORT_IDS
+        .get(usize::from(first))
+        .copied()
+        .filter(|command| !command.is_empty())?;
+    Some((command.to_owned(), contents.slice(1..)))
 }
 
 #[cfg(test)]
@@ -114,10 +115,6 @@ mod tests {
     fn every_assigned_command_uses_its_one_byte_id() {
         for (id, name) in SHORT_IDS.iter().enumerate().skip(1) {
             if name.is_empty() {
-                assert_eq!(
-                    decode(&Bytes::from(vec![u8::try_from(id).unwrap_or(u8::MAX)])),
-                    None
-                );
                 continue;
             }
             let contents = encode(&command(name), b"payload");
@@ -129,6 +126,33 @@ mod tests {
                 Some(((*name).to_owned(), Bytes::from_static(b"payload")))
             );
         }
+    }
+
+    #[test]
+    fn undefined_sparse_ids_yield_none() {
+        for id in 29..=36 {
+            assert_eq!(decode(&Bytes::from(vec![id, 1, 2])), None, "sparse id {id}");
+        }
+    }
+
+    #[test]
+    fn feature_short_id_37_maps_correctly() {
+        let contents = encode(&command("feature"), b"payload");
+        assert_eq!(contents[0], 37);
+        assert_eq!(&contents[1..], b"payload");
+        let decoded = decode(&Bytes::from(contents));
+        assert_eq!(
+            decoded,
+            Some(("feature".to_owned(), Bytes::from_static(b"payload")))
+        );
+
+        let mut long = vec![LONG_FORM];
+        long.extend_from_slice(b"feature\0\0\0\0\0");
+        long.extend_from_slice(b"payload");
+        assert_eq!(
+            decode(&Bytes::from(long)),
+            Some(("feature".to_owned(), Bytes::from_static(b"payload")))
+        );
     }
 
     #[test]
@@ -157,17 +181,14 @@ mod tests {
         long.extend_from_slice(&7u64.to_le_bytes());
         let short = encode(&command("ping"), &7u64.to_le_bytes());
         assert_eq!(decode(&Bytes::from(long)), decode(&Bytes::from(short)));
-        let mut long = vec![LONG_FORM];
-        long.extend_from_slice(b"feature\0\0\0\0\0");
-        long.extend_from_slice(b"\x04test\x00");
-        let short = encode(&command("feature"), b"\x04test\x00");
-        assert_eq!(short[0], 37);
-        assert_eq!(decode(&Bytes::from(long)), decode(&Bytes::from(short)));
     }
 
     #[test]
     fn empty_undefined_and_malformed_types_are_dropped() {
         assert_eq!(decode(&Bytes::new()), None);
+        for id in 29..=36 {
+            assert_eq!(decode(&Bytes::from(vec![id, 1, 2])), None, "sparse id {id}");
+        }
         for id in u8::try_from(SHORT_IDS.len()).unwrap_or(u8::MAX)..=u8::MAX {
             assert_eq!(decode(&Bytes::from(vec![id, 1, 2])), None, "id {id}");
         }

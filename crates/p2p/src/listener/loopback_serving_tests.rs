@@ -1,5 +1,6 @@
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -150,7 +151,7 @@ fn chain_over(blocks: &[Block], recent: RecentBlockSlot) -> Fallible<ActiveChain
 }
 
 struct Node {
-    addr: SocketAddr,
+    addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
     shutdown: Arc<AtomicBool>,
@@ -167,13 +168,17 @@ impl Node {
         );
         shared.chain_query = Some(Arc::new(chain));
         let aggregate = Arc::clone(&shared.shared_outbound);
-        let listener = bind_listener(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = bind_listener(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let addr = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let thread = std::thread::spawn(move || serve(listener, flag, shared));
         Ok(Self {
-            addr,
+            addr: addr.into(),
             table,
             aggregate,
             shutdown,
@@ -221,13 +226,17 @@ impl Drop for Node {
 
 struct Client {
     peer: Peer<TcpStream>,
-    local: SocketAddr,
+    local: PeerEndpoint,
     nonce: u64,
 }
 
 impl Client {
     fn connect(node: &Node) -> Fallible<Self> {
-        let stream = TcpStream::connect(node.addr)?;
+        let stream = TcpStream::connect(
+            node.addr
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         configure_peer_stream(&stream)?;
         let local = stream.local_addr()?;
         let mut peer = Peer::new(stream, MAGIC);
@@ -248,7 +257,7 @@ impl Client {
         )?;
         let mut client = Self {
             peer,
-            local,
+            local: local.into(),
             nonce: 0,
         };
         let barrier = client.ping()?;
@@ -317,11 +326,9 @@ fn messages_of(frames: Vec<Frame>) -> Vec<Message> {
 fn session_of(node: &Node, client: &Client) -> Fallible<PeerSession> {
     let mut found = None;
     wait_until("the node to publish the client's session", || {
-        found = node
-            .table
-            .sessions()
-            .into_iter()
-            .find(|session| session.addr == client.local && session.info.is_some());
+        found = node.table.sessions().into_iter().find(|session| {
+            session.addr == crate::PeerRemote::Endpoint(client.local) && session.info.is_some()
+        });
         found.is_some()
     })?;
     found.ok_or_else(|| "the client's session vanished".into())
@@ -614,7 +621,7 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
         let received: Vec<&Message> = delivered.iter().map(|(message, _)| message).collect();
         return Err(format!("the victim's body must precede its pong, got {received:?}").into());
     };
-    assert_eq!(block, &blocks[2]);
+    assert_eq!(block.block(), &blocks[2]);
     assert_eq!(&raw[..], victim_payload.as_slice());
     wait_until("the aggregate to drain once the victim was served", || {
         node.aggregate.pending() == 0

@@ -17,7 +17,9 @@ use crate::set::{UtxoCoin, UtxoError, UtxoSet};
 use crate::stats::{CoinStatsListener, CoinStatsRewindError};
 use crate::undo_codec;
 
-pub use crate::undo_codec::UndoCodecError;
+pub use crate::undo_codec::{
+    UndoCodecError, decode as decode_undo_record, record_size_limit as undo_record_size_limit,
+};
 
 /// One UTXO output to add, owning a `TxOut` or borrowing it from a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -369,15 +371,6 @@ pub fn decode_undo_record_for_block(
     )
 }
 
-/// Bounds the persisted undo copy for a consensus-valid block.
-///
-/// The caller supplies the interpreter's maximum spendable script length; format sizes
-/// and BIP30/removal overhead remain owned by the persisted codec.
-#[must_use]
-pub fn undo_record_size_limit(block: &Block, max_spent_script: usize) -> usize {
-    undo_codec::record_size_limit(block, max_spent_script)
-}
-
 /// Projects rollback facts into transaction/input order without changing their format.
 ///
 /// Same-block outputs are absent from net undo and come from earlier transactions
@@ -631,19 +624,6 @@ pub fn load_block_undo(
         .map_err(UndoLoadError::Read)?
         .ok_or(UndoLoadError::Missing { hash, height })?;
     undo_codec::decode(&record, hash).map_err(|source| UndoLoadError::Unreadable { hash, source })
-}
-
-/// Decodes one raw undo record that the caller already holds.
-///
-/// The stored head certifies an undo record in the same batch as its block
-/// body, so a replay that reads the body from its own store can decode the
-/// same row without going through [`load_block_undo`]'s `UndoStore`.
-///
-/// # Errors
-///
-/// A malformed record, or one bound to a different block.
-pub fn decode_undo_record(bytes: &[u8], block_hash: Hash256) -> Result<UndoBatch, UndoCodecError> {
-    undo_codec::decode(bytes, block_hash)
 }
 
 /// Rolls one block out of the UTXO set under a durable disconnect marker.

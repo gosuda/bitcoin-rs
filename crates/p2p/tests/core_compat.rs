@@ -1,8 +1,10 @@
 //! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
 
+use std::collections::BTreeSet;
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::error::Error;
 use std::io::Cursor;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -20,7 +22,7 @@ use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
 };
-use bitcoin_rs_p2p::handshake::{start, version_message};
+use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
@@ -28,12 +30,12 @@ use bitcoin_rs_p2p::wire::{
     PeerError, read_message, write_message,
 };
 use bitcoin_rs_p2p::{
-    BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, ListenerExtras,
-    Message, NetworkActivity, Peer, PeerState, PeerTable,
+    BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, FEATURE_VERSION, InboundBlock, InboundHeaders,
+    ListenerExtras, Message, NetworkActivity, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
-    deserialize,
+    Block, BlockHash as NativeBlockHash, BlockPayload, CompactTarget, Hash256, Header,
+    consensus_bytes, deserialize,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -123,6 +125,13 @@ impl FakeChain {
 }
 
 impl ChainQuery for FakeChain {
+    fn stale_tip_announcement(
+        &self,
+        _tip: bitcoin_rs_primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<bitcoin_rs_p2p::StaleTipHeaders> {
+        None
+    }
     fn headers_after(
         &self,
         locator_hashes: &[NativeBlockHash],
@@ -356,17 +365,124 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(buffer)
 }
 
+/// The protocol version Bitcoin Core 31.1 advertises. This node advertises
+/// [`PROTOCOL_VERSION`] instead, the one protocol-version deviation recorded in
+/// `docs/policies/p2p-compatibility.md` §4.
+const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
+
+/// The 36 commands of the Core-compatibility inventory: Core 31.1's wire set
+/// this node types, plus the legacy `reject` and `alert` that Core 31.1 no
+/// longer processes. Each decodes with a Core-style outcome.
+const CORE_COMPAT_COMMANDS: [&str; 36] = [
+    "version",
+    "verack",
+    "addr",
+    "inv",
+    "getdata",
+    "notfound",
+    "getblocks",
+    "getheaders",
+    "mempool",
+    "tx",
+    "block",
+    "headers",
+    "sendheaders",
+    "getaddr",
+    "ping",
+    "pong",
+    "merkleblock",
+    "filterload",
+    "filteradd",
+    "filterclear",
+    "getcfilters",
+    "cfilter",
+    "getcfheaders",
+    "cfheaders",
+    "getcfcheckpt",
+    "cfcheckpt",
+    "sendcmpct",
+    "cmpctblock",
+    "getblocktxn",
+    "blocktxn",
+    "reject",
+    "alert",
+    "feefilter",
+    "wtxidrelay",
+    "addrv2",
+    "sendaddrv2",
+];
+
+/// The commands this node types beyond Core 31.1's set: BIP434 `feature`,
+/// BIP331 package relay, and BIP332 `staletip`. Core 31.1 treats each as an
+/// unknown command.
+const EXTENSION_COMMANDS: [&str; 6] = [
+    "feature",
+    "sendpackages",
+    "ancpkginfo",
+    "getpkgtxns",
+    "pkgtxns",
+    "staletip",
+];
+
+/// Whether `outcome` is the typed result an extension command gives an empty
+/// payload: its own codec error, or for `pkgtxns` the raw payload surfaced for
+/// the listener to charge before any transaction is parsed.
+fn is_own_typed_empty_payload_outcome(
+    command: &str,
+    outcome: &Result<(Message, bytes::Bytes), PeerError>,
+) -> bool {
+    match (command, outcome) {
+        ("feature", Err(PeerError::Feature(_)))
+        | ("sendpackages" | "ancpkginfo" | "getpkgtxns", Err(PeerError::Package(_)))
+        | ("staletip", Err(PeerError::StaleTip(_))) => true,
+        ("pkgtxns", Ok((Message::PkgTxnsPayload(payload), _))) => payload.is_empty(),
+        _ => false,
+    }
+}
+
+#[test]
+fn command_inventory_is_the_core_compat_set_plus_the_declared_extensions() {
+    let core: BTreeSet<&str> = CORE_COMPAT_COMMANDS.iter().copied().collect();
+    let extensions: BTreeSet<&str> = EXTENSION_COMMANDS.iter().copied().collect();
+    let typed: BTreeSet<&str> = COMMANDS.iter().copied().collect();
+
+    assert_eq!(core.len(), CORE_COMPAT_COMMANDS.len());
+    assert_eq!(extensions.len(), EXTENSION_COMMANDS.len());
+    assert!(
+        core.is_disjoint(&extensions),
+        "a command is either Core-compatible or an extension"
+    );
+    assert_eq!(
+        core.union(&extensions).copied().collect::<BTreeSet<_>>(),
+        typed,
+        "COMMANDS is exactly the Core-compatibility inventory plus the declared extensions"
+    );
+    assert_eq!(COMMANDS.len(), core.len() + extensions.len());
+    for name in CORE_UNTYPED_COMMANDS {
+        assert!(
+            !typed.contains(name),
+            "{name} is a Core command this node leaves untyped, not an extension"
+        );
+    }
+}
+
 #[test]
 fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
     for spec in COMMANDS {
         let frame = raw_frame(magic, &command_field(spec)?, &[]);
-        match read_message(&mut Cursor::new(frame), magic) {
-            Ok((Message::Unknown { command, .. }, _)) => {
-                return Err(
-                    format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into(),
-                );
-            }
+        let outcome = read_message(&mut Cursor::new(frame), magic);
+        if let Ok((Message::Unknown { command, .. }, _)) = &outcome {
+            return Err(format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into());
+        }
+        if EXTENSION_COMMANDS.contains(spec) {
+            assert!(
+                is_own_typed_empty_payload_outcome(spec, &outcome),
+                "{spec}: an empty payload must give the extension's own typed outcome, got {outcome:?}"
+            );
+            continue;
+        }
+        match outcome {
             Ok(_)
             | Err(
                 PeerError::Encode(_)
@@ -441,9 +557,13 @@ fn version_message_pins_core_31_handshake_fields() {
 
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
-        u64::from(PROTOCOL_VERSION),
-        70_017,
-        "BIP434 protocol version (extension to the Core 31.1 baseline)"
+        PROTOCOL_VERSION, FEATURE_VERSION,
+        "documented deviation: we advertise the BIP434 feature-negotiation threshold"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION,
+        CORE_31_1_PROTOCOL_VERSION + 1,
+        "the one protocol version above Core 31.1's, and only that"
     );
     let expected_services = {
         let mut services = ServiceFlags::NETWORK;
@@ -464,7 +584,7 @@ fn version_message_pins_core_31_handshake_fields() {
 }
 
 #[test]
-fn outbound_handshake_waits_for_remote_version_before_negotiating() -> Result<(), Box<dyn Error>> {
+fn outbound_handshake_sends_version_then_core_feature_set() {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
     let messages = start(
         &mut peer,
@@ -475,19 +595,13 @@ fn outbound_handshake_waits_for_remote_version_before_negotiating() -> Result<()
     );
 
     assert_eq!(peer.state, PeerState::VersionExchange);
-    assert_eq!(messages.len(), 1);
+    assert_eq!(messages.len(), 4);
     assert!(matches!(messages.first(), Some(Message::Version(_))));
-    let responses = dispatch_inbound(&mut peer, &version_for_handshake())?;
     assert_eq!(
-        responses,
-        [
-            Message::WtxidRelay,
-            Message::SendAddrV2,
-            Message::SendHeaders,
-            Message::Verack
-        ]
+        &messages[1..],
+        &feature_messages(),
+        "BIP339 wtxidrelay, BIP155 sendaddrv2, BIP130 sendheaders — Core 31 order"
     );
-    Ok(())
 }
 
 #[test]
@@ -715,11 +829,15 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     )?;
     wire.set_position(0);
     let (decoded, raw) = read_message(&mut wire, Magic::REGTEST)?;
-    let Message::Block(decoded_block) = decoded else {
+    let Message::Block(payload) = decoded else {
         return Err("expected block on the wire".into());
     };
-    assert_eq!(decoded_block.block_hash(), genesis.block_hash());
-    assert_eq!(raw.as_ref(), consensus_bytes(&genesis).as_slice());
+    assert_eq!(payload.block().block_hash(), genesis.block_hash());
+    assert_eq!(
+        payload.bytes().as_ref(),
+        consensus_bytes(&genesis).as_slice()
+    );
+    assert_eq!(raw.as_ref(), payload.bytes().as_ref());
     Ok(())
 }
 
@@ -749,7 +867,10 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
     let genesis = genesis_block()?;
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    let responses = dispatch_inbound(&mut peer, &Message::Block(genesis.clone()))?;
+    let responses = dispatch_inbound(
+        &mut peer,
+        &Message::Block(BlockPayload::from_local(genesis.clone())),
+    )?;
     assert_eq!(responses, []);
 
     let coinbase = genesis
@@ -769,7 +890,11 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
 #[test]
 fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
     let (headers_tx, headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
@@ -788,7 +913,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         None,
         ListenerExtras::default(),
     );
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
+    let dial = spawn_outbound_connection(addr.into(), shared, PeerRole::BlockRelayOnly);
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -826,7 +951,11 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
 
     let genesis = genesis_block()?;
     write_message(&mut server, magic, &Message::Addr(Vec::new()))?;
-    write_message(&mut server, magic, &Message::Block(genesis.clone()))?;
+    write_message(
+        &mut server,
+        magic,
+        &Message::Block(BlockPayload::from_local(genesis.clone())),
+    )?;
     let Ok(announced) = headers_rx.recv_timeout(Duration::from_secs(5)) else {
         return Err("a block must reach the scheduler on a block-relay connection".into());
     };
@@ -1137,7 +1266,11 @@ fn handshake_completes_over_tcp_for_every_network() -> Result<(), Box<dyn Error>
 }
 
 fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1162,7 +1295,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
 
     let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
-    let client = match connect_with_retry(addr) {
+    let client = match connect_with_retry(addr.into()) {
         Ok(client) => client,
         Err(error) => {
             shutdown.store(true, Ordering::Relaxed);
@@ -1177,10 +1310,15 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     outcome
 }
 
-fn connect_with_retry(addr: SocketAddr) -> Result<TcpStream, Box<dyn Error>> {
+fn connect_with_retry(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+        match TcpStream::connect_timeout(
+            &addr
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+            Duration::from_millis(200),
+        ) {
             Ok(stream) => return Ok(stream),
             Err(error) if Instant::now() < deadline => {
                 let _ = error;
@@ -1350,9 +1488,13 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1382,7 +1524,7 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
         peer_table.live_sessions().is_empty(),
         "the refused peer leaves no live entry"
     );
-    assert!(!peer_table.is_connected(addr));
+    assert!(!peer_table.is_connected(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)));
     Ok(())
 }
 
@@ -1391,9 +1533,13 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1409,11 +1555,17 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
     write_message(&mut server, magic, &Message::Verack)?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+    while peer_table
+        .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+        .is_none()
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        peer_table.ready_source(addr).is_some(),
+        peer_table
+            .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+            .is_some(),
         "an eligible peer is published ready"
     );
     drop(server);
@@ -1435,9 +1587,13 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
         ..genesis_block()?.header
     };
     shared.chain_query = Some(Arc::new(FakeChain::new(vec![recent], HashMap::new())));
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
-    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let dial = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
     let (mut server, _) = listener.accept()?;
     server.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1453,11 +1609,17 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     write_message(&mut server, magic, &Message::Verack)?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+    while peer_table
+        .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+        .is_none()
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        peer_table.ready_source(addr).is_some(),
+        peer_table
+            .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(addr))
+            .is_some(),
         "a LIMITED peer near the local tip is desirable"
     );
     drop(server);

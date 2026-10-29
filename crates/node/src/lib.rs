@@ -27,6 +27,8 @@ mod lifecycle;
 pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
+/// Foreground offline import for the strict full-validation comparator.
+pub mod offline_import;
 /// Node-owned effects around authoritative chainstate reorgs.
 pub mod reorg;
 /// Top-level node runner.

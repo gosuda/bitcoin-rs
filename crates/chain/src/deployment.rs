@@ -530,6 +530,7 @@ mod tests {
             // prev_blockhash and the by_hash key pointing at a discarded hash.
             let node_id = if height == activation_height {
                 tree.insert_header_with_hash(header, expected_hash, NodeStatus::HeaderValid)?
+                    .id
             } else {
                 tree.insert_header(header, NodeStatus::HeaderValid)?
             };

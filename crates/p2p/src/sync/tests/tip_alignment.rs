@@ -22,7 +22,10 @@ fn tick_skips_getheaders_when_header_tip_matches_peer_height() -> TestResult {
         }
     };
     applied_tip.store(Some(Arc::new(applied_snapshot)));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 3));
 
     sync.tick();

@@ -30,7 +30,7 @@ The durable head is the only authoritative commit point. A writer appends body a
 Estimator, discovery, and index formats evolve outside `CURRENT_SCHEMA`. Each carries its own version:
 
 - Fee estimator state carries an estimator-owned version. A corrupt, missing, or unknown version degrades to insufficient-data status. The node starts. It never fabricates a rate or a default confidence.
-- Peer discovery state carries a discovery-owned version. A corrupt, missing, or unknown version degrades to seeded or empty discovery with a typed reseed or rebuild status. The node starts.
+- Peer discovery state uses the single canonical AddrMan v1 defined in [P2P compatibility section 7](p2p-compatibility.md#7-deviation-ledger). Its schema version remains 1 until the first official release. Unmarked development snapshots are preserved byte-for-byte before fresh discovery is published; no historical records are migrated. Corrupt or unreadable files disable replacement while in-memory discovery and node startup continue.
 - Mempool restart snapshots carry a mempool-owned version, genesis identity and checksum. Rejected candidates never prevent Chainstate startup. On clean save, a rejected ordinary snapshot is moved intact into a unique `mempool-snapshot-rejected-*` directory before publishing fresh candidates. Failure to read or quarantine it prevents replacement. The gateway revalidates candidates against recovered Chainstate; fee-estimator history remains independent.
 - Index layout carries one durable marker in `UtxoMeta`. The durability marker (`[0x00, b'V']`, currently row-format 5) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The marker covers key layout and row-value widths alike; format 5 changed both.
 
@@ -39,7 +39,7 @@ In every case:
 - Authoritative startup never fails because of an owner-local version.
 - Owner-local evolution keeps `CURRENT_SCHEMA` unchanged.
 - No translator, converter, or legacy reader exists for any owner-local format.
-- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exceptions: mempool restart snapshots are quarantined intact as described above; disposable derived index namespaces recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
+- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exceptions: incompatible pre-release AddrMan files are durably preserved before replacement as described above; mempool restart snapshots are quarantined intact as described above; disposable derived index namespaces recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
 - No backup or rotation framework exists. Recovery is reseed, rebuild, or re-admission from canonical data.
 
 ## Operator resync procedure
@@ -83,6 +83,24 @@ The marker covers the authoritative surfaces:
 - Owner-local state (fee estimator, peer discovery, mempool restart snapshots, index capabilities) persists under its own version fields (see the owner-local section).
 
 Current readers still validate magic values, versions, filenames, lengths, hashes, checksums, ancestry, tips, and semantic invariants. Those checks detect corruption in the current format. They are not compatibility or migration machinery.
+
+## Approved checkpoint header compatibility
+
+Checkpoint header artifacts have one explicit compatibility exception.
+The current writer MUST emit version 2. Checkpoints written as version 1
+MUST remain readable by current code: the current reader MUST read version 1
+and version 2 within the current datadir epoch. The forward-compat read path
+is `read_headers` gated by `is_readable_version` in
+`crates/chainstate/src/checkpoint/headers.rs`
+(`ACTIVE_ONLY_HEADER_VERSION = 1`, `HEADER_VERSION = 2`).
+Version 1 contains active
+ancestry only. Version 2 also contains replayable side-branch headers.
+Both versions MUST pass the manifest, digest, ancestry, commitment, and
+historical-header validation checks. Side-header replay MUST NOT change the
+restored best tip. Unknown versions and corrupt artifacts MUST fail closed.
+The reader MUST NOT reset or convert an old artifact to make it readable.
+This exception does not authorize another legacy reader or an operator-data
+migration. All other format changes follow the schema rules below.
 
 ## Schema changes
 

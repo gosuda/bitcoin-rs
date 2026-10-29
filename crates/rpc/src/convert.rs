@@ -49,15 +49,12 @@ pub(crate) const fn chain_name(network: Network) -> &'static str {
     }
 }
 
-/// Saturating `u64 -> i64` for Core wire counters typed as `i64`.
+/// Saturating integer `-> i64` for Core wire counters typed as `i64`.
 #[must_use]
-pub(crate) fn i64_saturated(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-/// Saturating `usize -> i64` for Core wire counters typed as `i64`.
-#[must_use]
-pub(crate) fn i64_saturated_len(value: usize) -> i64 {
+pub(crate) fn i64_saturated<T>(value: T) -> i64
+where
+    i64: TryFrom<T>,
+{
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
@@ -300,12 +297,20 @@ fn omit_json_nulls(value: &mut Value) {
 }
 
 /// Projects one output script into the versioned `scriptPubKey` object,
-/// reusing the transport renderer and validating against the pinned type.
-pub(crate) fn script_pub_key_typed(
-    script: &[u8],
-    network: Network,
-) -> Result<corepc_types::ScriptPubKey, RpcError> {
-    sonic_rs::from_value(&tx_render::script_pub_key_json(script, network)).map_err(RpcError::from)
+/// constructed directly from the shape classification and renderers.
+pub(crate) fn script_pub_key_typed(script: &[u8], network: Network) -> corepc_types::ScriptPubKey {
+    let shape = classify(script);
+    corepc_types::ScriptPubKey {
+        asm: tx_render::script_asm(script, false),
+        descriptor: Some(tx_render::script_descriptor(script, network)),
+        hex: script.to_lower_hex_string(),
+        required_signatures: None,
+        type_: core_type_name(shape).to_owned(),
+        address: (shape != ScriptShape::Pubkey)
+            .then(|| script_address(script, network))
+            .flatten(),
+        addresses: None,
+    }
 }
 
 /// The coinbase transaction object carried by verbose block responses.

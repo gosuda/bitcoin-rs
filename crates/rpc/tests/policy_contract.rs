@@ -673,8 +673,8 @@ struct RecordingGatewayObserver {
     changes: parking_lot::Mutex<Vec<(u64, Hash256, MutationOutcome)>>,
 }
 
-impl MempoolObserver for RecordingGatewayObserver {
-    fn on_mutation(&self, envelope: &MutationEnvelope) {
+    impl MempoolObserver for RecordingGatewayObserver {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
         let result = &envelope.result;
         let mut changes = self.changes.lock();
         for (offset, change) in result.changes.iter().enumerate() {
@@ -1560,8 +1560,22 @@ impl ChainControl for NodeInvalidator {
             })
     }
 
-    // This fixture routes only invalidation through the node; with no block
-    // verifier wired, the chain cannot be declared verified.
+    // This fixture routes only invalidation through the node; it has no
+    // snapshot exporter wired.
+    fn dump_txoutset(
+        &self,
+        _path: &std::path::Path,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::SnapshotControlError::Unavailable(
+            "snapshot export is not attached to this fixture".to_owned(),
+        ))
+    }
+
+    // With no block verifier wired, the chain cannot be declared verified.
     fn verify_chain(
         &self,
         _check_level: u8,
@@ -1648,7 +1662,9 @@ fn reorg_mine_and_apply(
     block.header.merkle_root =
         regtest_fixture::merkle_root(&block.txs).ok_or("mined block must have a merkle root")?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&block)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        block.clone(),
+    ))?;
     Ok(block)
 }
 
@@ -1694,6 +1710,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             derived_index_status: None,
         },
         network: NetworkHandles {
+            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             peer_table: state.peer_table(),
             p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),
@@ -1710,7 +1727,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
 -> Result<(), Box<dyn Error>> {
     let (state, _dir) = open_regtest_state()?;
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&genesis)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
     for height in 1..=REORG_SEED_BLOCKS {
         let (prev, _) = applied_tip_pair(&state)?;
         reorg_mine_and_apply(&state, prev, height, Vec::new())?;

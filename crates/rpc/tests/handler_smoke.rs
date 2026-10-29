@@ -1,4 +1,4 @@
-//! Smoke tests for every required Task 16 RPC handler.
+//! RPC handlers report the fixture chain, mempool, index, and network facts.
 // A mis-sequenced fixture is a test failure; panicking reports it at the call
 // site, so expect() is deliberate throughout.
 #![allow(clippy::expect_used)]
@@ -14,7 +14,7 @@ use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapsh
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
-use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
+use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, wire::PROTOCOL_VERSION};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
@@ -263,7 +263,7 @@ fn network_and_wallet_expectations(
         (
             "getnetworkinfo",
             json!([]),
-            json!({"protocolversion": 70017, "connections": 0, "networkactive": true}),
+            json!({"protocolversion": PROTOCOL_VERSION, "connections": 0, "networkactive": true}),
         ),
         ("getpeerinfo", json!([]), json!([])),
         ("getconnectioncount", json!([]), json!(0)),
@@ -394,6 +394,20 @@ impl ChainControl for RecordingChainControl {
             Some(error) => Err(error.clone()),
             None => Ok(()),
         }
+    }
+
+    // No snapshot exporter is wired into this fixture.
+    fn dump_txoutset(
+        &self,
+        _path: &std::path::Path,
+        _cancellation: &bitcoin_rs_chain::LatchReader,
+    ) -> Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::SnapshotControlError::Unavailable(
+            "snapshot export is not attached to this fixture".to_owned(),
+        ))
     }
 
     // No block verifier is wired, so the chain cannot be declared verified.
@@ -813,7 +827,12 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            8333,
+        ))),
+        network: bitcoin_rs_p2p::NetworkLabel::Ipv4,
+        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333).into(),
         version: 70016,
         services: 0,
         user_agent: "/bitcoin-rs:0.1.0/".to_string(),
@@ -821,15 +840,18 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         best_known_height: 0,
         conn_time: 0,
         inbound: true,
-        addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        addr_bind: bitcoin_rs_p2p::TransportRemote::new(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            8333,
+        )),
         time_offset: 0,
         counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         transport: bitcoin_rs_p2p::TransportProtocol::V1,
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    peer_table.register(info.endpoint.expect("identified test peer"), lease.clone());
+    peer_table.publish_info(info.endpoint.expect("identified test peer"), &lease, info);
     let ctx = context_with_peers(peer_table);
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getpeerinfo", &json!([]))?;

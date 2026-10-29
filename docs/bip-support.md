@@ -51,6 +51,7 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 324 | [v2 transport](../crates/p2p/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/p2p/tests/data/bip324/) and [negotiation tests](../crates/p2p/src/listener/v2_transport_tests.rs) |
 | 330 | [Erlay](https://github.com/gosuda/bitcoin-rs/issues/1501) | ❌ | — | Explicitly deferred backlog (#1501 tracks the deferral, so the policy keeps it `Unsupported` rather than `Planned`); sendtxrcncl ignored |
 | 339 | [Wtxid relay](../crates/p2p/src/peer.rs) | ✅ | — | Negotiation, announcements and getdata |
+| 434 | [Feature negotiation](../crates/p2p/src/feature.rs) | 🧪 | — | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
 | 35 | [Mempool request](../crates/p2p/src/dispatch.rs) | ❌ | — | Command decoded then ignored |
 
 ## Mining
@@ -67,9 +68,12 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | :-- | :-- | :--: | :--: | :-- |
 | 32 | [BIP32 derivation](../crates/rpc/src/handlers/util.rs) | ✅ | — | Ranged descriptor addresses; no key custody |
 | 173/350 | [Segwit addresses](../crates/rpc/src/convert.rs) | ✅ | — | Wallet-free script address rendering |
-| 380 | [Output descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | getdescriptorinfo/deriveaddresses; scantxoutset rejects ranged/multipath forms |
-| 389 | [Multipath descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | Multipath key expressions in getdescriptorinfo/deriveaddresses; rejected by scantxoutset |
+| 380 | [Output descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | getdescriptorinfo/deriveaddresses |
+| 380 | scantxoutset public-descriptor scans ([#1676](https://github.com/gosuda/bitcoin-rs/pull/1676)) | ☐ | — | bounded public-descriptor scans ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
+| 389 | [Multipath descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | — | Multipath key expressions in getdescriptorinfo/deriveaddresses |
+| 389 | scantxoutset public multipath scans ([#1676](https://github.com/gosuda/bitcoin-rs/pull/1676)) | ☐ | — | bounded public multipath scans ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
 | 352 | [Silent Payments](../crates/index/src/silent_payments.rs) | 🧪 | — | Opt-in keyless codec and authenticated `getblocktweaks` extension; external wallet interoperability unverified; [docs](silent-payments.md) |
+| 337 | [Compressed transactions](../crates/rpc/src/compressed_tx.rs) | 🧪 | — | Default-off `--compressed-transactions` extension (`compressrawtransaction`/`decompressrawtransaction`, `-32603` while disabled); no consensus, relay, or mempool surface. Reference readings recorded in the codec docs: carry-aware Core VARINT over the 7-bit prose (`a608` = 5000), the six-bit input metadata carries the public-key-hash bit the prose table omits, compressed signatures cover only P2TR key-path/P2PKH/P2WPKH/P2SH-P2WPKH with the uncompressed VARINT scriptSig/witness envelope for everything else, minimum height follows the reference `locktime - 1` / `coin.height - 1` rule with the `u32::MAX` sentinel encoded as zero, and a compressed outpoint is emitted only for a prevout with a confirmed height and a resolvable flat output index, otherwise the raw outpoint is emitted with one `UTXO(i): <reason>` warning and no outpoint is ever fabricated |
 
 ## Out of scope by policy
 

@@ -231,6 +231,64 @@ impl Ledger {
     }
 }
 
+/// Samples a run must hold before its p99 may be read as a tail estimate
+/// (`HPA-13`: no trustworthy p99 from too few samples).
+pub const MIN_SAMPLES_FOR_P99: usize = 100;
+
+/// Order statistics of one raw sample set, in the samples' own unit.
+///
+/// The summary never replaces the raw samples; it is printed beside them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Quantiles {
+    /// Sample count the statistics were computed from.
+    pub n: usize,
+    /// Median, linearly interpolated between adjacent order statistics.
+    pub p50: u64,
+    /// 95th percentile, interpolated the same way.
+    pub p95: u64,
+    /// 99th percentile, interpolated the same way.
+    pub p99: u64,
+    /// Largest sample.
+    pub max: u64,
+}
+
+impl Quantiles {
+    /// Computes p50/p95/p99/max of `samples`; `None` for an empty set, which
+    /// is a missing measurement, never a zero.
+    #[must_use]
+    pub fn of(samples: &[u64]) -> Option<Self> {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let max = *sorted.last()?;
+        let at = |percent: u64| -> u64 {
+            // Rank scaled by 100 keeps the interpolation exact in integers.
+            let last_rank = u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX);
+            let scaled = percent.saturating_mul(last_rank);
+            let lower = usize::try_from(scaled / 100).unwrap_or(usize::MAX);
+            let remainder = scaled % 100;
+            let low = sorted[lower];
+            let high = sorted.get(lower + 1).copied().unwrap_or(low);
+            let span = u128::from(high - low);
+            let step = span * u128::from(remainder);
+            // Round half up on the interpolated step.
+            low + u64::try_from((step + 50) / 100).unwrap_or(u64::MAX)
+        };
+        Some(Self {
+            n: sorted.len(),
+            p50: at(50),
+            p95: at(95),
+            p99: at(99),
+            max,
+        })
+    }
+
+    /// Whether `p99` rests on enough samples to be read as a tail estimate.
+    #[must_use]
+    pub const fn p99_supported(&self) -> bool {
+        self.n >= MIN_SAMPLES_FOR_P99
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "benchmark evidence rejection tests")]
 mod tests {
@@ -414,5 +472,38 @@ mod tests {
             measured_before + usize::from(samples_before == 0)
         );
         assert_eq!(reparsed.cells.len(), ledger.cells.len());
+    }
+
+    #[test]
+    fn quantiles_are_exact_order_statistics_with_a_support_floor() {
+        assert_eq!(Quantiles::of(&[]), None, "an empty set is not a zero");
+
+        let single = Quantiles::of(&[7]).expect("one sample");
+        assert_eq!(
+            (single.p50, single.p95, single.p99, single.max),
+            (7, 7, 7, 7)
+        );
+        assert!(!single.p99_supported());
+
+        // Ranks land on whole samples, so the statistics are the samples.
+        let ranks: Vec<u64> = (0..=100).rev().collect();
+        let exact = Quantiles::of(&ranks).expect("101 samples");
+        assert_eq!(
+            (exact.n, exact.p50, exact.p95, exact.p99, exact.max),
+            (101, 50, 95, 99, 100)
+        );
+        assert!(exact.p99_supported());
+        assert!(
+            !Quantiles::of(&ranks[..99])
+                .expect("99 samples")
+                .p99_supported()
+        );
+
+        // Between samples the order statistic is interpolated, halves up.
+        let spread = Quantiles::of(&[40, 10, 30, 20]).expect("four samples");
+        assert_eq!(
+            (spread.p50, spread.p95, spread.p99, spread.max),
+            (25, 39, 40, 40)
+        );
     }
 }

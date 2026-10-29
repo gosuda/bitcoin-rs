@@ -10,10 +10,14 @@ manifest emitter splices it without materializing the entries array.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import http.client
 import json
 import os
+import re
+import stat
 import struct
 import sys
 import uuid
@@ -59,6 +63,30 @@ _MAX_ARCHIVE_SIZE = _MAX_BLOCK_COUNT * (HEADER_LEN + MAX_PAYLOAD)
 _MAX_INT_DIGITS = len(str(_MAX_ARCHIVE_SIZE))
 _HEX = frozenset("0123456789abcdefABCDEF")
 
+INDEX_SCHEMA = "bitcoin-rs-corpus-index-v1"
+INDEX_VERSION = 1
+_MAX_SOURCES = 10000
+_SOURCE_NAME_RE = re.compile(r"blk\d{5}\.dat")
+_INDEX_ROOT_KEYS = frozenset(
+    {
+        "corpus_id",
+        "entries",
+        "genesis_hash",
+        "index_sha256",
+        "logical",
+        "network",
+        "network_magic",
+        "range",
+        "schema",
+        "source_tip_hash",
+        "sources",
+        "version",
+    }
+)
+_INDEX_SOURCE_KEYS = frozenset({"name", "sha256", "size"})
+_INDEX_ENTRY_KEYS = frozenset({"hash", "height", "length", "offset", "source"})
+_INDEX_LOGICAL_KEYS = frozenset({"sha256", "size"})
+
 Fetch = Callable[[str], bytes]
 
 
@@ -68,6 +96,9 @@ class ContractError(ValueError):
 
 @dataclass(frozen=True)
 class FrameMeta:
+    """Index record into the archive: `offset` is the byte offset of the
+    frame magic; the payload starts at `offset + HEADER_LEN`."""
+
     offset: int
     payload_length: int
 
@@ -114,13 +145,41 @@ class CorpusSummary:
     manifest_file_sha256: str
 
 
+@dataclass(frozen=True)
+class IndexSource:
+    name: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class IndexEntry:
+    height: int
+    hash: str
+    source: int
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True)
+class IndexSummary:
+    count: int
+    logical_size: int
+    logical_sha256: str
+    index_sha256: str
+    index_file_sha256: str
+
+
 def load_freeze(path: Path = PRODUCTS_PATH) -> Freeze:
     raw = _load_json(path)
     if raw.get("schema") != "bitcoin-rs-campaign-corpora-v1":
-        raise ContractError("products.json schema is not bitcoin-rs-campaign-corpora-v1")
+        raise ContractError(
+            "products.json schema is not bitcoin-rs-campaign-corpora-v1"
+        )
     magic = bytes.fromhex(_text(raw["network_magic"], "network_magic"))
     specials = tuple(
-        _text(item, "census_specials[]") for item in _array(raw["census_specials"], "census_specials")
+        _text(item, "census_specials[]")
+        for item in _array(raw["census_specials"], "census_specials")
     )
     validation = _object(raw["validation"], "validation")
     products: dict[str, Product] = {}
@@ -138,7 +197,9 @@ def load_freeze(path: Path = PRODUCTS_PATH) -> Freeze:
         network=_text(raw["network"], "network"),
         network_magic=magic,
         genesis_hash=_hash(_text(raw["genesis_hash"], "genesis_hash")),
-        assume_valid_height=_u32(validation["assume_valid_height"], "assume_valid_height"),
+        assume_valid_height=_u32(
+            validation["assume_valid_height"], "assume_valid_height"
+        ),
         census_specials=specials,
         core_oracle=_object(raw["core_oracle"], "core_oracle"),
         products=products,
@@ -183,16 +244,52 @@ def _read_exact(source: BinaryIO, count: int, what: str) -> bytes:
     return b"".join(chunks)
 
 
-def iter_frames(source: BinaryIO, magic: bytes = MAINNET_MAGIC) -> Iterator[tuple[FrameMeta, bytes]]:
-    """Stream Core-framed payloads. Clean EOF is legal only between frames."""
+def _require_zero_tail(source: BinaryIO, offset: int) -> None:
+    """Consume zero-padding past `offset`; refuse when non-zero bytes follow.
+
+    Core preallocates blk files with zeros. Padding is legal only as an
+    all-zero tail: any non-zero byte after the first all-zero header means
+    the file was over-trimmed or spliced, never a clean EOF.
+    """
+    while True:
+        chunk = source.read(1 << 20)
+        if not chunk:
+            return
+        if chunk.strip(b"\x00"):
+            raise ContractError(
+                f"Core blk tail has non-zero bytes after zero padding at offset"
+                f" {offset}: trim the file to the last frame end"
+            )
+
+
+def iter_frames(
+    source: BinaryIO, magic: bytes = MAINNET_MAGIC
+) -> Iterator[tuple[FrameMeta, bytes]]:
+    """Stream Core-framed payloads. Clean EOF is legal only between frames.
+
+    A trailing all-zero region is Core blk preallocation padding, not a
+    frame: an 8-byte all-zero header followed only by zero bytes ends the
+    stream. Raw blk files are never XOR-obfuscated; a magic mismatch at
+    offset 0 fails closed instead of attempting de-obfuscation.
+    """
     offset = 0
     while True:
         head = source.read(1)
         if not head:
             return
         header = head + _read_exact(source, HEADER_LEN - 1, "Core frame header")
+        if header == b"\x00" * HEADER_LEN:
+            _require_zero_tail(source, offset)
+            return
         if header[:4] != magic:
-            raise ContractError("Core frame magic mismatch")
+            if offset == 0:
+                raise ContractError(
+                    "Core frame magic mismatch at offset 0: not a raw"
+                    " blkNNNNN.dat record (raw blk files are never"
+                    " XOR-obfuscated; do not point at an obfuscated store"
+                    " or LevelDB directory)"
+                )
+            raise ContractError(f"Core frame magic mismatch at offset {offset}")
         length = struct.unpack_from("<I", header, 4)[0]
         if length > MAX_PAYLOAD:
             raise ContractError("Core frame payload exceeds the consensus maximum")
@@ -290,7 +387,9 @@ class CorpusWriter:
     directories, never deletes or truncates files, and never publishes paths.
     """
 
-    def __init__(self, freeze: Freeze, corpus_id: str, archive: BinaryIO, entries: BinaryIO) -> None:
+    def __init__(
+        self, freeze: Freeze, corpus_id: str, archive: BinaryIO, entries: BinaryIO
+    ) -> None:
         self._freeze = freeze
         self._chosen = product(freeze, corpus_id)
         self._archive = archive
@@ -314,7 +413,9 @@ class CorpusWriter:
     def _check_tail(self) -> None:
         if self._tail_pending:
             if not self._tail_cleared():
-                raise ContractError("unverified tail present: truncate owned files to the recorded prefix first")
+                raise ContractError(
+                    "unverified tail present: truncate owned files to the recorded prefix first"
+                )
             self._tail_pending = False
 
     def append(self, payload: bytes, *, expected_hash: str | None = None) -> FrameMeta:
@@ -342,11 +443,18 @@ class CorpusWriter:
             assert self._last_hash is not None
             if not _prev_field_matches(payload, self._last_hash):
                 raise ContractError("block header does not link to the previous block")
-            if height == self._chosen.stop_height and block_hash != self._chosen.stop_hash:
-                raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
+            if (
+                height == self._chosen.stop_height
+                and block_hash != self._chosen.stop_hash
+            ):
+                raise ContractError(
+                    f"{self._chosen.corpus_id} stop hash does not match the frozen tip"
+                )
         meta = FrameMeta(offset=self._offset, payload_length=len(payload))
         header = self._freeze.network_magic + struct.pack("<I", len(payload))
-        line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
+        line = (
+            _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
+        )
         self._tail_pending = True
         _write_all(self._archive, header)
         _write_all(self._archive, payload)
@@ -379,8 +487,12 @@ class CorpusWriter:
             )
         assert self._last_hash is not None
         if self._last_hash != self._chosen.stop_hash:
-            raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
-        metadata = _manifest_metadata(self._freeze, self._chosen, self._offset, self._archive_sha.hexdigest())
+            raise ContractError(
+                f"{self._chosen.corpus_id} stop hash does not match the frozen tip"
+            )
+        metadata = _manifest_metadata(
+            self._freeze, self._chosen, self._offset, self._archive_sha.hexdigest()
+        )
         preimage_sha = hashlib.sha256()
         for chunk in _manifest_chunks(metadata, self._replay_entries(), ZERO_SHA256):
             preimage_sha.update(chunk)
@@ -443,7 +555,9 @@ class CorpusWriter:
             try:
                 meta, payload = next(frames)
             except StopIteration:
-                raise ContractError("archive is shorter than the recorded prefix") from None
+                raise ContractError(
+                    "archive is shorter than the recorded prefix"
+                ) from None
             height = writer._count
             block_hash = header_block_hash(payload)
             if height == 0:
@@ -452,11 +566,20 @@ class CorpusWriter:
             else:
                 assert writer._last_hash is not None
                 if not _prev_field_matches(payload, writer._last_hash):
-                    raise ContractError("committed prefix fails previous-header linkage")
-                if height == writer._chosen.stop_height and block_hash != writer._chosen.stop_hash:
+                    raise ContractError(
+                        "committed prefix fails previous-header linkage"
+                    )
+                if (
+                    height == writer._chosen.stop_height
+                    and block_hash != writer._chosen.stop_hash
+                ):
                     raise ContractError("committed prefix carries a foreign stop block")
-            if line[:-1] != _entry_chunk(height, block_hash, meta.offset, meta.payload_length):
-                raise ContractError("entry spool record does not match the archive frame")
+            if line[:-1] != _entry_chunk(
+                height, block_hash, meta.offset, meta.payload_length
+            ):
+                raise ContractError(
+                    "entry spool record does not match the archive frame"
+                )
             header = freeze.network_magic + struct.pack("<I", len(payload))
             writer._archive_sha.update(header)
             writer._archive_sha.update(payload)
@@ -471,10 +594,14 @@ class CorpusWriter:
             or facts.archive_bytes != recorded_prefix.archive_bytes
             or facts.entries_bytes != recorded_prefix.entries_bytes
             or facts.last_hash != recorded_prefix.last_hash
-            or facts.archive_prefix_sha256 != _hash(recorded_prefix.archive_prefix_sha256)
-            or facts.entries_prefix_sha256 != _hash(recorded_prefix.entries_prefix_sha256)
+            or facts.archive_prefix_sha256
+            != _hash(recorded_prefix.archive_prefix_sha256)
+            or facts.entries_prefix_sha256
+            != _hash(recorded_prefix.entries_prefix_sha256)
         ):
-            raise ContractError("durable prefix does not match the recorded checkpoint identity")
+            raise ContractError(
+                "durable prefix does not match the recorded checkpoint identity"
+            )
         archive_end = archive.seek(0, os.SEEK_END)
         entries_end = entries.seek(0, os.SEEK_END)
         if archive_end < facts.archive_bytes or entries_end < facts.entries_bytes:
@@ -486,10 +613,18 @@ class CorpusWriter:
         return writer
 
 
-def _entry_chunk(height: int, block_hash: str, offset: int, payload_length: int) -> bytes:
+def _entry_chunk(
+    height: int, block_hash: str, offset: int, payload_length: int
+) -> bytes:
     return canonical_json(
-        {"hash": block_hash, "height": height, "offset": offset, "payload_length": payload_length}
+        {
+            "hash": block_hash,
+            "height": height,
+            "offset": offset,
+            "payload_length": payload_length,
+        }
     )
+
 
 def _entry_int(entry: Mapping[str, object], key: str) -> int:
     value = entry[key]
@@ -530,7 +665,9 @@ def _manifest_chunks(
     materializing the entries array. Key order is the sorted canonical order;
     scalar chunks reuse the retained canonical_json encoder."""
     archive = _object(metadata["archive"], "archive")
-    yield b'{"archive":' + canonical_json({"sha256": archive["sha256"], "size": archive["size"]})
+    yield b'{"archive":' + canonical_json(
+        {"sha256": archive["sha256"], "size": archive["size"]}
+    )
     yield b',"corpus_id":' + canonical_json(metadata["corpus_id"])
     yield b',"entries":['
     first = True
@@ -539,7 +676,7 @@ def _manifest_chunks(
             yield b","
         first = False
         yield chunk
-    yield b']'
+    yield b"]"
     yield b',"genesis_hash":' + canonical_json(metadata["genesis_hash"])
     yield b',"manifest_sha256":' + canonical_json(manifest_sha256)
     yield b',"network":' + canonical_json(metadata["network"])
@@ -675,7 +812,9 @@ class _ManifestReader:
                 raise ContractError("manifest object is malformed")
         missing = keys - result.keys()
         if missing:
-            raise ContractError(f"manifest object is missing members: {sorted(missing)}")
+            raise ContractError(
+                f"manifest object is missing members: {sorted(missing)}"
+            )
         return result
 
     def _read_string(self, label: str, max_chars: int) -> str:
@@ -690,7 +829,9 @@ class _ManifestReader:
             if char == ord('"') and not _ends_with_odd_escapes(raw[:-1]):
                 break
             if len(raw) > max_chars * 8 + 2:
-                raise ContractError(f"manifest {label} exceeds its schema-derived bound")
+                raise ContractError(
+                    f"manifest {label} exceeds its schema-derived bound"
+                )
         try:
             value = json.loads(b'"' + bytes(raw))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -710,7 +851,9 @@ class _ManifestReader:
     def _read_hex(self, label: str, digits: int) -> str:
         value = self._read_string(label, digits)
         if len(value) != digits or any(char not in _HEX for char in value):
-            raise ContractError(f"manifest {label} is not a {digits}-character hex value")
+            raise ContractError(
+                f"manifest {label} is not a {digits}-character hex value"
+            )
         return value
 
     def _read_int(self, label: str, max_digits: int) -> int:
@@ -723,7 +866,9 @@ class _ManifestReader:
             self._next()
             digits.append(char)
             if len(digits) > max_digits:
-                raise ContractError(f"manifest {label} exceeds its schema-derived bound")
+                raise ContractError(
+                    f"manifest {label} exceeds its schema-derived bound"
+                )
         if not digits:
             raise ContractError(f"manifest {label} is not a JSON integer")
         return int(digits.decode("ascii"))
@@ -818,13 +963,18 @@ def verify_archive(
     chosen = product(freeze, corpus_id)
     if metadata["network"] != freeze.network:
         raise ContractError("manifest network is not mainnet")
-    if bytes.fromhex(_text(metadata["network_magic"], "network_magic")) != freeze.network_magic:
+    if (
+        bytes.fromhex(_text(metadata["network_magic"], "network_magic"))
+        != freeze.network_magic
+    ):
         raise ContractError("manifest network magic is not mainnet")
     if _hash(_text(metadata["genesis_hash"], "genesis_hash")) != freeze.genesis_hash:
         raise ContractError("manifest genesis hash is not mainnet genesis")
     range_obj = _object(metadata["range"], "range")
     if range_obj["start_height"] != 0 or range_obj["stop_height"] != chosen.stop_height:
-        raise ContractError(f"{corpus_id} height range is not genesis through the frozen tip")
+        raise ContractError(
+            f"{corpus_id} height range is not genesis through the frozen tip"
+        )
     if _hash(_text(metadata["source_tip_hash"], "source_tip_hash")) != chosen.stop_hash:
         raise ContractError(f"{corpus_id} source tip is not the frozen stop hash")
     archive_info = _object(metadata["archive"], "archive")
@@ -839,7 +989,10 @@ def verify_archive(
         if not chunk:
             break
         archive_sha.update(chunk)
-    if _hash(_text(archive_info["sha256"], "archive.sha256")) != archive_sha.hexdigest():
+    if (
+        _hash(_text(archive_info["sha256"], "archive.sha256"))
+        != archive_sha.hexdigest()
+    ):
         raise ContractError("manifest archive sha256 does not match the file")
     archive.seek(0)
     height = 0
@@ -850,9 +1003,15 @@ def verify_archive(
         try:
             meta, payload = next(frames)
         except StopIteration:
-            raise ContractError(f"{corpus_id} entry count is not the frozen block count") from None
+            raise ContractError(
+                f"{corpus_id} entry count is not the frozen block count"
+            ) from None
         block_hash = header_block_hash(payload)
-        if entry["height"] != height or entry["offset"] != meta.offset or entry["payload_length"] != meta.payload_length:
+        if (
+            entry["height"] != height
+            or entry["offset"] != meta.offset
+            or entry["payload_length"] != meta.payload_length
+        ):
             raise ContractError("manifest offsets do not match the archive frames")
         if _hash(_text(entry["hash"], f"entries[{height}].hash")) != block_hash:
             raise ContractError("manifest block hash does not match the framed header")
@@ -864,7 +1023,9 @@ def verify_archive(
             if not _prev_field_matches(payload, last_hash):
                 raise ContractError("framed archive fails previous-header linkage")
             if height == chosen.stop_height and block_hash != chosen.stop_hash:
-                raise ContractError(f"{corpus_id} framed tip is not the frozen stop hash")
+                raise ContractError(
+                    f"{corpus_id} framed tip is not the frozen stop hash"
+                )
         last_hash = block_hash
         height += 1
     if archive.read(1):
@@ -874,9 +1035,13 @@ def verify_archive(
     return chosen
 
 
-def classify_census(freeze: Freeze, corpus_id: str, counters: Mapping[str, object]) -> dict[str, object]:
+def classify_census(
+    freeze: Freeze, corpus_id: str, counters: Mapping[str, object]
+) -> dict[str, object]:
     chosen = product(freeze, corpus_id)
-    specials = {name: _u64(counters.get(name, 0), name) for name in freeze.census_specials}
+    specials = {
+        name: _u64(counters.get(name, 0), name) for name in freeze.census_specials
+    }
     missing = [name for name in freeze.census_specials if name not in counters]
     if missing:
         raise ContractError("census is missing required special context counters")
@@ -892,15 +1057,25 @@ def classify_census(freeze: Freeze, corpus_id: str, counters: Mapping[str, objec
         passed = "c150_passed"
     elif corpus_id == "Cmodern":
         if any(count <= 0 for count in specials.values()):
-            raise ContractError("Cmodern census requires a positive count for every special context")
-        schnorr_entries = _u64(counters.get("checkschnorr_entries", 0), "checkschnorr_entries")
-        schnorr_calls = _u64(counters.get("schnorr_verify_calls", 0), "schnorr_verify_calls")
+            raise ContractError(
+                "Cmodern census requires a positive count for every special context"
+            )
+        schnorr_entries = _u64(
+            counters.get("checkschnorr_entries", 0), "checkschnorr_entries"
+        )
+        schnorr_calls = _u64(
+            counters.get("schnorr_verify_calls", 0), "schnorr_verify_calls"
+        )
         schnorr_ok = _u64(counters.get("schnorr_verify_ok", 0), "schnorr_verify_ok")
-        schnorr_fail = _u64(counters.get("schnorr_verify_fail", 0), "schnorr_verify_fail")
+        schnorr_fail = _u64(
+            counters.get("schnorr_verify_fail", 0), "schnorr_verify_fail"
+        )
         if schnorr_entries < schnorr_calls:
             raise ContractError("Cmodern Schnorr entries are below verify calls")
         if schnorr_calls != schnorr_ok + schnorr_fail:
-            raise ContractError("Cmodern Schnorr verify calls do not equal ok plus fail")
+            raise ContractError(
+                "Cmodern Schnorr verify calls do not equal ok plus fail"
+            )
         passed = "cmodern_passed"
     else:
         raise ContractError(f"unknown corpus_id {corpus_id!r}")
@@ -923,6 +1098,945 @@ def core_oracle_params(freeze: Freeze, corpus_id: str) -> list[object]:
     chosen = product(freeze, corpus_id)
     oracle = freeze.core_oracle
     return [oracle["hash_type"], chosen.stop_height, oracle["use_index"]]
+
+
+_MAX_INDEX_BYTES = _MAX_BLOCK_COUNT * 256 + (1 << 20)
+
+
+@dataclass(frozen=True)
+class SourceOffset:
+    source: int
+    offset: int
+
+
+@dataclass(frozen=True)
+class IndexDocument:
+    corpus_id: str
+    network: str
+    network_magic: str
+    genesis_hash: str
+    start_height: int
+    stop_height: int
+    source_tip_hash: str
+    sources: tuple[IndexSource, ...]
+    entries: tuple[IndexEntry, ...]
+    logical_size: int
+    logical_sha256: str
+    index_sha256: str
+
+
+@dataclass(frozen=True)
+class _ScanRecord:
+    prev: str
+    source: int
+    offset: int
+    length: int
+
+
+def _check_source_name(name: object) -> str:
+    """Validate an indexed source file name.
+
+    Only Core block-file basenames (``blkNNNNN.dat``) are accepted. This
+    rejects absolute paths, directory traversal, separators, and drive
+    prefixes by construction. Consistency: callers hold snapshot isolation
+    over the source directory (quiescent blk files, no concurrent writer);
+    verification is idempotent and safe to retry.
+    """
+    if not isinstance(name, str) or not name:
+        raise ContractError("index source name must be a non-empty string")
+    if len(name) > 32:
+        raise ContractError("index source name exceeds its length bound")
+    if _SOURCE_NAME_RE.fullmatch(name) is None:
+        raise ContractError(
+            f"index source name {name!r} is not a blkNNNNN.dat basename"
+        )
+    return name
+
+
+def _lower_hex(value: object, label: str, digits: int) -> str:
+    text = _text(value, label)
+    if len(text) != digits:
+        raise ContractError(f"{label} is not a {digits}-character hex value")
+    if text != text.lower():
+        raise ContractError(f"{label} must be lowercase hex")
+    if any(char not in "0123456789abcdef" for char in text):
+        raise ContractError(f"{label} is not a hex value")
+    return text
+
+
+def _open_source_nofollow(path: Path) -> BinaryIO:
+    """Open an indexed source without following symlinks.
+
+    `_source_path` validation and `open()` are otherwise a TOCTOU pair: a
+    symlink swapped in between would be followed and hashed. `O_NOFOLLOW`
+    makes the open itself authoritative: a symlink fails with `ELOOP`
+    instead of being traversed, and `fstat` pins regular-file identity
+    before the descriptor is wrapped.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise ContractError(f"source {path.name!r} must not be a symlink") from err
+        raise ContractError(f"cannot open source file {path}: {err}") from err
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as err:
+        os.close(fd)
+        raise ContractError(f"cannot stat source file {path}: {err}") from err
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        raise ContractError(f"source {path.name!r} is not a regular file")
+    return os.fdopen(fd, "rb")
+
+
+def _hash_file(path: Path) -> tuple[int, str]:
+    """Stream a source file, returning its size and SHA-256 hex digest.
+
+    The open never follows symlinks (see `_open_source_nofollow`), so a
+    symlink swapped in after `_source_path` validation fails closed here
+    instead of hashing attacker-chosen bytes.
+    """
+    hasher = hashlib.sha256()
+    size = 0
+    handle = _open_source_nofollow(path)
+    try:
+        with handle:
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                size += len(chunk)
+    except OSError as err:
+        raise ContractError(f"cannot read source file {path}: {err}") from err
+    return size, hasher.hexdigest()
+
+
+def _source_path(source_dir: Path, name: str) -> Path:
+    if not source_dir.is_dir():
+        raise ContractError(f"source directory {source_dir} is not a directory")
+    path = source_dir / name
+    if path.is_symlink():
+        raise ContractError(f"source {name!r} must not be a symlink")
+    if not path.is_file():
+        raise ContractError(f"source {name!r} is not a regular file")
+    return path
+
+
+class _SingleSourceReader:
+    """Bounded indexed-source reader holding at most one open file.
+
+    The handle stays open while consecutive entries share a source and closes
+    on source switch or ``close()``. All indexed paths (build, verify, iterate)
+    read through this helper, so frame policy cannot diverge. Callers must call
+    ``close()``; the reader never opens more than one file.
+    """
+
+    def __init__(
+        self, source_dir: Path, sources: Sequence[IndexSource], magic: bytes
+    ) -> None:
+        self._source_dir = source_dir
+        self._sources = sources
+        self._magic = magic
+        self._current: int | None = None
+        self._handle: BinaryIO | None = None
+        self._stack = contextlib.ExitStack()
+
+    def read(self, entry: IndexEntry) -> bytes:
+        if entry.source < 0 or entry.source >= len(self._sources):
+            raise ContractError(
+                f"entries[{entry.height}].source is outside the sources array"
+            )
+        if entry.offset < 0 or entry.length < MIN_HEADER or entry.length > MAX_PAYLOAD:
+            raise ContractError(
+                f"entries[{entry.height}] has an out-of-range offset/length"
+            )
+        recorded = self._sources[entry.source]
+        if entry.offset + HEADER_LEN + entry.length > recorded.size:
+            raise ContractError(
+                f"entries[{entry.height}] range exceeds its source size"
+            )
+        if self._current != entry.source:
+            self.close()
+            path = _source_path(self._source_dir, recorded.name)
+            self._handle = self._stack.enter_context(_open_source_nofollow(path))
+            self._current = entry.source
+        handle = self._handle
+        if handle is None:
+            raise ContractError("indexed source reader lost its handle")
+        try:
+            handle.seek(entry.offset)
+        except OSError as err:
+            raise ContractError(
+                f"cannot seek entries[{entry.height}] in {recorded.name}: {err}"
+            ) from err
+        header = _read_exact(handle, HEADER_LEN, "indexed Core frame header")
+        if header[:4] != self._magic:
+            raise ContractError(f"entries[{entry.height}] magic does not match mainnet")
+        if struct.unpack_from("<I", header, 4)[0] != entry.length:
+            raise ContractError(
+                f"entries[{entry.height}] length does not match the frame header"
+            )
+        try:
+            return _read_exact(handle, entry.length, "indexed Core frame payload")
+        except OSError as err:
+            raise ContractError(
+                f"cannot read entries[{entry.height}] from {recorded.name}: {err}"
+            ) from err
+
+    def close(self) -> None:
+        try:
+            self._stack.close()
+        except OSError as err:
+            print(f"warning: cannot close source handle: {err}", file=sys.stderr)
+        self._handle = None
+        self._current = None
+
+
+def _verify_entry_hash(
+    freeze: Freeze,
+    chosen: Product,
+    entry: IndexEntry,
+    height: int,
+    payload: bytes,
+    last_hash: str | None,
+) -> str:
+    """Check one payload against its entry, genesis, linkage, and frozen tip."""
+    block_hash = header_block_hash(payload)
+    if block_hash != entry.hash:
+        raise ContractError(f"entries[{height}] hash does not match the payload header")
+    if height == 0:
+        if block_hash != freeze.genesis_hash:
+            raise ContractError("indexed genesis is not mainnet genesis")
+    else:
+        if last_hash is None:
+            raise ContractError("indexed chain lost its linkage cursor")
+        if not _prev_field_matches(payload, last_hash):
+            raise ContractError("indexed chain fails previous-header linkage")
+        if height == chosen.stop_height and block_hash != chosen.stop_hash:
+            raise ContractError(
+                f"{chosen.corpus_id} indexed tip is not the frozen stop hash"
+            )
+    return block_hash
+
+
+def _index_entry_chunk(entry: IndexEntry) -> bytes:
+    return canonical_json(
+        {
+            "hash": entry.hash,
+            "height": entry.height,
+            "length": entry.length,
+            "offset": entry.offset,
+            "source": entry.source,
+        }
+    )
+
+
+def _index_source_chunk(source: IndexSource) -> bytes:
+    return canonical_json(
+        {"name": source.name, "sha256": source.sha256, "size": source.size}
+    )
+
+
+def _index_metadata(
+    freeze: Freeze,
+    corpus_id: str,
+    sources: Sequence[IndexSource],
+    logical_size: int,
+    logical_sha: str,
+    index_sha: str,
+) -> dict[str, object]:
+    chosen = product(freeze, corpus_id)
+    return {
+        "corpus_id": chosen.corpus_id,
+        "genesis_hash": freeze.genesis_hash,
+        "logical": {"sha256": logical_sha, "size": logical_size},
+        "network": freeze.network,
+        "network_magic": freeze.network_magic.hex(),
+        "range": {"start_height": 0, "stop_height": chosen.stop_height},
+        "schema": INDEX_SCHEMA,
+        "source_tip_hash": chosen.stop_hash,
+        "version": INDEX_VERSION,
+    }
+
+
+def _index_chunks(
+    metadata: Mapping[str, object],
+    source_chunks: Iterable[bytes],
+    entry_chunks: Iterable[bytes],
+    index_sha: str,
+) -> Iterator[bytes]:
+    """Emit canonical index-v1 bytes, splicing sources/entries without materializing arrays."""
+    logical = _object(metadata["logical"], "logical")
+    yield b'{"corpus_id":' + canonical_json(metadata["corpus_id"])
+    yield b',"entries":['
+    first = True
+    for chunk in entry_chunks:
+        if not first:
+            yield b","
+        first = False
+        yield chunk
+    yield b"]"
+    yield b',"genesis_hash":' + canonical_json(metadata["genesis_hash"])
+    yield b',"index_sha256":' + canonical_json(index_sha)
+    yield b',"logical":' + canonical_json(
+        {"sha256": logical["sha256"], "size": logical["size"]}
+    )
+    yield b',"network":' + canonical_json(metadata["network"])
+    yield b',"network_magic":' + canonical_json(metadata["network_magic"])
+    yield b',"range":' + canonical_json(
+        {
+            "start_height": _object(metadata["range"], "range")["start_height"],
+            "stop_height": _object(metadata["range"], "range")["stop_height"],
+        }
+    )
+    yield b',"schema":' + canonical_json(metadata["schema"])
+    yield b',"source_tip_hash":' + canonical_json(metadata["source_tip_hash"])
+    yield b',"sources":['
+    first = True
+    for chunk in source_chunks:
+        if not first:
+            yield b","
+        first = False
+        yield chunk
+    yield b"]"
+    yield b',"version":' + canonical_json(metadata["version"])
+    yield b"}"
+
+
+def _load_index(path: Path) -> IndexDocument:
+    """Parse and structurally validate an index file. No source I/O is performed."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(_MAX_INDEX_BYTES + 1)
+    except OSError as err:
+        raise ContractError(f"cannot read index file {path}: {err}") from err
+    if len(data) > _MAX_INDEX_BYTES:
+        raise ContractError("index file exceeds its size bound")
+    try:
+        raw = json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicates)
+    except ValueError as err:
+        raise ContractError(f"index file {path} is not valid JSON: {err}") from err
+    if not isinstance(raw, dict):
+        raise ContractError("index root must be a JSON object")
+    if frozenset(raw.keys()) != _INDEX_ROOT_KEYS:
+        raise ContractError("index root fields do not match index-v1")
+    if _text(raw["schema"], "schema") != INDEX_SCHEMA:
+        raise ContractError("index schema is not bitcoin-rs-corpus-index-v1")
+    if _u32(raw["version"], "version") != INDEX_VERSION:
+        raise ContractError("index version is not 1")
+    corpus_id = _text(raw["corpus_id"], "corpus_id")
+    network = _text(raw["network"], "network")
+    network_magic = _lower_hex(raw["network_magic"], "network_magic", 8)
+    genesis_hash = _lower_hex(raw["genesis_hash"], "genesis_hash", 64)
+    source_tip_hash = _lower_hex(raw["source_tip_hash"], "source_tip_hash", 64)
+    range_obj = _object(raw["range"], "range")
+    if frozenset(range_obj.keys()) != _RANGE_KEYS:
+        raise ContractError("index range fields do not match v1")
+    start_height = _u32(range_obj["start_height"], "range.start_height")
+    stop_height = _u32(range_obj["stop_height"], "range.stop_height")
+    if start_height != 0:
+        raise ContractError("index range must start at genesis")
+    logical_obj = _object(raw["logical"], "logical")
+    if frozenset(logical_obj.keys()) != _INDEX_LOGICAL_KEYS:
+        raise ContractError("index logical fields do not match v1")
+    logical_sha256 = _lower_hex(logical_obj["sha256"], "logical.sha256", 64)
+    logical_size = _u64(logical_obj["size"], "logical.size")
+    index_sha256 = _lower_hex(raw["index_sha256"], "index_sha256", 64)
+    raw_sources = _array(raw["sources"], "sources")
+    if len(raw_sources) == 0 or len(raw_sources) > _MAX_SOURCES:
+        raise ContractError("index sources are outside their count bound")
+    sources: list[IndexSource] = []
+    seen_names: set[str] = set()
+    for position, item in enumerate(raw_sources):
+        body = _object(item, f"sources[{position}]")
+        if frozenset(body.keys()) != _INDEX_SOURCE_KEYS:
+            raise ContractError(f"sources[{position}] fields do not match v1")
+        name = _check_source_name(body["name"])
+        if name in seen_names:
+            raise ContractError(f"duplicate index source {name!r}")
+        seen_names.add(name)
+        size = _u64(body["size"], f"sources[{position}].size")
+        if size > _MAX_ARCHIVE_SIZE:
+            raise ContractError(f"sources[{position}].size exceeds its bound")
+        sha256 = _lower_hex(body["sha256"], f"sources[{position}].sha256", 64)
+        sources.append(IndexSource(name=name, size=size, sha256=sha256))
+    raw_entries = _array(raw["entries"], "entries")
+    if len(raw_entries) == 0 or len(raw_entries) > _MAX_BLOCK_COUNT:
+        raise ContractError("index entries are outside their count bound")
+    entries: list[IndexEntry] = []
+    for position, item in enumerate(raw_entries):
+        body = _object(item, f"entries[{position}]")
+        if frozenset(body.keys()) != _INDEX_ENTRY_KEYS:
+            raise ContractError(f"entries[{position}] fields do not match v1")
+        height = _u64(body["height"], f"entries[{position}].height")
+        block_hash = _lower_hex(body["hash"], f"entries[{position}].hash", 64)
+        source = _u64(body["source"], f"entries[{position}].source")
+        offset = _u64(body["offset"], f"entries[{position}].offset")
+        length = _u64(body["length"], f"entries[{position}].length")
+        if source >= len(sources):
+            raise ContractError(
+                f"entries[{position}].source is outside the sources array"
+            )
+        if length < MIN_HEADER or length > MAX_PAYLOAD:
+            raise ContractError(
+                f"entries[{position}].length is outside consensus bounds"
+            )
+        if offset + HEADER_LEN + length > sources[source].size:
+            raise ContractError(f"entries[{position}] range exceeds its source size")
+        entries.append(
+            IndexEntry(
+                height=height,
+                hash=block_hash,
+                source=source,
+                offset=offset,
+                length=length,
+            )
+        )
+    for position, entry in enumerate(entries):
+        if entry.height != position:
+            raise ContractError("index entries must be contiguous heights from genesis")
+    return IndexDocument(
+        corpus_id=corpus_id,
+        network=network,
+        network_magic=network_magic,
+        genesis_hash=genesis_hash,
+        start_height=start_height,
+        stop_height=stop_height,
+        source_tip_hash=source_tip_hash,
+        sources=tuple(sources),
+        entries=tuple(entries),
+        logical_size=logical_size,
+        logical_sha256=logical_sha256,
+        index_sha256=index_sha256,
+    )
+
+
+def _check_index_digest(doc: IndexDocument) -> None:
+    metadata = {
+        "corpus_id": doc.corpus_id,
+        "genesis_hash": doc.genesis_hash,
+        "logical": {"sha256": doc.logical_sha256, "size": doc.logical_size},
+        "network": doc.network,
+        "network_magic": doc.network_magic,
+        "range": {"start_height": doc.start_height, "stop_height": doc.stop_height},
+        "schema": INDEX_SCHEMA,
+        "source_tip_hash": doc.source_tip_hash,
+        "version": INDEX_VERSION,
+    }
+    preimage = hashlib.sha256()
+    for chunk in _index_chunks(
+        metadata,
+        [_index_source_chunk(source) for source in doc.sources],
+        [_index_entry_chunk(entry) for entry in doc.entries],
+        ZERO_SHA256,
+    ):
+        preimage.update(chunk)
+    if preimage.hexdigest() != doc.index_sha256:
+        raise ContractError("index_sha256 does not match the canonical preimage")
+
+
+def _check_index_against_freeze(freeze: Freeze, doc: IndexDocument) -> Product:
+    chosen = product(freeze, doc.corpus_id)
+    if doc.network != freeze.network:
+        raise ContractError("index network is not mainnet")
+    if doc.network_magic != freeze.network_magic.hex():
+        raise ContractError("index network magic is not mainnet")
+    if doc.genesis_hash != freeze.genesis_hash:
+        raise ContractError("index genesis hash is not mainnet genesis")
+    if doc.start_height != 0 or doc.stop_height != chosen.stop_height:
+        raise ContractError(
+            f"{chosen.corpus_id} index range is not genesis through the frozen tip"
+        )
+    if doc.source_tip_hash != chosen.stop_hash:
+        raise ContractError(f"{chosen.corpus_id} index tip is not the frozen stop hash")
+    if len(doc.entries) != chosen.block_count:
+        raise ContractError(
+            f"{chosen.corpus_id} index entry count is not the frozen block count"
+        )
+    return chosen
+
+
+class IndexWriter:
+    """Streaming indexed-corpus builder over caller-supplied payloads and locators.
+
+    The writer owns append invariants: contiguous height, frozen capacity,
+    previous-header linkage, the rolling logical digest, and per-frame range
+    checks against registered source sizes. Source digests are registered by
+    the caller (see ``build_index_from_scan`` for custody-derived values);
+    ``verify_index`` recomputes them from disk before any frame is accepted.
+    Outputs are published atomically with no-clobber semantics; inputs are
+    never pruned, truncated, or mutated. Consistency: build on a quiescent
+    source directory (snapshot isolation); finishing is idempotent only by
+    retrying with a fresh writer and a fresh destination.
+    """
+
+    def __init__(self, freeze: Freeze, corpus_id: str) -> None:
+        self._freeze = freeze
+        self._chosen = product(freeze, corpus_id)
+        self._sources: list[IndexSource] = []
+        self._entries: list[IndexEntry] = []
+        self._count = 0
+        self._logical_size = 0
+        self._logical_sha = hashlib.sha256()
+        self._last_hash: str | None = None
+
+    def add_source(self, source: IndexSource) -> int:
+        checked_name = _check_source_name(source.name)
+        if source.size > _MAX_ARCHIVE_SIZE:
+            raise ContractError("index source size exceeds its bound")
+        _lower_hex(source.sha256, "source.sha256", 64)
+        for existing in self._sources:
+            if existing.name == checked_name:
+                raise ContractError(f"duplicate index source {checked_name!r}")
+        if len(self._sources) >= _MAX_SOURCES:
+            raise ContractError("index sources exceed their count bound")
+        index = len(self._sources)
+        self._sources.append(
+            IndexSource(name=checked_name, size=source.size, sha256=source.sha256)
+        )
+        return index
+
+    def append(
+        self,
+        payload: bytes,
+        at: SourceOffset,
+        expected_hash: str | None = None,
+    ) -> IndexEntry:
+        if self._count >= self._chosen.block_count:
+            raise ContractError("index append exceeds the frozen block count")
+        if len(payload) > MAX_PAYLOAD or len(payload) < MIN_HEADER:
+            raise ContractError("index payload is outside consensus bounds")
+        block_hash = header_block_hash(payload)
+        if expected_hash is not None and block_hash != _lower_hex(
+            expected_hash, "expected_hash", 64
+        ):
+            raise ContractError("advertised header hash does not match the payload")
+        height = self._count
+        if height == 0:
+            if block_hash != self._freeze.genesis_hash:
+                raise ContractError("index genesis hash is not mainnet genesis")
+        else:
+            if self._last_hash is None:
+                raise ContractError("index writer lost its linkage cursor")
+            if not _prev_field_matches(payload, self._last_hash):
+                raise ContractError("indexed block does not link to its predecessor")
+            if (
+                height == self._chosen.stop_height
+                and block_hash != self._chosen.stop_hash
+            ):
+                raise ContractError(
+                    f"{self._chosen.corpus_id} index tip is not the frozen stop hash"
+                )
+        if at.source < 0 or at.source >= len(self._sources):
+            raise ContractError("indexed frame source is outside the sources array")
+        if at.offset < 0:
+            raise ContractError("indexed frame offset is negative")
+        recorded = self._sources[at.source]
+        if at.offset + HEADER_LEN + len(payload) > recorded.size:
+            raise ContractError("indexed frame range exceeds its source size")
+        entry = IndexEntry(
+            height=height,
+            hash=block_hash,
+            source=at.source,
+            offset=at.offset,
+            length=len(payload),
+        )
+        self._entries.append(entry)
+        self._logical_sha.update(
+            self._freeze.network_magic + struct.pack("<I", len(payload))
+        )
+        self._logical_sha.update(payload)
+        self._logical_size += HEADER_LEN + len(payload)
+        self._count += 1
+        self._last_hash = block_hash
+        return entry
+
+    def finish(self, index: BinaryIO) -> IndexSummary:
+        if self._count != self._chosen.block_count:
+            raise ContractError(
+                f"{self._chosen.corpus_id} index has {self._count} blocks, expected {self._chosen.block_count}"
+            )
+        if self._last_hash is None:
+            raise ContractError("index writer has no committed tip")
+        if self._last_hash != self._chosen.stop_hash:
+            raise ContractError(
+                f"{self._chosen.corpus_id} index tip is not the frozen stop hash"
+            )
+        intervals: dict[int, list[tuple[int, int]]] = {}
+        for entry in self._entries:
+            span = (entry.offset, entry.offset + HEADER_LEN + entry.length)
+            intervals.setdefault(entry.source, []).append(span)
+        for source, spans in intervals.items():
+            spans.sort()
+            previous_end: int | None = None
+            for start, end in spans:
+                if previous_end is not None and start < previous_end:
+                    raise ContractError(
+                        f"index entries overlap in source {self._sources[source].name!r}"
+                    )
+                previous_end = end
+        logical_sha = self._logical_sha.hexdigest()
+        metadata = _index_metadata(
+            self._freeze,
+            self._chosen.corpus_id,
+            self._sources,
+            self._logical_size,
+            logical_sha,
+            ZERO_SHA256,
+        )
+        preimage = hashlib.sha256()
+        for chunk in _index_chunks(
+            metadata,
+            [_index_source_chunk(source) for source in self._sources],
+            [_index_entry_chunk(entry) for entry in self._entries],
+            ZERO_SHA256,
+        ):
+            preimage.update(chunk)
+        index_sha = preimage.hexdigest()
+        file_sha = hashlib.sha256()
+        for chunk in _index_chunks(
+            metadata,
+            [_index_source_chunk(source) for source in self._sources],
+            [_index_entry_chunk(entry) for entry in self._entries],
+            index_sha,
+        ):
+            file_sha.update(chunk)
+            _write_all(index, chunk)
+        _write_all(index, b"\n")
+        file_sha.update(b"\n")
+        return IndexSummary(
+            count=self._count,
+            logical_size=self._logical_size,
+            logical_sha256=logical_sha,
+            index_sha256=index_sha,
+            index_file_sha256=file_sha.hexdigest(),
+        )
+
+
+def build_index_from_scan(
+    freeze: Freeze, corpus_id: str, source_dir: Path, index_path: Path
+) -> IndexSummary:
+    """Scan Core blk files, select the canonical chain, and publish an index.
+
+    Selection walks backward from the frozen stop hash through previous-header
+    links, so side-branch blocks in the same files are ignored. Every source
+    is fully hashed (streaming) before any frame is accepted, so same-length
+    source replacement is rejected. Frames are re-read in height order to bind
+    the logical digest, and every source is re-hashed after the re-read: a
+    file mutated between the pre-hash, the scan, and the re-read fails the
+    build instead of publishing an index over mixed generations. Full proof-of-work, merkle-root recomputation, and
+    coinbase consensus rules are not reimplemented here: they remain owned by
+    the Rust validation engines that consume the identical logical byte stream
+    (the same bytes the packed archive carries), plus ``classify_census`` for
+    script census. This keeps one authoritative consensus owner and avoids a
+    divergent second implementation. Consistency: snapshot isolation over a
+    quiescent ``source_dir``; the build is idempotent by retrying with a fresh
+    destination (existing destinations are never clobbered).
+    """
+    chosen = product(freeze, corpus_id)
+    if not source_dir.is_dir():
+        raise ContractError(f"source directory {source_dir} is not a directory")
+    _refuse_existing(index_path)
+    try:
+        names = sorted(entry.name for entry in source_dir.iterdir())
+    except OSError as err:
+        raise ContractError(
+            f"cannot list source directory {source_dir}: {err}"
+        ) from err
+    blk_names = [name for name in names if _SOURCE_NAME_RE.fullmatch(name) is not None]
+    if len(blk_names) == 0:
+        raise ContractError(
+            f"source directory {source_dir} holds no blkNNNNN.dat files"
+        )
+    if len(blk_names) > _MAX_SOURCES:
+        raise ContractError("source file count exceeds its bound")
+    for name in blk_names:
+        _check_source_name(name)
+    sources: list[IndexSource] = []
+    for name in blk_names:
+        validated = _source_path(source_dir, name)
+        size, digest = _hash_file(validated)
+        sources.append(IndexSource(name=name, size=size, sha256=digest))
+    by_hash: dict[str, _ScanRecord] = {}
+    for position, source in enumerate(sources):
+        path = _source_path(source_dir, source.name)
+        try:
+            with _open_source_nofollow(path) as handle:
+                for meta, payload in iter_frames(handle, freeze.network_magic):
+                    block_hash = header_block_hash(payload)
+                    prev_display = payload[4:36][::-1].hex()
+                    if block_hash in by_hash:
+                        raise ContractError(
+                            f"duplicate block hash {block_hash} across sources"
+                        )
+                    by_hash[block_hash] = _ScanRecord(
+                        prev=prev_display,
+                        source=position,
+                        offset=meta.offset,
+                        length=meta.payload_length,
+                    )
+        except OSError as err:
+            raise ContractError(f"cannot scan source {source.name}: {err}") from err
+    tip = chosen.stop_hash
+    if tip not in by_hash:
+        raise ContractError(f"{corpus_id} stop hash is absent from the sources")
+    reversed_hashes: list[str] = [tip]
+    seen: set[str] = {tip}
+    cursor = tip
+    while cursor != freeze.genesis_hash:
+        record = by_hash.get(cursor)
+        if record is None:
+            raise ContractError(f"canonical chain has a gap at {cursor}")
+        cursor = record.prev
+        if cursor in seen:
+            raise ContractError("canonical chain contains a linkage cycle")
+        seen.add(cursor)
+        reversed_hashes.append(cursor)
+        if len(reversed_hashes) > chosen.block_count:
+            raise ContractError(
+                f"{corpus_id} canonical chain exceeds the frozen block count"
+            )
+    if len(reversed_hashes) != chosen.block_count:
+        raise ContractError(
+            f"{corpus_id} canonical chain length is not the frozen block count"
+        )
+    ordered = list(reversed(reversed_hashes))
+    if ordered[0] != freeze.genesis_hash:
+        raise ContractError("canonical chain does not start at genesis")
+    writer = IndexWriter(freeze, corpus_id)
+    for source in sources:
+        writer.add_source(source)
+    reader = _SingleSourceReader(source_dir, sources, freeze.network_magic)
+    try:
+        for height, block_hash in enumerate(ordered):
+            record = by_hash.get(block_hash)
+            if record is None:
+                raise ContractError(f"canonical chain has a gap at height {height}")
+            entry = IndexEntry(
+                height=height,
+                hash=block_hash,
+                source=record.source,
+                offset=record.offset,
+                length=record.length,
+            )
+            payload = reader.read(entry)
+            writer.append(
+                payload,
+                SourceOffset(source=record.source, offset=record.offset),
+                expected_hash=block_hash,
+            )
+    finally:
+        reader.close()
+    _reverify_sources(source_dir, sources)
+    scratch = _unique_scratch(index_path)
+    try:
+        with open(scratch, "xb") as index_fh:
+            summary = writer.finish(index_fh)
+            _synced(index_fh)
+    except OSError as err:
+        raise ContractError(f"cannot write index scratch file: {err}") from err
+    try:
+        _commit_scratch(scratch, index_path)
+    finally:
+        try:
+            scratch.unlink(missing_ok=True)
+        except OSError as err:
+            print(f"warning: cannot remove index scratch file: {err}", file=sys.stderr)
+    return summary
+
+
+def _reverify_sources(source_dir: Path, sources: Sequence[IndexSource]) -> None:
+    """Re-hash every source after the scan/re-read and refuse on drift.
+
+    The pre-hash, the frame scan, and the height-ordered re-read are three
+    separate opens. Without this gate a file replaced mid-build could mix
+    generations: the scan would locate frames in one generation while the
+    re-read binds digests from another. Re-hashing here binds all three
+    passes to one generation before `writer.finish` runs.
+    """
+    for source in sources:
+        path = _source_path(source_dir, source.name)
+        size, digest = _hash_file(path)
+        if size != source.size or digest != source.sha256:
+            raise ContractError(
+                f"source {source.name} changed during the scan;"
+                " rebuild on a quiescent directory"
+            )
+
+
+def _actual_frame_spans(
+    source_dir: Path, sources: Sequence[IndexSource], magic: bytes
+) -> list[set[tuple[int, int]]]:
+    """Pre-parse every source with the `iter_frames` owner.
+
+    Returns per-source sets of exact top-level ``(offset, length)`` spans.
+    Only frame metadata is retained; payload bytes are discarded at once, so
+    no second packed copy is held. `ContractError` from `iter_frames` (magic
+    mismatch, truncation, over-limit length) propagates unchanged; `OSError`
+    becomes `ContractError` to preserve indexed-path refusal behavior.
+    """
+    spans: list[set[tuple[int, int]]] = []
+    for source in sources:
+        path = _source_path(source_dir, source.name)
+        actual: set[tuple[int, int]] = set()
+        try:
+            with _open_source_nofollow(path) as handle:
+                for meta, _payload in iter_frames(handle, magic):
+                    actual.add((meta.offset, meta.payload_length))
+        except OSError as err:
+            raise ContractError(f"cannot scan source {source.name}: {err}") from err
+        spans.append(actual)
+    return spans
+
+
+def verify_index(freeze: Freeze, index_path: Path, source_dir: Path) -> Product:
+    """Fully verify an index against its sources. Pre-hashes every source before accepting frames."""
+    doc = _load_index(index_path)
+    _check_index_digest(doc)
+    chosen = _check_index_against_freeze(freeze, doc)
+    for source in doc.sources:
+        path = _source_path(source_dir, source.name)
+        try:
+            actual_size = path.stat().st_size
+        except OSError as err:
+            raise ContractError(f"cannot stat source {source.name}: {err}") from err
+        if actual_size != source.size:
+            raise ContractError(f"source {source.name} size does not match the index")
+        _, digest = _hash_file(path)
+        if digest != source.sha256:
+            raise ContractError(f"source {source.name} digest does not match the index")
+    actual_spans = _actual_frame_spans(source_dir, doc.sources, freeze.network_magic)
+    logical_sha = hashlib.sha256()
+    logical_size = 0
+    last_hash: str | None = None
+    intervals: dict[int, list[tuple[int, int]]] = {}
+    reader = _SingleSourceReader(source_dir, doc.sources, freeze.network_magic)
+    try:
+        for height, entry in enumerate(doc.entries):
+            if entry.height != height:
+                raise ContractError("index entries are not in height order")
+            if (entry.offset, entry.length) not in actual_spans[entry.source]:
+                raise ContractError(
+                    f"entries[{height}] is not a top-level frame in source "
+                    f"{doc.sources[entry.source].name!r}"
+                )
+            payload = reader.read(entry)
+            last_hash = _verify_entry_hash(
+                freeze, chosen, entry, height, payload, last_hash
+            )
+            logical_sha.update(freeze.network_magic + struct.pack("<I", entry.length))
+            logical_sha.update(payload)
+            logical_size += HEADER_LEN + entry.length
+            intervals.setdefault(entry.source, []).append(
+                (entry.offset, entry.offset + HEADER_LEN + entry.length)
+            )
+    finally:
+        reader.close()
+    if logical_size != doc.logical_size:
+        raise ContractError("indexed logical size does not match the index")
+    if logical_sha.hexdigest() != doc.logical_sha256:
+        raise ContractError("indexed logical digest does not match the index")
+    for source_index, spans in intervals.items():
+        spans.sort()
+        previous_end: int | None = None
+        for start, end in spans:
+            if previous_end is not None and start < previous_end:
+                raise ContractError(
+                    f"index entries overlap in source {doc.sources[source_index].name!r}"
+                )
+            previous_end = end
+    if last_hash != chosen.stop_hash:
+        raise ContractError(
+            f"{chosen.corpus_id} indexed tip is not the frozen stop hash"
+        )
+    return chosen
+
+
+def iter_indexed_payloads(
+    freeze: Freeze, index_path: Path, source_dir: Path
+) -> Iterator[tuple[int, str, bytes]]:
+    """Yield verified (height, hash, payload) triples in height order.
+
+    Every source is fully hashed (streaming) before the first payload is
+    yielded, so same-length replacement is rejected up front. Actual top-level
+    frames are pre-parsed with `iter_frames` before the first payload is
+    yielded, so embedded or misaligned spans are rejected even when their
+    magic and length decode. Each payload is hash- and linkage-checked before
+    it is yielded. The caller must exhaust the
+    iterator: the trailing logical-digest check binds stream identity for the
+    comparator, and an abandoned prefix must not be accepted. Retrying is
+    idempotent.
+    """
+    doc = _load_index(index_path)
+    _check_index_digest(doc)
+    chosen = _check_index_against_freeze(freeze, doc)
+    for source in doc.sources:
+        path = _source_path(source_dir, source.name)
+        try:
+            actual_size = path.stat().st_size
+        except OSError as err:
+            raise ContractError(f"cannot stat source {source.name}: {err}") from err
+        if actual_size != source.size:
+            raise ContractError(f"source {source.name} size does not match the index")
+        _, digest = _hash_file(path)
+        if digest != source.sha256:
+            raise ContractError(f"source {source.name} digest does not match the index")
+    actual_spans = _actual_frame_spans(source_dir, doc.sources, freeze.network_magic)
+    logical_sha = hashlib.sha256()
+    logical_size = 0
+    last_hash: str | None = None
+    intervals: dict[int, list[tuple[int, int]]] = {}
+    reader = _SingleSourceReader(source_dir, doc.sources, freeze.network_magic)
+    try:
+        for height, entry in enumerate(doc.entries):
+            if entry.height != height:
+                raise ContractError("index entries are not in height order")
+            if (entry.offset, entry.length) not in actual_spans[entry.source]:
+                raise ContractError(
+                    f"entries[{height}] is not a top-level frame in source "
+                    f"{doc.sources[entry.source].name!r}"
+                )
+            payload = reader.read(entry)
+            block_hash = _verify_entry_hash(
+                freeze, chosen, entry, height, payload, last_hash
+            )
+            logical_sha.update(freeze.network_magic + struct.pack("<I", entry.length))
+            logical_sha.update(payload)
+            logical_size += HEADER_LEN + entry.length
+            intervals.setdefault(entry.source, []).append(
+                (entry.offset, entry.offset + HEADER_LEN + entry.length)
+            )
+            last_hash = block_hash
+            yield height, block_hash, payload
+    finally:
+        reader.close()
+    if logical_size != doc.logical_size:
+        raise ContractError("indexed logical size does not match the index")
+    if logical_sha.hexdigest() != doc.logical_sha256:
+        raise ContractError("indexed logical digest does not match the index")
+    if last_hash != chosen.stop_hash:
+        raise ContractError(
+            f"{chosen.corpus_id} indexed tip is not the frozen stop hash"
+        )
+    for source_index, spans in intervals.items():
+        spans.sort()
+        previous_end: int | None = None
+        for start, end in spans:
+            if previous_end is not None and start < previous_end:
+                raise ContractError(
+                    f"index entries overlap in source {doc.sources[source_index].name!r}"
+                )
+            previous_end = end
+
+
+def iter_indexed_framed(
+    freeze: Freeze, index_path: Path, source_dir: Path
+) -> Iterator[bytes]:
+    """Yield verified Core-framed records identical to the packed archive bytes."""
+    for _, _, payload in iter_indexed_payloads(freeze, index_path, source_dir):
+        yield write_frame(payload, freeze.network_magic)
 
 
 def _unique_scratch(dest: Path) -> Path:
@@ -955,13 +2069,58 @@ def _synced(fh: BinaryIO) -> None:
     os.fsync(fh.fileno())
 
 
+def build_archive_from_index(
+    freeze: Freeze,
+    index_path: Path,
+    source_dir: Path,
+    archive_path: Path,
+    manifest_path: Path,
+) -> CorpusSummary:
+    """Pack a byte-identical archive from a verified index.
+
+    The payload stream fully verifies its sources while yielding (source
+    pre-hash, top-level span gate, per-payload hash/linkage, trailing
+    logical digest), so the packed bytes are the logical stream the index
+    fingerprinted. The published manifest digest and size must equal the
+    index logical digest and size; a mismatch unpublishes both outputs and
+    fails instead of leaving divergent digests behind.
+    """
+    doc = _load_index(index_path)
+    _check_index_digest(doc)
+    chosen = _check_index_against_freeze(freeze, doc)
+    summary = _run_writer(
+        freeze,
+        chosen.corpus_id,
+        archive_path,
+        manifest_path,
+        (
+            (block_hash, payload)
+            for _, block_hash, payload in iter_indexed_payloads(
+                freeze, index_path, source_dir
+            )
+        ),
+    )
+    if (
+        summary.archive_sha256 != doc.logical_sha256
+        or summary.archive_size != doc.logical_size
+    ):
+        with contextlib.suppress(OSError):
+            archive_path.unlink()
+        with contextlib.suppress(OSError):
+            manifest_path.unlink()
+        raise ContractError(
+            "packed archive digest does not match the index logical digest"
+        )
+    return summary
+
+
 def _run_writer(
     freeze: Freeze,
     corpus_id: str,
     archive_path: Path,
     manifest_path: Path,
     items: Iterable[tuple[str | None, bytes]],
-) -> None:
+) -> CorpusSummary:
     if archive_path.resolve() == manifest_path.resolve():
         raise ContractError("archive and manifest paths must differ")
     _refuse_existing(archive_path)
@@ -970,11 +2129,16 @@ def _run_writer(
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     archive_scratch = _unique_scratch(archive_path)
     manifest_scratch = _unique_scratch(manifest_path)
-    spool_scratch = _unique_scratch(archive_path)
+    # The spool never commits, but it gets its own scratch namespace
+    # (`.spool.tmp.*`) instead of sharing the archive's, so the three live
+    # scratch paths are pairwise distinct by construction, not just by UUID.
+    spool_scratch = _unique_scratch(archive_path.parent / "spool")
     try:
-        with open(archive_scratch, "xb") as archive_fh, open(
-            spool_scratch, "x+b"
-        ) as spool_fh, open(manifest_scratch, "xb") as manifest_fh:
+        with (
+            open(archive_scratch, "xb") as archive_fh,
+            open(spool_scratch, "x+b") as spool_fh,
+            open(manifest_scratch, "xb") as manifest_fh,
+        ):
             writer = CorpusWriter(freeze, corpus_id, archive_fh, spool_fh)
             for hash_value, payload in items:
                 writer.append(payload, expected_hash=hash_value)
@@ -990,6 +2154,7 @@ def _run_writer(
     print(f"wrote {archive_path} ({summary.archive_size} bytes)")
     print(f"wrote {manifest_path}")
     print(f"archive sha256 {summary.archive_sha256}")
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1002,7 +2167,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     export_cmd.add_argument("--archive", type=Path, required=True)
     export_cmd.add_argument("--manifest", type=Path, required=True)
 
-    convert_cmd = sub.add_parser("convert", help="convert a length-prefixed archive to Core frames")
+    convert_cmd = sub.add_parser(
+        "convert", help="convert a length-prefixed archive to Core frames"
+    )
     convert_cmd.add_argument("--length-prefixed", type=Path, required=True)
     convert_cmd.add_argument("--corpus-id", required=True, choices=("C150", "Cmodern"))
     convert_cmd.add_argument("--archive", type=Path, required=True)
@@ -1016,6 +2183,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     classify_cmd.add_argument("--contract", required=True, choices=("C150", "Cmodern"))
     classify_cmd.add_argument("--counters", type=Path, required=True)
 
+    build_index_cmd = sub.add_parser(
+        "build-index", help="build an indexed corpus over Core blk files"
+    )
+    build_index_cmd.add_argument(
+        "--corpus-id", required=True, choices=("C150", "Cmodern")
+    )
+    build_index_cmd.add_argument("--source-dir", type=Path, required=True)
+    build_index_cmd.add_argument("--index", type=Path, required=True)
+
+    verify_index_cmd = sub.add_parser(
+        "verify-index", help="verify an indexed corpus against its sources"
+    )
+    verify_index_cmd.add_argument("--index", type=Path, required=True)
+    verify_index_cmd.add_argument("--source-dir", type=Path, required=True)
+
+    build_archive_cmd = sub.add_parser(
+        "build-archive", help="pack a byte-identical archive from a verified index"
+    )
+    build_archive_cmd.add_argument("--index", type=Path, required=True)
+    build_archive_cmd.add_argument("--source-dir", type=Path, required=True)
+    build_archive_cmd.add_argument("--archive", type=Path, required=True)
+    build_archive_cmd.add_argument("--manifest", type=Path, required=True)
+
     args = parser.parse_args(argv)
     freeze = load_freeze()
     if args.command == "export":
@@ -1024,7 +2214,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.corpus_id,
             args.archive,
             args.manifest,
-            ((advertised, payload) for advertised, payload in iter_rest_blocks(freeze, args.corpus_id, args.rest_url)),
+            (
+                (advertised, payload)
+                for advertised, payload in iter_rest_blocks(
+                    freeze, args.corpus_id, args.rest_url
+                )
+            ),
         )
     elif args.command == "convert":
         with open(args.length_prefixed, "rb") as source:
@@ -1038,9 +2233,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "verify":
         scratch = _unique_scratch(args.archive)
         try:
-            with open(args.archive, "rb") as archive_fh, open(
-                args.manifest, "rb"
-            ) as manifest_fh, open(scratch, "w+b") as spool_fh:
+            with (
+                open(args.archive, "rb") as archive_fh,
+                open(args.manifest, "rb") as manifest_fh,
+                open(scratch, "w+b") as spool_fh,
+            ):
                 verify_archive(freeze, archive_fh, manifest_fh, entries=spool_fh)
         finally:
             scratch.unlink(missing_ok=True)
@@ -1049,15 +2246,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = classify_census(freeze, args.contract, _load_json(args.counters))
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
+    elif args.command == "build-index":
+        summary = build_index_from_scan(
+            freeze, args.corpus_id, args.source_dir, args.index
+        )
+        print(f"wrote {args.index} ({summary.logical_size} bytes logical)")
+        print(f"logical sha256 {summary.logical_sha256}")
+        print(f"index sha256 {summary.index_sha256}")
+    elif args.command == "verify-index":
+        verify_index(freeze, args.index, args.source_dir)
+        print(f"verified {args.index}")
+    elif args.command == "build-archive":
+        summary = build_archive_from_index(
+            freeze, args.index, args.source_dir, args.archive, args.manifest
+        )
+        print(f"wrote {args.archive} ({summary.archive_size} bytes)")
+        print(f"archive sha256 {summary.archive_sha256}")
     return 0
 
 
 def canonical_json(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
 
 
 def _load_json(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicates)
+    return json.loads(
+        path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicates
+    )
 
 
 def _reject_duplicates(pairs: Iterable[tuple[str, object]]) -> dict[str, object]:
@@ -1109,7 +2326,12 @@ def _object(value: object, label: str) -> dict[str, object]:
 
 
 def _u32(value: object, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 0xFFFFFFFF:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value > 0xFFFFFFFF
+    ):
         raise ContractError(f"{label} must be a u32")
     return value
 

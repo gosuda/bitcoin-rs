@@ -308,23 +308,28 @@ impl SyncFrontier {
 
     /// The P2P-05 probe pick: a witness-network peer rotated past the
     /// expired (or dead) pending request's owner so consecutive probes do
-    /// not land on the same connection.
+    /// not land on the same connection. Rotation reads the connection id,
+    /// not the endpoint: anonymous sessions share no endpoint to order by,
+    /// and a same-address replacement must not compare equal to the
+    /// connection it replaced.
     fn probe_pick(&self) -> Option<PeerSource> {
         let required = ServiceFlags::NETWORK.to_u64() | ServiceFlags::WITNESS.to_u64();
         let eligible = |peer: &&UsablePeer| peer.info.services & required == required;
-        let pending_addr = self.header_request.map(|request| request.source.addr);
+        let pending_id = self
+            .header_request
+            .map(|request| request.source.connection_id().get());
         self.usable_peers
             .iter()
             .filter(|peer| {
-                eligible(peer) && pending_addr.is_none_or(|addr| peer.source.addr > addr)
+                eligible(peer) && pending_id.is_none_or(|id| peer.source.connection_id().get() > id)
             })
-            .min_by_key(|peer| peer.source.addr)
+            .min_by_key(|peer| peer.source.connection_id().get())
             .map(|peer| peer.source)
             .or_else(|| {
                 self.usable_peers
                     .iter()
                     .filter(|peer| eligible(peer))
-                    .min_by_key(|peer| peer.source.addr)
+                    .min_by_key(|peer| peer.source.connection_id().get())
                     .map(|peer| peer.source)
             })
     }
@@ -343,4 +348,109 @@ pub(crate) fn header_request_live(
                 .iter()
                 .any(|peer| peer.source == request.source)
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::super::HeaderRequestKind;
+    use super::super::HeaderRequestState;
+    use super::*;
+    use crate::connection::PeerSource;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn addr(port: u16) -> crate::PeerRemote {
+        crate::PeerRemote::Endpoint(crate::PeerEndpoint::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+        ))
+    }
+
+    fn usable(source: PeerSource) -> UsablePeer {
+        UsablePeer {
+            source,
+            info: crate::sync::tests::synthetic_peer(addr(9001), 100),
+            demonstrated_tips: Vec::new(),
+            active_height: None,
+            headers_horizon: None,
+            role: crate::peer_info::PeerRole::FullRelay,
+            manual: false,
+            connected_at: Instant::now(),
+        }
+    }
+
+    fn snap(tip_id: u32, height: u32, hash_byte: u8) -> std::sync::Arc<TipSnapshot> {
+        std::sync::Arc::new(TipSnapshot {
+            tip_id: bitcoin_rs_chain::NodeId::new(tip_id),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            height,
+            chainwork: bitcoin_rs_chain::ChainWork::from(u64::from(height) + 1),
+            hash: Hash256::from_le_bytes(&[hash_byte; 32]),
+        })
+    }
+
+    fn frontier_with_request(
+        usable_peers: Vec<UsablePeer>,
+        request_source: PeerSource,
+    ) -> SyncFrontier {
+        let frontier = SyncFrontier {
+            chain: ChainFrontier {
+                applied_tip: Some(snap(1, 4, 0x01)),
+                chain_tip: Some(snap(2, 9, 0x02)),
+                next_required: Some(RequiredBody {
+                    height: 5,
+                    hash: Hash256::from_le_bytes(&[0x03; 32]),
+                }),
+                apply_halted: false,
+            },
+            body_state: Some(BodyState::Unowned),
+            header_request: Some(super::super::HeaderRequest {
+                source: request_source,
+                kind: HeaderRequestKind::Frontier,
+                locator_tip_hash: Hash256::from_le_bytes(&[0x01; 32]),
+                target_height: 6,
+                requested_at: Instant::now(),
+                state: HeaderRequestState::AwaitingResponse,
+            }),
+            header_request_live: false,
+            usable_peers,
+        };
+        let live = header_request_live(
+            frontier.header_request,
+            &frontier.usable_peers,
+            Instant::now(),
+        );
+        SyncFrontier {
+            header_request_live: live,
+            ..frontier
+        }
+    }
+
+    #[test]
+    fn probe_rotation_orders_by_connection_id_not_endpoint() {
+        // Allocation order fixes the id order: earliest < dead < latest,
+        // while endpoints anti-order the earliest and latest peers.
+        let earliest = PeerSource::for_test(addr(9007));
+        let dead = PeerSource::for_test(addr(9005));
+        let latest = PeerSource::for_test(addr(9001));
+        let frontier = frontier_with_request(vec![usable(earliest), usable(latest)], dead);
+        assert!(!frontier.header_request_live);
+        match frontier.plan().header_action {
+            HeaderAction::Probe(picked) => assert_eq!(picked, latest),
+            action => panic!("expected Probe, got {action:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_rotation_distinguishes_anonymous_sessions() {
+        // Three anonymous sessions share no endpoint; the dead pending owner
+        // sits between the two usable connections by id order.
+        let first = PeerSource::for_test_unidentified();
+        let dead = PeerSource::for_test_unidentified();
+        let last = PeerSource::for_test_unidentified();
+        let frontier = frontier_with_request(vec![usable(last), usable(first)], dead);
+        assert!(!frontier.header_request_live);
+        match frontier.plan().header_action {
+            HeaderAction::Probe(picked) => assert_eq!(picked, last),
+            action => panic!("expected Probe, got {action:?}"),
+        }
+    }
 }

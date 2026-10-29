@@ -59,7 +59,10 @@ impl crate::MempoolObserver for Seen {
 fn gateway(limits: MempoolLimits, seen: Option<Arc<Seen>>) -> MempoolGateway {
     MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(limits))),
-        seen.map(|observer| -> Arc<dyn crate::MempoolObserver> { observer }),
+        seen.map(|observer| {
+            let leg: Arc<dyn crate::MempoolObserver> = observer;
+            (leg, crate::BodyInterest::Metadata)
+        }),
         ValidationEngine::Native,
         None,
     )

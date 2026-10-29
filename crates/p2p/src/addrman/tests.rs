@@ -1,8 +1,17 @@
 use super::*;
 use std::net::Ipv4Addr;
 
-fn addr(n: u8) -> SocketAddr {
-    SocketAddr::new(Ipv4Addr::new(8, n, 1, 1).into(), 8333)
+fn addr(n: u8) -> PeerEndpoint {
+    PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(8, n, 1, 1)), 8333)
+}
+
+trait ParseEndpoint {
+    fn parse_endpoint(self) -> PeerEndpoint;
+}
+impl ParseEndpoint for &str {
+    fn parse_endpoint(self) -> PeerEndpoint {
+        crate::parse_endpoint(self).expect("address")
+    }
 }
 fn book() -> Arc<AddressBook> {
     AddressBook::open(None, [1; 4], false, None)
@@ -11,7 +20,7 @@ fn book() -> Arc<AddressBook> {
 #[test]
 fn unproven_addresses_need_a_successful_outbound_handshake() {
     let book = book();
-    book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000)], 10_000);
     assert!(!book.state.lock().stored.records[0].tried);
     book.queued(addr(1));
     book.attempted(addr(1), true, 10_001);
@@ -25,7 +34,7 @@ fn unproven_addresses_need_a_successful_outbound_handshake() {
 fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
     let book = book();
     for n in 1..200 {
-        book.learn_peer(addr(200).ip(), &[(addr(n), 9, 10_000)], 10_000);
+        book.learn_peer(crate::PeerRemote::Endpoint(addr(200)), &[(addr(n), 9, 10_000)], 10_000);
     }
     assert!(book.len() <= 199);
     let picked = book
@@ -38,7 +47,7 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
     );
     assert_eq!(book.select(&[], &[], 10_000, u64::MAX, |_| false), None);
     book.unqueue(picked);
-    let same_group = SocketAddr::new(picked.ip(), 8334);
+    let same_group = PeerEndpoint::new(picked.address(), 8334);
     assert_ne!(
         book.select(&[], &[same_group], 10_000, u64::MAX, |_| true),
         Some(picked)
@@ -59,15 +68,19 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
 fn invalid_and_duplicate_addresses_do_not_create_records() {
     let book = book();
     book.learn_peer(
-        addr(2).ip(),
+        crate::PeerRemote::Endpoint(addr(2)),
         &[
-            ("127.0.0.1:1".parse().expect("addr"), 9, 10_000),
+            (
+                crate::parse_endpoint("127.0.0.1:1").expect("addr"),
+                9,
+                10_000,
+            ),
             (addr(1), 9, 20_000),
         ],
         10_000,
     );
     assert_eq!(book.len(), 0);
-    book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000); 2], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000); 2], 10_000);
     assert_eq!(book.len(), 1);
 }
 
@@ -76,7 +89,7 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.dat");
     let book = AddressBook::open(Some(path.clone()), [1; 4], false, None);
-    book.learn_peer(addr(2).ip(), &[(addr(1), 9, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000)], 10_000);
     book.succeeded(addr(1), 9, 10_001);
     book.save();
     let restored = AddressBook::open(Some(path.clone()), [1; 4], false, None);
@@ -85,7 +98,7 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
     for corrupt in [b"truncated".to_vec(), vec![0; 40]] {
         fs::write(network_path(&path, [1; 4]), &corrupt).expect("corrupt fixture");
         let recovered = AddressBook::open(Some(path.clone()), [1; 4], false, None);
-        recovered.learn_peer(addr(2).ip(), &[(addr(3), 9, 10_000)], 10_000);
+        recovered.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(3), 9, 10_000)], 10_000);
         recovered.save();
         assert_eq!(
             fs::read(network_path(&path, [1; 4])).expect("read"),
@@ -98,18 +111,18 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
 fn promotion_collision_never_overwrites_a_proven_peer() {
     let book = book();
     let first = addr(1);
-    book.learn_peer(addr(2).ip(), &[(first, 9, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(first, 9, 10_000)], 10_000);
     book.succeeded(first, 9, 10_001);
     let incumbent = book.state.lock().stored.records[0].clone();
     let challenger = {
         let manager = book.state.lock();
-        let target = manager.tried_slot(incumbent.addr);
+        let target = manager.tried_slot(incumbent.endpoint);
         (1..65535_u16)
-            .map(|port| SocketAddr::new(first.ip(), port))
+            .map(|port| PeerEndpoint::new(first.address(), port))
             .find(|candidate| *candidate != first && manager.tried_slot(*candidate) == target)
             .expect("slot collision")
     };
-    book.learn_peer(addr(3).ip(), &[(challenger, 9, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(3)), &[(challenger, 9, 10_000)], 10_000);
     book.succeeded(challenger, 9, 10_002);
     let manager = book.state.lock();
     assert!(
@@ -117,7 +130,7 @@ fn promotion_collision_never_overwrites_a_proven_peer() {
             .stored
             .records
             .iter()
-            .find(|entry| entry.addr == first)
+            .find(|entry| entry.endpoint == first)
             .expect("incumbent")
             .tried
     );
@@ -126,7 +139,7 @@ fn promotion_collision_never_overwrites_a_proven_peer() {
             .stored
             .records
             .iter()
-            .find(|entry| entry.addr == challenger)
+            .find(|entry| entry.endpoint == challenger)
             .expect("challenger")
             .tried
     );
@@ -160,7 +173,7 @@ fn scoped_network_books_and_stale_temporary_files_are_independent() {
 }
 
 #[test]
-fn legacy_import_retains_original_and_scoped_state_wins() {
+fn unscoped_current_import_retains_original_and_scoped_state_wins() {
     let dir = tempfile::tempdir().expect("dir");
     let base = dir.path().join("peers.dat");
     let source = book();
@@ -253,6 +266,7 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
             .expect("published")
             .expect("exists")
             .stored
+            .expect("canonical v1")
             .records
             .len(),
         1
@@ -263,16 +277,16 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
 fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     let dir = tempfile::tempdir().expect("dir");
     let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false, None);
-    book.learn_peer(addr(2).ip(), &[(addr(1), 1, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 1, 10_000)], 10_000);
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(addr(2).ip(), &[(addr(1), 1, 9_999); 32], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 1, 9_999); 32], 10_000);
     assert_eq!(
         book.state.lock().revision,
         clean,
         "unchanged duplicate reports cannot schedule disk writes"
     );
-    book.learn_peer(addr(2).ip(), &[(addr(1), 8, 10_000)], 10_000);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 8, 10_000)], 10_000);
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -281,7 +295,7 @@ fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     book.succeeded(addr(1), 9, 10_001);
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(addr(2).ip(), &[(addr(1), 64, 10_001)], 10_001);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 64, 10_001)], 10_001);
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -289,7 +303,7 @@ fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     );
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(addr(2).ip(), &[(addr(1), 9, 13_602)], 13_602);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 13_602)], 13_602);
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -313,13 +327,13 @@ fn gossip_cache_is_shared_stable_until_expiry_and_rotates_new_discoveries() {
     assert_eq!(first.len(), 32);
     assert_eq!(book.state.lock().revision, before);
     let fresh = (1..=255)
-        .map(|n| SocketAddr::from(([9, n, 1, 1], 8333)))
+        .map(|n| PeerEndpoint::from(([9, n, 1, 1], 8333)))
         .find(|candidate| {
             book.learn_dns("other-seed", &[*candidate], 10_001);
             book.len() > 64
         })
         .expect("new discovery");
-    let updated = first[0].1.socket_addr().expect("endpoint");
+    let updated = PeerEndpoint::from(first[0].socket_addr().expect("endpoint"));
     book.connected(updated, 20_000);
     let before = book.state.lock().revision;
     for seconds in 0..100 {
@@ -333,10 +347,11 @@ fn gossip_cache_is_shared_stable_until_expiry_and_rotates_new_discoveries() {
     assert_ne!(first, second);
     let third = book.gossip_at(20_100, tick + 2 * GOSSIP_CACHE_TTL);
     assert!(
-        second
-            .iter()
-            .chain(&third)
-            .any(|(_, address)| address.socket_addr().ok() == Some(fresh))
+        second.iter().chain(&third).any(|address| address
+            .socket_addr()
+            .ok()
+            .map(PeerEndpoint::from)
+            == Some(fresh))
     );
     assert_eq!(book.state.lock().revision, before, "cache is not persisted");
     assert_eq!(
@@ -346,13 +361,167 @@ fn gossip_cache_is_shared_stable_until_expiry_and_rotates_new_discoveries() {
 }
 
 #[test]
+fn gossip_cursor_cache_shared_across_projections() {
+    let book = book();
+    for n in 1..=5u8 {
+        book.learn_dns("seed", &[addr(n)], 10_000);
+    }
+    let tor = crate::PeerEndpoint::TorV3 {
+        key: [7u8; 32],
+        port: 8333,
+    };
+    book.learn_dns("seed", &[tor], 10_000);
+    assert_eq!(book.len(), 6);
+    book.set_addrv2_gossip(true, false);
+    let tick = Instant::now();
+    let legacy = book.gossip_at(10_000, tick);
+    assert_eq!(legacy.len(), 6, "gossip projects the shared cache overlay-inclusive");
+    let cursor = book.state.lock().gossip_cursor;
+    let v2 = book.gossip_addrv2_at(10_000, tick);
+    assert_eq!(
+        v2.len(),
+        6,
+        "addrv2 projects the same cached selection with overlay"
+    );
+    assert_eq!(
+        book.state.lock().gossip_cursor,
+        cursor,
+        "projecting the cache must not re-rotate the shared cursor"
+    );
+    assert_eq!(
+        book.gossip_at(10_000, tick),
+        legacy,
+        "shared cache keeps both replies stable until expiry"
+    );
+    // Same cached rows, overlay disabled: IP-only projection.
+    book.set_addrv2_gossip(false, false);
+    assert_eq!(book.gossip_addrv2_at(10_000, tick).len(), 5);
+    // After TTL expiry both projections refresh from one new selection.
+    let refreshed = book.gossip_addrv2_at(10_000, tick + GOSSIP_CACHE_TTL);
+    assert_eq!(refreshed.len(), 5);
+    assert_eq!(book.gossip_at(10_000, tick + GOSSIP_CACHE_TTL).len(), 6);
+}
+
+#[test]
+fn gossip_addrv2_rotates_successive_replies_and_caches_within_ttl() {
+    let book = book();
+    for n in 1..200 {
+        book.learn_dns("seed", &[addr(n)], 10_000);
+        if book.len() == 64 {
+            break;
+        }
+    }
+    assert_eq!(book.len(), 64);
+    let tick = Instant::now();
+    let before = book.state.lock().revision;
+    let first = book.gossip_addrv2_at(10_000, tick);
+    assert_eq!(first.len(), 32);
+    assert_eq!(book.state.lock().revision, before);
+    assert_eq!(
+        book.gossip_addrv2_at(10_000, tick),
+        first,
+        "repeats within the TTL are served from the cache without advancing rotation"
+    );
+    let second = book.gossip_addrv2_at(10_100, tick + GOSSIP_CACHE_TTL);
+    assert_ne!(
+        first, second,
+        "successive addrv2 rounds must rotate, not replay the first insertion-order records"
+    );
+    let endpoints =
+        |rows: &[bitcoin::p2p::address::AddrV2Message]| -> std::collections::HashSet<PeerEndpoint> {
+            rows.iter()
+                .map(|row| crate::endpoint::endpoint_from_addrv2(row).expect("addrv2 round-trips"))
+                .collect()
+        };
+    let first_set = endpoints(&first);
+    let second_set = endpoints(&second);
+    assert!(
+        first_set.is_disjoint(&second_set),
+        "two full 32-row windows over 64 records must not overlap"
+    );
+    assert_eq!(first_set.len() + second_set.len(), 64);
+    assert_eq!(
+        book.gossip_addrv2_at(10_100, tick + 2 * GOSSIP_CACHE_TTL),
+        first,
+        "rotation wraps fairly after a full cycle"
+    );
+    assert_eq!(book.state.lock().revision, before, "cache is not persisted");
+}
+
+#[test]
+fn gossip_addrv2_applies_current_overlay_filtering_per_reply() {
+    let book = book();
+    for n in 1..10 {
+        book.learn_dns("seed", &[addr(n)], 10_000);
+    }
+    let tor = PeerEndpoint::TorV3 {
+        key: [7; 32],
+        port: 8333,
+    };
+    let i2p = PeerEndpoint::I2p {
+        hash: [9; 32],
+        port: 8333,
+    };
+    book.learn_dns("seed", &[tor, i2p], 10_000);
+    assert!(book.state.lock().by_addr.contains_key(&tor));
+    assert!(book.state.lock().by_addr.contains_key(&i2p));
+    let tick = Instant::now();
+    let ip_only = book.gossip_addrv2_at(10_000, tick);
+    assert_ne!(ip_only.len(), 0);
+    assert!(
+        ip_only.iter().all(|row| matches!(
+            row.addr,
+            bitcoin::p2p::address::AddrV2::Ipv4(_) | bitcoin::p2p::address::AddrV2::Ipv6(_)
+        )),
+        "without overlay transports only IP rows are gossiped"
+    );
+    book.set_addrv2_gossip(true, false);
+    let with_tor = book.gossip_addrv2_at(10_000, tick);
+    assert!(
+        with_tor.iter().any(|row| matches!(
+            &row.addr,
+            bitcoin::p2p::address::AddrV2::TorV3(key) if *key == [7; 32]
+        )),
+        "enabling Tor applies on the next reply, not after the TTL"
+    );
+    assert!(
+        with_tor
+            .iter()
+            .all(|row| !matches!(row.addr, bitcoin::p2p::address::AddrV2::I2p(_))),
+        "unconfigured I2P stays filtered"
+    );
+    book.set_addrv2_gossip(true, true);
+    let with_both = book.gossip_addrv2_at(10_000, tick);
+    assert!(with_both.iter().any(|row| matches!(
+        &row.addr,
+        bitcoin::p2p::address::AddrV2::TorV3(key) if *key == [7; 32]
+    )));
+    assert!(with_both.iter().any(|row| matches!(
+        &row.addr,
+        bitcoin::p2p::address::AddrV2::I2p(hash) if *hash == [9; 32]
+    )));
+    book.set_addrv2_gossip(false, false);
+    let ip_again = book.gossip_addrv2_at(10_000, tick);
+    assert!(
+        ip_again.iter().all(|row| matches!(
+            row.addr,
+            bitcoin::p2p::address::AddrV2::Ipv4(_) | bitcoin::p2p::address::AddrV2::Ipv6(_)
+        )),
+        "disabling overlays drops them on the next reply"
+    );
+    for reply in [&ip_only, &with_tor, &with_both, &ip_again] {
+        assert!(reply.len() <= MAX_GOSSIP, "gossip cap preserved");
+    }
+}
+
+#[test]
 fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
     let book = book();
     book.learn_dns("seed", &[addr(1)], 10_000);
-    let other = SocketAddr::new(addr(1).ip(), 18333);
+    let other = PeerEndpoint::new(addr(1).address(), 18333);
     // A vacant different new slot is needed for both same-group records.
     let candidate = (1..65535)
-        .map(|port| SocketAddr::new(other.ip(), port))
+        .map(|port| PeerEndpoint::new(other.address(), port))
         .find(|&candidate| {
             if candidate == addr(1) {
                 return false;
@@ -392,16 +561,16 @@ fn oracle_book() -> Arc<AddressBook> {
 fn source(n: u8) -> Source {
     Source::Ip(Ipv4Addr::new(1, n, 1, 1).into())
 }
-fn target() -> SocketAddr {
+fn target() -> PeerEndpoint {
     "8.8.8.8:8333".parse().expect("target")
 }
-fn refs(manager: &Manager, addr: SocketAddr) -> usize {
+fn refs(manager: &Manager, addr: PeerEndpoint) -> usize {
     manager
         .by_addr
         .get(&addr)
         .map_or(0, |index| manager.stored.records[*index].new_buckets.len())
 }
-fn add_ref(manager: &mut Manager, addr: SocketAddr, source: &Source, seen: u64) {
+fn add_ref(manager: &mut Manager, addr: PeerEndpoint, source: &Source, seen: u64) {
     for _ in 0..4096 {
         if manager.learn(addr, Some(9), source.clone(), seen, EPOCH, 0) {
             return;
@@ -415,17 +584,17 @@ fn assert_indexes(manager: &Manager) {
     assert_eq!(manager.by_addr.len(), manager.stored.records.len());
     let mut count = 0;
     for (index, entry) in manager.stored.records.iter().enumerate() {
-        assert_eq!(manager.by_addr.get(&entry.addr), Some(&index));
+        assert_eq!(manager.by_addr.get(&entry.endpoint), Some(&index));
         if entry.tried {
             assert_eq!(
-                manager.tried[manager.tried_slot(entry.addr)],
+                manager.tried[manager.tried_slot(entry.endpoint)],
                 u32::try_from(index).expect("index")
             );
             count += 1;
         } else {
             for bucket in &entry.new_buckets {
                 assert_eq!(
-                    manager.new[manager.new_slot(entry.addr, usize::from(*bucket))],
+                    manager.new[manager.new_slot(entry.endpoint, usize::from(*bucket))],
                     u32::try_from(index).expect("index")
                 );
                 count += 1;
@@ -454,9 +623,9 @@ fn placement_matches_68_unmodified_core_vectors() {
         let ip = row["address"]
             .as_str()
             .expect("address")
-            .parse()
+            .parse::<IpAddr>()
             .expect("IP");
-        let addr = canonical(SocketAddr::new(
+        let addr = canonical(PeerEndpoint::new(
             ip,
             u16::try_from(row["port"].as_u64().expect("port")).expect("port"),
         ));
@@ -467,7 +636,9 @@ fn placement_matches_68_unmodified_core_vectors() {
             Source::Ip(origin.parse().expect("source IP"))
         };
         assert_eq!(
-            NetGroups::default().group(addr.ip()).to_lower_hex_string(),
+            NetGroups::default()
+                .group(addr.address())
+                .to_lower_hex_string(),
             row["address_group_hex"].as_str().expect("group")
         );
         assert_eq!(
@@ -517,7 +688,7 @@ fn health_matches_71_actual_core_boundaries_and_probabilities() {
     for row in data["rows"].as_array().expect("rows") {
         let entry = Candidate {
             creation_id: 0,
-            addr: target(),
+            endpoint: target(),
             services: Some(9),
             source: source(1),
             last_seen: row["seen"].as_u64().expect("seen"),
@@ -570,7 +741,7 @@ fn corroboration_ref_cap_dirty_membership_and_promotion_follow_core() {
 
 #[test]
 fn new_collision_removes_only_one_reference_and_preserves_pending_identity() {
-    let other: SocketAddr = "8.8.9.89:8333".parse().expect("Core collision");
+    let other: PeerEndpoint = "8.8.9.89:8333".parse().expect("Core collision");
     for extra_ref in [false, true] {
         let book = oracle_book();
         let mut manager = book.state.lock();
@@ -642,13 +813,25 @@ fn gossip_time_penalty_and_source_self_exception_follow_core() {
         EPOCH + 3601,
         "time update before freshness test"
     );
-    let local: SocketAddr = "9.9.9.9:8333".parse().expect("addr");
-    manager.learn(local, Some(9), Source::Ip(local.ip()), EPOCH, EPOCH, 7200);
+    let local: PeerEndpoint = "9.9.9.9:8333".parse().expect("addr");
+    manager.learn(
+        local,
+        Some(9),
+        Source::Ip(
+            local
+                .address()
+                .ip()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        ),
+        EPOCH,
+        EPOCH,
+        7200,
+    );
     assert_eq!(
         manager.stored.records[*manager.by_addr.get(&local).expect("self")].last_seen,
         EPOCH
     );
-    let floor: SocketAddr = "11.11.11.11:8333".parse().expect("addr");
+    let floor: PeerEndpoint = "11.11.11.11:8333".parse().expect("addr");
     manager.learn(floor, Some(9), source(3), 100, 100, 7200);
     assert_eq!(
         manager.stored.records[*manager.by_addr.get(&floor).expect("floor")].last_seen,
@@ -689,16 +872,16 @@ fn policy_callbacks_run_unlocked_and_selection_rechecks_pending() {
 fn one_source_flood_is_bucket_bounded_and_retains_legitimate_peers() {
     let book = oracle_book();
     let mut manager = book.state.lock();
-    let retained: SocketAddr = "9.9.9.9:8333".parse().expect("peer");
+    let retained: PeerEndpoint = "9.9.9.9:8333".parse().expect("peer");
     manager.learn(retained, Some(9), source(2), EPOCH, EPOCH, 0);
-    let proven: SocketAddr = "7.7.7.7:8333".parse().expect("peer");
+    let proven: PeerEndpoint = "7.7.7.7:8333".parse().expect("peer");
     manager.learn(proven, Some(9), source(3), EPOCH, EPOCH, 0);
     let proven_index = *manager.by_addr.get(&proven).expect("known");
     manager.stored.records[proven_index].last_success = EPOCH;
     manager.promote(proven);
     for index in 0..32_768_u32 {
         let bytes = index.to_be_bytes();
-        let peer = SocketAddr::from(([8, bytes[2], bytes[3], 1], 8333));
+        let peer = PeerEndpoint::from(([8, bytes[2], bytes[3], 1], 8333));
         manager.learn(peer, Some(0), source(1), EPOCH, EPOCH, 0);
     }
     let malicious: Vec<_> = manager
@@ -721,7 +904,7 @@ fn one_source_flood_is_bucket_bounded_and_retains_legitimate_peers() {
     assert!(manager.stored.records[*manager.by_addr.get(&proven).expect("retained")].tried);
     let accepted = (1..=255).any(|n| {
         manager.learn(
-            SocketAddr::from(([11, n, 1, 1], 8333)),
+            PeerEndpoint::from(([11, n, 1, 1], 8333)),
             Some(9),
             source(4),
             EPOCH,
@@ -739,95 +922,6 @@ fn fixture_bytes(value: &serde_json::Value) -> Vec<u8> {
     bytes.extend_from_slice(&hash);
     bytes
 }
-fn old_fixture() -> serde_json::Value {
-    serde_json::json!({"version":1,"magic":[1,1,1,1],"secret":vec![1;32],"records":[{
-        "addr":"8.8.8.8:8333","services":9,"source_group":(1_u64<<48)|0x0101,"source_ip":"1.1.1.1",
-        "last_seen":EPOCH,"last_attempt":EPOCH-1,"last_success":0,"failures":3,"tried":false
-    }]})
-}
-
-#[test]
-fn v1_migration_backs_up_exact_scoped_or_legacy_bytes_and_preserves_recovery() {
-    for scoped in [false, true] {
-        let dir = tempfile::tempdir().expect("dir");
-        let base = dir.path().join("peers.dat");
-        let source = if scoped {
-            network_path(&base, [1; 4])
-        } else {
-            base.clone()
-        };
-        let bytes = fixture_bytes(&old_fixture());
-        fs::write(&source, &bytes).expect("old operator book");
-        let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert_eq!(restored.len(), 1);
-        assert_eq!(
-            restored.select(&[], &[], EPOCH, u64::MAX, |_| true),
-            Some(target()),
-            "failed knowledge still selectable with DNS off"
-        );
-        let backups: Vec<_> = fs::read_dir(dir.path())
-            .expect("entries")
-            .map(|entry| entry.expect("entry").path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "bak"))
-            .collect();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(fs::read(&backups[0]).expect("backup"), bytes);
-        {
-            let manager = restored.state.lock();
-            let entry = &manager.stored.records[0];
-            assert_eq!(entry.failures, 3);
-            assert_eq!(entry.last_attempt, 0);
-            assert_eq!(entry.last_count_attempt, 0);
-            assert_eq!(manager.last_good, 1);
-            assert_indexes(&manager);
-        }
-        let retry = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(
-            retry.state.lock().writable,
-            "matching durable backup is reusable before first migration publication"
-        );
-        assert_eq!(retry.len(), 1);
-        restored.save();
-        if !scoped {
-            assert_eq!(fs::read(&source).expect("legacy retained"), bytes);
-        }
-        let again = AddressBook::open(Some(base), [1; 4], false, None);
-        assert_eq!(again.len(), 1);
-        assert_eq!(again.state.lock().stored.version, VERSION);
-    }
-}
-
-#[test]
-fn migration_backup_failure_and_unknown_child_schemas_preserve_operator_files() {
-    use bitcoin::hex::DisplayHex as _;
-    let dir = tempfile::tempdir().expect("dir");
-    let base = dir.path().join("peers.dat");
-    let path = network_path(&base, [1; 4]);
-    let bytes = fixture_bytes(&old_fixture());
-    fs::write(&path, &bytes).expect("old");
-    let digest = Sha256::digest(&bytes);
-    let backup = path.with_extension(format!("v1-{}.bak", digest[..].to_lower_hex_string()));
-    fs::create_dir(&backup).expect("unusable backup");
-    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-    assert_eq!(book.len(), 1);
-    assert!(!book.state.lock().writable);
-    book.learn_dns("seed", &[addr(8)], EPOCH);
-    book.save();
-    assert_eq!(fs::read(&path).expect("preserved"), bytes);
-    for version in [2, 3, 4, 7, 99] {
-        let mut value = old_fixture();
-        value["version"] = version.into();
-        value["anchors"] = serde_json::json!([{"addr":"8.8.8.8:8333","confirmed_at":EPOCH}]);
-        let bytes = fixture_bytes(&value);
-        fs::write(&path, &bytes).expect("unknown");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(!book.state.lock().writable);
-        book.learn_dns("seed", &[addr(9)], EPOCH);
-        book.save();
-        assert_eq!(fs::read(&path).expect("preserved"), bytes);
-    }
-}
-
 #[test]
 fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() {
     let dir = tempfile::tempdir().expect("dir");
@@ -897,7 +991,7 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
         let bucket = usize::from(manager.stored.records[0].new_buckets[0]);
         let slot = manager.new_slot(target(), bucket);
         let other = (1..=65535)
-            .map(|port| SocketAddr::new(target().ip(), port))
+            .map(|port| PeerEndpoint::new(target().address(), port))
             .find(|candidate| {
                 *candidate != target() && manager.new_slot(*candidate, bucket) == slot
             })
@@ -917,7 +1011,7 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
             assert_eq!(manager.select(&[true], EPOCH), Some(target()));
         }
         assert!(!manager.learn(
-            SocketAddr::from(([0, 0, 0, 0], 0)),
+            PeerEndpoint::from(([0, 0, 0, 0], 0)),
             Some(9),
             origin.clone(),
             EPOCH,
@@ -935,9 +1029,9 @@ fn stale_future_and_outage_candidates_survive_until_actual_new_slot_replacement(
 fn capacity_and_file_budget_have_explicit_bounded_representations() {
     let entry = Candidate {
         creation_id: 0,
-        addr: "2fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        endpoint: "2fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
             .parse::<IpAddr>()
-            .map(|ip| SocketAddr::new(ip, u16::MAX))
+            .map(|ip| PeerEndpoint::new(ip, u16::MAX))
             .expect("IP"),
         services: Some(u64::MAX),
         source: Source::Internal([255; 10]),
@@ -1030,7 +1124,7 @@ fn assert_core_operation(manager: &Manager, case: &str, accepted: Option<bool>) 
         let seen = entry.map_or(-1, |entry| i64::try_from(entry.last_seen).expect("seen"));
         assert_eq!(seen, expected["seen"].as_i64().expect("seen"), "{case}");
         if let Some(present) = expected["other_present"].as_bool() {
-            let other = "8.8.9.89:8333".parse().expect("collider");
+            let other = crate::parse_endpoint("8.8.9.89:8333").expect("collider");
             assert_eq!(manager.by_addr.contains_key(&other), present, "{case}");
             assert_eq!(
                 refs(manager, other),
@@ -1064,7 +1158,7 @@ fn all_24_addsingle_attempt_good_observations_match_actual_core() {
         assert_core_operation(&manager, &format!("source-{n}"), Some(accepted));
     }
     drop(manager);
-    let other = "8.8.9.89:8333".parse().expect("collider");
+    let other = crate::parse_endpoint("8.8.9.89:8333").expect("collider");
     let book = oracle_book();
     let mut manager = book.state.lock();
     manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
@@ -1123,7 +1217,7 @@ fn all_24_addsingle_attempt_good_observations_match_actual_core() {
 
 fn actual_core_attempt_good_sequence() {
     let book = oracle_book();
-    let other: SocketAddr = "9.9.9.9:8333".parse().expect("peer");
+    let other: PeerEndpoint = "9.9.9.9:8333".parse().expect("peer");
     {
         let mut manager = book.state.lock();
         manager.learn(target(), Some(0), source(1), EPOCH - 1000, EPOCH, 0);
@@ -1161,7 +1255,7 @@ fn actual_core_attempt_good_sequence() {
     );
 }
 
-fn ring_manager(second_port: u16) -> (Manager, SocketAddr, SocketAddr) {
+fn ring_manager(second_port: u16) -> (Manager, PeerEndpoint, PeerEndpoint) {
     let data: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/data/core-addrman-ring-v31.1.json"
     ))
@@ -1179,10 +1273,15 @@ fn ring_manager(second_port: u16) -> (Manager, SocketAddr, SocketAddr) {
             .iter()
             .find(|row| row["port"] == port)
             .expect("Core endpoint");
-        let peer = SocketAddr::new(
-            row["address"].as_str().expect("ip").parse().expect("ip"),
+        let peer = PeerEndpoint::new(
+            row["address"]
+                .as_str()
+                .expect("ip")
+                .parse::<IpAddr>()
+                .expect("ip"),
             port,
-        );
+        )
+        .into();
         assert!(manager.learn(peer, Some(9), source(1), EPOCH, EPOCH, 0));
         let bucket = usize::try_from(row["new_bucket"].as_u64().expect("bucket")).expect("bucket");
         assert_eq!(
@@ -1282,7 +1381,7 @@ fn table_choice_is_half_even_when_new_health_is_bad_and_selection_work_is_bounde
         .stored
         .records
         .iter()
-        .map(|entry| entry.addr == bad)
+        .map(|entry| entry.endpoint == bad)
         .collect();
     for _ in 0..1000 {
         assert_eq!(manager.select(&eligible, EPOCH), Some(bad));
@@ -1297,7 +1396,7 @@ fn table_choice_is_half_even_when_new_health_is_bad_and_selection_work_is_bounde
     );
 }
 
-fn core_mapped_alias() -> SocketAddr {
+fn core_mapped_alias() -> PeerEndpoint {
     let data: serde_json::Value =
         serde_json::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
             .expect("actual Core identity vectors");
@@ -1316,7 +1415,7 @@ fn core_mapped_alias() -> SocketAddr {
         row("8.8.8.8")["endpoint_key_hex"],
         row("::ffff:8.8.8.8")["endpoint_key_hex"]
     );
-    let alias: SocketAddr = "[::ffff:8.8.8.8]:8333".parse().expect("mapped endpoint");
+    let alias: PeerEndpoint = "[::ffff:8.8.8.8]:8333".parse().expect("mapped endpoint");
     assert_eq!(endpoint_key(alias), endpoint_key(target()));
     alias
 }
@@ -1400,7 +1499,7 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
     let book = oracle_book();
     book.learn_dns("seed", &[target()], EPOCH);
     assert_eq!(book.select(&[alias], &[], EPOCH, u64::MAX, |_| true), None);
-    let different_port = SocketAddr::new(alias.ip(), 8334);
+    let different_port = PeerEndpoint::new(alias.address(), 8334);
     assert_eq!(
         book.select(&[different_port], &[], EPOCH, u64::MAX, |_| true),
         Some(target()),
@@ -1411,7 +1510,7 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         None,
         "outbound diversity still excludes the group"
     );
-    let linked: SocketAddr = "[2002:0808:0808::1]:8333"
+    let linked: PeerEndpoint = "[2002:0808:0808::1]:8333"
         .parse()
         .expect("different IPv6 transport endpoint");
     assert_ne!(endpoint_key(linked), endpoint_key(target()));
@@ -1421,6 +1520,135 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
         "linked IPv4 grouping never rewrites a real IPv6 endpoint identity"
     );
 }
+
+#[test]
+fn overlay_identity_anonymous_tor_gossip_learns_nothing() {
+    let book = book();
+    let anon =
+        crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(77));
+    book.learn_peer(anon, &[(addr(1), 9, 10_000)], 10_000);
+    assert_eq!(
+        book.len(),
+        0,
+        "anonymous Tor gossip must learn nothing: no forwarder/proxy source"
+    );
+    assert!(
+        book.state.lock().stored.records.is_empty(),
+        "anonymous source consumes no bucket state"
+    );
+}
+
+#[test]
+fn overlay_identity_identified_tor_learns_typed_source() {
+    let book = book();
+    let tor = PeerEndpoint::TorV3 {
+        key: [7u8; 32],
+        port: 8333,
+    };
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(tor),
+        &[(addr(1), 9, 10_000)],
+        10_000,
+    );
+    assert_eq!(book.len(), 1, "identified Tor gossip must be learned");
+    let entry = book.state.lock().stored.records[0].clone();
+    assert_eq!(entry.endpoint, addr(1));
+    assert_eq!(
+        entry.source,
+        Source::Overlay(tor.address()),
+        "Tor gossip source must be typed Overlay, never proxy Ip"
+    );
+    assert!(
+        !matches!(&entry.source, Source::Ip(ip) if ip.is_loopback()),
+        "Tor source must never be a loopback Ip"
+    );
+}
+
+#[test]
+fn overlay_identity_identified_i2p_learns_typed_source() {
+    let book = book();
+    let i2p = PeerEndpoint::I2p {
+        hash: [9u8; 32],
+        port: 7656,
+    };
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(i2p),
+        &[(addr(1), 9, 10_000)],
+        10_000,
+    );
+    assert_eq!(book.len(), 1, "identified I2P gossip must be learned");
+    let entry = book.state.lock().stored.records[0].clone();
+    assert_eq!(entry.endpoint, addr(1));
+    assert_eq!(
+        entry.source,
+        Source::Overlay(i2p.address()),
+        "I2P gossip source must be SAM-attested Overlay, never proxy Ip"
+    );
+    assert!(
+        !matches!(&entry.source, Source::Ip(ip) if ip.is_loopback()),
+        "I2P source must never be a loopback Ip"
+    );
+}
+
+#[test]
+fn overlay_identity_no_loopback_proxy_ip_in_learn() {
+    let book = book();
+    let loopback: PeerEndpoint =
+        std::net::SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8333).into();
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(loopback, 9, 10_000)],
+        10_000,
+    );
+    assert_eq!(
+        book.len(),
+        0,
+        "loopback gossip addresses must never enter learn"
+    );
+    let anon =
+        crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(78));
+    book.learn_peer(anon, &[(addr(1), 9, 10_000)], 10_000);
+    assert_eq!(
+        book.len(),
+        0,
+        "anonymous Tor gossip must learn nothing even for routable addresses"
+    );
+}
+
+#[test]
+fn i2p_port_zero_is_routable_and_gossiped_while_ip_tor_zero_are_not() {
+    use std::time::Instant;
+    let book = book();
+    let i2p_zero = PeerEndpoint::I2p {
+        hash: [9u8; 32],
+        port: 0,
+    };
+    let tor_zero = PeerEndpoint::TorV3 {
+        key: [3u8; 32],
+        port: 0,
+    };
+    let ip_zero: PeerEndpoint = PeerEndpoint::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 0);
+    book.learn_dns("seed", &[i2p_zero, tor_zero, ip_zero], 10_000);
+    assert!(
+        book.state.lock().by_addr.contains_key(&i2p_zero),
+        "Core-form I2P :0 must be admitted"
+    );
+    assert!(
+        !book.state.lock().by_addr.contains_key(&tor_zero),
+        "TorV3 :0 must stay unroutable"
+    );
+    assert!(
+        !book.state.lock().by_addr.contains_key(&ip_zero),
+        "IP :0 must stay unroutable"
+    );
+    book.set_addrv2_gossip(false, true);
+    let tick = Instant::now();
+    let rows = book.gossip_addrv2_at(10_000, tick);
+    assert!(
+        rows.iter().any(|row| matches!(&row.addr, bitcoin::p2p::address::AddrV2::I2p(hash) if *hash == [9u8; 32]) && row.port == 0),
+        "admitted I2P :0 must be gossiped with its explicit zero port"
+    );
+}
 mod asmap_tests;
 
 mod probe_tests;
@@ -1428,3 +1656,7 @@ mod probe_tests;
 mod eligibility_tests;
 
 mod services_tests;
+
+mod overlay_destinations;
+
+mod persistence;

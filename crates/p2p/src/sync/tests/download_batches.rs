@@ -1,5 +1,7 @@
 use super::*;
 
+use bitcoin_rs_primitives::BlockPayload;
+
 #[test]
 fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch() -> TestResult {
     let mut tree = BlockTree::new();
@@ -34,7 +36,10 @@ fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch() -> TestR
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -79,7 +84,10 @@ fn second_tick_does_not_re_request_already_pending_blocks() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx: _inbound_blocks_tx,
     } = SyncHarness::new(tree);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -114,7 +122,10 @@ fn second_tick_does_not_re_request_already_pending_blocks() -> TestResult {
 #[test]
 fn successful_getdata_send_marks_requested_blocks_pending() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -144,12 +155,12 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals() -> T
     let received_at = Instant::now()
         .checked_sub(super::super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    let staged =
-        sync.scheduler
-            .lock()
-            .stager
-            .insert(hash, None, block, serialized, None, received_at);
+    let payload = BlockPayload::from_local(block);
+    let staged = sync
+        .scheduler
+        .lock()
+        .stager
+        .insert(hash, None, payload, None, received_at);
     let StagedBlock::Memory { bytes, .. } = staged else {
         return Err(std::io::Error::other("test block should stage in memory").into());
     };
@@ -174,7 +185,10 @@ fn tick_respects_pending_byte_budget() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -198,7 +212,10 @@ fn tick_limits_inflight_per_peer() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -359,10 +376,10 @@ fn ineligible_peers_receive_no_block_requests_during_fanout() -> TestResult {
         "a peer that misses the request timeout must release its outbound slot"
     );
     assert!(
-        sync.scheduler
-            .lock()
-            .window
-            .peer_in_staller_cooldown(test_addr(9250, 0)?, Instant::now()),
+        sync.scheduler.lock().window.peer_in_staller_cooldown(
+            crate::PeerSource::for_test(test_addr(9250, 0)?),
+            Instant::now()
+        ),
         "a timed-out peer must not immediately reacquire the same block stripe"
     );
 

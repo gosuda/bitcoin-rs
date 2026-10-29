@@ -16,16 +16,12 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_primitives::Block;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -36,7 +32,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(any(test, feature = "test-seam"))]
+#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use storage::NodeStorage;
@@ -91,6 +87,18 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
+// Bounds the bytes retained for BIP331 `pkgtxns` bodies between the listener
+// threads and the single ingress consumer: the encoded frames queued on the
+// channel above plus each package's planned decoded heap. One package is at
+// most `MAX_PACKAGE_WEIGHT` weight units, so a full channel of them is the
+// cap. It is a charged lower-bound ledger of what the decoder requests, not a
+// physical heap ceiling: allocator rounding stays outside it.
+pub(crate) const PACKAGE_INGRESS_MAX_BYTES: u64 =
+    1_024 * bitcoin_rs_mempool::standardness::MAX_PACKAGE_WEIGHT;
+
+const _: () = assert!(PACKAGE_INGRESS_MAX_BYTES == 413_696_000);
+const _: () = assert!(INBOUND_TX_CHANNEL_LIMIT == 1_024);
+
 /// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
@@ -107,8 +115,11 @@ pub struct NodeState {
     p2p: Arc<bitcoin_rs_p2p::P2pService>,
     /// Node-owned P2P-to-mempool ingress bridge. Unlike the service-owned
     /// header/block channels, this receiver is drained by node orchestration.
-    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
-    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
+    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
+    /// The one ledger of retained `pkgtxns` bytes, shared by every listener
+    /// thread and the ingress consumer.
+    package_capacity: bitcoin_rs_p2p::PackageCapacity,
     /// The transition domain minted for this node.
     ///
     /// Composition splits it: chainstate holds the mutation role, and every
@@ -258,13 +269,6 @@ impl NodeState {
         self.followers.block_log_reader()
     }
 
-    /// Returns the shared block-records handle exposed to RPC handlers.
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
-        Arc::clone(self.followers.block_log())
-    }
-
     /// Returns a durable block body reader for metadata-only block records.
     pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
         let store = self
@@ -300,16 +304,22 @@ impl NodeState {
     }
 
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
-    /// transactions into for mempool admission.
-    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundTx> {
+    /// transactions and charged package frames into for mempool admission.
+    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
-    /// Takes the inbound transaction receiver for the single ingress consumer.
+    /// Takes the inbound body receiver for the single ingress consumer.
     /// Returns `None` if the receiver has already been claimed.
     #[must_use]
-    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
+    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundBody>> {
         self.inbound_tx_rx.lock().take()
+    }
+
+    /// Returns the shared ledger of retained `pkgtxns` bytes.
+    #[must_use]
+    pub fn package_capacity(&self) -> bitcoin_rs_p2p::PackageCapacity {
+        self.package_capacity.clone()
     }
 
     /// Takes the block announcement receiver for worker execution.
@@ -328,13 +338,6 @@ impl NodeState {
     #[must_use]
     pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
-    }
-
-    /// Returns the process-wide shutdown signal shared by all runtime workers.
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn shutdown(&self) -> Arc<AtomicBool> {
-        self.chainstate.shutdown_handle()
     }
 
     /// Returns a read-only capability to observe the process-wide shutdown signal.
@@ -370,17 +373,18 @@ impl NodeState {
         self.followers.clone()
     }
 
-    /// Synthetically applies `block` as the next tip after consensus checks.
+    /// Synthetically applies `payload` as the next tip after consensus checks.
     ///
     /// Holds the chain transition through follower dispatch (`ARCH-07`).
     /// A post-commit settlement failure remains distinguishable in
     /// [`crate::ConnectMutationError`] and retains the authoritative outcome.
+    /// Exactness is owned by the [`BlockPayload`] constructor; no re-encode.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        block: &Block,
+        payload: &bitcoin_rs_primitives::BlockPayload,
     ) -> core::result::Result<TipSnapshot, crate::chain_effects::ConnectMutationError> {
-        let outcome = self.followers.apply_connect(&self.chainstate, block)?;
+        let outcome = self.followers.apply_connect(&self.chainstate, payload)?;
         Ok(outcome.tip)
     }
 
@@ -440,6 +444,18 @@ impl NodeState {
             let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
             q
         })
+    }
+
+    /// Returns the node-owned historical query adapter when any index capability is enabled.
+    ///
+    /// Capability selection stays with the engine: a tx-only node serves
+    /// historical transactions while script calls fail closed with the typed
+    /// disabled cause. A node with no index capability returns `None` so the
+    /// caller maps to the per-call disabled cause.
+    pub(crate) fn historical_index_adapter(
+        &self,
+    ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
+        self.derived_index.adapter().cloned()
     }
 
     /// Returns the optional compact-filter query owner for RPC and P2P.
@@ -512,6 +528,7 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
+    seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
 ) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
@@ -548,7 +565,31 @@ fn build_derived_index_open_spec(
         }),
         utxo: None,
         chain_transition: None,
+        bundle: index_bundle_directive(config)?,
+        seed_slot,
     }))
+}
+
+/// The portable-bundle action the operator asked for, or `None`.
+///
+/// Configuration validation already rejects both directories together; a
+/// caller that bypassed it is refused here rather than guessing which wins.
+fn index_bundle_directive(
+    config: &NodeConfig,
+) -> Result<bitcoin_rs_index::portable::IndexBundleDirective> {
+    use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
+    let request = |dir: &std::path::PathBuf| IndexBundleRequest {
+        dir: dir.clone(),
+        network: config.network,
+    };
+    match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
+        (None, None) => Ok(IndexBundleDirective::None),
+        (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
+        (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
+        (Some(_), Some(_)) => {
+            bail!("--index-bundle-import and --index-bundle-export are mutually exclusive")
+        }
+    }
 }
 
 struct DerivedIndexComposer {

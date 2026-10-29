@@ -48,6 +48,8 @@ use std::time::Duration;
 
 #[cfg(test)]
 use crate::PeerLease;
+#[cfg(test)]
+use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
@@ -271,9 +273,7 @@ impl PeerRelaySink {
 impl RelaySink for PeerRelaySink {
     fn poll(&self, gateway: &MempoolGateway) {
         use bitcoin::secp256k1::rand::SeedableRng as _;
-        let ibd = self.ibd.as_ref().is_some_and(|(latch, network)| {
-            latch.is_active(bitcoin_rs_primitives::unix_time_secs(), *network)
-        });
+        let ibd = crate::block_announce::ibd_active(self.ibd.as_ref());
         if !ibd {
             self.peers.poll_transaction_requests(gateway);
         }
@@ -452,7 +452,6 @@ mod tests {
     use bitcoin_rs_primitives::Hash256;
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
-    use std::net::SocketAddr;
     use std::sync::atomic::AtomicBool;
 
     /// A peer in the fake sink: a node id and a remaining send budget.
@@ -855,6 +854,7 @@ mod tests {
                     queue.clone(),
                     Arc::downgrade(&gateway),
                 )),
+                BodyInterest::Metadata,
             )
             .expect("observer slot");
         let sink = FakeSink::new(Vec::new());
@@ -930,6 +930,7 @@ mod tests {
     ) -> MutationEnvelope {
         MutationEnvelope {
             origin,
+            accepted_transactions: Vec::new(),
             result: bitcoin_rs_mempool::MutationResult {
                 changes: vec![bitcoin_rs_mempool::MutationChange { txid, outcome }],
                 sequence_base: 1,
@@ -950,14 +951,14 @@ mod tests {
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let gateway = Arc::new(MempoolGateway::new(
             pool,
-            Some(Arc::new(CompositeObserver::new())),
+            Some((Arc::new(CompositeObserver::new()), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
         let (queue, rx) = TxRelayQueue::new(8);
         let observer = Arc::new(LocalTxRelayObserver::new(queue, Arc::downgrade(&gateway)));
         gateway
-            .attach_observer_leg("relay", observer.clone())
+            .attach_observer_leg("relay", observer.clone(), BodyInterest::Metadata)
             .expect("observer slot");
         let mut last_txid = Txid::default();
         for (marker, origin, should_announce) in [
@@ -969,7 +970,8 @@ mod tests {
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
-                    addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    endpoint: Some(crate::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+                    addr: Some(crate::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
                     connection_id: 7,
                 }),
                 false,
@@ -1094,7 +1096,8 @@ mod tests {
     }
     fn relay_identity_peer() -> AdmissionOrigin {
         AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
-            addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+            endpoint: Some(crate::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+            addr: Some(crate::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             connection_id: 7,
         })
     }
@@ -1105,7 +1108,7 @@ mod tests {
             Arc::new(parking_lot::RwLock::new(Mempool::new(
                 MempoolLimits::default(),
             ))),
-            Some(Arc::new(CompositeObserver::new())),
+            Some((Arc::new(CompositeObserver::new()), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ))
@@ -1153,12 +1156,14 @@ mod tests {
                     next: Mutex::new(Some(MempoolEntry::new(next, 100, 10_000, 2, 0, 0))),
                     clear_first,
                 }),
+                BodyInterest::Metadata,
             )
             .expect("fixture observer slot");
         gateway
             .attach_observer_leg(
                 "relay",
                 Arc::new(LocalTxRelayObserver::new(relay, Arc::downgrade(&gateway))),
+                BodyInterest::Metadata,
             )
             .expect("relay observer slot");
         gateway
@@ -1233,6 +1238,7 @@ mod tests {
             .attach_observer_leg(
                 "relay",
                 Arc::new(LocalTxRelayObserver::new(relay, Arc::downgrade(&gateway))),
+                BodyInterest::Metadata,
             )
             .expect("observer slot");
         let original = relay_identity_tx();

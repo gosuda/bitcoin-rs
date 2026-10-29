@@ -22,15 +22,22 @@ impl BlockSync {
     /// zero-length available connect prefix guarantees no mutation. Keeping
     /// this as one authority avoids a pre-check that can disagree with the
     /// transition witness.
-    pub(super) fn switch_branch_if_outweighed(&self) {
-        let Some(target) = self.outweighed_branch_target() else {
-            return;
-        };
+    ///
+    /// Returns the valid header tip a failed connect's invalidation moved
+    /// onto another branch (`ReorgError::ConnectFailed::demoted_tip`), the
+    /// chain-owned fact a stale-tip retainer records. `None` when no switch
+    /// ran, the switch committed, or the failure displaced no valid tip.
+    /// Header admission reports its own displacement through
+    /// `HeaderAdmission::Accepted::demoted_tip`, so a committed switch has
+    /// nothing further to report.
+    pub(super) fn switch_branch_if_outweighed(&self) -> Option<Hash256> {
+        let target = self.outweighed_branch_target()?;
         let outcome = self.chain.switch_to_branch(
             target,
             &mut |hash| self.scheduler.lock().stager.staged_body(hash),
             &mut |hash| self.retire_applied_reorg_body(hash),
         );
+        let mut displaced = None;
         match outcome {
             Ok(()) => {
                 let height = self.chain.applied_tip().map_or(0, |tip| tip.height);
@@ -61,8 +68,10 @@ impl BlockSync {
                 hash,
                 disposition,
                 invalidated,
+                demoted_tip,
                 ..
             }) => {
+                displaced = demoted_tip;
                 // Capture the delivering connection before the purge drops
                 // the staged entry that carries it.
                 let failed_source = self.scheduler.lock().stager.staged_source(&hash);
@@ -122,6 +131,7 @@ impl BlockSync {
                 tracing::warn!(%error, "block sync: branch switch failed");
             }
         }
+        displaced
     }
 
     pub(super) fn retire_applied_reorg_body(&self, hash: Hash256) {

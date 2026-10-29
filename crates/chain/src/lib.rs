@@ -42,9 +42,9 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    HeaderAdmission, HeaderValidationMode, accept_headers, block_work, compact_is_met_by,
-    current_unix_seconds, permitted_difficulty_transition, validate_contextual_header,
-    validate_pow,
+    AcceptHeaders, HeaderAdmission, HeaderValidationMode, accept_headers, block_work,
+    compact_is_met_by, current_unix_seconds, permitted_difficulty_transition,
+    validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
@@ -74,7 +74,7 @@ pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,
 };
-pub use tree::BlockTree;
+pub use tree::{BlockTree, InvalidationOutcome};
 pub use view::{BlockTreeReader, LatchReader, TipReader};
 
 /// A caller-owned bound on fallback ancestor parent hops was exhausted.

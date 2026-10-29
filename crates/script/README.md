@@ -1,3 +1,5 @@
+# bitcoin-rs-script
+
 `Interpreter::execute_with_prevouts` verifies one input under a `VerifyFlags`
 set, taking one spent output per input in transaction order (flags parseable
 from Core test-vector strings with `VerifyFlags::from_core_names`). The opcode evaluator covers legacy and P2SH.

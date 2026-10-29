@@ -1,5 +1,7 @@
 use super::*;
 
+use bitcoin_rs_primitives::BlockPayload;
+
 #[test]
 fn process_epoch_is_strictly_monotonic_across_restart() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -63,7 +65,7 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Resu
     let (tip, first_epoch) = {
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-        let tip = state.apply_block(&genesis)?;
+        let tip = state.apply_block(&BlockPayload::from_local(genesis))?;
         assert!(state.publish_checkpoint()?.is_some());
         (tip, state.chainstate().chain_snapshot().epoch)
     };

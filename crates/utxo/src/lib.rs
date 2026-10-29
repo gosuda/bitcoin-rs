@@ -46,6 +46,8 @@ mod undo_codec;
 pub use overlay::{WindowOverlay, WindowOverlayError};
 pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoReader, UtxoScan, UtxoSet, UtxoSetView};
 pub use snapshot::{
-    SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, read_snapshot_strict_v4,
-    read_snapshot_strict_v4_observed, write_snapshot_observed,
+    OfferOutcome, RawSeedError, SeedOfferCell, SeedProvenance, SeedSlot, SnapshotCoin,
+    SnapshotCoinObserver, SnapshotLoad, V4Witness, VerifiedSnapshotArtifact,
+    read_snapshot_strict_v4, read_snapshot_strict_v4_observed, read_snapshot_strict_v4_witnessed,
+    write_snapshot_observed, write_snapshot_witnessed,
 };

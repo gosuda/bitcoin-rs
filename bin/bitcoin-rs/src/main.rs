@@ -27,8 +27,22 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    let result = config::resolve(cli, std::env::vars_os())
-        .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()));
+    // Foreground offline import shares the timed `{corpus_path}` contract:
+    // one regular file, never the indexed `sources` directory. All three
+    // flags must appear together; a partial set is a caller error, not a
+    // daemon run.
+    let import = (cli.corpus.clone(), cli.manifest.clone(), cli.state.clone());
+    let result = config::resolve(cli, std::env::vars_os()).and_then(|config| match import {
+        (Some(corpus), Some(manifest), Some(state)) => {
+            bitcoin_rs_node::offline_import::run_offline_import(config, &corpus, &manifest, &state)
+        }
+        (None, None, None) => {
+            bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default())
+        }
+        _ => Err(anyhow::anyhow!(
+            "--corpus, --manifest, and --state must be given together"
+        )),
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -286,6 +300,39 @@ mod tests {
                 password: "runtime-only-secret".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn public_listener_cli_overrides_environment_and_file() -> anyhow::Result<()> {
+        let config = load_file(
+            "--config",
+            "public_bind = '127.0.0.1:8080'\nrpc_max_connections = 4\npublic_max_connections = 32\n",
+            &[
+                "--public-bind",
+                "0.0.0.0:9090",
+                "--public-max-connections",
+                "16",
+            ],
+            [
+                (
+                    OsString::from("BITCOIN_RS_PUBLIC_BIND"),
+                    OsString::from("127.0.0.1:8081"),
+                ),
+                (
+                    OsString::from("BITCOIN_RS_RPC_MAX_CONNECTIONS"),
+                    OsString::from("8"),
+                ),
+                (
+                    OsString::from("BITCOIN_RS_PUBLIC_MAX_CONNECTIONS"),
+                    OsString::from("24"),
+                ),
+            ]
+            .into_iter(),
+        )?;
+        assert_eq!(config.rpc.public_bind, Some("0.0.0.0:9090".parse()?));
+        assert_eq!(config.rpc.max_connections, 8);
+        assert_eq!(config.rpc.public_max_connections, 16);
+        Ok(())
     }
 
     #[test]

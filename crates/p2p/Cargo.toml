@@ -16,7 +16,14 @@ workspace = true
 # builds.
 test-seam = []
 
-default = []
+# Optional overlay transports (I2P SAM bridge, Tor control port). Declared
+# so baseline P2P (direct TCP) builds without the overlay surface; the
+# `mod` gates land as a verified follow-up once endpoint/service lanes add
+# their matching cfgs (pool overlay-review-fixes coordination). On by
+# default, so the default build keeps current behavior exactly.
+overlay = []
+
+default = ["overlay"]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
@@ -37,11 +44,15 @@ metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chacha20.workspace = true
 chacha20poly1305.workspace = true
 hkdf.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "net"] }
 
 [dev-dependencies]
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }

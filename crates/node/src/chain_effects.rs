@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_primitives::{Block, BlockHash, BlockPayload, Hash256};
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
@@ -63,14 +63,8 @@ pub struct ChainFollowers {
 impl ChainFollowers {
     /// Builds the follower set over its consumers.
     ///
-    /// PRE: each argument is the live consumer it names; `mempool` is `None`
-    /// only for a node that runs no admission gate.
-    ///
-    /// POST: the set holds exactly those consumers and mutates none of them.
-    ///
-    /// INVARIANT: construction does not attach observers or wake any
-    /// consumer; effects run only through [`Self::on_connect`] and
-    /// [`Self::on_disconnect`].
+    /// `mempool` is `None` only for a node without an admission gate. Effects
+    /// run through [`Self::on_connect`] and [`Self::on_disconnect`].
     #[must_use]
     pub(crate) fn new(
         blocks: Arc<RwLock<BlockLog>>,
@@ -147,7 +141,7 @@ impl ChainFollowers {
     }
 
     /// Shared RPC block log owned by this committed-effect dispatcher.
-    #[cfg(any(test, feature = "test-seam"))]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
         &self.blocks
@@ -368,7 +362,7 @@ impl ChainFollowers {
     pub(crate) fn apply_connect(
         &self,
         handles: &bitcoin_rs_chainstate::Chainstate,
-        block: &Block,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         let transition = handles
             .begin_transition()
@@ -376,7 +370,7 @@ impl ChainFollowers {
         let mempool_change = self
             .begin_mempool_change()
             .map_err(ConnectMutationError::NotCommitted)?;
-        self.apply_connect_in_transition(handles, transition, mempool_change, block, None)
+        self.apply_connect_in_transition(handles, transition, mempool_change, payload)
     }
 
     pub(crate) fn apply_connect_in_transition(
@@ -384,12 +378,11 @@ impl ChainFollowers {
         handles: &bitcoin_rs_chainstate::Chainstate,
         transition: bitcoin_rs_chainstate::ChainTransition<'_>,
         mempool_change: Option<ChainChangeGuard>,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
+        payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
-        match transition.connect(block, serialized) {
+        match transition.connect(payload) {
             Ok(outcome) => {
-                self.on_connect(block, &outcome);
+                self.on_connect(payload.block(), &outcome);
                 match Self::finish_transition(handles, transition, mempool_change) {
                     Ok(()) => Ok(outcome),
                     Err(source) => Err(ConnectMutationError::CommittedButSettlementFailed {
@@ -443,7 +436,8 @@ pub(crate) fn bootstrap_genesis(
         return Ok(());
     }
     let genesis = handles.network().genesis_block();
-    match followers.apply_connect(handles, &genesis) {
+    let payload = BlockPayload::from_local(genesis);
+    match followers.apply_connect(handles, &payload) {
         // The header-tip cell is the chainstate's to publish — including on
         // a committed-but-unsettled connect, which owns its outcome.
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
@@ -784,7 +778,8 @@ mod tests {
         let available = orphan_child(OutPoint::new(parent, 0));
         let missing = orphan_child(OutPoint::new(Hash256::from_le_bytes(&[43; 32]).into(), 0));
         let source = PeerToken {
-            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+            endpoint: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),
+            addr: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),
             connection_id: 7,
         };
         let replacement = PeerToken {
@@ -792,7 +787,8 @@ mod tests {
             ..source
         };
         let missing_source = PeerToken {
-            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18445)),
+            endpoint: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18445)).into()),
+            addr: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18445)).into()),
             connection_id: 9,
         };
         let chain = AdmissionCoins::default();
@@ -883,7 +879,8 @@ mod tests {
         let outpoint = OutPoint::new(parent, 0);
         let child = orphan_child(outpoint);
         let source = PeerToken {
-            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+            endpoint: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),
+            addr: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),
             connection_id: 7,
         };
         let chain = AdmissionCoins::default();
@@ -1008,8 +1005,8 @@ mod tests {
         config.p2p.listen.clear();
         let state = crate::state::NodeState::open(config, None)?;
         let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
-        let genesis = Network::Regtest.genesis_block();
-        let hash = Hash256::from(genesis.block_hash());
+        let genesis = BlockPayload::from_local(Network::Regtest.genesis_block());
+        let hash = Hash256::from(genesis.block().block_hash());
 
         let error = match followers.apply_connect(&state.chainstate(), &genesis) {
             Ok(outcome) => panic!("forced generation move settled connect {outcome:?}"),
@@ -1058,11 +1055,16 @@ mod tests {
         );
 
         assert_eq!(
-            mining.submit_block(Network::Regtest.genesis_block())?,
+            mining.submit_block(BlockPayload::from_local(Network::Regtest.genesis_block()))?,
             BlockValidationResult::Accepted,
             "submitblock must not invite retry after authoritative commit"
         );
-        assert!(state.shutdown().load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            state
+                .chainstate()
+                .shutdown_handle()
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         Ok(())
     }
 }

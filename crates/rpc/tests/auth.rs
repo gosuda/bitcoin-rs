@@ -68,7 +68,9 @@ fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::er
     let payload = response.split_once("\r\n\r\n").ok_or("missing body")?.1;
     let value: sonic_rs::Value = sonic_rs::from_str(payload)?;
 
-    assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+    // CONTRACT: API-02. Core maps legacy RPC_METHOD_NOT_FOUND to HTTP 404
+    // (`src/httprpc.cpp:51-53`); other legacy codes keep 500.
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     assert!(value.get("jsonrpc").is_none());
     assert!(value.get("error").is_some());
     assert!(

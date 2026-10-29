@@ -1,4 +1,4 @@
-# P2P wire contract (pointer)
+# P2P wire contract
 
 This page assigns ownership and cites proof under the
 [contracts precedence rule](README.md).
@@ -14,9 +14,11 @@ This page assigns ownership and cites proof under the
 
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
-- **Owner**: `crates/p2p/src/compat.rs` owns the 37-command inventory and
-  `PINNED_CORE_VERSION` (Bitcoin Core 31.1). The policy document owns
-  handshake fields, reject-or-ignore semantics, and recorded deviations.
+- **Owner**: `crates/p2p/src/compat.rs` owns the 42-command inventory (the 36
+  Core-compatibility commands plus the extensions `feature`, the four BIP331
+  package messages, and `staletip`, which Core 31.1 does not have) and
+  `PINNED_CORE_VERSION` (Bitcoin Core 31.1). The policy document owns handshake
+  fields, reject-or-ignore semantics, and recorded deviations.
 - **Scope**: `crates/p2p` wire, handshake, protocol FSM, and message policy; the
   chain-serving query `crates/p2p/src/chain_query.rs`; and node network flags.
 - Message framing, envelope decoder, service flags, and network magic follow
@@ -29,15 +31,45 @@ This page assigns ownership and cites proof under the
   Both forms validate the complete borrowed layout without materializing
   scripts or witnesses; malformed bodies are never forwarded. Both forms
   resolve `(height, hash)` directly and recheck serving eligibility after
-  preparing the payload. Stored stale blocks remain servable under the policy
+  preparing the payload.   Stored stale blocks remain servable under the policy
   document's validation and age bounds; unsolicited announcements remain
   active-only. Response depth uses the applied frontier rather than unapplied
-  headers. The decoder
-  still types inbound `block` as `Message::Block`.
+  headers. Locator-based `getheaders` replies walk the applied chain:
+  `ActiveChainQuery::headers_after` resolves the locator order, stop hash,
+  and height walk against the validated applied tip, never the header-best
+  tip; the empty-locator single-header direct lookup stays on the header-best
+  chain. The wire decoder types inbound `block` as
+  `Message::Block(BlockPayload)`, constructed once via
+  `BlockPayload::from_raw` on the frame bytes with no second decode; the
+  serving `Message::BlockPayload(Bytes)` envelope stays raw-only with no
+  decoded field. `InboundBlock` owns the one payload while peer/source and
+  `forward_credit` stay outer; `check_body_binding` runs on the decoded
+  block and credit is released at the existing handoff.
+- Proof: applied-tip `headers_after` in `crates/p2p/src/chain_query.rs`
+  (`applied_prefix_when_headers_lead` proves only the servable applied
+  prefix replies while headers lead and a header-best-only locator is not
+  an applied ancestor; `applied_fork_off_best_serves_own_ancestry`,
+  `best_only_locator_does_not_skip_applied_fork`, and
+  `stop_hash_bounds_applied_response` prove off-best ancestry, locator
+  fallback, and applied-stop bounding);
+  `committed_tip_reads_applied_tip_when_headers_are_ahead` and
+  `serving_depth_uses_applied_tip_when_headers_are_ahead` prove the
+  committed tip and serving depth follow the applied tip while headers
+  lead. Single `BlockPayload::from_raw` decode:
+  `crates/primitives/src/block.rs`
+  `payload_from_raw_retains_exact_fixture_bytes` and
+  `payload_from_raw_rejects_trailing_bytes` plus
+  `crates/p2p/src/wire.rs`
+  `block_message_roundtrip_preserves_wire_payload` (one decode carries the
+  frame; raw bytes preserved end to end).
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
+  `connection::PeerRemote` distinguishes a destination from an anonymous
+  inbound Tor circuit identified by its lease's `ConnectionId`. Address-book
+  and dial APIs accept only `PeerEndpoint` destinations. Transaction attribution
+  retains the connection id even when no destination is known.
 - Automatic discouragement is owned by the P2P service's `BannedReader` and
   bounded ephemeral policy. The listener records only typed remote violations
   from a current lease. Immutable exclusion snapshots precede address-book
@@ -247,7 +279,8 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
   one release it earns is the recovery path above: a body-carried header that
   cannot attach frees its owner's gate, so the ancestry request that delivery
   motivates reaches the wire with it (P2P-05).
-- The staged retry carries the delivering connection
+- The stager MUST hold one `BlockPayload` per entry (`insert(payload)`). The
+  staged retry carries the delivering connection
   (`ReceivedBlock::source`): a retry that admits credits that peer exactly
   as the headers drain would (`note_announced_tip`), and a peer-fault
   rejection drops the staged body (`stager.discard`, never re-queued;
@@ -458,7 +491,7 @@ forward body is retried, never punished.
   Accepted ordinary VERSION updates metadata before service rejection without
   marking Good. Unknown DNS service metadata retains its bootstrap exemption;
   an observed VERSION, including zero services, is known metadata. Representation
-  and migration are owned by `docs/policies/p2p-compatibility.md` section 7;
+  and persistence are owned by `docs/policies/p2p-compatibility.md` section 7;
   manual dials and feelers bypass this metadata prefilter.
 - The advertised set follows the prune setting (`init.cpp:2022-2026`):
   `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when

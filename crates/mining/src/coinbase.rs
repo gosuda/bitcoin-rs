@@ -78,27 +78,51 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     script
 }
 
+/// Read-only predicate for Core `UpdateUncommittedBlockStructures`.
+///
+/// Returns `true` exactly when [`update_uncommitted_block_structures`] would
+/// push [`WITNESS_RESERVED_VALUE`]: `segwit_active` holds, the block carries a
+/// coinbase whose outputs contain a BIP141 witness commitment, and the
+/// coinbase's first input has an empty witness stack.
+///
+/// Preconditions (owner-kept, not derived here): `segwit_active` is the
+/// caller-owned `SegWit` activation at the child height (`prev.height + 1`);
+/// parent-header lookup stays with the Node caller. Proposal mode skips both
+/// this predicate and the mutation, matching Core. Borrows only; performs no
+/// allocation, clone, or encode.
+#[must_use]
+pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool {
+    if !segwit_active {
+        return false;
+    }
+    let Some(coinbase) = block.txs.first() else {
+        return false;
+    };
+    if !coinbase_has_witness_commitment(coinbase) {
+        return false;
+    }
+    let Some(input) = coinbase.inputs.first() else {
+        return false;
+    };
+    input.witness.is_empty()
+}
+
 /// Core `UpdateUncommittedBlockStructures`: if the block already carries a
 /// BIP141 commitment but the coinbase has no witness, insert the reserved nonce.
 ///
 /// `submitblock` calls this before admission. Proposal mode does not.
+/// The fill condition is owned by [`needs_witness_reserved_value`]; this
+/// mutation reuses that predicate and performs only the push.
 pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
-    if !segwit_active {
+    if !needs_witness_reserved_value(block, segwit_active) {
         return;
     }
-    let Some(coinbase) = block.txs.first_mut() else {
-        return;
-    };
-    if !coinbase_has_witness_commitment(coinbase) {
-        return;
-    }
-    let Some(input) = coinbase.inputs.first_mut() else {
-        return;
-    };
-    if !input.witness.is_empty() {
-        return;
-    }
-    input.witness.push(WITNESS_RESERVED_VALUE.to_vec());
+    // Predicate proved a coinbase with a first input exists, and the same
+    // exclusive borrow is held with no intervening mutation, so indexing is
+    // validated. Empty shapes stay a no-op through the false predicate above.
+    block.txs[0].inputs[0]
+        .witness
+        .push(WITNESS_RESERVED_VALUE.to_vec());
 }
 
 fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
@@ -125,7 +149,8 @@ fn coinbase_script_sig(height: u32) -> Vec<u8> {
 #[cfg(test)]
 mod uncommitted_witness_tests {
     use super::{
-        WITNESS_RESERVED_VALUE, update_uncommitted_block_structures, witness_commitment_script,
+        WITNESS_RESERVED_VALUE, needs_witness_reserved_value, update_uncommitted_block_structures,
+        witness_commitment_script,
     };
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
@@ -165,6 +190,38 @@ mod uncommitted_witness_tests {
                 lock_time: LockTime::ZERO,
             }],
         }
+    }
+
+    /// Predicate agrees with the fill branch, including shapes the matrix
+    /// below never builds: a block without a coinbase and a coinbase without
+    /// inputs are both panic-free no-ops with a false predicate.
+    #[test]
+    fn predicate_matches_fill_branch_including_empty_shapes() {
+        // Positive: the one shape the mutation fills.
+        let mut fillable = commitment_block(Vec::new(), true);
+        assert!(needs_witness_reserved_value(&fillable, true));
+        update_uncommitted_block_structures(&mut fillable, true);
+        assert_eq!(
+            fillable.txs[0].inputs[0].witness,
+            Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
+        );
+
+        // Uncovered: no coinbase at all.
+        let mut no_txs = commitment_block(Vec::new(), true);
+        no_txs.txs.clear();
+        assert!(!needs_witness_reserved_value(&no_txs, true));
+        update_uncommitted_block_structures(&mut no_txs, true);
+        assert_eq!(no_txs.txs, Vec::<bitcoin_rs_primitives::Tx>::new());
+
+        // Uncovered: coinbase without inputs has no witness slot.
+        let mut no_inputs = commitment_block(Vec::new(), true);
+        no_inputs.txs[0].inputs.clear();
+        assert!(!needs_witness_reserved_value(&no_inputs, true));
+        update_uncommitted_block_structures(&mut no_inputs, true);
+        assert_eq!(
+            no_inputs.txs[0].inputs,
+            Vec::<bitcoin_rs_primitives::TxIn>::new()
+        );
     }
 
     /// The reserved nonce is inserted only for an active-segwit block that

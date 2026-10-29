@@ -5,8 +5,8 @@
 //! listener decides which by recording why each pass stopped
 //! (`ParkedFilter::last`), which only a session can show.
 
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -59,6 +59,13 @@ impl FilterChain {
 }
 
 impl ChainQuery for FilterChain {
+    fn stale_tip_announcement(
+        &self,
+        _: bitcoin_rs_primitives::Hash256,
+        _: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<crate::dispatch::StaleTipHeaders> {
+        None
+    }
     fn serve_compact_filters(
         &self,
         request: &FilterRequest,
@@ -226,9 +233,15 @@ fn the_first_filter_pass_records_an_aggregate_refusal() -> TestResult {
     crate::wire::write_message(&mut input, MAGIC, &get_cfilters())?;
     let mut peer = Peer::new(io::Cursor::new(input), MAGIC);
     peer.state = PeerState::Ready;
-    let addr = SocketAddr::from(([127, 0, 0, 1], 18_444));
+    let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_444));
 
-    run_message_loop(&mut peer, addr, &lease, &shared, None)?;
+    run_message_loop(
+        &mut peer,
+        addr,
+        &lease,
+        &shared,
+        None,
+    )?;
 
     assert!(lease.is_cancelled(), "the chain closed the lease");
     let parked = peer

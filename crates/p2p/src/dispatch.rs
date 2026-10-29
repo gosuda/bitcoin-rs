@@ -1,17 +1,22 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{BlockHash, ConsensusEncode, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
-use crate::handshake::feature_messages;
+use crate::handshake::{feature_messages, negotiated_features};
 use crate::inv::{
     inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
 };
-use crate::peer::{Peer, PeerState};
-use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PeerError};
+use crate::packages::{
+    AncPkgInfo, GetPkgTxns, MSG_ANCPKGINFO, MSG_PKGTXNS, PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, PkgTxns,
+    SendPackages, combined_package_hash,
+};
+use crate::peer::{PackageRequest, Peer, PeerState};
+use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, MAX_MESSAGE_PAYLOAD, Message, PeerError};
 
 /// Fully applied active-chain tip published by chainstate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +88,15 @@ pub enum FilterServing {
     Pending(FilterRequest),
 }
 
+/// Header response for a BIP332 stale tip announcement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StaleTipHeaders {
+    /// The stale branch headers starting immediately after `fork_point`.
+    Headers(crate::staletip::StaleTipAnnouncement),
+    /// The stale branch is longer than [`crate::staletip::MAX_STALETIP_HEADERS`].
+    TooMany,
+}
+
 /// Read-only active-chain view used by server-side P2P responders.
 pub trait ChainQuery: Send + Sync {
     /// Whether the optional filter index currently covers the applied chain.
@@ -112,7 +126,9 @@ pub trait ChainQuery: Send + Sync {
     ) -> Result<FilterServing, PeerError> {
         Ok(FilterServing::Done)
     }
-    /// Returns a bounded contiguous active-chain header response.
+    /// Returns a bounded contiguous header response: locator-based ranges
+    /// walk the applied chain, while the empty-locator single-header direct
+    /// lookup stays on the header-best chain.
     fn headers_after(
         &self,
         locator_hashes: &[BlockHash],
@@ -199,6 +215,16 @@ pub trait ChainQuery: Send + Sync {
     fn committed_tip(&self) -> Option<CommittedTip> {
         None
     }
+
+    /// Returns the BIP332 stale-tip headers for `tip` given the peer's
+    /// demonstrated tips, or `None` if the tip is unknown, not stale, or
+    /// not an ancestor of any demonstrated tip. Returns `TooMany` if the
+    /// branch exceeds [`crate::staletip::MAX_STALETIP_HEADERS`].
+    fn stale_tip_announcement(
+        &self,
+        tip: Hash256,
+        peer_tips: &[Hash256],
+    ) -> Option<StaleTipHeaders>;
 }
 
 /// Transaction inventory view and successful-getdata acknowledgement seam,
@@ -226,12 +252,38 @@ pub trait TxInventory: Send + Sync {
 
     /// Called only after a transaction body was successfully queued for getdata.
     fn transaction_sent(&self, _wtxid: Wtxid) {}
+
+    /// The BIP331 ancestor package of `wtxid` the node can serve: its
+    /// unconfirmed ancestors in topological order, then `wtxid` itself.
+    ///
+    /// POST: resident pool members only, never an orphan or a recent reject,
+    /// and `None` when `wtxid` is not resident, the package is too large, or
+    /// the provider has no resident pool. The last element is `wtxid`.
+    fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
+
+    /// The bodies of `wtxids`, in request order, when every one is resident.
+    ///
+    /// POST: all or none, read from one view of the resident pool, as the
+    /// pool's own handles; never an orphan or a recent reject, and never the
+    /// general [`Self::get_tx_by_wtxid`] lookup. `None` when any member is
+    /// absent or the provider has no resident pool. The caller bounds
+    /// `wtxids.len()`.
+    fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
 }
 
 impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
     fn transaction_sent(&self, wtxid: Wtxid) {
         self.mark_broadcast(wtxid);
     }
+
+    fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+        Self::ancestor_package_wtxids(self, wtxid)
+    }
+
+    fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+        Self::resident_package(self, wtxids)
+    }
+
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
         Self::have_tx(self, hash, hash_is_wtxid)
     }
@@ -330,12 +382,9 @@ pub fn dispatch_inbound_full<S>(
     announce_tx: &mut dyn FnMut(Vec<Inventory>),
 ) -> Result<(), PeerError> {
     match message {
-        Message::Version(_) => {
+        Message::Version(version) => {
             step(peer, message)?;
-            for response in feature_messages() {
-                send(response)?;
-            }
-            send(Message::Verack)?;
+            reply_to_version(peer, version.version, send)?;
         }
         Message::Ping(nonce) => {
             step(peer, message)?;
@@ -343,35 +392,14 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::Inv(items) => {
             step(peer, message)?;
-            // Evaluated once per `inv`.
-            let relay_open = tx_relay_open();
-            let mut requested = Vec::new();
-            for item in items {
-                if let Some(hash) = inventory_block_hash(item) {
-                    announce_block(hash);
-                    continue;
-                }
-                // Only tx-typed vectors are ever requested from an `inv`;
-                // compact, unknown, and error vectors are ignored (Core
-                // `ProcessMessage(INV)`).
-                let Some(hash) = inventory_tx_hash(item) else {
-                    continue;
-                };
-                if !relay_open
-                    || tx_inventory
-                        .is_some_and(|inv| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
-                {
-                    continue;
-                }
-                requested.push(*item);
-            }
-            if !requested.is_empty() {
-                let witness = peer.remote_version.as_ref().is_some_and(|version| {
-                    version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
-                });
-                request_witness(&mut requested, witness);
-                announce_tx(requested);
-            }
+            receive_inv(
+                peer,
+                items,
+                tx_inventory,
+                tx_relay_open,
+                announce_block,
+                announce_tx,
+            )?;
         }
         Message::GetHeaders(request) => {
             ensure_block_locator_within_bounds(
@@ -411,7 +439,15 @@ pub fn dispatch_inbound_full<S>(
         Message::GetData(items) => {
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
+            ensure_getdata_package_types_negotiated(peer, items)?;
             serve_inbound_getdata(peer, chain, tx_inventory, items, headroom, send)?;
+        }
+        Message::AncPkgInfo(_)
+        | Message::GetPkgTxns(_)
+        | Message::PkgTxns(_)
+        | Message::PkgTxnsPayload(_) => {
+            step(peer, message)?;
+            receive_package_message(peer, message, tx_inventory, tx_relay_open, headroom, send)?;
         }
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
@@ -427,6 +463,284 @@ pub fn dispatch_inbound_full<S>(
     }
 
     Ok(())
+}
+
+/// Answers the peer's `version` with our feature offers, the one BIP331
+/// `sendpackages` offer, and `verack`.
+///
+/// POST: `sendpackages` is sent at most once per connection, before `verack`.
+fn reply_to_version<S>(
+    peer: &mut Peer<S>,
+    remote_version: u32,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    for response in feature_messages() {
+        send(response)?;
+    }
+    for announcement in negotiated_features(peer, remote_version) {
+        send(Message::Feature(announcement))?;
+    }
+    if let Some(versions) = peer.package_relay.unsent_offer() {
+        send(Message::SendPackages(SendPackages { versions }))?;
+        peer.package_relay.record_advertised(versions);
+    }
+    send(Message::Verack)
+}
+
+/// Routes one `inv`: block vectors go to `announce_block`, and the
+/// transaction vectors this node wants go to `announce_tx` as one request.
+///
+/// POST: an `inv` of a package-relay-only type is misbehavior. Compact,
+/// unknown, and error vectors are ignored (Core `ProcessMessage(INV)`).
+fn receive_inv<S>(
+    peer: &Peer<S>,
+    items: &[Inventory],
+    tx_inventory: Option<&dyn TxInventory>,
+    tx_relay_open: &dyn Fn() -> bool,
+    announce_block: &mut dyn FnMut(Hash256),
+    announce_tx: &mut dyn FnMut(Vec<Inventory>),
+) -> Result<(), PeerError> {
+    if items.iter().any(is_package_inventory) {
+        return Err(PeerError::Misbehavior(
+            "inv of a package-relay-only inventory type",
+        ));
+    }
+    let relay_open = tx_relay_open();
+    let mut requested = Vec::new();
+    for item in items {
+        if let Some(hash) = inventory_block_hash(item) {
+            announce_block(hash);
+            continue;
+        }
+        let Some(hash) = inventory_tx_hash(item) else {
+            continue;
+        };
+        if !relay_open
+            || tx_inventory.is_some_and(|inv| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+        {
+            continue;
+        }
+        requested.push(*item);
+    }
+    if !requested.is_empty() {
+        let witness = peer.remote_version.as_ref().is_some_and(|version| {
+            version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
+        });
+        request_witness(&mut requested, witness);
+        announce_tx(requested);
+    }
+    Ok(())
+}
+
+/// Applies one BIP331 package message once its sequence step passed.
+///
+/// POST: the message's `PKG_RELAY_*` bit was negotiated, otherwise the peer is
+/// disconnected through the returned error. A `pkgtxns` frame is charged and
+/// admitted by the node's ingress, which decodes it only after planning, so
+/// dispatch checks the negotiation alone.
+fn receive_package_message<S>(
+    peer: &mut Peer<S>,
+    message: &Message,
+    tx_inventory: Option<&dyn TxInventory>,
+    tx_relay_open: &dyn Fn() -> bool,
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    match message {
+        Message::AncPkgInfo(info) => {
+            ensure_package_relay(
+                peer,
+                PKG_RELAY_ANC,
+                "ancpkginfo without negotiated ancestor package relay",
+            )?;
+            if tx_relay_open() {
+                peer.pending_package_request = package_request(tx_inventory, info);
+            }
+        }
+        Message::GetPkgTxns(request) => {
+            ensure_package_relay(
+                peer,
+                PKG_RELAY_PKGTXNS,
+                "getpkgtxns without negotiated package transaction relay",
+            )?;
+            serve_getpkgtxns(tx_inventory, request, headroom, send)?;
+        }
+        _ => ensure_package_relay(
+            peer,
+            PKG_RELAY_PKGTXNS,
+            "pkgtxns without negotiated package transaction relay",
+        )?,
+    }
+    Ok(())
+}
+
+/// Whether `item` is one of the two BIP331 inventory types.
+fn is_package_inventory(item: &Inventory) -> bool {
+    matches!(
+        item,
+        Inventory::Unknown {
+            inv_type: MSG_ANCPKGINFO | MSG_PKGTXNS,
+            ..
+        }
+    )
+}
+
+/// The BIP331 `PKG_RELAY_*` bit `bit` must have been negotiated for the
+/// connection before a message that rides it is accepted.
+///
+/// POST: otherwise the sender violated its own negotiation and no reply is
+/// sent; the peer is disconnected through the returned error.
+fn ensure_package_relay<S>(peer: &Peer<S>, bit: u64, error: &'static str) -> Result<(), PeerError> {
+    if peer.package_relay_versions() & bit == 0 {
+        return Err(PeerError::Misbehavior(error));
+    }
+    Ok(())
+}
+
+/// Rejects the `getdata` item types BIP331 forbids: `MSG_PKGTXNS` is a
+/// `notfound`-only type, and `MSG_ANCPKGINFO` needs ancestor-package relay.
+fn ensure_getdata_package_types_negotiated<S>(
+    peer: &Peer<S>,
+    items: &[Inventory],
+) -> Result<(), PeerError> {
+    for item in items {
+        match item {
+            Inventory::Unknown {
+                inv_type: MSG_PKGTXNS,
+                ..
+            } => {
+                return Err(PeerError::Misbehavior(
+                    "getdata of a notfound-only package inventory type",
+                ));
+            }
+            Inventory::Unknown {
+                inv_type: MSG_ANCPKGINFO,
+                ..
+            } => ensure_package_relay(
+                peer,
+                PKG_RELAY_ANC,
+                "getdata ancpkginfo without negotiated ancestor package relay",
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The download an `ancpkginfo` asks the request owner for.
+///
+/// A member counts as held only when it is resident in the pool: an orphan
+/// or a recent reject is exactly what the package exists to resolve, so it
+/// is requested again and admitted with its ancestors as one package.
+/// POST: `None` when the subject is already resident or more than
+/// `MAX_PACKAGE_COUNT` members are missing. Otherwise the non-resident
+/// members in announced order, the subject last: the one sequence the
+/// `getpkgtxns` is written from and the claim records.
+fn package_request(
+    tx_inventory: Option<&dyn TxInventory>,
+    info: &AncPkgInfo,
+) -> Option<PackageRequest> {
+    let subject = info.subject()?;
+    let resident = |wtxid: &Wtxid| {
+        tx_inventory.is_some_and(|inventory| {
+            inventory
+                .resident_package(std::slice::from_ref(wtxid))
+                .is_some()
+        })
+    };
+    if resident(&subject) {
+        return None;
+    }
+    let wtxids: Vec<Wtxid> = info
+        .wtxids
+        .iter()
+        .copied()
+        .filter(|wtxid| !resident(wtxid))
+        .collect();
+    if wtxids.len() > bitcoin_rs_mempool::standardness::MAX_PACKAGE_COUNT {
+        return None;
+    }
+    Some(PackageRequest { subject, wtxids })
+}
+
+/// Answers one `getpkgtxns`: every requested transaction in one `pkgtxns`,
+/// or one `notfound` of type `MSG_PKGTXNS` carrying the request's combined
+/// hash and nothing else.
+///
+/// Members come from the resident pool only, read as one view, never from
+/// the orphan or recent-reject sets. A package whose `pkgtxns` could not fit
+/// one frame is unavailable too.
+/// INVARIANT: one reply message, so one `headroom` reservation covers it and
+/// no body is loaded while the gate is closed. A closed gate leaves the
+/// request unanswered, like `getblocktxn`.
+fn serve_getpkgtxns(
+    tx_inventory: Option<&dyn TxInventory>,
+    request: &GetPkgTxns,
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    if !headroom() {
+        return Ok(());
+    }
+    let package = tx_inventory.and_then(|inventory| {
+        inventory
+            .resident_package(&request.wtxids)
+            .filter(|bodies| fits_one_frame(bodies))
+            .map(|bodies| (inventory, bodies))
+    });
+    let Some((inventory, bodies)) = package else {
+        return send(Message::NotFound(vec![Inventory::Unknown {
+            inv_type: MSG_PKGTXNS,
+            hash: combined_package_hash(&request.wtxids),
+        }]));
+    };
+    send(Message::PkgTxns(PkgTxns {
+        txs: bodies.iter().map(|tx| Tx::clone(tx)).collect(),
+    }))?;
+    for wtxid in &request.wtxids {
+        inventory.transaction_sent(*wtxid);
+    }
+    Ok(())
+}
+
+/// Whether `bodies`, as one `pkgtxns`, fit the transport frame.
+fn fits_one_frame(bodies: &[Arc<Tx>]) -> bool {
+    let count = u64::try_from(bodies.len()).unwrap_or(u64::MAX);
+    let mut total = bitcoin_rs_primitives::varint::encoded_len(count);
+    for tx in bodies {
+        total = total.saturating_add(tx.consensus_size());
+        if total > MAX_MESSAGE_PAYLOAD {
+            return false;
+        }
+    }
+    true
+}
+
+/// Answers one `getdata(MSG_ANCPKGINFO)` item with the resident ancestor
+/// package of its subject, or reports the item missing.
+///
+/// Returns `false`, having done nothing, when `headroom` is closed; `true`
+/// once the `ancpkginfo` was sent or the item appended to `not_found`.
+fn serve_ancpkginfo_item(
+    tx_inventory: Option<&dyn TxInventory>,
+    item: &Inventory,
+    subject: Wtxid,
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+    not_found: &mut Vec<Inventory>,
+) -> Result<bool, PeerError> {
+    if !headroom() {
+        return Ok(false);
+    }
+    let package = tx_inventory
+        .and_then(|inventory| inventory.resident_ancestor_package(subject))
+        .map(|wtxids| AncPkgInfo { wtxids })
+        .filter(|info| info.subject() == Some(subject) && info.encode().is_ok());
+    match package {
+        Some(info) => send(Message::AncPkgInfo(info))?,
+        None => not_found.push(*item),
+    }
+    Ok(true)
 }
 
 fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage) -> Message {
@@ -529,9 +843,19 @@ pub(crate) fn serve_getdata(
                 Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
             )
         });
-        let served = match tx_source {
-            Some(inv) => serve_tx_item(inv, item, headroom, send, not_found)?,
-            None => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
+        let served = match (item, tx_source) {
+            (
+                Inventory::Unknown {
+                    inv_type: MSG_ANCPKGINFO,
+                    hash,
+                },
+                _,
+            ) => {
+                let subject = Wtxid::from(Hash256::from_le_bytes(hash));
+                serve_ancpkginfo_item(tx_inventory, item, subject, headroom, send, not_found)?
+            }
+            (_, Some(inv)) => serve_tx_item(inv, item, headroom, send, not_found)?,
+            (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
             return Ok(items[index..].to_vec());
@@ -696,6 +1020,7 @@ mod tests {
     use bitcoin_rs_consensus::ValidationEngine;
     use std::cell::RefCell;
     use std::io::Cursor;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
@@ -710,12 +1035,18 @@ mod tests {
 
     use super::{
         ChainQuery, FilterRequest, FilterServing, InventoryServing, MAX_LOCATOR_HASHES,
-        TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
+        StaleTipHeaders, TxInventory, dispatch_inbound, dispatch_inbound_full, serve_getdata,
     };
     use crate::connection::{OutboundBudget, PeerLease};
+    use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
+    use crate::handshake::{feature_messages, negotiated_features};
     use crate::inv::MAX_INV_PER_MSG;
-    use crate::peer::{Peer, PeerState};
-    use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PeerError};
+    use crate::packages::{
+        AncPkgInfo, GetPkgTxns, MSG_ANCPKGINFO, MSG_PKGTXNS, PKG_RELAY_ANC, PKG_RELAY_PKGTXNS,
+        PkgTxns, SendPackages, combined_package_hash,
+    };
+    use crate::peer::{PackageRequest, Peer, PeerState};
+    use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PROTOCOL_VERSION, PeerError};
 
     fn block_payload(block: &Block) -> Message {
         Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
@@ -751,6 +1082,13 @@ mod tests {
     }
 
     impl ChainQuery for FakeChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn serve_compact_filters(
             &self,
             request: &FilterRequest,
@@ -823,6 +1161,13 @@ mod tests {
     }
 
     impl ChainQuery for GreedyHeaders {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _locator_hashes: &[BlockHash],
@@ -1019,6 +1364,13 @@ mod tests {
     fn getblocktxn_is_answered_with_blocktxn_from_the_chain() -> Result<(), PeerError> {
         struct ServingChain;
         impl ChainQuery for ServingChain {
+            fn stale_tip_announcement(
+                &self,
+                _tip: Hash256,
+                _peer_tips: &[Hash256],
+            ) -> Option<StaleTipHeaders> {
+                None
+            }
             fn headers_after(
                 &self,
                 _locator_hashes: &[BlockHash],
@@ -1105,6 +1457,13 @@ mod tests {
             loads: AtomicUsize,
         }
         impl ChainQuery for GatedChain {
+            fn stale_tip_announcement(
+                &self,
+                _tip: Hash256,
+                _peer_tips: &[Hash256],
+            ) -> Option<StaleTipHeaders> {
+                None
+            }
             fn headers_after(
                 &self,
                 _locator_hashes: &[BlockHash],
@@ -1195,6 +1554,13 @@ mod tests {
         load_tripwire: Option<usize>,
     }
     impl ChainQuery for StreamingChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _locator_hashes: &[BlockHash],
@@ -1350,7 +1716,7 @@ mod tests {
     #[test]
     fn hostile_50000_item_getdata_parks_the_tail() {
         let block = Block::default();
-        let block_wire_len = wire_len_of(&Message::Block(block.clone()));
+        let block_wire_len = wire_len_of(&block_payload(&block));
         let (outbound_tx, _undrained_rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new_with_budget(
             outbound_tx,
@@ -1579,7 +1945,7 @@ mod tests {
     #[test]
     fn send_refusal_mid_stream_aborts_production() {
         let block = Block::default();
-        let block_wire_len = wire_len_of(&Message::Block(block.clone()));
+        let block_wire_len = wire_len_of(&block_payload(&block));
         let (outbound_tx, _undrained_rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new_with_budget(
             outbound_tx,
@@ -1650,6 +2016,10 @@ mod tests {
         txs_by_txid: hashbrown::HashMap<bitcoin::Txid, Tx>,
         txs_by_wtxid: hashbrown::HashMap<bitcoin::Wtxid, Tx>,
         have_hashes: hashbrown::HashSet<[u8; 32]>,
+        /// The resident pool: a subset of the bodies above. A body known
+        /// only through `with_tx` models an orphan.
+        resident: Vec<Arc<Tx>>,
+        ancestor_packages: hashbrown::HashMap<Wtxid, Vec<Wtxid>>,
     }
 
     impl FakeTxInventory {
@@ -1658,7 +2028,20 @@ mod tests {
                 txs_by_txid: hashbrown::HashMap::new(),
                 txs_by_wtxid: hashbrown::HashMap::new(),
                 have_hashes: hashbrown::HashSet::new(),
+                resident: Vec::new(),
+                ancestor_packages: hashbrown::HashMap::new(),
             }
+        }
+
+        /// A transaction resident in the pool, so also known and servable.
+        fn with_resident_tx(mut self, tx: Tx) -> Self {
+            self.resident.push(Arc::new(tx.clone()));
+            self.with_tx(tx)
+        }
+
+        fn with_ancestor_package(mut self, subject: Wtxid, package: Vec<Wtxid>) -> Self {
+            self.ancestor_packages.insert(subject, package);
+            self
         }
 
         fn with_tx(mut self, tx: Tx) -> Self {
@@ -1688,6 +2071,22 @@ mod tests {
         fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
             let bwid = bitcoin::Wtxid::from_byte_array(*wtxid.as_bytes());
             self.txs_by_wtxid.get(&bwid).cloned()
+        }
+
+        fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+            self.ancestor_packages.get(&wtxid).cloned()
+        }
+
+        fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+            wtxids
+                .iter()
+                .map(|wtxid| {
+                    self.resident
+                        .iter()
+                        .find(|tx| tx.wtxid() == *wtxid)
+                        .map(Arc::clone)
+                })
+                .collect()
         }
     }
 
@@ -2042,7 +2441,13 @@ mod tests {
             assert_ne!(txid.as_byte_array(), wtxid.as_byte_array());
             if orphan {
                 let source = PeerToken {
-                    addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                        std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    )),
+                    addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                        [127, 0, 0, 1],
+                        8333,
+                    ))),
                     connection_id: 1,
                 };
                 assert!(matches!(
@@ -2363,6 +2768,13 @@ mod tests {
     struct NarrowingChain;
 
     impl ChainQuery for NarrowingChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: Hash256,
+            _peer_tips: &[Hash256],
+        ) -> Option<StaleTipHeaders> {
+            None
+        }
         fn serve_compact_filters(
             &self,
             request: &FilterRequest,
@@ -2450,6 +2862,579 @@ mod tests {
                 expected_end: Some(9),
             }
         );
+        Ok(())
+    }
+
+    fn version_at(version: u32) -> Message {
+        Message::Version(bitcoin::p2p::message_network::VersionMessage {
+            version,
+            ..crate::handshake::version_message(
+                1,
+                0,
+                crate::peer_info::PeerRole::FullRelay,
+                bitcoin::p2p::ServiceFlags::NETWORK,
+            )
+        })
+    }
+
+    /// The reply to a peer's `version` is the feature messages, then the
+    /// features negotiated for its protocol version, then `verack`; a peer
+    /// below BIP434's version never receives a `feature` frame.
+    #[test]
+    fn version_reply_orders_features_between_feature_messages_and_verack() -> Result<(), PeerError>
+    {
+        for version in [FEATURE_VERSION - 1, PROTOCOL_VERSION] {
+            let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+            peer.offer_stale_tip_relay(true);
+
+            let responses = dispatch_inbound(&mut peer, &version_at(version))?;
+
+            let mut expected = feature_messages().to_vec();
+            expected.extend(
+                negotiated_features(&peer, version)
+                    .into_iter()
+                    .map(Message::Feature),
+            );
+            expected.push(Message::Verack);
+            assert_eq!(responses, expected);
+            let announced = responses
+                .iter()
+                .any(|response| matches!(response, Message::Feature(_)));
+            assert_eq!(announced, version >= FEATURE_VERSION);
+        }
+        Ok(())
+    }
+
+    /// A `feature` from the peer is absorbed silently between its `version`
+    /// and `verack`, and is a protocol violation that changes nothing once the
+    /// peer is ready.
+    #[test]
+    fn remote_feature_is_accepted_before_verack_and_rejected_after() -> Result<(), PeerError> {
+        let feature = Message::Feature(FeatureAnnouncement::new(
+            FeatureId::from_raw_unchecked(b"BIP332".to_vec()),
+            vec![1],
+        ));
+        let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+        dispatch_inbound(&mut peer, &version_at(PROTOCOL_VERSION))?;
+
+        assert_eq!(dispatch_inbound(&mut peer, &feature)?, []);
+        assert_eq!(peer.remote_feature(b"BIP332"), Some([1].as_slice()));
+
+        dispatch_inbound(&mut peer, &Message::Verack)?;
+        assert_eq!(peer.state, PeerState::Ready);
+        let before = peer_snapshot(&peer);
+        assert!(matches!(
+            dispatch_inbound(&mut peer, &feature),
+            Err(PeerError::Misbehavior(_))
+        ));
+        assert_eq!(peer_snapshot(&peer), before);
+        assert_eq!(peer.remote_feature(b"BIP332"), Some([1].as_slice()));
+        Ok(())
+    }
+
+    /// An offered `sendpackages` follows the feature messages and precedes
+    /// `verack`, once; a repeated `version` does not repeat it.
+    #[test]
+    fn version_reply_sends_the_offered_sendpackages_once_before_verack() -> Result<(), PeerError> {
+        let both = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
+        let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+        peer.offer_package_relay(both | (1 << 40));
+
+        let first = dispatch_inbound(&mut peer, &version_at(PROTOCOL_VERSION))?;
+
+        let mut expected = feature_messages().to_vec();
+        expected.extend(
+            negotiated_features(&peer, PROTOCOL_VERSION)
+                .into_iter()
+                .map(Message::Feature),
+        );
+        expected.push(Message::SendPackages(SendPackages { versions: both }));
+        expected.push(Message::Verack);
+        assert_eq!(first, expected);
+
+        let second = dispatch_inbound(&mut peer, &version_at(PROTOCOL_VERSION))?;
+        assert!(
+            !second
+                .iter()
+                .any(|response| matches!(response, Message::SendPackages(_)))
+        );
+        Ok(())
+    }
+
+    const BOTH_PACKAGE_BITS: u64 = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
+
+    /// A ready peer that negotiated package relay for `bits` on both sides.
+    fn package_peer(bits: u64) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        peer.offer_package_relay(bits);
+        dispatch_inbound(&mut peer, &version_at(PROTOCOL_VERSION))?;
+        dispatch_inbound(&mut peer, &Message::WtxidRelay)?;
+        dispatch_inbound(
+            &mut peer,
+            &Message::SendPackages(SendPackages { versions: bits }),
+        )?;
+        dispatch_inbound(&mut peer, &Message::Verack)?;
+        assert_eq!(peer.package_relay_versions(), bits);
+        Ok(peer)
+    }
+
+    fn package_item(inv_type: u32, wtxid: Wtxid) -> Inventory {
+        Inventory::Unknown {
+            inv_type,
+            hash: *wtxid.as_bytes(),
+        }
+    }
+
+    /// Dispatches one message against `inventory` with every gate open.
+    fn dispatch_over<S>(
+        peer: &mut Peer<S>,
+        message: &Message,
+        inventory: &dyn TxInventory,
+    ) -> Result<Vec<Message>, PeerError> {
+        let collected = RefCell::new(Vec::new());
+        dispatch_inbound_full(
+            peer,
+            message,
+            None,
+            Some(inventory),
+            &|| true,
+            &|| true,
+            &mut |response| {
+                collected.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )?;
+        Ok(collected.into_inner())
+    }
+
+    #[test]
+    fn package_messages_without_negotiation_are_protocol_violations() {
+        let wtxid = dummy_tx(1).wtxid();
+        for message in [
+            Message::AncPkgInfo(AncPkgInfo {
+                wtxids: vec![wtxid],
+            }),
+            Message::GetPkgTxns(GetPkgTxns {
+                wtxids: vec![wtxid],
+            }),
+            Message::PkgTxnsPayload(bytes::Bytes::new()),
+            Message::GetData(vec![package_item(MSG_ANCPKGINFO, wtxid)]),
+            Message::GetData(vec![package_item(MSG_PKGTXNS, wtxid)]),
+            Message::Inv(vec![package_item(MSG_ANCPKGINFO, wtxid)]),
+            Message::Inv(vec![package_item(MSG_PKGTXNS, wtxid)]),
+        ] {
+            let mut peer = ready_peer();
+            let before = peer_snapshot(&peer);
+
+            assert!(
+                matches!(
+                    dispatch_inbound(&mut peer, &message),
+                    Err(PeerError::Misbehavior(_))
+                ),
+                "{message:?}"
+            );
+            assert_eq!(peer_snapshot(&peer), before);
+            assert!(peer.take_package_request().is_none());
+        }
+    }
+
+    #[test]
+    fn a_negotiated_bit_admits_only_its_own_messages() -> Result<(), PeerError> {
+        let wtxid = dummy_tx(1).wtxid();
+        let ancestor_only = [
+            Message::GetPkgTxns(GetPkgTxns {
+                wtxids: vec![wtxid],
+            }),
+            Message::PkgTxnsPayload(bytes::Bytes::new()),
+        ];
+        for message in ancestor_only {
+            let mut peer = package_peer(PKG_RELAY_ANC)?;
+            assert!(matches!(
+                dispatch_inbound(&mut peer, &message),
+                Err(PeerError::Misbehavior(_))
+            ));
+        }
+        let batch_only = [
+            Message::AncPkgInfo(AncPkgInfo {
+                wtxids: vec![wtxid],
+            }),
+            Message::GetData(vec![package_item(MSG_ANCPKGINFO, wtxid)]),
+        ];
+        for message in batch_only {
+            let mut peer = package_peer(PKG_RELAY_PKGTXNS)?;
+            assert!(matches!(
+                dispatch_inbound(&mut peer, &message),
+                Err(PeerError::Misbehavior(_))
+            ));
+        }
+        // `pkgtxns` bytes are admitted by the node's ingress, not dispatch.
+        let mut peer = package_peer(PKG_RELAY_PKGTXNS)?;
+        assert_eq!(
+            dispatch_inbound(&mut peer, &Message::PkgTxnsPayload(bytes::Bytes::new()))?,
+            []
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn package_only_inventory_types_are_never_valid_in_inv_or_getdata6() -> Result<(), PeerError> {
+        let wtxid = dummy_tx(1).wtxid();
+        for message in [
+            Message::Inv(vec![package_item(MSG_ANCPKGINFO, wtxid)]),
+            Message::Inv(vec![package_item(MSG_PKGTXNS, wtxid)]),
+            Message::GetData(vec![package_item(MSG_PKGTXNS, wtxid)]),
+        ] {
+            let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+            assert!(
+                matches!(
+                    dispatch_inbound(&mut peer, &message),
+                    Err(PeerError::Misbehavior(_))
+                ),
+                "{message:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_ancpkginfo_serves_the_resident_package_and_reports_the_rest() -> Result<(), PeerError>
+    {
+        let parent = dummy_tx(1);
+        let child = dummy_tx(2);
+        let orphan = dummy_tx(3);
+        let unknown = dummy_tx(4).wtxid();
+        let misdirected = dummy_tx(5);
+        let inventory = FakeTxInventory::empty()
+            .with_resident_tx(parent.clone())
+            .with_resident_tx(child.clone())
+            .with_resident_tx(misdirected.clone())
+            .with_tx(orphan.clone())
+            .with_ancestor_package(child.wtxid(), vec![parent.wtxid(), child.wtxid()])
+            // A package that does not end at its subject is never served.
+            .with_ancestor_package(misdirected.wtxid(), vec![misdirected.wtxid(), parent.wtxid()]);
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let responses = dispatch_over(
+            &mut peer,
+            &Message::GetData(vec![
+                package_item(MSG_ANCPKGINFO, child.wtxid()),
+                package_item(MSG_ANCPKGINFO, orphan.wtxid()),
+                package_item(MSG_ANCPKGINFO, unknown),
+                package_item(MSG_ANCPKGINFO, misdirected.wtxid()),
+            ]),
+            &inventory,
+        )?;
+
+        assert_eq!(
+            responses,
+            vec![
+                Message::AncPkgInfo(AncPkgInfo {
+                    wtxids: vec![parent.wtxid(), child.wtxid()],
+                }),
+                Message::NotFound(vec![
+                    package_item(MSG_ANCPKGINFO, orphan.wtxid()),
+                    package_item(MSG_ANCPKGINFO, unknown),
+                    package_item(MSG_ANCPKGINFO, misdirected.wtxid()),
+                ]),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_ancpkginfo_without_an_inventory_is_reported_missing() -> Result<(), PeerError> {
+        let subject = dummy_tx(1).wtxid();
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let responses = dispatch_inbound(
+            &mut peer,
+            &Message::GetData(vec![package_item(MSG_ANCPKGINFO, subject)]),
+        )?;
+
+        assert_eq!(
+            responses,
+            vec![Message::NotFound(vec![package_item(
+                MSG_ANCPKGINFO,
+                subject
+            )])]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getpkgtxns_is_all_resident_in_request_order_or_one_notfound() -> Result<(), PeerError> {
+        let parent = dummy_tx(1);
+        let child = dummy_tx(2);
+        let orphan = dummy_tx(3);
+        let unknown = dummy_tx(4).wtxid();
+        let inventory = FakeTxInventory::empty()
+            .with_resident_tx(parent.clone())
+            .with_resident_tx(child.clone())
+            .with_tx(orphan.clone());
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let served = dispatch_over(
+            &mut peer,
+            &Message::GetPkgTxns(GetPkgTxns {
+                wtxids: vec![child.wtxid(), parent.wtxid(), child.wtxid()],
+            }),
+            &inventory,
+        )?;
+        assert_eq!(
+            served,
+            vec![Message::PkgTxns(PkgTxns {
+                txs: vec![child.clone(), parent.clone(), child.clone()],
+            })]
+        );
+
+        // One member that is only an orphan, or absent altogether, makes the
+        // whole request unavailable: one notfound, nothing else.
+        for unavailable in [orphan.wtxid(), unknown] {
+            let wtxids = vec![parent.wtxid(), unavailable, child.wtxid()];
+            let responses = dispatch_over(
+                &mut peer,
+                &Message::GetPkgTxns(GetPkgTxns {
+                    wtxids: wtxids.clone(),
+                }),
+                &inventory,
+            )?;
+            assert_eq!(
+                responses,
+                vec![Message::NotFound(vec![Inventory::Unknown {
+                    inv_type: MSG_PKGTXNS,
+                    hash: combined_package_hash(&wtxids),
+                }])]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getpkgtxns_without_an_inventory_is_one_notfound() -> Result<(), PeerError> {
+        let wtxids = vec![dummy_tx(1).wtxid(), dummy_tx(2).wtxid()];
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let responses = dispatch_inbound(
+            &mut peer,
+            &Message::GetPkgTxns(GetPkgTxns {
+                wtxids: wtxids.clone(),
+            }),
+        )?;
+
+        assert_eq!(
+            responses,
+            vec![Message::NotFound(vec![Inventory::Unknown {
+                inv_type: MSG_PKGTXNS,
+                hash: combined_package_hash(&wtxids),
+            }])]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getpkgtxns_that_cannot_fit_one_frame_is_unavailable() -> Result<(), PeerError> {
+        let bulky: Vec<Tx> = (1..=3_u8)
+            .map(|byte| {
+                let mut tx = dummy_tx(byte);
+                tx.inputs[0].script_sig = vec![byte; 1_500_000].into();
+                tx
+            })
+            .collect();
+        let wtxids: Vec<Wtxid> = bulky.iter().map(Tx::wtxid).collect();
+        let inventory = bulky
+            .into_iter()
+            .fold(FakeTxInventory::empty(), FakeTxInventory::with_resident_tx);
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let responses = dispatch_over(
+            &mut peer,
+            &Message::GetPkgTxns(GetPkgTxns {
+                wtxids: wtxids.clone(),
+            }),
+            &inventory,
+        )?;
+
+        assert_eq!(
+            responses,
+            vec![Message::NotFound(vec![Inventory::Unknown {
+                inv_type: MSG_PKGTXNS,
+                hash: combined_package_hash(&wtxids),
+            }])]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getpkgtxns_is_left_unanswered_while_the_production_gate_is_closed() -> Result<(), PeerError>
+    {
+        let tx = dummy_tx(1);
+        let inventory = FakeTxInventory::empty().with_resident_tx(tx.clone());
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+        let loaded = AtomicUsize::new(0);
+        let counting = CountingResident {
+            inner: &inventory,
+            loaded: &loaded,
+        };
+
+        dispatch_inbound_full(
+            &mut peer,
+            &Message::GetPkgTxns(GetPkgTxns {
+                wtxids: vec![tx.wtxid()],
+            }),
+            None,
+            Some(&counting),
+            &|| true,
+            &|| false,
+            &mut |response| panic!("a closed gate queued {response:?}"),
+            &mut |_| {},
+            &mut |_| {},
+        )?;
+
+        assert_eq!(loaded.load(Ordering::SeqCst), 0, "no body was loaded");
+        Ok(())
+    }
+
+    /// Counts resident package loads, forwarding to `inner`.
+    struct CountingResident<'a> {
+        inner: &'a FakeTxInventory,
+        loaded: &'a AtomicUsize,
+    }
+
+    impl TxInventory for CountingResident<'_> {
+        fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
+            self.inner.have_tx(hash, hash_is_wtxid)
+        }
+
+        fn get_tx(&self, txid: Txid) -> Option<Tx> {
+            self.inner.get_tx(txid)
+        }
+
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+            self.inner.get_tx_by_wtxid(wtxid)
+        }
+
+        fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+            self.inner.resident_ancestor_package(wtxid)
+        }
+
+        fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+            self.loaded.fetch_add(1, Ordering::SeqCst);
+            self.inner.resident_package(wtxids)
+        }
+    }
+
+    #[test]
+    fn ancpkginfo_hands_the_missing_members_to_the_request_owner_once() -> Result<(), PeerError> {
+        let parent = dummy_tx(1);
+        let child = dummy_tx(2);
+        let message = Message::AncPkgInfo(AncPkgInfo {
+            wtxids: vec![parent.wtxid(), child.wtxid()],
+        });
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        // The child is a held orphan and the parent a recent reject: both are
+        // known to the node, neither is resident, so both are requested.
+        let refused = FakeTxInventory::empty()
+            .with_tx(child.clone())
+            .with_have(*parent.wtxid().as_bytes())
+            .with_have(*child.wtxid().as_bytes());
+        assert_eq!(dispatch_over(&mut peer, &message, &refused)?, []);
+        assert_eq!(
+            peer.take_package_request(),
+            Some(PackageRequest {
+                subject: child.wtxid(),
+                wtxids: vec![parent.wtxid(), child.wtxid()],
+            })
+        );
+        assert_eq!(peer.take_package_request(), None, "one handoff per message");
+
+        // A resident parent is not asked for again.
+        let resident_parent = FakeTxInventory::empty().with_resident_tx(parent);
+        dispatch_over(&mut peer, &message, &resident_parent)?;
+        assert_eq!(
+            peer.take_package_request(),
+            Some(PackageRequest {
+                subject: child.wtxid(),
+                wtxids: vec![child.wtxid()],
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ancpkginfo_requests_nothing_when_nothing_is_missing_or_the_package_is_too_large()
+    -> Result<(), PeerError> {
+        let max = bitcoin_rs_mempool::standardness::MAX_PACKAGE_COUNT;
+        let held: Vec<Tx> = (1..=3_u8).map(dummy_tx).collect();
+        let everything = held
+            .iter()
+            .cloned()
+            .fold(FakeTxInventory::empty(), FakeTxInventory::with_resident_tx);
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+        dispatch_over(
+            &mut peer,
+            &Message::AncPkgInfo(AncPkgInfo {
+                wtxids: held.iter().map(Tx::wtxid).collect(),
+            }),
+            &everything,
+        )?;
+        assert_eq!(
+            peer.take_package_request(),
+            None,
+            "subject already resident"
+        );
+
+        let too_many: Vec<Wtxid> = (0..=max)
+            .map(|index| {
+                let byte = u8::try_from(index).unwrap_or(u8::MAX);
+                Wtxid::from(Hash256::from_le_bytes(&[byte.wrapping_add(1); 32]))
+            })
+            .collect();
+        assert_eq!(too_many.len(), max + 1);
+        dispatch_over(
+            &mut peer,
+            &Message::AncPkgInfo(AncPkgInfo { wtxids: too_many }),
+            &FakeTxInventory::empty(),
+        )?;
+        assert_eq!(peer.take_package_request(), None, "above admission bound");
+
+        let exact: Vec<Wtxid> = (1..=u8::try_from(max).unwrap_or(u8::MAX))
+            .map(|byte| Wtxid::from(Hash256::from_le_bytes(&[byte; 32])))
+            .collect();
+        dispatch_over(
+            &mut peer,
+            &Message::AncPkgInfo(AncPkgInfo {
+                wtxids: exact.clone(),
+            }),
+            &FakeTxInventory::empty(),
+        )?;
+        assert_eq!(
+            peer.take_package_request().map(|request| request.wtxids),
+            Some(exact),
+            "a package at the bound is requested whole"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ancpkginfo_is_not_requested_while_transaction_relay_is_closed() -> Result<(), PeerError> {
+        let wtxid = dummy_tx(1).wtxid();
+        let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
+
+        let responses = dispatch_collect_gated(
+            &mut peer,
+            &Message::AncPkgInfo(AncPkgInfo {
+                wtxids: vec![wtxid],
+            }),
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(responses, []);
+        assert_eq!(peer.take_package_request(), None);
         Ok(())
     }
 

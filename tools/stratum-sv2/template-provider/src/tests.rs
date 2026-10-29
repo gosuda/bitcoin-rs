@@ -5,7 +5,8 @@ use bitcoin_rs_mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,
 };
 use bitcoin_rs_primitives::{
-    Amount, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
+    Amount, BlockPayload, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    consensus_bytes,
 };
 use std::time::Instant;
 use stratum_apps::stratum_core::{bitcoin, template_distribution_sv2::SubmitSolutionOwned};
@@ -174,7 +175,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
         tokio::task::spawn_blocking(move || submission_node
             .mining_control()
             .unwrap()
-            .submit_block(assembled))
+            .submit_block(BlockPayload::from_local(assembled)))
         .await??,
         BlockValidationResult::Accepted
     );
@@ -183,7 +184,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     assert!(Arc::ptr_eq(&hub.lookup(first.id).unwrap(), &first));
     assert_eq!(
         node.mining_control()?
-            .submit_block(first.assemble_block(&solution)?)?,
+            .submit_block(BlockPayload::from_local(first.assemble_block(&solution)?))?,
         BlockValidationResult::Duplicate
     );
     let funding = solved.txs[0].clone();
@@ -273,12 +274,14 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     let mut old_job = before.into_unsolved_block()?;
     solve_block(&mut old_job, 1_000_000)?;
     assert_eq!(
-        node.mining_control()?.submit_block(old_job)?,
+        node.mining_control()?
+            .submit_block(BlockPayload::from_local(old_job))?,
         BlockValidationResult::Accepted
     );
     // Its competitor must now be rejected by normal chainstate admission.
     assert!(matches!(
-        node.mining_control()?.submit_block(projected)?,
+        node.mining_control()?
+            .submit_block(BlockPayload::from_local(projected))?,
         BlockValidationResult::Rejected(_)
     ));
 

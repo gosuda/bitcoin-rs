@@ -2,7 +2,9 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_fs_ext::{
+    DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt, OpenOptionsSyncExt,
+};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
@@ -149,23 +151,6 @@ impl CheckpointRoot {
         self.dir.rename(from, &self.dir, to)
     }
 
-    #[cfg(any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "redox"
-    ))]
-    pub(crate) fn rename_noreplace(&self, from: &str, to: &str) -> io::Result<()> {
-        rustix::fs::renameat_with(
-            self.dir(),
-            from,
-            self.dir(),
-            to,
-            rustix::fs::RenameFlags::NOREPLACE,
-        )
-        .map_err(Into::into)
-    }
-
     pub(crate) fn sync(&self) -> io::Result<()> {
         sync_dir(&self.dir)
     }
@@ -197,6 +182,49 @@ impl CheckpointRoot {
     }
 }
 
+/// Whether [`rename_noreplace`] is available on this target. Callers that do
+/// expensive work before publishing consult it first so they can refuse early.
+pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+));
+
+/// Renames `from` to `to` inside `dir` in one filesystem step that fails with
+/// [`io::ErrorKind::AlreadyExists`] instead of replacing an existing `to`.
+///
+/// A prior existence check cannot provide this: another process can create
+/// `to` between the check and the rename and lose its file. Both names stay
+/// confined to `dir`: absolute paths, parent components, and separators are
+/// refused before the rename.
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+    check_confined_endpoint(from)?;
+    check_confined_endpoint(to)?;
+    rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE)
+        .map_err(Into::into)
+}
+
+/// Platforms without an atomic no-replace rename refuse rather than replace.
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+)))]
+pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no atomic no-replace rename",
+    ))
+}
+
 /// Creates a new regular file without following symlinks.
 pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
     let mut options = OpenOptions::new();
@@ -207,9 +235,16 @@ pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
     dir.open_with(name, &options)
 }
 
-pub(crate) fn open_file(dir: &Dir, name: &str) -> io::Result<File> {
+/// Opens a checkpoint entry for reading without blocking on FIFOs.
+///
+/// A plain read-only open waits for a writer when `name` resolves to a FIFO,
+/// so a substituted entry could stall the caller before any byte is read.
+/// Open nonblocking without following symlinks, then require the opened
+/// inode to be a regular file. `O_NONBLOCK` is a no-op for regular files,
+/// so `NotFound` and other I/O error kinds propagate unchanged.
+pub fn open_file(dir: &Dir, name: &str) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
+    options.read(true).follow(FollowSymlinks::No).nonblock(true);
     let file = dir.open_with(name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
@@ -289,6 +324,46 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
 )))]
 /// Returns success when the platform cannot fsync directory handles.
 pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
+    Ok(())
+}
+
+/// Rejects any rename endpoint that could resolve outside the checkpoint root.
+///
+/// Raw `/` is rejected before `components()` because `Path` normalizes a
+/// trailing slash away (`"link/"` yields one `Normal` component) while
+/// `renameat` still treats it as a directory target and may follow a symlink
+/// planted inside the root. The remaining `components()` check then accepts
+/// exactly one `Normal` component, which rejects `.`, `..`, absolute roots,
+/// prefixes, and any other non-entry structure. Backslash stays a valid
+/// filename character on the Unix targets this method compiles for, so only
+/// `/` (and NUL/empty) is rejected at the byte layer. Both endpoints are
+/// validated so neither the source nor the destination can traverse, and the
+/// single-shot `renameat_with(NOREPLACE)` that follows keeps atomic
+/// publication without overwriting operator data.
+fn check_confined_endpoint(name: &str) -> io::Result<()> {
+    fn invalid(name: &str, reason: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("checkpoint rename endpoint {name:?} is not confined: {reason}"),
+        )
+    }
+    if name.is_empty() {
+        return Err(invalid(name, "empty name"));
+    }
+    if name.contains('\0') {
+        return Err(invalid(name, "NUL byte"));
+    }
+    if name.contains('/') {
+        return Err(invalid(name, "path separator"));
+    }
+    let mut components = Path::new(name).components();
+    match components.next() {
+        Some(std::path::Component::Normal(_)) => {}
+        _ => return Err(invalid(name, "not a single normal component")),
+    }
+    if components.next().is_some() {
+        return Err(invalid(name, "nested path"));
+    }
     Ok(())
 }
 

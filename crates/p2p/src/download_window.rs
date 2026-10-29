@@ -5,7 +5,7 @@
 //! to manage the in-flight window budget. `crate::BlockStager` owns the
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
-use std::net::SocketAddr;
+
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -79,6 +79,44 @@ impl PeerRequest {
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
+
+}
+
+/// Per-peer availability view for one request build.
+///
+/// `is_refused` names the bodies this peer answered `notfound` for; the scan
+/// records the lowest such height so the batch pins the cursor there instead
+/// of dropping the whole batch. Grouping the predicate with its pin keeps the
+/// scan helpers to one added parameter.
+pub(crate) struct RefusalFilter<'a> {
+    is_refused: &'a dyn Fn(Hash256) -> bool,
+    min_refused: Option<u32>,
+}
+
+impl<'a> RefusalFilter<'a> {
+    pub(crate) fn new(is_refused: &'a dyn Fn(Hash256) -> bool) -> Self {
+        Self {
+            is_refused,
+            min_refused: None,
+        }
+    }
+
+    /// Whether `hash` stays in this peer's batch. A refused body is dropped
+    /// and its height contends for the cursor pin.
+    pub(crate) fn keep(&mut self, hash: Hash256, height: u32) -> bool {
+        if (self.is_refused)(hash) {
+            self.min_refused = Some(self.min_refused.map_or(height, |floor| {
+                floor.min(height)
+            }));
+            false
+        } else {
+            true
+        }
+    }
+
+    pub(crate) fn min_refused(&self) -> Option<u32> {
+        self.min_refused
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -145,7 +183,7 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 struct PendingBlock {
     /// The exact connection that owns this request. Same-address
     /// replacement must never inherit it: liveness is checked on the pair
-    /// `(owner.addr, owner.connection_id())`, not the address alone.
+    /// `(owner.endpoint, owner.connection_id())`, not the address alone.
     owner: PeerSource,
     requested_at: Instant,
     height: u32,
@@ -381,7 +419,29 @@ pub(crate) struct DownloadWindow {
     /// time. While inside `staller_cooldown` such a peer is not fan-out
     /// eligible and receives no block requests except as the last-resort peer.
     /// This prevents immediate re-acquisition of the same block stripe.
-    recent_stallers: HashMap<SocketAddr, Instant>,
+    recent_stallers: HashMap<StallerKey, Instant>,
+}
+
+/// Identity a staller cooldown attaches to: the logical endpoint for
+/// identified peers, or the connection id for unidentified (anonymous,
+/// e.g. inbound Tor) sessions. Anonymous stallers are tracked per
+/// connection rather than silently skipped: a `None` endpoint must never
+/// collapse every anonymous session into one shared key or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum StallerKey {
+    /// Identified peer, keyed by logical endpoint.
+    Endpoint(crate::PeerEndpoint),
+    /// Unidentified session, keyed by its connection id.
+    Unidentified(crate::ConnectionId),
+}
+
+impl From<PeerSource> for StallerKey {
+    fn from(source: PeerSource) -> Self {
+        match source.endpoint() {
+            Some(endpoint) => Self::Endpoint(endpoint),
+            None => Self::Unidentified(source.connection_id()),
+        }
+    }
 }
 
 impl DownloadWindow {
@@ -794,7 +854,7 @@ impl DownloadWindow {
                         now,
                     ))
             {
-                self.mark_peer_unresponsive(observation.owner.addr, now);
+                self.mark_peer_unresponsive(observation.owner, now);
                 return Some(observation.owner);
             }
             return None;
@@ -991,7 +1051,7 @@ impl DownloadWindow {
                 stored.info_logged = true;
             }
             tracing::info!(
-                peer_addr = %episode.owner.addr,
+                peer_addr = ?episode.owner.endpoint,
                 front_hash = %episode.front_hash,
                 front_height = next_apply_height,
                 episode_age_ms = u64::try_from(now.duration_since(episode.since).as_millis())
@@ -1017,7 +1077,7 @@ impl DownloadWindow {
         self.stall_timeout = effective_timeout
             .saturating_mul(2)
             .min(self.budget.stall_timeout_max);
-        self.mark_peer_unresponsive(owner.addr, now);
+        self.mark_peer_unresponsive(owner, now);
         Some(owner)
     }
 
@@ -1153,9 +1213,9 @@ impl DownloadWindow {
     /// peer delivering each front block just under the adaptive threshold is
     /// never disconnected (same exposure as Core) but is visible here and on
     /// the `node.sync.stall_seconds` gauge.
-    pub(crate) fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(Option<crate::PeerEndpoint>, Instant)> {
         self.stall
-            .map(|episode| (episode.owner.addr, episode.since))
+            .map(|episode| (episode.owner.endpoint, episode.since))
     }
     /// Advances the cold-start front timer independently of the strong stall
     /// predicate. Returns a duplicate request only after the same apply-front
@@ -1256,6 +1316,29 @@ impl DownloadWindow {
     pub(crate) fn clear_preferred_peer(&mut self) {
         self.preferred_peer = None;
     }
+
+    /// Whether `source` was offered `hash` as a prefix-probe racer: its
+    /// `notfound` answers a question the node asked, so the scheduler
+    /// remembers it even though the owner keeps the request.
+    pub(crate) fn probe_offered(&self, source: PeerSource, hash: &Hash256) -> bool {
+        self.prefix_probe
+            .as_ref()
+            .is_some_and(|probe| probe.hashes.contains(hash) && probe.racers.contains_key(&source))
+    }
+
+    /// Whether `source` is the recorded hedge alternate racing for `hash`:
+    /// its `notfound` answers the duplicate request the node sent, so the
+    /// scheduler remembers it even though the owner keeps the request.
+    pub(crate) fn hedge_offered(&self, source: PeerSource, hash: &Hash256) -> bool {
+        matches!(
+            self.cold_front,
+            Some(ColdFrontState::Racing {
+                alternate,
+                hash: front,
+                owner: _,
+            }) if alternate == source && front == *hash
+        )
+    }
     /// Builds the one-shot common-prefix probe after a deep fallback request.
     pub(crate) fn prefix_probe_plan(
         &self,
@@ -1342,18 +1425,20 @@ impl DownloadWindow {
     }
 
     /// Starts the re-acquisition cooldown for an unresponsive peer.
-    pub(crate) fn mark_peer_unresponsive(&mut self, peer_addr: SocketAddr, now: Instant) {
+    /// Unidentified sessions cool down per connection (see
+    /// [`StallerKey`]); they are never silently skipped.
+    pub(crate) fn mark_peer_unresponsive(&mut self, source: PeerSource, now: Instant) {
         let cooldown = self.budget.staller_cooldown;
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < cooldown);
-        self.recent_stallers.insert(peer_addr, now);
+        self.recent_stallers.insert(StallerKey::from(source), now);
     }
 
-    /// Whether `peer_addr` is in cooldown; such peers are a last resort so a
+    /// Whether `source` is in cooldown; such peers are a last resort so a
     /// reconnecting staller cannot immediately reacquire the window front.
-    pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn peer_in_staller_cooldown(&self, source: PeerSource, now: Instant) -> bool {
         self.recent_stallers
-            .get(&peer_addr)
+            .get(&StallerKey::from(source))
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
     }
 
@@ -1502,7 +1587,8 @@ impl DownloadWindow {
     ///   fails `owns` is cancelled regardless of its racers, and a race left
     ///   with fewer than two racers is cancelled.
     /// INVARIANT: no fact here is compared by address alone.
-    ///   `recent_stallers` is the one address-keyed fact and stays exempt;
+    ///   `recent_stallers` is keyed by [`StallerKey`] (endpoint, or
+    ///   connection id for unidentified sessions) and stays exempt;
     ///   `stall` is untouched because the conviction paths own its release.
     pub(crate) fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
         let cold_front_owned = match self.cold_front {
@@ -1593,9 +1679,11 @@ impl DownloadWindow {
     /// no blocks are available to request.
     ///
     /// PRE: `stager` is the coupled staging set; expiry has run this tick.
-    /// POST: a request whose entries are unowned, on the request branch, and
-    ///      inside every pending/staging budget; `next_request_height` covers
-    ///      every height the scan offered.
+    /// POST: a request whose entries are unowned, on the request branch,
+    ///      inside every pending/staging budget, and free of bodies
+    ///      `is_refused` names for `source`; `next_request_height` covers
+    ///      every height the scan offered except the lowest refused one,
+    ///      which pins the cursor so another peer can plan it this tick.
     /// INVARIANT: staged membership, count, and bytes are read from `stager`.
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn next_peer_request(
@@ -1609,6 +1697,7 @@ impl DownloadWindow {
         servable_floor: u32,
         tree: &BlockTree,
         now: Instant,
+        refusals: &mut RefusalFilter,
     ) -> Option<PeerRequest> {
         self.retarget_request_branch(stager, chain_tip, request_start_height, tree, now);
         if self.staged_bytes_exhausted(stager) {
@@ -1616,7 +1705,7 @@ impl DownloadWindow {
         }
         if !allow_expired_retry_from_peer
             && (self.peer_has_expired_pending(source, now)
-                || self.peer_in_staller_cooldown(source.addr, now))
+                || self.peer_in_staller_cooldown(source, now))
         {
             return None;
         }
@@ -1646,12 +1735,16 @@ impl DownloadWindow {
             return None;
         }
 
+        // Bodies `source` already answered `notfound` for are excluded per
+        // entry, never by dropping the batch: the lowest refused height pins
+        // the cursor so a peer that holds it is still planned below.
         let mut entries = self.expired_request_entries(
             stager,
             expired,
             batch_limit,
             servable_floor,
             &mut byte_capacity,
+            refusals,
         );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
@@ -1693,8 +1786,14 @@ impl DownloadWindow {
                 next_request_height,
             };
             if entries.is_empty()
-                && let Some(request) =
-                    self.clean_contiguous_peer_request(stager, source, chain_tip, tree, scan)
+                && let Some(request) = self.clean_contiguous_peer_request(
+                    stager,
+                    source,
+                    chain_tip,
+                    tree,
+                    scan,
+                    refusals,
+                )
             {
                 return Some(request);
             }
@@ -1706,7 +1805,15 @@ impl DownloadWindow {
                 scan,
                 selected_hashes.as_ref(),
                 &mut entries,
+                refusals,
             );
+        }
+        if let Some(refused_height) = refusals.min_refused() {
+            // The pin only holds the cursor back, never rewinds it: every
+            // refused height the scan saw sits at or above where it started.
+            next_request_height = next_request_height
+                .min(refused_height)
+                .max(self.next_request_height);
         }
         non_empty_request(source, entries, next_request_height)
     }
@@ -1776,6 +1883,7 @@ impl DownloadWindow {
         scan: RequestScan,
         selected_hashes: Option<&SelectedHashes>,
         entries: &mut Vec<PeerRequestEntry>,
+        refusals: &mut RefusalFilter,
     ) -> u32 {
         if scan.remaining_limit == 0 {
             return scan.next_request_height;
@@ -1805,10 +1913,12 @@ impl DownloadWindow {
                 && !stager.contains(&node.hash)
                 && selected_hashes.is_none_or(|hashes| !hashes.contains(&node.hash))
             {
-                candidates.push(PeerRequestEntry {
-                    hash: node.hash,
-                    height: node.height,
-                });
+                if refusals.keep(node.hash, node.height) {
+                    candidates.push(PeerRequestEntry {
+                        hash: node.hash,
+                        height: node.height,
+                    });
+                }
             }
             let Some(parent) = node.parent else {
                 break;
@@ -1835,11 +1945,15 @@ impl DownloadWindow {
         batch_limit: usize,
         servable_floor: u32,
         byte_capacity: &mut usize,
+        refusals: &mut RefusalFilter,
     ) -> Vec<PeerRequestEntry> {
         let mut entries = Vec::with_capacity(batch_limit);
         for entry in expired {
             if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
                 break;
+            }
+            if !refusals.keep(entry.hash, entry.height) {
+                continue;
             }
             if entry.height < servable_floor
                 || stager.contains(&entry.hash)
@@ -1860,6 +1974,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         scan: RequestScan,
+        refusals: &mut RefusalFilter,
     ) -> Option<PeerRequest> {
         if !self.pending.is_empty() || stager.received_len() > 0 {
             return None;
@@ -1871,6 +1986,17 @@ impl DownloadWindow {
             .min(scan.request_tip_height);
         let entries =
             contiguous_request_entries(tree, chain_tip.tip_id, scan.height, request_end_height)?;
+        // A refused body inside the range falls through to the reverse scan,
+        // which excludes it per entry and pins the cursor at its height. The
+        // loop never short-circuits: every refused height contends for the
+        // pin even though the range is rebuilt below.
+        let mut has_refused = false;
+        for entry in &entries {
+            has_refused |= !refusals.keep(entry.hash, entry.height);
+        }
+        if has_refused {
+            return None;
+        }
         let next_request_height = scan
             .next_request_height
             .max(request_end_height.saturating_add(1));
@@ -1915,12 +2041,12 @@ impl DownloadWindow {
         self.pending_timeout_observation = None;
         self.retain_peer_assignments(|peer| *peer == winner || !probe.racers.contains_key(peer));
         if winner != owner {
-            self.mark_peer_unresponsive(owner.addr, now);
+            self.mark_peer_unresponsive(owner, now);
         }
         self.preferred_peer = Some(winner);
         tracing::info!(
-            owner = %owner.addr,
-            winner = %winner.addr,
+            owner = ?owner.endpoint,
+            winner = ?winner.endpoint,
             winner_is_owner = winner == owner,
             blocks = probe.hashes.len(),
             elapsed_ms = u64::try_from(now.duration_since(probe.started_at).as_millis()).unwrap_or(u64::MAX),
@@ -1954,11 +2080,11 @@ impl DownloadWindow {
                 }
                 self.prefix_probe = None;
                 self.retain_peer_assignments(|peer| *peer != owner);
-                self.mark_peer_unresponsive(owner.addr, now);
+                self.mark_peer_unresponsive(owner, now);
                 self.preferred_peer = Some(alternate);
                 tracing::info!(
-                    owner = %owner.addr,
-                    winner = %alternate.addr,
+                    owner = ?owner.endpoint,
+                    winner = ?alternate.endpoint,
                     %hash,
                     "block sync: cold-front hedge elected alternate"
                 );
@@ -2387,13 +2513,13 @@ impl DownloadWindow {
     /// tick's request scan must reach in addition to fresh capacity.
     ///
     /// PRE: expiry has run this tick.
-    /// POST: returns the number of distinct `pending.owner.addr` values.
+    /// POST: returns the number of distinct `pending.owner.endpoint` values.
     /// INVARIANT: each address counts once, however many requests it owns.
     fn owner_address_count(&self) -> usize {
-        let mut owners: SmallVec<[SocketAddr; 16]> = SmallVec::new();
+        let mut owners: SmallVec<[Option<crate::PeerEndpoint>; 16]> = SmallVec::new();
         for pending in self.pending.values() {
-            if !owners.contains(&pending.owner.addr) {
-                owners.push(pending.owner.addr);
+            if !owners.contains(&pending.owner.endpoint) {
+                owners.push(pending.owner.endpoint);
             }
         }
         owners.len()

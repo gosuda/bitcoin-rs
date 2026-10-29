@@ -10,7 +10,7 @@ use super::{
     PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
 };
 use crate::error::ApplyError;
-use bitcoin_rs_primitives::{Block, Hash256};
+use bitcoin_rs_primitives::{Block, BlockPayload, Hash256};
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -221,33 +221,23 @@ fn restore_uncommitted_takes(
 #[expect(clippy::result_large_err)]
 pub(super) fn apply_window_admitted(
     handles: &Chainstate,
-    blocks: &[&Block],
-    serialized: &[bytes::Bytes],
+    payloads: &[&BlockPayload],
 ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
-    if blocks.len() != serialized.len() {
-        return Err(WindowApplyError {
-            applied: 0,
-            committed: Vec::new(),
-            source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(format!(
-                "window has {} blocks but {} serialized bodies",
-                blocks.len(),
-                serialized.len()
-            ))),
-            disposition: WindowApplyDisposition::Operational,
-            invalidated: Box::default(),
-        });
-    }
-    let window = prove_window(handles, blocks, serialized);
+    // A single slice has one length: the parallel-length mismatch is
+    // unrepresentable and its `Operational` source is gone with the second
+    // slice. An empty window still proves nothing and falls through to the
+    // existing per-block path below exactly as today.
+    let window = prove_window(handles, payloads);
     let mut proven = window.proven.into_iter();
     let mut takes = window.takes;
     let take_starts = window.take_starts;
     let mut group = WindowGroup::default();
-    let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(blocks.len());
-    for (block, raw) in blocks.iter().zip(serialized) {
+    let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(payloads.len());
+    for &payload in payloads {
+        let block = payload.block();
         match apply_committed_block_admitted(
             handles,
-            block,
-            Some(raw.clone()),
+            payload,
             proven.next(),
             BlockProvenance::Network,
             PublishMode::Grouped(&mut group),
@@ -299,7 +289,7 @@ pub(super) fn apply_window_admitted(
                 // its durable group before reporting, so the durable head
                 // and the published tip keep moving together. A flush
                 // failure is the ambiguous-batch case: fatal, never retried.
-                if let Err(error) = flush_group(&mut group, handles, &mut committed, blocks) {
+                if let Err(error) = flush_group(&mut group, handles, &mut committed, payloads) {
                     restore_uncommitted_takes(takes.take(), &take_starts, error.applied);
                     return Err(error);
                 }
@@ -314,13 +304,13 @@ pub(super) fn apply_window_admitted(
             }
         }
         if group.should_flush() {
-            if let Err(error) = flush_group(&mut group, handles, &mut committed, blocks) {
+            if let Err(error) = flush_group(&mut group, handles, &mut committed, payloads) {
                 restore_uncommitted_takes(takes.take(), &take_starts, error.applied);
                 return Err(error);
             }
         }
     }
-    if let Err(error) = flush_group(&mut group, handles, &mut committed, blocks) {
+    if let Err(error) = flush_group(&mut group, handles, &mut committed, payloads) {
         restore_uncommitted_takes(takes.take(), &take_starts, error.applied);
         return Err(error);
     }
@@ -335,8 +325,11 @@ fn flush_group(
     group: &mut WindowGroup,
     handles: &Chainstate,
     committed: &mut Vec<ConnectOutcome>,
-    blocks: &[&Block],
+    payloads: &[&BlockPayload],
 ) -> core::result::Result<(), WindowApplyError> {
+    if group.pending.is_empty() {
+        return Ok(());
+    }
     // The staged prefix is a contiguous suffix starting at `committed.len()`,
     // so the newest staged block is borrowed straight from the caller's apply
     // batch — no clone in chainstate. Empty group: nothing staged, no hook.
@@ -345,16 +338,27 @@ fn flush_group(
     let staged_block = if group.pending.is_empty() {
         None
     } else {
-        blocks
+        payloads
             .get(committed.len() + group.pending.len() - 1)
-            .copied()
+            .map(|payload| payload.block())
     };
+    let flush_started = quanta::Instant::now();
+    let pending_blocks = group.pending.len();
     match group.flush(handles, staged_block) {
         Ok(flushed) => {
+            let flush_wait_us = flush_started.elapsed().as_micros();
+            tracing::debug!(blocks = flushed.len(), flush_wait_us, "window: group flush");
             committed.extend(flushed);
             Ok(())
         }
         Err(flush_error) => {
+            let flush_wait_us = flush_started.elapsed().as_micros();
+            tracing::debug!(
+                blocks = pending_blocks,
+                flush_wait_us,
+                %flush_error,
+                "window: group flush failed"
+            );
             group.abandon();
             Err(WindowApplyError {
                 applied: committed.len(),
@@ -375,7 +379,10 @@ fn invalidate_permanent_failure(
     hash: Hash256,
 ) -> (Box<[Hash256]>, WindowApplyDisposition) {
     match crate::reorg::invalidate_and_republish(handles, hash) {
-        Ok(invalidated) => (invalidated, WindowApplyDisposition::Permanent),
+        Ok(outcome) => (
+            outcome.invalid.into_boxed_slice(),
+            WindowApplyDisposition::Permanent,
+        ),
         Err(crate::reorg::InvalidationError::UnknownBlock(_)) => {
             (Box::default(), WindowApplyDisposition::Permanent)
         }
@@ -446,10 +453,12 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
 #[expect(clippy::too_many_lines)]
 fn prove_window<'a, 'h>(
     handles: &'h Chainstate,
-    blocks: &[&'a Block],
-    serialized: &[bytes::Bytes],
+    payloads: &[&'a BlockPayload],
 ) -> ProvenWindow<'a, 'h> {
-    if blocks.is_empty() || blocks.len() != serialized.len() {
+    // Empty input proves nothing: silent default, same as every other
+    // fallback below (missing tip, chain break, missing tree node, parse or
+    // overlay failure). No assert, no new error.
+    if payloads.is_empty() {
         return ProvenWindow::default();
     }
     let Some(applied) = handles.applied_tip.load_full() else {
@@ -461,12 +470,13 @@ fn prove_window<'a, 'h>(
     // state under the later blocks. Each apply re-derives all of it and
     // compares, so a captured value that turns out wrong costs the batch only.
     let context_started = quanta::Instant::now();
-    let mut contexts = Vec::with_capacity(blocks.len());
+    let mut contexts = Vec::with_capacity(payloads.len());
     {
         let tree = handles.block_tree.read();
         let mut parent_id = applied.tip_id;
         let mut parent_hash = applied.hash;
-        for (index, block) in blocks.iter().enumerate() {
+        for (index, &payload) in payloads.iter().enumerate() {
+            let block = payload.block();
             let hash = block.block_hash().0;
             if block.header.prev_blockhash.0 != parent_hash {
                 return ProvenWindow::default();
@@ -509,12 +519,10 @@ fn prove_window<'a, 'h>(
     // block, so the window does all of it at once. Only the overlay walk below
     // is order-dependent, and it is the cheaper half.
     let parse_started = quanta::Instant::now();
-    let parsed: Vec<core::result::Result<_, ApplyError>> = blocks
+    let parsed: Vec<core::result::Result<_, ApplyError>> = payloads
         .par_iter()
-        .zip(serialized.par_iter())
-        .map(|(block, raw)| {
-            parse_block_for_apply(block, Some(raw.clone()), handles.validation_engine)
-        })
+        .copied()
+        .map(|payload| parse_block_for_apply(payload, handles.validation_engine))
         .collect();
     metrics::histogram!("node.window.parse_seconds").record(parse_started.elapsed().as_secs_f64());
 
@@ -523,8 +531,9 @@ fn prove_window<'a, 'h>(
         handles.utxo.as_ref(),
         bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
     );
-    let mut prepared = Vec::with_capacity(blocks.len());
-    for ((block, parsed), context) in blocks.iter().zip(parsed).zip(&contexts) {
+    let mut prepared = Vec::with_capacity(payloads.len());
+    for ((&payload, parsed), context) in payloads.iter().zip(parsed).zip(&contexts) {
+        let block = payload.block();
         let Ok((script_source, facts)) = parsed else {
             return ProvenWindow::default();
         };
@@ -554,7 +563,8 @@ fn prove_window<'a, 'h>(
         .record(prepare_started.elapsed().as_secs_f64());
 
     // Cheap structural checks before any script runs.
-    for ((block, unit), context) in blocks.iter().zip(prepared.iter_mut()).zip(&contexts) {
+    for ((&payload, unit), context) in payloads.iter().zip(prepared.iter_mut()).zip(&contexts) {
+        let block = payload.block();
         // The one-pass derivation already reduced these txids through the
         // production walker; comparing the stored root is the same verdict
         // without a second tree walk.
@@ -607,12 +617,13 @@ fn prove_window<'a, 'h>(
         // same reason the script checks are batched across blocks rather than
         // split within one.
         let mut units = Vec::with_capacity(prepared.len());
-        for (index, ((block, unit), context)) in blocks
+        for (index, ((&payload, unit), context)) in payloads
             .iter()
             .zip(prepared.iter_mut())
             .zip(&contexts)
             .enumerate()
         {
+            let block = payload.block();
             if let Some(takes) = takes.as_ref() {
                 take_starts.push(takes.checkpoint());
             }

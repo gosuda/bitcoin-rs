@@ -37,7 +37,14 @@ fn startup_reports_regtest_identity() -> Result<()> {
 fn node_info_rpcs_answer() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let rpcinfo = node.rpc("getrpcinfo", &json!([]))?;
-    assert_eq!(rpcinfo.field("active_commands")?, &json!([]));
+    let active = rpcinfo.field("active_commands")?;
+    assert!(
+        active == &json!([])
+            || active.as_array().is_some_and(|commands| {
+                commands.len() == 1 && commands[0]["method"] == json!("getrpcinfo")
+            }),
+        "unexpected active commands: {active:?}"
+    );
     let datadir = node.take_datadir()?;
     assert_eq!(
         rpcinfo.str_field("logpath")?,

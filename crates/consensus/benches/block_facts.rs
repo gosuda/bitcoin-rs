@@ -9,9 +9,10 @@ mod fixtures;
 
 use std::hint::black_box;
 
-use bitcoin_rs_consensus::{BlockFacts, BlockView};
+use bitcoin_rs_consensus::kernel::BlockParse;
+use bitcoin_rs_consensus::{BlockFacts, BlockView, ValidationEngine};
 use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Tx, consensus_bytes};
+use bitcoin_rs_primitives::{BlockPayload, Tx};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn block_facts(c: &mut Criterion) {
@@ -28,24 +29,32 @@ fn block_facts(c: &mut Criterion) {
         ("segwit_253_inputs", 8, 253, 2, 0, 1),
         ("segwit_253_outputs", 8, 1, 253, 0, 1),
     ] {
+        // Locally assembled fixture: one encode retains the exact bytes. The
+        // timed spans below never re-encode and never run a second decode
+        // alongside the payload construction.
         let block = fixtures::fixture(txs, inputs, outputs, script, witness);
-        let bytes = consensus_bytes(&block);
-        let parsed = ParsedBlock::parse_exact(&bytes)
+        let payload = BlockPayload::from_local(block);
+        let parsed = ParsedBlock::parse_exact(payload.bytes())
             .unwrap_or_else(|error| panic!("benchmark layout: {error}"));
         let checked = BlockFacts::from_parsed(&parsed);
-        fixtures::assert_oracle(&bytes, &checked);
+        fixtures::assert_oracle(payload.bytes(), &checked);
         assert!(!checked.merkle_mutated());
         group.throughput(Throughput::Bytes(
-            u64::try_from(bytes.len()).unwrap_or_else(|error| panic!("fixture size: {error}")),
+            u64::try_from(payload.bytes().len())
+                .unwrap_or_else(|error| panic!("fixture size: {error}")),
         ));
         group.bench_function(BenchmarkId::new("derive", name), |b| {
             b.iter(|| black_box(BlockFacts::from_parsed(black_box(&parsed))));
         });
         group.bench_function(BenchmarkId::new("parse_and_derive", name), |b| {
             b.iter(|| {
-                let layout = ParsedBlock::parse_exact(black_box(&bytes))
-                    .unwrap_or_else(|error| panic!("benchmark layout: {error}"));
-                black_box(BlockFacts::from_parsed(&layout))
+                let parsed =
+                    BlockParse::parse(black_box(payload.bytes()), ValidationEngine::Native)
+                        .unwrap_or_else(|error| panic!("benchmark layout: {error}"));
+                let (_, facts) = parsed
+                    .into_parts(payload.block().txs.as_slice())
+                    .unwrap_or_else(|error| panic!("benchmark facts: {error}"));
+                black_box(facts)
             });
         });
     }
@@ -56,11 +65,11 @@ fn lazy_witness_ids(c: &mut Criterion) {
     let mut group = c.benchmark_group("lazy_witness_ids");
     for (name, witness) in [("legacy", 0), ("segwit", 1), ("mixed", 2)] {
         let block = fixtures::fixture(1024, 1, 2, 25, witness);
-        let txids = block.txs.iter().map(Tx::txid).collect();
-        let baseline = BlockFacts::from_txids(&block.txs, txids);
-        let mut checked = BlockView::from_facts(&block.txs, baseline.clone());
-        let bytes = consensus_bytes(&block);
-        let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)
+        let payload = BlockPayload::from_local(block);
+        let txids = payload.block().txs.iter().map(Tx::txid).collect();
+        let baseline = BlockFacts::from_txids(&payload.block().txs, txids);
+        let mut checked = BlockView::from_facts(&payload.block().txs, baseline.clone());
+        let oracle: bitcoin::Block = bitcoin::consensus::deserialize(payload.bytes())
             .unwrap_or_else(|error| panic!("benchmark oracle: {error}"));
         assert_eq!(checked.witness_ids().len(), oracle.txdata.len());
         for (actual, expected) in checked.witness_ids().iter().zip(&oracle.txdata) {
@@ -71,7 +80,7 @@ fn lazy_witness_ids(c: &mut Criterion) {
             // Reset the lazy cache outside timing. Each iteration measures a
             // genuine first fill, not the already-populated fast return.
             b.iter_batched_ref(
-                || BlockView::from_facts(&block.txs, baseline.clone()),
+                || BlockView::from_facts(&payload.block().txs, baseline.clone()),
                 |view| {
                     black_box(view.witness_ids());
                 },
