@@ -1230,7 +1230,7 @@ impl PeerLease {
         }
         // BIP434 advertisements belong to Peer::send's version/verack
         // window; refuse before charging the budget.
-        if matches!(message, crate::Message::Feature { .. }) {
+        if matches!(message, crate::Message::Feature(_)) {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));
         }
@@ -1275,7 +1275,7 @@ impl PeerLease {
         };
         // BIP434 advertisements belong to Peer::send's version/verack
         // window; refuse before charging the budget.
-        if matches!(message, crate::Message::Feature { .. }) {
+        if matches!(message, crate::Message::Feature(_)) {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));
         }
@@ -1296,7 +1296,7 @@ impl PeerLease {
     ) -> Result<(), OutboundRefusal> {
         // BIP434 advertisements belong to Peer::send's version/verack
         // window, never the asynchronous post-handshake writer queue.
-        if matches!(message, crate::Message::Feature { .. }) {
+        if matches!(message, crate::Message::Feature(_)) {
             self.cancel();
             return Err(OutboundRefusal::Closed(message));
         }
@@ -1756,10 +1756,12 @@ mod tests {
         let shared = Arc::new(SharedOutboundBudget::with_limits(10_000, 1_000));
         for reserved in [false, true] {
             let (lease, rx) = shared_lease_with_reserve(&shared, 1_000);
-            let message = crate::Message::Feature {
-                id: b"BIP999".to_vec(),
-                data: vec![],
-            };
+            let message = crate::Message::Feature(
+                crate::feature::FeatureAnnouncement::new(
+                    crate::feature::FeatureId::from_raw_unchecked(b"BIP999".to_vec()),
+                    vec![],
+                ),
+            );
             let result = if reserved {
                 lease.send_with(reserve(&lease.budget_handle()), message.clone())
             } else {

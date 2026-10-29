@@ -51,6 +51,9 @@ fn receive_version<S>(
     peer: &mut Peer<S>,
     version: bitcoin::p2p::message_network::VersionMessage,
 ) -> Result<(), PeerError> {
+    if peer.remote_version.is_some() {
+        return Err(PeerError::Misbehavior("duplicate version message"));
+    }
     match peer.state {
         PeerState::Disconnected | PeerState::VersionExchange | PeerState::Verack => {
             peer.remote_version = Some(version);

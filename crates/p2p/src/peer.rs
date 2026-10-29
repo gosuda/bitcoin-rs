@@ -508,12 +508,12 @@ impl<S: Read + Write> Peer<S> {
     /// payload before the write attempt, the way Core's `CSerializedNetMsg` is
     /// shared by its send path and the probe.
     pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
-        if matches!(message, Message::Feature { .. })
+        if matches!(message, Message::Feature(_))
             && (self.sent_verack
                 || self
                     .remote_version
                     .as_ref()
-                    .is_none_or(|version| version.version < crate::wire::FEATURE_VERSION))
+                    .is_none_or(|version| version.version < crate::feature::FEATURE_VERSION))
         {
             return Err(PeerError::Protocol(
                 "feature outside negotiated send window",

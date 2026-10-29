@@ -128,7 +128,7 @@ fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotia
 #[test]
 fn bip434_pre_verack_features_and_legacy_sessions_over_both_transports() -> TestResult {
     for v2 in [false, true] {
-        for version in [70_015, 70_016, wire::FEATURE_VERSION] {
+        for version in [70_015, 70_016, crate::feature::FEATURE_VERSION] {
             let (listener_shared, table) = shared(v2);
             let (addr, shutdown, handle) = listen(listener_shared)?;
             let result = (|| -> TestResult {
@@ -182,12 +182,14 @@ fn bip434_pre_verack_features_and_legacy_sessions_over_both_transports() -> Test
                         "verack"
                     ]
                 );
-                if version >= wire::FEATURE_VERSION {
+                if version >= crate::feature::FEATURE_VERSION {
                     for id in [b"BIP999".to_vec(), b"BIP999".to_vec(), vec![0, 255, 1, 127]] {
-                        peer.send(&Message::Feature {
-                            id,
-                            data: vec![0; 512],
-                        })?;
+                        peer.send(&Message::Feature(
+                            crate::feature::FeatureAnnouncement::new(
+                                crate::feature::FeatureId::from_raw_unchecked(id),
+                                vec![0; 512],
+                            ),
+                        ))?;
                     }
                 }
                 peer.send(&Message::Verack)?;
