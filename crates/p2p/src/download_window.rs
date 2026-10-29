@@ -250,6 +250,7 @@ pub(crate) struct DownloadWindow {
     next_request_height: u32,
     request_tip: Option<(Hash256, u32)>,
     owner_downloading_since: HashMap<PeerSource, Instant>,
+    owner_last_body_at: HashMap<PeerSource, Instant>,
     fanout_eligible_peers: usize,
     fanout_engaged: bool,
     stall: Option<StallEpisode>,
@@ -295,6 +296,7 @@ impl DownloadWindow {
             next_request_height: 1,
             request_tip: None,
             owner_downloading_since: HashMap::with_capacity(budget.max_pending_blocks),
+            owner_last_body_at: HashMap::with_capacity(budget.max_pending_blocks),
             fanout_eligible_peers: 0,
             fanout_engaged: false,
             stall: None,
@@ -980,6 +982,7 @@ impl DownloadWindow {
         match oldest_remaining {
             None => {
                 self.owner_downloading_since.remove(&owner);
+                self.owner_last_body_at.remove(&owner);
             }
             Some(oldest) if removed_requested_at < oldest => {
                 self.owner_downloading_since.insert(owner, now);
@@ -1070,6 +1073,8 @@ impl DownloadWindow {
             false
         });
         self.owner_downloading_since
+            .retain(|owner, _| retain_owner(owner));
+        self.owner_last_body_at
             .retain(|owner, _| retain_owner(owner));
         self.next_request_height = retry_height;
     }
@@ -1543,6 +1548,7 @@ impl DownloadWindow {
         pending_height: Option<u32>,
         now: Instant,
     ) {
+        self.owner_last_body_at.insert(source, now);
         if self
             .pending_timeout_observation
             .is_some_and(|observation| observation.hash == hash && observation.owner == source)
@@ -1663,7 +1669,21 @@ impl DownloadWindow {
             .filter(|(_, since)| now.duration_since(**since) >= timeout)
             .map(|(owner, _)| *owner)
             .collect();
-        if expired_owners.is_empty() {
+        // INVARIANT: an item unanswered beyond the owner's backoff is
+        // re-eligible only with proof the owner skipped it: a body from
+        // the same owner delivered after this item was requested. A peer
+        // busy sending this very block has no later delivery, so its item
+        // stays; a peer that moved on while this one was outstanding gets
+        // the item re-queued.
+        let backoff = self.stall_timeout;
+        let last_body_at = &self.owner_last_body_at;
+        let skipped = |pending: &PendingBlock| {
+            now.saturating_duration_since(pending.requested_at) >= backoff
+                && last_body_at
+                    .get(&pending.owner)
+                    .is_some_and(|last| *last > pending.requested_at)
+        };
+        if expired_owners.is_empty() && !self.pending.values().any(&skipped) {
             return Vec::new();
         }
         let mut entries = Vec::new();
@@ -1672,10 +1692,9 @@ impl DownloadWindow {
         {
             let pending_bytes = &mut self.pending_bytes;
             let next_request_height = &mut self.next_request_height;
-            for (hash, pending) in self
-                .pending
-                .extract_if(|_hash, pending| expired_owners.contains(&pending.owner))
-            {
+            for (hash, pending) in self.pending.extract_if(|_hash, pending| {
+                expired_owners.contains(&pending.owner) || skipped(pending)
+            }) {
                 if let Some(observation) = armed_observation
                     && observation.hash == hash
                     && observation.owner == pending.owner
@@ -1712,8 +1731,7 @@ impl DownloadWindow {
             stager.clear_gate_pending(&hash);
             return true;
         }
-        if height < self.next_request_height
-            || !self.has_request_capacity(stager)
+        if !self.has_request_capacity(stager)
             || self.pending_count_for(owner) >= self.effective_peer_inflight()
         {
             return false;
