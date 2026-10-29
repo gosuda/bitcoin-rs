@@ -3451,6 +3451,7 @@ fn generate_nonce(peer_addr: impl Into<crate::PeerRemote>) -> u64 {
 /// Wiring for unit tests: an active network, a start token that stays
 /// `false`, no bans, no ready callback, no node handles, and mainnet magic.
 #[cfg(test)]
+#[expect(clippy::expect_used)]
 mod overlay_dial_tests {
     use super::*;
     use std::io::{BufRead as _, BufReader as StdBufReader, Write as _};
@@ -3460,15 +3461,6 @@ mod overlay_dial_tests {
     /// key certificate), base64-encoded.
     fn dest() -> String {
         format!("{}BQAEAAcABA==", "A".repeat(512))
-    }
-
-    /// Structurally valid private destination fixture (public destination plus
-    /// 64 private key bytes for Ed25519/X25519), base64-encoded.
-    fn priv_dest() -> String {
-        format!(
-            "{}BQAEAAcABAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
-            "A".repeat(512)
-        )
     }
 
     /// The I2P endpoint whose hash is exactly the fixture destination the
@@ -3508,17 +3500,23 @@ mod overlay_dial_tests {
 
     /// Minimal scripted SAM bridge serving one established session;
     /// `STREAM CONNECT` replies with `stream_status`.
-    fn fake_sam_session(stream_status: &'static str) -> (SocketAddr, Arc<crate::sam::SamSession>) {
+    fn fake_sam_session(stream_status: &'static str, shared: &mut ConnectionShared) -> SamFixture {
         let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
             panic!("bind sam");
         };
         let Ok(addr) = listener.local_addr() else {
             panic!("sam addr");
         };
-        std::thread::spawn(move || {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let bridge = std::thread::spawn(move || {
+            let mut connections = Vec::new();
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
-                std::thread::spawn(move || {
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                connections.push(std::thread::spawn(move || {
                     if stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .is_err()
@@ -3544,6 +3542,8 @@ mod overlay_dial_tests {
                             format!("SESSION STATUS RESULT=OK DESTINATION={}\n", dest())
                         } else if line.starts_with("NAMING LOOKUP") {
                             format!("NAMING REPLY RESULT=OK NAME=ME VALUE={}\n", dest())
+                        } else if line.starts_with("PING ") {
+                            line.replacen("PING ", "PONG ", 1)
                         } else if line.starts_with("STREAM CONNECT") {
                             format!("STREAM STATUS RESULT={stream_status}\n")
                         } else {
@@ -3556,25 +3556,68 @@ mod overlay_dial_tests {
                             return;
                         }
                     }
-                });
+                }));
+            }
+            for connection in connections {
+                connection.join().expect("bridge connection stopped");
             }
         });
-        let Ok(session) =
-            crate::sam::SamSession::establish(addr, &priv_dest(), Duration::from_secs(5))
-        else {
-            panic!("session");
+        shared.overlay = Arc::new(crate::overlay::OverlayTransport::new(Arc::new(
+            crate::overlay::OverlayConfig {
+                i2p_sam: Some(addr),
+                ..crate::overlay::OverlayConfig::default()
+            },
+        )));
+        let workers = shared.overlay.start(shared, &shutdown).expect("SAM worker");
+        let fixture = SamFixture {
+            shutdown,
+            workers,
+            addr,
+            bridge: Some(bridge),
         };
-        (addr, Arc::new(session))
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared
+            .overlay
+            .resolve("fixture.i2p:8333", &|| false)
+            .is_err()
+        {
+            assert!(Instant::now() < deadline, "SAM session ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        fixture
     }
 
+    struct SamFixture {
+        shutdown: Arc<AtomicBool>,
+        workers: Vec<std::thread::JoinHandle<Result<(), ListenerError>>>,
+        addr: SocketAddr,
+        bridge: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for SamFixture {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Release);
+            for worker in self.workers.drain(..) {
+                worker
+                    .join()
+                    .expect("SAM worker stopped")
+                    .expect("SAM worker");
+            }
+            let _ = TcpStream::connect(self.addr);
+            if let Some(bridge) = self.bridge.take() {
+                bridge.join().expect("bridge stopped");
+            }
+        }
+    }
     #[test]
     fn dead_onion_proxy_leaves_addrman_failure_accounting_untouched() {
         let endpoint = tor_endpoint();
         let (mut shared, book) = shared_with_book(endpoint);
-        shared.dial_routes = crate::DialRoutes {
-            onion: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))),
-            ..crate::DialRoutes::default()
-        };
+        shared.overlay = Arc::new(crate::overlay::OverlayTransport::new(Arc::new(
+            crate::overlay::OverlayConfig {
+                onion_proxy: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))),
+                ..crate::overlay::OverlayConfig::default()
+            },
+        )));
         let result = dial(
             endpoint,
             &shared,
@@ -3595,14 +3638,10 @@ mod overlay_dial_tests {
     fn dead_sam_bridge_leaves_addrman_failure_accounting_untouched() {
         // Session established, then the bridge disappears: the dial's
         // naming/connect steps fail locally.
-        let (_sam, session) = fake_sam_session("OK");
-        session.close();
         let endpoint = i2p_endpoint();
         let (mut shared, book) = shared_with_book(endpoint);
-        shared.dial_routes = crate::DialRoutes {
-            sam_session: Some(session),
-            ..crate::DialRoutes::default()
-        };
+        let fixture = fake_sam_session("OK", &mut shared);
+        drop(fixture);
         let result = dial(
             endpoint,
             &shared,
@@ -3617,13 +3656,9 @@ mod overlay_dial_tests {
 
     #[test]
     fn sam_cant_reach_peer_counts_as_peer_failure() {
-        let (_sam, session) = fake_sam_session("CANT_REACH_PEER");
         let endpoint = i2p_endpoint();
         let (mut shared, book) = shared_with_book(endpoint);
-        shared.dial_routes = crate::DialRoutes {
-            sam_session: Some(session),
-            ..crate::DialRoutes::default()
-        };
+        let _fixture = fake_sam_session("CANT_REACH_PEER", &mut shared);
         let result = dial(
             endpoint,
             &shared,
@@ -3642,13 +3677,9 @@ mod overlay_dial_tests {
 
     #[test]
     fn sam_timeout_past_a_working_bridge_counts_as_peer_failure() {
-        let (_sam, session) = fake_sam_session("TIMEOUT");
         let endpoint = i2p_endpoint();
         let (mut shared, book) = shared_with_book(endpoint);
-        shared.dial_routes = crate::DialRoutes {
-            sam_session: Some(session),
-            ..crate::DialRoutes::default()
-        };
+        let _fixture = fake_sam_session("TIMEOUT", &mut shared);
         let result = dial(
             endpoint,
             &shared,

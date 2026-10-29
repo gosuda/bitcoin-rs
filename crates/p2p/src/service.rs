@@ -2247,8 +2247,7 @@ mod tests {
     use super::*;
     use crate::PeerSource;
     use bitcoin_rs_primitives::PeerEndpoint;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-    use std::sync::atomic::AtomicUsize;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
     #[test]
     fn feeler_poisson_delay_matches_actual_core_uniform_vectors() {
@@ -4768,415 +4767,21 @@ mod tests {
         assert!(bounded_rx.try_recv().is_err());
     }
 
-    /// Structurally valid I2P destination (384 zero key bytes plus an
-    /// Ed25519/X25519 key certificate), base64-encoded.
-    fn sam_destination() -> String {
-        format!("{}BQAEAAcABA==", "A".repeat(512))
-    }
-
-    /// [`sam_destination`] followed by 64 private key bytes.
-    fn sam_private_destination() -> String {
-        format!(
-            "{}BQAEAAcABAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
-            "A".repeat(512)
-        )
-    }
-
-    /// The endpoint a session on the fixture bridge publishes.
-    fn sam_endpoint() -> crate::PeerEndpoint {
-        let bytes =
-            crate::sam::i2p_base64_decode(&sam_destination()).expect("fixture destination decodes");
-        crate::PeerEndpoint::I2p {
-            hash: crate::sam::destination_hash(&bytes),
-            port: 8333,
-        }
-    }
-
-    /// Shared state of one [`SamBridge`].
-    struct BridgeState {
-        /// While false, the `SESSION CREATE` reply is withheld.
-        release: AtomicBool,
-        stop: AtomicBool,
-        /// How many leading `HELLO` commands are answered with version 3.1,
-        /// which the client refuses at once.
-        unsupported_hellos: AtomicUsize,
-        create_seen: Sender<()>,
-        hung_up: Sender<()>,
-    }
-
-    /// Scripted SAM bridge. It answers every command at once, except that
-    /// the `SESSION CREATE` reply waits for `release`: the pinned bridge
-    /// answers it only once its destination is ready, which can take two
-    /// minutes.
-    struct SamBridge {
-        addr: SocketAddr,
-        state: Arc<BridgeState>,
-        /// One signal per `SESSION CREATE` the bridge received.
-        create_seen: Receiver<()>,
-        /// One signal per client that closed its connection while the
-        /// `SESSION CREATE` reply was held.
-        hung_up: Receiver<()>,
-        accept: Option<JoinHandle<()>>,
-        connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    }
-
-    impl SamBridge {
-        /// A bridge that withholds the `SESSION CREATE` reply until
-        /// [`SamBridge::release`].
-        fn holding_session_create() -> Self {
-            Self::spawn(0)
-        }
-
-        /// A bridge whose first `HELLO` negotiates 3.1, which the client
-        /// refuses for good, and whose later ones negotiate 3.3.
-        fn refusing_first_hello() -> Self {
-            // No client has connected yet, so releasing here is not a race.
-            let bridge = Self::spawn(1);
-            bridge.release();
-            bridge
-        }
-
-        /// Starts a bridge that holds `SESSION CREATE` replies until
-        /// [`SamBridge::release`].
-        fn spawn(unsupported_hellos: usize) -> Self {
-            let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-                .expect("bind sam bridge");
-            let addr = listener.local_addr().expect("sam bridge address");
-            let (create_seen_tx, create_seen) = crossbeam_channel::unbounded();
-            let (hung_up_tx, hung_up) = crossbeam_channel::unbounded();
-            let state = Arc::new(BridgeState {
-                release: AtomicBool::new(false),
-                stop: AtomicBool::new(false),
-                unsupported_hellos: AtomicUsize::new(unsupported_hellos),
-                create_seen: create_seen_tx,
-                hung_up: hung_up_tx,
-            });
-            let connections = Arc::new(Mutex::new(Vec::new()));
-            let accept = {
-                let state = Arc::clone(&state);
-                let connections = Arc::clone(&connections);
-                thread::spawn(move || {
-                    for stream in listener.incoming() {
-                        let Ok(stream) = stream else { break };
-                        if state.stop.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let state = Arc::clone(&state);
-                        connections
-                            .lock()
-                            .push(thread::spawn(move || serve_sam_connection(&stream, &state)));
-                    }
-                })
-            };
-            Self {
-                addr,
-                state,
-                create_seen,
-                hung_up,
-                accept: Some(accept),
-                connections,
-            }
-        }
-
-        /// Answers every withheld and later `SESSION CREATE`.
-        fn release(&self) {
-            self.state.release.store(true, Ordering::Release);
-        }
-    }
-
-    impl Drop for SamBridge {
-        fn drop(&mut self) {
-            self.state.stop.store(true, Ordering::Release);
-            self.release();
-            // A throwaway connection wakes the blocking accept loop.
-            let _ = TcpStream::connect(self.addr);
-            if let Some(accept) = self.accept.take() {
-                let _ = accept.join();
-            }
-            let connections = std::mem::take(&mut *self.connections.lock());
-            for connection in connections {
-                let _ = connection.join();
-            }
-        }
-    }
-
-    /// Releases a bridge's hold when dropped, so a start parked on a held
-    /// reply ends on every exit path, a failed assertion included.
-    struct ReleaseOnDrop(Arc<BridgeState>);
-
-    impl Drop for ReleaseOnDrop {
-        fn drop(&mut self) {
-            self.0.release.store(true, Ordering::Release);
-        }
-    }
-
-    fn timed_out(error: &io::Error) -> bool {
-        matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        )
-    }
-
-    /// Waits out the withheld `SESSION CREATE` reply. False when the bridge
-    /// stopped, or the client closed the connection, before the release.
-    fn wait_for_release(reader: &mut impl std::io::Read, state: &BridgeState) -> bool {
-        let mut byte = [0u8; 1];
-        while !state.release.load(Ordering::Acquire) {
-            if state.stop.load(Ordering::Acquire) {
-                return false;
-            }
-            match reader.read(&mut byte) {
-                Ok(read) if read > 0 => {}
-                Err(error) if timed_out(&error) => {}
-                // End of stream or a reset: the client gave up on the reply.
-                Ok(_) | Err(_) => {
-                    let _ = state.hung_up.send(());
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    /// The bridge's reply to `command`; `None` ends the connection.
-    fn bridge_reply(
-        command: &str,
-        state: &BridgeState,
-        reader: &mut impl std::io::Read,
-    ) -> Option<String> {
-        let destination = sam_destination();
-        if command.starts_with("HELLO") {
-            let refused = state
-                .unsupported_hellos
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |left| {
-                    left.checked_sub(1)
-                })
-                .is_ok();
-            let version = if refused { "3.1" } else { "3.3" };
-            Some(format!("HELLO REPLY RESULT=OK VERSION={version}\n"))
-        } else if command.starts_with("DEST GENERATE") {
-            Some(format!(
-                "DEST REPLY PUB={destination} PRIV={}\n",
-                sam_private_destination()
-            ))
-        } else if command.starts_with("SESSION CREATE") {
-            let _ = state.create_seen.send(());
-            wait_for_release(reader, state)
-                .then(|| format!("SESSION STATUS RESULT=OK DESTINATION={destination}\n"))
-        } else if command.starts_with("NAMING LOOKUP") {
-            Some(format!(
-                "NAMING REPLY RESULT=OK NAME=ME VALUE={destination}\n"
-            ))
-        } else {
-            Some("SESSION STATUS RESULT=I2P_ERROR\n".to_owned())
-        }
-    }
-
-    /// Serves one bridge connection until the client or the bridge ends it.
-    fn serve_sam_connection(stream: &TcpStream, state: &BridgeState) {
-        use std::io::{BufRead as _, BufReader, Write as _};
-
-        // A short read timeout lets the worker notice `stop`, and a client
-        // that closed its end while a reply is held.
-        if stream
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .is_err()
-        {
-            return;
-        }
-        let Ok(clone) = stream.try_clone() else {
-            return;
-        };
-        let mut reader = BufReader::new(clone);
-        let mut writer = stream;
-        let mut pending = Vec::new();
-        while !state.stop.load(Ordering::Acquire) {
-            match reader.read_until(b'\n', &mut pending) {
-                Ok(0) => return,
-                Ok(_) => {}
-                Err(error) if timed_out(&error) => continue,
-                Err(_) => return,
-            }
-            if pending.last() != Some(&b'\n') {
-                continue;
-            }
-            let command = String::from_utf8_lossy(&pending).trim_end().to_owned();
-            pending.clear();
-            let Some(reply) = bridge_reply(&command, state, &mut reader) else {
-                return;
-            };
-            if writer.write_all(reply.as_bytes()).is_err() {
-                return;
-            }
-        }
-    }
-
-    /// A service whose only overlay is the I2P bridge at `bridge`.
-    fn i2p_service(bridge: SocketAddr) -> P2pService {
-        P2pService::new(
+    #[test]
+    fn failed_start_keeps_worker_slot_until_teardown_finishes() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("occupied listener");
+        let address = occupied.local_addr().expect("address");
+        let service = P2pService::new(
             P2pServiceConfig {
-                overlay: crate::overlay::OverlayConfig {
-                    i2p_sam: Some(bridge),
-                    ..crate::overlay::OverlayConfig::default()
-                },
+                listen_addrs: vec![address],
                 ..P2pServiceConfig::default()
             },
             Arc::new(AtomicBool::new(false)),
-        )
-    }
-
-    /// Polls `condition` until it holds; false once `limit` has passed.
-    fn wait_until(limit: Duration, condition: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + limit;
-        while !condition() {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        true
-    }
-
-    /// A `shutdown` must end a `start` parked in the SAM bridge's readiness
-    /// wait: the wait lasts up to two minutes, and `shutdown` itself needs
-    /// the worker slot that start holds. The failed start publishes neither
-    /// a route nor an address, and a restart the operator then permits works.
-    ///
-    /// Removing the cancellation (the stop counter in the startup predicate,
-    /// or its increment in `shutdown`) leaves the start parked until the gate
-    /// opens, so `interrupted` fails.
-    #[test]
-    fn shutdown_interrupts_an_i2p_start_held_in_root_readiness_and_a_restart_publishes() {
-        let bridge = SamBridge::holding_session_create();
-        let service = i2p_service(bridge.addr);
-        let queued: crate::PeerEndpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into();
-        service
-            .outbound_tx
-            .try_send(OutboundDial::auto(queued))
-            .expect("queue a dial for the route probe");
-
-        let (held, interrupted, hung_up, started) = thread::scope(|scope| {
-            let _unhold = ReleaseOnDrop(Arc::clone(&bridge.state));
-            let start = scope.spawn(|| {
-                service.start(
-                    None,
-                    None,
-                    &idle_ready(),
-                    crate::listener::ListenerExtras::default(),
-                )
-            });
-            // The bridge has the `SESSION CREATE` and is withholding its
-            // reply, so the start is inside the readiness wait.
-            let held = bridge
-                .create_seen
-                .recv_timeout(Duration::from_secs(10))
-                .is_ok();
-            let stopper = scope.spawn(|| service.shutdown());
-            let interrupted = wait_until(Duration::from_secs(10), || start.is_finished());
-            // The bridge still holds its reply, so the only way it learns of
-            // the abandoned root is the client closing that connection.
-            let hung_up = bridge.hung_up.recv_timeout(Duration::from_secs(5)).is_ok();
-            bridge.release();
-            let started = start.join().expect("start thread");
-            stopper.join().expect("shutdown thread");
-            (held, interrupted, hung_up, started)
-        });
-
-        assert!(held, "the start never reached the bridge's readiness wait");
-        assert!(
-            interrupted,
-            "shutdown must end a start held in root readiness"
         );
-        assert!(
-            matches!(
-                &started,
-                Err(P2pServiceError::Overlay(error)) if error.kind() == io::ErrorKind::Interrupted
-            ),
-            "an interrupted start reports the cancellation, got {started:?}"
-        );
-        assert!(
-            service.overlay_addresses().is_empty(),
-            "an interrupted start publishes no overlay address"
-        );
-        assert!(
-            service.workers.lock().is_none(),
-            "an interrupted start publishes no workers, so no route"
-        );
-        assert_eq!(
-            service.outbound_rx.lock().len(),
-            1,
-            "no outbound worker exists to drain the queued dial"
-        );
-        assert!(
-            hung_up,
-            "the abandoned root exchange must be closed, not left on the bridge"
-        );
-        service
-            .join()
-            .expect("an interrupted start leaves the service joinable");
-
-        service
-            .outbound_rx
-            .lock()
-            .try_recv()
-            .expect("drain the probe dial");
-        service.set_network_active(true);
-        service
-            .start(
-                None,
-                None,
-                &idle_ready(),
-                crate::listener::ListenerExtras::default(),
-            )
-            .expect("a restart after the interrupted start");
-        assert_eq!(service.overlay_addresses(), vec![sam_endpoint()]);
-        service.shutdown();
-        service.join().expect("restarted join");
-        assert_eq!(
-            service.overlay_addresses(),
-            Vec::<crate::PeerEndpoint>::new()
-        );
-    }
-
-    /// A failed `start` tears its own epoch down while it still holds the
-    /// worker slot, so a `start` that follows cannot publish before that
-    /// teardown ends, and the teardown cannot erase what the next epoch
-    /// published. The failed teardown's address-list clear is its last step
-    /// and is parked here; its peer cancellation, the step before it,
-    /// reports through the registered peer.
-    ///
-    /// Releasing the slot before the teardown, or dropping the teardown's
-    /// cancellation, fails this test: the slot is free once the peer is
-    /// cancelled, the next start reaches the bridge while the teardown is
-    /// still parked, or the peer is never cancelled. The final address
-    /// assertion is an end-to-end check of the surviving epoch, not the
-    /// discriminating one.
-    #[test]
-    fn failed_start_finishes_its_teardown_before_the_next_start_can_publish() {
-        /// What the race scenario observed, read only after every thread ended.
-        struct Observed {
-            /// The failed start's teardown reached its peer cancellation.
-            torn_down: bool,
-            /// The worker slot was still held at that point.
-            slot_held: bool,
-            /// The bridge observation while the prior teardown was parked.
-            early_create: Result<(), crossbeam_channel::RecvTimeoutError>,
-            /// The next start reached the bridge once the teardown ended.
-            reached_bridge: bool,
-            failed: Result<(), P2pServiceError>,
-            next: Result<(), P2pServiceError>,
-        }
-        // The first start's key step meets a bridge that does not speak 3.3,
-        // which fails at once and for good; the next start meets a healthy one.
-        let bridge = SamBridge::refusing_first_hello();
-        let service = i2p_service(bridge.addr);
         let (frames, _outbound) = crossbeam_channel::unbounded();
         let peer = crate::PeerLease::new(frames);
-        service
-            .peer_table
-            .register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8334)), peer.clone());
-
-        let observed = thread::scope(|scope| {
+        service.peer_table.register(address, peer.clone());
+        thread::scope(|scope| {
             let parked = service.overlay_addresses.lock();
             let failed = scope.spawn(|| {
                 service.start(
@@ -5186,8 +4791,14 @@ mod tests {
                     crate::listener::ListenerExtras::default(),
                 )
             });
-            let torn_down = wait_until(Duration::from_secs(10), || peer.is_cancelled());
-            let slot_held = service.workers.try_lock().is_none();
+            // Cancellation precedes the address-list clear, which is parked.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !peer.is_cancelled() {
+                assert!(Instant::now() < deadline, "failed start cancels peers");
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(service.workers.try_lock().is_none(), "teardown holds slot");
+            drop(occupied);
             let next = scope.spawn(|| {
                 service.start(
                     None,
@@ -5196,68 +4807,121 @@ mod tests {
                     crate::listener::ListenerExtras::default(),
                 )
             });
-            // Only the next start sends `SESSION CREATE`; the failed one stops
-            // at its first `HELLO`. While the failed teardown is parked, the
-            // next start cannot take the slot, so it cannot reach the bridge.
-            // This probe is bounded: it can miss a late scheduler, but it can
-            // never fail a correct implementation. The slot probe above is the
-            // deterministic check.
-            let early_create = bridge.create_seen.recv_timeout(Duration::from_millis(500));
             drop(parked);
-            let failed = failed.join().expect("failed start thread");
-            let next = next.join().expect("next start thread");
-            let reached_bridge = bridge
-                .create_seen
-                .recv_timeout(Duration::from_secs(5))
-                .is_ok();
-            Observed {
-                torn_down,
-                slot_held,
-                early_create,
-                reached_bridge,
-                failed,
-                next,
+            assert!(failed.join().expect("failed thread").is_err());
+            next.join()
+                .expect("next thread")
+                .expect("replacement start");
+        });
+        assert!(service.workers.lock().is_some(), "replacement owns slot");
+        service.shutdown();
+        service.join().expect("replacement join");
+    }
+
+    /// A bridge can hold readiness while the service starts and shuts down.
+    #[test]
+    fn i2p_readiness_is_async_and_shutdown_joins_before_restart() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bridge");
+        let address = listener.local_addr().expect("bridge address");
+        let (held_tx, held_rx) = crossbeam_channel::bounded(1);
+        let (closed_tx, closed_rx) = crossbeam_channel::bounded(1);
+        let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+        let bridge = thread::spawn(move || {
+            // First epoch: withhold readiness until shutdown closes the socket.
+            let (mut stream, _) = listener.accept().expect("first root");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("hello");
+            stream
+                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+                .expect("hello reply");
+            line.clear();
+            reader.read_line(&mut line).expect("session create");
+            assert!(line.starts_with("SESSION CREATE "));
+            held_tx.send(()).expect("held signal");
+            line.clear();
+            assert_eq!(reader.read_line(&mut line).expect("root closed"), 0);
+            closed_tx.send(()).expect("closed signal");
+
+            // Replacement epoch: publish a session and answer its heartbeat.
+            let (mut stream, _) = listener.accept().expect("replacement root");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("bridge command: {error}"),
+                }
+                let reply = if line.starts_with("HELLO") {
+                    "HELLO REPLY RESULT=OK VERSION=3.3\n".to_owned()
+                } else if line.starts_with("SESSION CREATE") {
+                    "SESSION STATUS RESULT=OK\n".to_owned()
+                } else if line.starts_with("NAMING LOOKUP") {
+                    format!("NAMING REPLY RESULT=OK VALUE={}\n", "A".repeat(516))
+                } else {
+                    assert_eq!(line, "PING bitcoin-rs\n");
+                    let _ = ready_tx.try_send(());
+                    "PONG bitcoin-rs\n".to_owned()
+                };
+                stream.write_all(reply.as_bytes()).expect("reply");
             }
         });
-
-        assert!(
-            observed.torn_down,
-            "the failed start must cancel its peers in its teardown"
+        let service = P2pService::new(
+            P2pServiceConfig {
+                overlay: crate::overlay::OverlayConfig {
+                    i2p_sam: Some(address),
+                    ..crate::overlay::OverlayConfig::default()
+                },
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
         );
-        assert!(
-            observed.slot_held,
-            "the failed start must keep the worker slot until its teardown ends"
-        );
-        assert!(
-            matches!(
-                observed.early_create,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout)
-            ),
-            "the live bridge must receive no new root while the prior teardown is running"
-        );
-        assert!(
-            observed.reached_bridge,
-            "the next start proceeds once the failed teardown has ended"
-        );
-        assert!(
-            matches!(
-                &observed.failed,
-                Err(P2pServiceError::Overlay(error)) if error.kind() == io::ErrorKind::Unsupported
-            ),
-            "the first start fails on the bridge's version, got {:?}",
-            observed.failed
-        );
-        observed.next.expect("the start after the failed one");
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("async start");
+        held_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("readiness held");
+        assert!(service.workers.lock().is_some());
         assert_eq!(
             service.overlay_addresses(),
-            vec![sam_endpoint()],
-            "the failed teardown must not clear what the next epoch published"
-        );
-        assert!(
-            service.workers.lock().is_some(),
-            "the next epoch owns the worker slot"
+            Vec::<crate::PeerEndpoint>::new()
         );
         service.shutdown();
-        service.join().expect("join");
+        service.join().expect("join held readiness");
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("root closed by shutdown");
+        assert!(service.workers.lock().is_none());
+
+        service.set_network_active(true);
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("restart");
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("replacement session heartbeat");
+        service.shutdown();
+        service.join().expect("join replacement");
+        bridge.join().expect("bridge thread");
     }
 }

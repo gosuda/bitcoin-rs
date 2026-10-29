@@ -72,8 +72,15 @@ fn incompatible_snapshots_are_preserved_without_decoding_or_migration() {
             let source = if scoped { &path } else { &base };
             // Only the old envelope matters. In particular, the divergent v9
             // record/source/netgroup layouts never pass through a decoder.
+            // A foreign-network pre-release file at the scoped path is also
+            // preserved before fresh discovery, not treated as corrupt v1.
+            let magic = if scoped && version == 8 {
+                [2; 4]
+            } else {
+                [1; 4]
+            };
             let bytes = fixture_bytes(&serde_json::json!({
-                "version": version, "magic": [1, 1, 1, 1],
+                "version": version, "magic": magic,
                 "records": [{"obsolete_layout": "not a canonical candidate"}]
             }));
             fs::write(source, &bytes).expect("old snapshot");
@@ -187,9 +194,6 @@ fn corrupt_unknown_and_wrong_network_files_are_not_disposable_snapshots() {
     let mut invalid_record = current;
     invalid_record["records"] = serde_json::json!([{"broken": true}]);
     cases.push(fixture_bytes(&invalid_record));
-    cases.push(fixture_bytes(
-        &serde_json::json!({"version": 8, "magic": [2, 2, 2, 2]}),
-    ));
     cases.push(fixture_bytes(
         &serde_json::json!({"version": 99, "magic": [1, 1, 1, 1]}),
     ));

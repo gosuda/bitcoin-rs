@@ -357,7 +357,25 @@ fn assert_oversized_first_row<S: KvStore>(store: &S) -> Result<(), StorageError>
 }
 
 fn run_bounded_scan_suite<S: KvStore>(store: &S) -> Result<(), StorageError> {
+    assert_eq!(
+        store
+            .snapshot()?
+            .last_prefix(ColumnFamily::TxConfirmed, &[])?,
+        None
+    );
     seed_rows(store)?;
+    let snapshot = store.snapshot()?;
+    for prefix in [&[][..], &[0x00][..], &[0x03][..], &[0xff][..]] {
+        let expected = snapshot
+            .iter_prefix(ColumnFamily::TxConfirmed, prefix)?
+            .collect::<Result<Vec<_>, _>>()?
+            .pop();
+        assert_eq!(
+            snapshot.last_prefix(ColumnFamily::TxConfirmed, prefix)?,
+            expected
+        );
+    }
+    drop(snapshot);
     assert_limit_semantics(store)?;
     assert_prefix_boundaries(store)?;
     assert_continuation(store)?;

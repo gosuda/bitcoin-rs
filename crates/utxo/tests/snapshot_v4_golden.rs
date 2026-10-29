@@ -15,8 +15,10 @@ use bitcoin_rs_utxo::read_snapshot_strict_v4;
 /// A fixed v4 snapshot captured from an earlier build.
 const GOLDEN: &[u8] = include_bytes!("fixtures/utxo-v4-golden.dat");
 
-/// `hash_serialized_3` of that set, as the v4 build computed it.
-const GOLDEN_HASH_HEX: &str = "020e5a59271f9db60e11102c4262702747676e868e80e7837b6e6d5fb05213ff";
+/// Commitment of the fixed coins in Core VARINT vout-key order. Independently
+/// decoded from the fixture: numeric vout order gave the old 020e5a59... hash,
+/// but differs at the 16,511/16,512 width transition (see core_snapshot tests).
+const GOLDEN_HASH_HEX: &str = "0e318186eb68834de0ee996ac39e1dbc3f91f4c39936427d2455bd8d882ca422";
 
 const GOLDEN_OUTPUTS: usize = 433;
 const GOLDEN_TIP_HEIGHT: u32 = 412_732;
@@ -32,7 +34,7 @@ fn txid(seed: u64) -> Hash256 {
 
 /// The load direction: v4 bytes must still decode to the same consensus values.
 #[test]
-fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {
+fn a_v4_snapshot_preserves_coins_and_trailer_with_core_key_order_commitment() {
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(GOLDEN)).expect("v4 snapshot loads");
 
     assert_eq!(loaded.height, GOLDEN_TIP_HEIGHT);
@@ -52,6 +54,6 @@ fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {
                 .to_le_bytes()
         ),
         GOLDEN_HASH_HEX,
-        "a v4 snapshot no longer hashes to what the v4 build computed"
+        "the fixed v4 coins must retain their Core key-order commitment"
     );
 }
