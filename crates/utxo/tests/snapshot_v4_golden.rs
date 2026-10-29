@@ -17,7 +17,7 @@ const GOLDEN: &[u8] = include_bytes!("fixtures/utxo-v4-golden.dat");
 
 /// Commitment of the fixed coins in Core VARINT vout-key order. Independently
 /// decoded from the fixture: numeric vout order gave the old 020e5a59... hash,
-/// but differs at the 16,511/16,512 width transition (see core_snapshot tests).
+/// but differs at the 16,511/16,512 width transition (see `core_snapshot` tests).
 const GOLDEN_HASH_HEX: &str = "0e318186eb68834de0ee996ac39e1dbc3f91f4c39936427d2455bd8d882ca422";
 
 const GOLDEN_OUTPUTS: usize = 433;
