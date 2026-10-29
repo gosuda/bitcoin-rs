@@ -944,8 +944,10 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
     let response = handle_single_json(handler, request);
     let status = response.http_status();
     match response {
-        CallResponse::Reply { body, .. } => JsonResponse {
-            close,
+        CallResponse::Reply {
+            body, error_code, ..
+        } => JsonResponse {
+            close: close && !rejected_before_reserve(request, error_code),
             status,
             reason: reason_for_status(status),
             body: Some(body),
@@ -958,6 +960,13 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             }
         }
     }
+}
+
+/// A blocking method that a running scan refused before reserving anything
+/// keeps its connection: the reply closes only to release a worker it held.
+fn rejected_before_reserve(request: &Value, error_code: Option<i64>) -> bool {
+    error_code == Some(RpcError::CORE_INVALID_PARAMETER)
+        && request.get("method").and_then(Value::as_str) == Some("scantxoutset")
 }
 
 fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
