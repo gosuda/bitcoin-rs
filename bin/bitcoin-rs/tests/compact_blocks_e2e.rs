@@ -502,7 +502,7 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
 /// Hold a compact-block reconstruction across a real chain switch.
 ///
 /// Core v31.1 GETBLOCKTXN resolves stored bodies by hash even after they leave the
-/// chain (9be056a8a72b624dae9623b2f7bded92c2a21c91, net_processing.cpp:4333-4391).
+/// chain (9be056a8a72b624dae9623b2f7bded92c2a21c91, `net_processing.cpp`).
 #[test]
 fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error> {
     use NetworkMessage::{BlockTxn, NotFound};

@@ -27,6 +27,6 @@ The live Bitcoin Core P2P interop lane is external evidence only where it observ
 
 Cloning every Bitcoin Core interface; supporting internal Core filesystem or database formats for parity; importing Core's internal ownership model; bespoke integrations no external project uses; compatibility claims from schema shape alone; every experimental Core interface as a required feature; external-tool count as a KPI; internal state solely to satisfy tooling; a parallel external correctness framework.
 
-## Proven by
+## Verification boundaries
 
-- [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml), with each row's `evidence` naming its proof owner and every current row honestly downgraded to `implemented` or weaker wherever only in-tree proof exists; `scripts/run-p2p-core-interop.sh` with `crates/p2p/tests/core_interop_live.rs` (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`, `CORE-06`), the one real-consumer lane today, an unmodified Bitcoin Core 31.1 peer. Items needing real external validation runs are tracked as issue #1122 follow-up work, not claimed here.
+Public-surface fixtures and the existing process harness own the named consumer boundaries. Adapter compilation and in-tree protocol tests do not establish deployment or independent external-consumer interoperability; the clause qualifications remain in force.

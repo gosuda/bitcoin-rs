@@ -6,7 +6,7 @@ pub enum RpcError {
     #[error("parse error: {0}")]
     Parse(String),
     /// The payload is rendered verbatim: Core's `JSONRPCError` message text
-    /// has no prefix (`src/rpc/request.cpp:206-260`), and the pinned client
+    /// has no prefix (`src/rpc/request.cpp`), and the pinned client
     /// comparison checks the exact string.
     #[error("{0}")]
     InvalidRequest(&'static str),

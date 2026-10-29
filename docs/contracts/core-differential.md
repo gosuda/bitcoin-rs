@@ -130,19 +130,6 @@ a running pinned binary, not a replay of captured JSON.
 - This is a bounded curated suite. Coverage-guided live Core fuzzing and
   broader rule-family coverage remain follow-up work under #1323.
 
-## Proven by
+## Verification boundaries
 
-- Main workflow `core-differential`.
-- The workflow retains any generated evidence JSON, installer/build/driver
-  output, and node logs in the `core-differential-<run_attempt>` artifact for
-  seven days, including failed runs. Node databases and RPC cookies are
-  excluded. Failures before evidence generation can leave only partial logs;
-  failures before log creation can leave no files to upload.
-- `cargo test -p bitcoin-rs-p2p --test core_interop_live -- --ignored`
-  with `P2P_CORE_INTEROP_EVIDENCE` set by the driver.
-- `cargo test --locked -p bitcoin-rs-e2e --test acceptance`, after building
-  the daemon and provisioning the pinned Core fixture. `BITCOIN_RS_NODE`
-  and `BITCOIN_RS_REFERENCE_BITCOIND` can name the exact binaries.
-- The existing `ci.yml` `test-workspace` lane discovers the acceptance test
-  on merge-queue and main runs; its always-run process-evidence upload
-  preserves the case JSON and both processes' logs on success or failure.
+The binary process harness owns real Core comparisons over RPC, P2P announcements, reorgs, and negotiated transport. Shared fixture/custody checks validate inputs; they do not replace a provisioned process run or close the clause-local gaps. The configured CI/evidence lanes own execution results.

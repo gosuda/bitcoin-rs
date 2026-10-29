@@ -16,7 +16,7 @@ Whether the documented production default engine is strict-Rust validation. Ever
 
 | Cell | Required evidence | Command | Status |
 |---|---|---|---|
-| Core vector parity | zero mismatches on runnable rows; pinned skip counts + reasons | `cargo test --locked -p bitcoin-rs-script --test core_vectors` | `planned_not_executed` |
+| Core vector parity | zero mismatches on runnable rows; pinned skip counts + reasons | `cargo test --locked -p bitcoin-rs-script --test suite core_vectors::` | `planned_not_executed` |
 | Contextual/script qualification | active/inactive boundaries, mandatory/policy flags; zero unexplained mismatches; exclusions counted/classified | regression commands below (no consolidated matrix) | `BLOCKED` |
 | Strict-Rust crypto qualification | valid/invalid signatures/tweaks, boundaries, oracle agreement, audited closure | none exists | `BLOCKED` |
 | Signed-spend apply | native median beats pinned kernel median per acceptance rule, on final strict artifact, engines explicit | diagnostic commands below | `BLOCKED` |
@@ -26,7 +26,7 @@ Whether the documented production default engine is strict-Rust validation. Ever
 
 Reference arm: Bitcoin Core `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, x86_64 linux archive SHA-256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. Kernel oracle: `31.99.0` tree via `bitcoinkernel 0.3.0`, `differential_harness = false`; oracle evidence only, never a policy pin.
 ```sh
-cargo test --locked -p bitcoin-rs-script --test core_vectors
+cargo test --locked -p bitcoin-rs-script --test suite core_vectors::
 BITCOIN_RS_VALIDATION_ENGINE=native CARGO_TARGET_DIR=target/signed-spend-native cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8
 BITCOIN_RS_VALIDATION_ENGINE=kernel CARGO_TARGET_DIR=target/signed-spend-kernel cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall,kernel -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8
 ```

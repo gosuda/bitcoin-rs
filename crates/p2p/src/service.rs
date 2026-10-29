@@ -249,7 +249,7 @@ impl Workers {
 /// INVARIANT: the origin travels with the request to the lease.
 ///
 /// Core's `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
-/// extra-peer retirement (`net_processing.cpp:5502`, `net_processing.cpp:5558-5604`),
+/// extra-peer retirement (`net_processing.cpp`),
 /// and the queue is the only place that still knows which dials were asked for by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutboundDial {
@@ -1481,7 +1481,7 @@ fn next_outbound_role(
 /// as the chain moves.
 ///
 /// Core retires one per check (`EvictExtraOutboundPeers`,
-/// `net_processing.cpp:5604-5668`) and passes over a peer with blocks in flight or a
+/// `net_processing.cpp`) and passes over a peer with blocks in flight or a
 /// peer below the minimum age.
 fn retire_extra_full_relay_connection(
     peer_table: &crate::PeerTable,

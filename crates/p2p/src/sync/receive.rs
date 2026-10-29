@@ -583,7 +583,7 @@ impl BlockSync {
 }
 
 /// Whether a body that no connection has in flight may stage: Core's `AcceptBlock`
-/// acceptance for `fRequested == false` (validation.cpp:4327-4353), plus an
+/// acceptance for `fRequested == false` (validation.cpp), plus an
 /// active-branch clause.
 ///
 /// INVARIANT: reads only the tree and the two tip snapshots.

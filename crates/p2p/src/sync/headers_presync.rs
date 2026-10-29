@@ -148,7 +148,7 @@ impl CompressedHeader {
 }
 
 /// A FIFO of the one-bit commitments a PRESYNC pass leaves for the REDOWNLOAD check
-/// (`headerssync.h:198-201` keeps the same bits), packed 64 per word.
+/// (`headerssync.h` keeps the same bits), packed 64 per word.
 ///
 /// A mainnet pass can retain millions of commitments — see the honest-chain estimate in
 /// [`HeadersSyncState::new`] — so one byte apiece would make every open sync state a

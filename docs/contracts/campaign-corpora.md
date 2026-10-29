@@ -130,31 +130,9 @@ that height. No Cmodern cell may close on a guessed or recalled UTXO total.
 - A corpus with a mismatched stop hash, an unsynchronized `coinstatsindex`, or
   a guessed `muhash` is rejected as reference-set failure.
 
-## Proven by
+## Verification boundaries
 
-- `tools/campaign-corpus/test_corpus.py`
-  (`python3 tools/campaign-corpus/test_corpus.py`) pins both identities, the
-  eleven specials, C150 census zeros, Cmodern all-positive specials, Core
-  framing, manifest digest binding, and `assume_valid_height = 0`. Its
-  `IndexedParity` cases prove indexed logical bytes match the packed archive
-  with same-length, header-stable, order, truncation, and unsafe-name
-  refusals.
-- `tools/benchmark-campaign/test_offline_full_validation.py`
-  `IndexedParityHarnessTests` prove dual packed/indexed harness custody and
-  refusals (golden plus source, truncation, index-tamper, and post-load pin
-  refusals) without claiming a live campaign.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: G0 pin; rejects
-  label-only, malformed, and well-formed-but-unbound identities, checks
-  kernel package custody, and pins `corpus_custody()` honesty.
-- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 replay
-  arm; covers every active and inactive consensus boundary with invalid
-  corpora counted and classified.
-- `crates/consensus/tests/overhaul_parse_parity.rs`: G3 parse parity
-  over the golden fixtures, including txids, wtxids, weight, positions, and
-  Merkle mutation flags.
-- Export: `python3 tools/campaign-corpus/corpus.py export --rest-url HOST:PORT --corpus-id C150|Cmodern --archive blocks.dat --manifest manifest.json`
-- Convert: `python3 tools/campaign-corpus/corpus.py convert --length-prefixed FILE --corpus-id C150 --archive blocks.dat --manifest manifest.json`
-- Verify / classify: `verify` and `classify` subcommands of the same tool.
+Corpus manifest and measured-campaign checks validate the recorded identities, bounds, and evidence schema. They do not establish that a corpus was acquired or that a product campaign completed; the custody and completion requirements above remain authoritative.
 
 ## Vocabulary
 

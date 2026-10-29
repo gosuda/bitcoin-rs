@@ -133,15 +133,15 @@ pub(super) fn active_demonstrated_height(
 
 /// How long a full-relay outbound connection may sit below our tip before it
 /// is probed, and then retired: `CHAIN_SYNC_TIMEOUT` is 20 * 60 seconds, as
-/// Core sets it (`net_processing.cpp:109`).
+/// Core sets it (`net_processing.cpp`).
 const CHAIN_SYNC_TIMEOUT: Duration = Duration::from_mins(20);
 
 /// How long the answer to that probe is awaited: `HEADERS_RESPONSE_TIME` is
-/// 2 * 60 seconds, as Core sets it (`net_processing.cpp:103`).
+/// 2 * 60 seconds, as Core sets it (`net_processing.cpp`).
 pub(super) const HEADERS_RESPONSE_TIME: Duration = Duration::from_mins(2);
 
 /// How many tip-reaching outbound connections are never retired. Core's
-/// `MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT` (`net_processing.cpp:107`).
+/// `MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT` (`net_processing.cpp`).
 const MAX_OUTBOUND_PEERS_TO_PROTECT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

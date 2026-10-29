@@ -116,27 +116,9 @@ semantics:
 Injected numeric statuses in regression tests are sentinels used to prove
 nonzero-status propagation; they are not stable public status-code assignments.
 
-## Proven by
+## Verification boundaries
 
-- `fuzz/CORPUS_PROVENANCE.md` (existing): records the upstream identity,
-  license, per-target mapping, and refresh rule.
-- `scripts/tests/test_import_qa_assets_provenance.py`: `QAC-03` acquisition,
-  minimization, cleanup, mode, and failure-atomic provenance publication.
-- `scripts/tests/test_import_reference_corpora.py`: `QAC-03` pinned-clone
-  acquisition, per-source provenance-section refresh, authored-head
-  preservation, and failure atomicity for the reference importer.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: G0 pin; rejects
-  a corpus absent from the manifest and reports an unpinned manifest digest
-  as custody-blocked (the upstream qa-assets commit is pinned by
-  `fuzz/CORPUS_PROVENANCE.md`).
-- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
-  counts and classifies invalid corpora with fixed skip reasons.
-- `crates/primitives/tests/differential.rs`: `QAC-05` gate; every
-  `tx_validate`/`block_validate` seed in the external corpus must match its
-  `verdicts.json` verdict, with byte-identical re-encoding of accepted
-  seeds.
-- Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
-  [fuzz/README.md](../../fuzz/README.md)).
+Corpus/schema tests exercise malformed, incomplete, mismatched, and unbound evidence, including custody and bounded input handling. A fixture/schema check does not certify a measured campaign or a missing external result.
 
 ## Vocabulary
 

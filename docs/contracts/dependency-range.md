@@ -32,6 +32,6 @@ Declared Cargo ranges are the versions this workspace claims to support. The com
 - `proptest` is bounded at `>=1.11, <1.12` in the root `Cargo.toml` `[workspace.dependencies]`. Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family; the bound retains the selected `rand 0.9` family used elsewhere.
 - The `syn@3.0.9` exception in `deny.toml` `[bans]` is an exact-version pin for the proc-macro chain. When the `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception to that exact version in the same change. The entry describes this pin only; it does not approve other splits.
 - The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions (with their RustCrypto transport companions) in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.0.0` SV2 chain, like the `syn` pin above. When the pinned SRI release family moves, update those exceptions to the exact resolved versions in the same change. The entries approve no other split.
-## Proven by
-- `scripts/check-dep-range.sh minimal` and `scripts/check-dep-range.sh maximum` (`compatibility-campaign.yml` `dependency-range` job).
-- `cargo deny check bans` (`deny.toml` `[bans] multiple-versions = "deny"`).
+## Verification boundaries
+
+Cargo manifests, lockfiles, cargo-deny, the workspace dependency-direction gate, and capability-compile fixtures exercise dependency and feature policy. Separate tool workspaces retain their own checks; compilation does not establish runtime or interoperability behavior.

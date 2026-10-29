@@ -31,3 +31,5 @@
 - [core-differential.md](core-differential.md): `CORE-01`–`CORE-06`.
 - [test-evidence.md](test-evidence.md): proof owners, deletions, coverage gaps.
 Tests map to contracts, not tasks; see [test-evidence.md](test-evidence.md).
+
+The [documentation ownership policy](../policies/documentation.md) assigns comments, defaults, operator guidance, and verification evidence to their owners. [Test evidence](test-evidence.md) retains the independent proof families; source and Cargo listings own executable case discovery.

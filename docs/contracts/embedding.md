@@ -47,9 +47,9 @@ impl Node {
 
 Typed lifecycle, readiness, `tx_by_id`/`block_by_hash` (EMB-06), mining, and broadcast errors are `NodeError`: `Startup` (config/storage/recovery/bind failure with rollback), `Shutdown` (join/checkpoint failure, only from consuming shutdown, never Drop), `Unavailable`, `NotFound`, `Broadcast` (policy rejection). Prefix reads return `HistoricalQueryError`, not `NodeError`. Daemon `run()` surfaces teardown failures as `anyhow`.
 
-## Proof
+## Verification boundaries
 
-- `gates/g17_dependency_direction.rs::node_composition_root_is_not_a_production_embedding_api` (isolated production consumer; rejects `NodeState`/ingress imports and production `test-seam` edges) · `crates/node/tests/embed.rs::embedded_node_lifecycle_round_trip`, `::dropped_node_releases_services_and_datadir_for_reopen`, `startup_failure_after_state_open_rolls_back_releases_state` · `unit/state/tests/data_dir_lock.rs` (lock held by retained connection/handles/stores) · `unit/lifecycle/tests.rs` (checkpoint/join failure, daemon/embedded identity, repeated teardown, rollback, queued wake) · `embed.rs::broadcast_publishes_one_ordered_a_event_through_the_shared_gateway` · `shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`.
+The public node API, RPC/HTTP consumers, and process lifecycle harness own startup, cancellation, query, and shutdown evidence. Owner-local tests do not substitute for the real process boundary or certify an external embedding.
 
 ## Vocabulary
 
