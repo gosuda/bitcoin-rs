@@ -471,7 +471,25 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
         "presync must request the continuation from the collected tip",
     );
 
+    // A queued response must not consume its request or advance the live
+    // presync cursor until the next tick actually admits that whole page.
+    for _ in 0..super::super::headers::MAX_HEADER_BATCHES_PER_TICK {
+        inbound_headers_tx.send(InboundHeaders {
+            headers: Vec::new(),
+            source: None,
+            wire_response: false,
+        })?;
+    }
+    let pending = pending_request(&sync, source).ok_or("missing continuation request")?;
+    let cursor = with_sync_state(&sync, source, |state| state.next_locator()[0]);
     deliver_headers(&inbound_headers_tx, chain[PAGE..].to_vec(), source)?;
+    sync.tick();
+    assert_eq!(sync.inbound_headers_rx.len(), 1);
+    assert_request_unchanged(&sync, source, pending);
+    assert_eq!(
+        with_sync_state(&sync, source, |state| state.next_locator()[0]),
+        cursor
+    );
     sync.tick();
 
     assert_eq!(

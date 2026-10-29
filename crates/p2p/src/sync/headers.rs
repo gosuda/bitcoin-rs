@@ -39,6 +39,12 @@ use std::vec::Vec;
 /// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
+/// Empty and stale-source batches must also yield to block/recovery work.
+pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
+/// Stop between whole batches, never in a download-twice response page.
+/// A final protocol-bounded batch can exceed this by at most 1,999 headers.
+pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * crate::wire::MAX_HEADERS_MESSAGE_COUNT;
+
 /// One batch's result from a connection's download-twice sync state.
 struct PresyncOutcome {
     failure: Option<HeaderSyncError>,
@@ -57,17 +63,23 @@ impl BlockSync {
         // Near-tip batches whose body the announcing connection can serve
         // straight away; drained after the loop with one frontier read.
         let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
-        while let Ok(InboundHeaders {
-            headers,
-            source,
-            wire_response,
-        }) = self.inbound_headers_rx.try_recv()
-        {
+        for _ in 0..MAX_HEADER_BATCHES_PER_TICK {
+            if total_headers >= MAX_HEADERS_PER_TICK {
+                break;
+            }
+            let Ok(InboundHeaders {
+                headers,
+                source,
+                wire_response,
+            }) = self.inbound_headers_rx.try_recv()
+            else {
+                break;
+            };
+            let batch_len = headers.len();
+            total_headers = total_headers.saturating_add(batch_len);
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
                 continue;
             }
-            let batch_len = headers.len();
-            total_headers = total_headers.saturating_add(batch_len);
 
             self.consume_header_request(source, wire_response, headers.is_empty());
 

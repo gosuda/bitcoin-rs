@@ -102,6 +102,8 @@ impl BlockSync {
             .set(metric_bytes(stager.retained_attributed_bytes_high_water()));
         metrics::gauge!("node.sync.inbound_block_queue_depth")
             .set(metric_count(self.inbound_blocks_rx.len()));
+        metrics::gauge!("node.sync.inbound_header_queue_depth")
+            .set(metric_count(self.inbound_headers_rx.len()));
     }
 
     pub(super) fn record_pending_sync_metrics(&self) {

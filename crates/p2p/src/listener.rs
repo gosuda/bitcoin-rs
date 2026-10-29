@@ -472,20 +472,36 @@ impl ConnectionShared {
         self.session_cancel.load()
     }
 
+    /// Retain the whole response under backpressure. Never wait while holding
+    /// the peer-table, scheduler, or chain transition lock; a cancelled
+    /// connection/session releases the wait at the next send timeout.
     fn send_headers(
         &self,
+        lease: &crate::PeerLease,
         source: crate::PeerSource,
         headers: Vec<bitcoin_rs_primitives::Header>,
         wire_response: bool,
     ) {
-        if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
+        let mut inbound = crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
-        }) {
-            tracing::warn!(peer_addr = ?source.endpoint, %error, "p2p inbound headers channel disconnected");
-        } else {
-            wake_sync(self.wake_tx.as_ref());
+        };
+        loop {
+            if self.is_session_cancelled() || lease.is_cancelled() {
+                return;
+            }
+            match self.headers_tx.send_timeout(inbound, POLL_INTERVAL) {
+                Ok(()) => {
+                    wake_sync(self.wake_tx.as_ref());
+                    return;
+                }
+                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    tracing::warn!(peer_addr = ?source.endpoint, "p2p inbound headers channel disconnected");
+                    return;
+                }
+            }
         }
     }
 
@@ -547,7 +563,7 @@ impl ConnectionShared {
             return;
         };
         if self.forward_block(payload, source, Some(credit)) {
-            self.send_headers(source, vec![header], false);
+            self.send_headers(lease, source, vec![header], false);
         }
     }
 
@@ -2722,7 +2738,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 }
             }
             crate::Message::Headers(headers) => {
-                shared.send_headers(lease.source(peer_addr.endpoint()), headers, true);
+                shared.send_headers(lease, lease.source(peer_addr.endpoint()), headers, true);
             }
             crate::Message::NotFound(items) => {
                 shared.block_not_found(lease.source(peer_addr.endpoint()), &items);
@@ -2759,7 +2775,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             // `getheaders` response, so it must neither consume
                             // the pending request nor feed a live download-twice
                             // cursor with a foreign side-branch page.
-                            shared.send_headers(source, headers, false);
+                            shared.send_headers(lease, source, headers, false);
                         }
                     }
                 }
@@ -3120,7 +3136,12 @@ fn process_compact_wire_message(
             hash = %header.compute_hash(),
             "p2p compact block header does not earn reconstruction"
         );
-        shared.send_headers(lease.source(peer_addr.endpoint()), vec![header], false);
+        shared.send_headers(
+            lease,
+            lease.source(peer_addr.endpoint()),
+            vec![header],
+            false,
+        );
         return;
     }
 
@@ -3154,7 +3175,7 @@ fn process_compact_wire_message(
         sync.enqueue_owned_body_fetch(source, hash, || sink.send(follow_up).is_ok());
     }
     if let Some(header) = announced_header {
-        shared.send_headers(source, vec![header], false);
+        shared.send_headers(lease, source, vec![header], false);
     }
 }
 
@@ -4119,7 +4140,7 @@ mod writer_shutdown_tests {
             .map_err(|_| std::io::Error::other("genesis block must decode"))?;
         let source = lease.source(Some(addr));
 
-        shared.send_headers(source, Vec::new(), true);
+        shared.send_headers(&lease, source, Vec::new(), true);
         shared.send_block(&lease, addr, payload);
 
         assert_eq!(headers_rx.try_recv()?.source, Some(source));
@@ -6513,6 +6534,9 @@ mod v2_transport_tests;
 
 #[cfg(test)]
 mod getdata_pause_tests;
+
+#[cfg(test)]
+mod header_ingress_tests;
 
 #[cfg(test)]
 mod aggregate_budget_tests;

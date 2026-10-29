@@ -233,6 +233,10 @@ fn describe_node_metrics() {
         "node.sync.inbound_block_queue_depth",
         "block bodies queued in the bounded inbound channel when the sync drain pass emitted its gauges, after it emptied the receiver; a residual, not a peak"
     );
+    metrics::describe_gauge!(
+        "node.sync.inbound_header_queue_depth",
+        "header batches remaining in the bounded inbound channel when sync emits its gauges; a sampled backlog, not a peak or byte count"
+    );
     metrics::describe_counter!(
         "storage.writes_total",
         "storage write batches applied, by backend and durability"

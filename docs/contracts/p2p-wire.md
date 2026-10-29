@@ -399,6 +399,27 @@ covers the delivery-path forward.
   when sync takes the body, so staging, discarding, and rejecting all return
   the slot; ownership and credits are per connection, so a same-address
   replacement inherits neither.
+- **Header ingress and tick fairness**: `P2pService` owns a shared channel
+  capped at 64 header batches (`INBOUND_HEADER_QUEUE_LIMIT` in
+  `crates/p2p/src/service.rs`). Wire decoding bounds a batch to 2,000 headers;
+  body and compact announcements carry one, and stale-tip pages at most 20.
+  Full ingress waits with 100 ms cancellation checks in
+  `ConnectionShared::send_headers`, retaining the whole batch and its
+  `wire_response` identity until admission, session/lease cancellation, or
+  receiver disconnection. No peer-table, scheduler, or transition lock is
+  held while waiting. The body remains queued before its carried header.
+  `BlockSync::drain_inbound_headers` consumes at most 32 batches per tick,
+  including empty and stale-source entries, and stops once it has consumed
+  4,000 headers. It finishes the current batch, so a final wire page can
+  overshoot by at most 1,999 headers. Pages are never split: request
+  consumption, live presync cursors, and owned body fetches retain their
+  existing admission path. Block drain, recovery and scheduling then run;
+  the remainder is driven by the existing inbound wake or periodic sync
+  tick, without a new scheduler. The queue's maximum decoded header payload
+  is `64 * 2,000 * size_of::<Header>()`; channel/Vec metadata, in-flight
+  producers, bodies, allocator overhead and process RSS are separate.
+  `node.sync.inbound_header_queue_depth` samples the remaining batch count
+  at the existing sync-metrics emission points, not the peak or byte count.
 - **Permanent consensus failure**: when a staged body's commit settles with
   `WindowCommitDisposition::Permanent` — in the apply pass or inside a
   branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
@@ -424,6 +445,17 @@ covers the delivery-path forward.
   `gate_pending` population is capped at `MAX_UNRESOLVED_STAGED_BODIES`
   (`crates/p2p/src/sync/receive.rs`), so a multi-peer orphan flood cannot
   fill the shared staging budget and evict valid progress.
+
+Proof for header ingress: `crates/p2p/src/listener/header_ingress_tests.rs`
+covers sustained wire/body forwarding into real sync ticks, bounded queue
+occupancy, body application, full-queue ordering, cancellation and
+disconnection; `crates/p2p/src/sync/tests/header_ingress.rs` covers message
+and header work limits plus block application and request scheduling while
+headers remain queued. `headers_presync.rs` test
+`sufficient_work_chain_syncs_presync_then_redownload` defers a continuation
+across the batch budget before completing both passes. These are local
+behavioral proofs, not a live-network throughput or multi-peer fairness
+campaign.
 
 Proof: `crates/p2p/src/dispatch.rs` test
 `inv_block_uses_headers_not_body_getdata`; `crates/p2p/src/sync/tests/head_sync.rs`

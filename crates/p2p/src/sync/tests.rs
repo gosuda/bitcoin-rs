@@ -2673,6 +2673,8 @@ mod peer_fanout;
 #[cfg(test)]
 mod header_progress;
 
+mod header_ingress;
+
 #[cfg(test)]
 mod fork_retargeting;
 
