@@ -142,6 +142,10 @@ pub trait TxInventory: Send + Sync {
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
+    /// Reverts `transaction_sent` when the response never reached the peer,
+    /// so a failed send does not falsely complete initial broadcast.
+    fn transaction_send_failed(&self, _wtxid: Wtxid) {}
+
     /// The BIP331 ancestor package of `wtxid` the node can serve: its
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
 
@@ -151,6 +155,10 @@ pub trait TxInventory: Send + Sync {
 impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
     fn transaction_sent(&self, wtxid: Wtxid) {
         self.mark_broadcast(wtxid);
+    }
+
+    fn transaction_send_failed(&self, wtxid: Wtxid) {
+        self.restore_unbroadcast(wtxid);
     }
 
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
@@ -497,12 +505,17 @@ fn serve_getpkgtxns(
             hash: combined_package_hash(&request.wtxids),
         }]));
     };
-    send(Message::PkgTxns(PkgTxns {
-        txs: bodies.iter().map(|tx| Tx::clone(tx)).collect(),
-    }))?;
     for wtxid in &request.wtxids {
         inventory.transaction_sent(*wtxid);
     }
+    send(Message::PkgTxns(PkgTxns {
+        txs: bodies.iter().map(|tx| Tx::clone(tx)).collect(),
+    }))
+    .inspect_err(|_error| {
+        for wtxid in &request.wtxids {
+            inventory.transaction_send_failed(*wtxid);
+        }
+    })?;
     Ok(())
 }
 
@@ -659,8 +672,8 @@ fn serve_tx_item(
     };
     match found {
         Some((wtxid, tx)) => {
-            send(Message::Tx(tx))?;
             inv.transaction_sent(wtxid);
+            send(Message::Tx(tx)).inspect_err(|_error| inv.transaction_send_failed(wtxid))?;
         }
         None => not_found.push(*item),
     }

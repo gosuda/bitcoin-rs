@@ -1189,7 +1189,10 @@ impl MempoolGateway {
         self.pool.write().set_unbroadcast(wtxid, false);
     }
 
-    pub(crate) fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    /// Reverts a broadcast mark when the response carrying the transaction
+    /// never reached the peer, so a failed send does not falsely complete
+    /// initial broadcast.
+    pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 
